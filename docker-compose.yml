@@ -5,13 +5,18 @@ services:
     build:
       context: ./apps/web
       dockerfile: Dockerfile
+      target: dev
     ports:
-      - "3000:3000"
+      - "4200:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+      - GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json
     volumes:
       - ./apps/web:/app
       - /app/node_modules
-    environment:
-      - NODE_ENV=development
+      - ~/.config/gcloud:/root/.config/gcloud # Mount Host GCloud Creds
+    command: npm run dev
     depends_on:
       - api
 
@@ -21,8 +26,13 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8000:8000"
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json
+    env_file:
+      - ./apps/api/.env
     volumes:
       - ./apps/api:/app
+      - ~/.config/gcloud:/root/.config/gcloud
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     depends_on:
       - redis

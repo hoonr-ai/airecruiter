@@ -1,3 +1,12 @@
 fastapi
 uvicorn
 pydantic
+httpx
+openai
+python-dotenv
+psycopg2-binary
+networkx
+cloud-sql-python-connector
+pg8000
+sqlalchemy
+cryptography

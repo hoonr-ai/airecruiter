@@ -1,0 +1,14 @@
+.env
+.env.local
+node_modules/
+__pycache__/
+.venv/
+.test_venv/
+.debug_venv/
+venv_debug/
+coverage/
+.DS_Store
+deploy_log_*.txt
+*.pyc
+*.pyo
+apps/api/ontology_data.csv
