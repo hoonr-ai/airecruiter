@@ -60,6 +60,10 @@ export default function CreateJobPage() {
     const [loading, setLoading] = useState(false);
     const [jdText, setJdText] = useState("");
     const [jobId, setJobId] = useState("");
+    
+    // Imported Metadata (JobDiva)
+    const [customerName, setCustomerName] = useState("");
+    const [jobStatus, setJobStatus] = useState("");
 
     // Parsed Data
     const [title, setTitle] = useState("");
@@ -135,6 +139,12 @@ export default function CreateJobPage() {
             if (res.ok) {
                 const data = await res.json();
                 setJdText(data.description);
+                setTitle(data.title || "");
+                setCustomerName(data.customer_name || data.company || "Unknown");
+                setJobStatus(data.job_status || "OPEN");
+                
+                if (data.city) setLocation(`${data.city}, ${data.state || ""}`);
+                
                 // Auto-parse logic could be added here if desired.
             } else {
                 alert("Job not found");
@@ -296,6 +306,29 @@ export default function CreateJobPage() {
                                         <Download className="mr-2 h-4 w-4" /> Import
                                     </Button>
                                 </div>
+                                
+                                {title && (
+                                    <div className="grid grid-cols-2 gap-4 mb-4 p-4 border rounded-lg bg-muted/40">
+                                         <div className="space-y-2">
+                                            <Label>Job Title</Label>
+                                            <Input value={title} readOnly className="bg-muted text-muted-foreground cursor-not-allowed" />
+                                         </div>
+                                         <div className="space-y-2">
+                                            <Label>Customer Name</Label>
+                                            <Input value={customerName} readOnly className="bg-muted text-muted-foreground cursor-not-allowed" />
+                                         </div>
+                                         <div className="space-y-2">
+                                            <Label>Job Status</Label>
+                                            <Input 
+                                                value={jobStatus.toUpperCase() === "OPEN" ? "Open" : "Closed"} 
+                                                readOnly 
+                                                className="bg-muted text-muted-foreground cursor-not-allowed" 
+                                            />
+                                            <p className="text-xs text-muted-foreground">Status updates automatically from JobDiva.</p>
+                                         </div>
+                                    </div>
+                                )}
+
                                 {jdText && (
                                     <div className="rounded-md border bg-muted/50 p-4 h-64 overflow-y-auto text-sm font-mono">
                                         {jdText}

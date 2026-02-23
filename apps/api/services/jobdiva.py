@@ -358,7 +358,9 @@ class JobDivaService:
                  "description": f"This is a fetched description for Job {job_id}. Requirements: Python, FastAPI, React.",
                  "city": "Remote",
                  "state": "US",
-                 "company": "Mock Corp"
+                 "company": "Mock Corp",
+                 "customer_name": "Mock Customer Inc.",
+                 "job_status": "OPEN"
              }
 
         # Real Implementation
@@ -435,7 +437,9 @@ class JobDivaService:
                     "description": description,
                     "city": j.get("city"),
                     "state": j.get("state"),
-                    "company": j.get("company")
+                    "company": j.get("company"),
+                    "customer_name": j.get("customer") or j.get("company") or "Unknown Customer",
+                    "job_status": j.get("job status") or j.get("status") or "OPEN"
                 }
 
         except Exception as e:
