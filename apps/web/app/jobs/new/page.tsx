@@ -9,7 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Loader2, Wand2, Search, Download, Trash2, Plus, Eye, Gavel, CheckCircle, AlertTriangle, ShieldAlert } from "lucide-react";
+import { Loader2, Wand2, Search, Download, Trash2, Plus, Eye, Gavel, CheckCircle, AlertTriangle, ShieldAlert, RefreshCw } from "lucide-react";
 import { CandidateTable } from "@/components/candidate-table";
 import { AnalysisCard } from "@/components/analysis/analysis-card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -319,12 +319,42 @@ export default function CreateJobPage() {
                                          </div>
                                          <div className="space-y-2">
                                             <Label>Job Status</Label>
-                                            <Input 
-                                                value={jobStatus.toUpperCase() === "OPEN" ? "Open" : "Closed"} 
-                                                readOnly 
-                                                className="bg-muted text-muted-foreground cursor-not-allowed" 
-                                            />
-                                            <p className="text-xs text-muted-foreground">Status updates automatically from JobDiva.</p>
+                                            <div className="flex items-center gap-2">
+                                                <Input 
+                                                    value={jobStatus.toUpperCase() === "OPEN" ? "Open" : "Closed"} 
+                                                    readOnly 
+                                                    className="bg-muted text-muted-foreground cursor-not-allowed flex-1" 
+                                                />
+                                                <Button 
+                                                    variant="outline" 
+                                                    size="sm" 
+                                                    onClick={async () => {
+                                                        try {
+                                                            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+                                                            const res = await fetch(`${apiUrl}/jobs/${jobId}/sync`);
+                                                            if (!res.ok) {
+                                                                throw new Error(`HTTP ${res.status}`);
+                                                            }
+                                                            const data = await res.json();
+                                                            console.log('Sync response:', data);
+                                                            
+                                                            if (data.status && data.status !== "ERROR" && data.status !== "NOT_FOUND") {
+                                                                setJobStatus(data.status);
+                                                                alert(`Status synced: ${data.status}`);
+                                                            } else {
+                                                                alert(`Sync failed: ${data.error || data.status || 'Unknown error'}`);
+                                                            }
+                                                        } catch (e: any) {
+                                                            console.error('Sync error:', e);
+                                                            alert(`Failed to sync status: ${e?.message || 'Unknown error'}`);
+                                                        }
+                                                    }}
+                                                    title="Refresh status from JobDiva"
+                                                >
+                                                    <RefreshCw className="h-4 w-4" />
+                                                </Button>
+                                            </div>
+                                            <p className="text-xs text-muted-foreground">Status updates automatically from JobDiva every 5 minutes.</p>
                                          </div>
                                     </div>
                                 )}

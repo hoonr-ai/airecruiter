@@ -1,11 +1,22 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any
 import asyncio
+import logging
+import json
+import os
+from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from contextlib import asynccontextmanager
 
 # Load environment variables
 load_dotenv()
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 from services.ai_service import ai_service
 from models import (
@@ -18,6 +29,36 @@ from services.extractor import llm_extractor
 from services.jobdiva import jobdiva_service
 from services.unipile import unipile_service
 from services.chat_service import chat_service
+
+# Simple file-based job tracking (in production, use proper DB)
+JOBS_DB_FILE = "monitored_jobs.json"
+
+# Global scheduler
+scheduler = AsyncIOScheduler()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifecycle - start/stop scheduler"""
+    # Startup
+    logger.info("🚀 Starting job status monitoring scheduler...")
+    
+    # Schedule polling every 5 minutes
+    scheduler.add_job(
+        poll_all_jobs,
+        "interval",
+        minutes=5,
+        id="job_status_poll",
+        replace_existing=True
+    )
+    
+    scheduler.start()
+    logger.info("✅ Scheduler started - polling every 5 minutes")
+    
+    yield
+    
+    # Shutdown
+    logger.info("📋 Stopping scheduler...")
+    scheduler.shutdown()
 from routers import engagement
 
 app = FastAPI(title="Hoonr.ai API")
@@ -197,14 +238,41 @@ async def analyze_candidates(request: CandidateAnalysisRequest):
     return {"results": results, "name": "", "email": "", "skills": [], "experience_years": 0} # Dummy fields to satisfy model if strict
 
 @app.post("/jobs/fetch")
-async def fetch_job_from_jobdiva(request: JobFetchRequest):
+async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: BackgroundTasks):
     """
     Fetches Full Job Details from JobDiva by ID.
+    Automatically adds the job to monitoring list.
     """
     job = await jobdiva_service.get_job_by_id(request.job_id)
     if not job:
          raise HTTPException(status_code=404, detail="Job not found in JobDiva")
+    
+    # Auto-add to monitoring when imported
+    background_tasks.add_task(add_job_to_monitoring_internal, request.job_id)
+    
     return job
+
+async def add_job_to_monitoring_internal(job_id: str):
+    """Internal function to add job to monitoring without HTTP response"""
+    try:
+        jobs_data = load_monitored_jobs()
+        
+        # Get initial status
+        status_info = await jobdiva_service.get_job_status(job_id)
+        
+        # Add to monitoring
+        jobs_data["jobs"][job_id] = {
+            "status": status_info["status"],
+            "customer": status_info.get("customer", "Unknown"),
+            "title": status_info.get("title", ""),
+            "added_at": datetime.now().isoformat(),
+            "last_updated": datetime.now().isoformat()
+        }
+        
+        save_monitored_jobs(jobs_data)
+        logger.info(f"📋 Auto-added Job {job_id} to monitoring")
+    except Exception as e:
+        logger.error(f"Failed to auto-add job {job_id} to monitoring: {e}")
 
 @app.get("/candidates/{candidate_id}/resume")
 async def get_candidate_resume(candidate_id: str):
@@ -243,6 +311,180 @@ async def get_candidate_resume(candidate_id: str):
             raise HTTPException(status_code=404, detail="Resume not found in any source")
         except Exception:
             raise HTTPException(status_code=404, detail="Resume not found")
+
+# Job monitoring utility functions
+def load_monitored_jobs() -> Dict[str, Any]:
+    """Load the list of jobs being monitored from file"""
+    if os.path.exists(JOBS_DB_FILE):
+        try:
+            with open(JOBS_DB_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Error loading monitored jobs: {e}")
+    return {"jobs": {}, "last_sync": None}
+
+def save_monitored_jobs(jobs_data: Dict[str, Any]):
+    """Save the monitored jobs data to file"""
+    try:
+        with open(JOBS_DB_FILE, 'w') as f:
+            json.dump(jobs_data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving monitored jobs: {e}")
+
+async def poll_all_jobs():
+    """Background task to poll all monitored jobs for status changes"""
+    logger.info("🔄 Starting job status polling...")
+    
+    jobs_data = load_monitored_jobs()
+    job_ids = list(jobs_data.get("jobs", {}).keys())
+    
+    if not job_ids:
+        logger.info("No jobs to monitor")
+        return
+    
+    logger.info(f"Polling {len(job_ids)} jobs: {job_ids}")
+    
+    # Batch fetch statuses
+    statuses = await jobdiva_service.get_multiple_jobs_status(job_ids)
+    
+    # Update local tracking
+    import time
+    updated_jobs = {}
+    changes_detected = []
+    
+    for status in statuses:
+        job_id = status["job_id"]
+        current_status = status["status"]
+        old_data = jobs_data["jobs"].get(job_id, {})
+        old_status = old_data.get("status", "UNKNOWN")
+        
+        # Track changes
+        if old_status != current_status:
+            changes_detected.append({
+                "job_id": job_id,
+                "old_status": old_status,
+                "new_status": current_status,
+                "title": status.get("title", "")
+            })
+        
+        # Update tracking data - preserve original job_id from monitoring list
+        updated_jobs[job_id] = {
+            "status": current_status,
+            "customer": status.get("customer", "Unknown"),
+            "title": status.get("title", ""),
+            "last_updated": datetime.now().isoformat(),
+            "added_at": old_data.get("added_at", datetime.now().isoformat())
+        }
+    
+    # Save updated data
+    jobs_data["jobs"] = updated_jobs
+    jobs_data["last_sync"] = datetime.now().isoformat()
+    save_monitored_jobs(jobs_data)
+    
+    if changes_detected:
+        logger.info(f"📢 Status changes detected: {changes_detected}")
+    else:
+        logger.info("✅ No status changes detected")
+    
+    return {"polled": len(job_ids), "changes": changes_detected}
+
+@app.post("/jobs/{job_id}/monitor")
+async def add_job_to_monitoring(job_id: str, background_tasks: BackgroundTasks):
+    """
+    Add a job to the monitoring list so its status gets polled regularly.
+    Call this when a user imports/views a job they want to track.
+    """
+    
+    jobs_data = load_monitored_jobs()
+    
+    # Get initial status
+    status_info = await jobdiva_service.get_job_status(job_id)
+    
+    # Add to monitoring
+    jobs_data["jobs"][job_id] = {
+        "status": status_info["status"],
+        "customer": status_info.get("customer", "Unknown"),
+        "title": status_info.get("title", ""),
+        "added_at": datetime.now().isoformat(),
+        "last_updated": datetime.now().isoformat()
+    }
+    
+    save_monitored_jobs(jobs_data)
+    
+    logger.info(f"📋 Added Job {job_id} to monitoring with status: {status_info['status']}")
+    
+    return {
+        "message": f"Job {job_id} added to monitoring",
+        "current_status": status_info["status"],
+        "total_monitored": len(jobs_data["jobs"])
+    }
+
+@app.delete("/jobs/{job_id}/monitor")
+async def remove_job_from_monitoring(job_id: str):
+    """
+    Remove a job from monitoring (e.g., when permanently closed or no longer relevant).
+    """
+    jobs_data = load_monitored_jobs()
+    
+    if job_id in jobs_data["jobs"]:
+        del jobs_data["jobs"][job_id]
+        save_monitored_jobs(jobs_data)
+        logger.info(f"🗑️ Removed Job {job_id} from monitoring")
+        return {"message": f"Job {job_id} removed from monitoring"}
+    else:
+        raise HTTPException(status_code=404, detail="Job not in monitoring list")
+
+@app.get("/jobs/monitored")
+async def get_monitored_jobs():
+    """
+    Get all jobs currently being monitored and their latest statuses.
+    """
+    jobs_data = load_monitored_jobs()
+    return {
+        "jobs": jobs_data.get("jobs", {}),
+        "total_count": len(jobs_data.get("jobs", {})),
+        "last_sync": jobs_data.get("last_sync")
+    }
+
+@app.post("/jobs/poll-now")
+async def trigger_manual_poll(background_tasks: BackgroundTasks):
+    """
+    Manually trigger a status poll for all monitored jobs.
+    Useful for testing or immediate sync.
+    """
+    background_tasks.add_task(poll_all_jobs)
+    return {"message": "Manual poll triggered"}
+
+@app.get("/jobs/{job_id}/sync")
+async def sync_job_status(job_id: str):
+    """
+    Check the current status of a job in JobDiva and update the monitoring data.
+    Useful for ensuring the local job state matches JobDiva (e.g. if Closed).
+    """
+    logger.info(f"Syncing status for Job {job_id}")
+    try:
+        status_info = await jobdiva_service.get_job_status(job_id)
+        logger.info(f"Sync result: {status_info}")
+        
+        # Update monitored jobs file with latest data
+        jobs_data = load_monitored_jobs()
+        if job_id in jobs_data.get("jobs", {}):
+            old_data = jobs_data["jobs"][job_id]
+            jobs_data["jobs"][job_id] = {
+                "status": status_info["status"],
+                "customer": status_info.get("customer", "Unknown"),
+                "title": status_info.get("title", ""),
+                "last_updated": datetime.now().isoformat(),
+                "added_at": old_data.get("added_at", datetime.now().isoformat())
+            }
+            jobs_data["last_sync"] = datetime.now().isoformat()
+            save_monitored_jobs(jobs_data)
+            logger.info(f"Updated monitoring data for job {job_id}")
+        
+        return status_info
+    except Exception as e:
+        logger.error(f"Sync failed for job {job_id}: {e}")
+        return {"job_id": job_id, "status": "ERROR", "error": str(e)}
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_with_aria(request: ChatRequest):

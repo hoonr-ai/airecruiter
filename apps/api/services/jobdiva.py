@@ -2,6 +2,7 @@ import os
 import time
 import httpx
 import logging
+from datetime import datetime
 from typing import Optional, Dict, Any, List
 from html import unescape
 
@@ -545,5 +546,55 @@ class JobDivaService:
         except Exception as e:
             logger.error(f"Get Resume Error: {e}")
             return f"Error fetching resume: {str(e)}"
+
+    async def get_job_status(self, job_id: str) -> Dict[str, Any]:
+        """
+        Fetch just the status and critical metadata for efficient checks.
+        Useful for syncing JobDiva status with local DB.
+        """
+        try:
+            # Note: We reuse get_job_by_id for now as it makes the same API call.
+            # In future, if JobDiva has a lighter endpoint, use that.
+            job = await self.get_job_by_id(job_id)
+            
+            if not job:
+                logger.warning(f"Job {job_id} not found in JobDiva")
+                return {
+                    "job_id": job_id, 
+                    "status": "NOT_FOUND", 
+                    "customer": "Unknown",
+                    "synced_at": datetime.now().isoformat()
+                }
+            
+            logger.info(f"Job data for {job_id}: {job}")
+            
+            # Extract status with multiple fallbacks
+            job_status = job.get("job_status") or job.get("status") or "OPEN"
+            
+            result = {
+                "job_id": job_id,  # Preserve original reference ID
+                "status": job_status,
+                "customer": job.get("customer_name") or job.get("company") or "Unknown Customer",
+                "title": job.get("title", ""),
+                "synced_at": datetime.now().isoformat()
+            }
+            
+            logger.info(f"Returning status info: {result}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Sync Status Failed for {job_id}: {e}")
+            return {"job_id": job_id, "status": "ERROR", "error": str(e)}
+    
+    async def get_multiple_jobs_status(self, job_ids: List[str]) -> List[Dict[str, Any]]:
+        """
+        Batch fetch status for multiple jobs efficiently.
+        Used by the polling/cron system.
+        """
+        results = []
+        for job_id in job_ids:
+            status_info = await self.get_job_status(job_id)
+            results.append(status_info)
+        return results
 
 jobdiva_service = JobDivaService()
