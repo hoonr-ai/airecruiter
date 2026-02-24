@@ -55,6 +55,83 @@ const HighlightText = ({ text, keywords }: { text: string, keywords: string[] })
     );
 };
 
+// Helper component to format job descriptions nicely
+const FormattedJobDescription = ({ text }: { text: string }) => {
+    const formatText = (rawText: string) => {
+        if (!rawText) return '';
+        
+        // Split by lines and process each
+        return rawText.split('\n').map((line, index) => {
+            const trimmedLine = line.trim();
+            
+            // Check if this is a section header (starts with 📋)
+            if (trimmedLine.startsWith('📋')) {
+                const sectionTitle = trimmedLine.replace('📋', '').trim();
+                return (
+                    <div key={index} className="font-semibold text-primary mt-4 mb-2 first:mt-0">
+                        <span className="text-sm tracking-wide">{sectionTitle}</span>
+                    </div>
+                );
+            }
+            
+            // Check if this is a bullet point
+            if (trimmedLine.startsWith('•')) {
+                const bulletText = trimmedLine.substring(1).trim();
+                // Split the bullet text on full stops to create multiple bullets, ensuring each ends with a period
+                const sentences = bulletText.split('.').filter(s => s.trim().length > 0);
+                
+                return sentences.map((sentence, sentenceIndex) => {
+                    const cleanSentence = sentence.trim();
+                    const sentenceWithPeriod = cleanSentence.endsWith('.') ? cleanSentence : cleanSentence + '.';
+                    
+                    return (
+                        <div key={`${index}-${sentenceIndex}`} className="flex items-start gap-2 ml-4 my-1">
+                            <div className="h-1.5 w-1.5 bg-muted-foreground rounded-full mt-2 shrink-0"></div>
+                            <span className="text-sm">{sentenceWithPeriod}</span>
+                        </div>
+                    );
+                });
+            }
+            
+            // Regular paragraph text - also split on full stops if it contains multiple sentences
+            if (trimmedLine) {
+                if (trimmedLine.includes('.')) {
+                    const sentences = trimmedLine.split('.').filter(s => s.trim().length > 0);
+                    return sentences.map((sentence, sentenceIndex) => {
+                        const cleanSentence = sentence.trim();
+                        const sentenceWithPeriod = cleanSentence.endsWith('.') ? cleanSentence : cleanSentence + '.';
+                        
+                        return (
+                            <div key={`${index}-${sentenceIndex}`} className="flex items-start gap-2 ml-4 my-1">
+                                <div className="h-1.5 w-1.5 bg-muted-foreground rounded-full mt-2 shrink-0"></div>
+                                <span className="text-sm">{sentenceWithPeriod}</span>
+                            </div>
+                        );
+                    });
+                } else {
+                    // For lines without periods, add one and create a bullet point
+                    const sentenceWithPeriod = trimmedLine.endsWith('.') ? trimmedLine : trimmedLine + '.';
+                    return (
+                        <div key={index} className="flex items-start gap-2 ml-4 my-1">
+                            <div className="h-1.5 w-1.5 bg-muted-foreground rounded-full mt-2 shrink-0"></div>
+                            <span className="text-sm">{sentenceWithPeriod}</span>
+                        </div>
+                    );
+                }
+            }
+            
+            // Empty line for spacing
+            return <div key={index} className="h-2"></div>;
+        });
+    };
+
+    return (
+        <div className="space-y-1">
+            {formatText(text)}
+        </div>
+    );
+};
+
 export default function CreateJobPage() {
     const [step, setStep] = useState(1);
     const [loading, setLoading] = useState(false);
@@ -360,8 +437,13 @@ export default function CreateJobPage() {
                                 )}
 
                                 {jdText && (
-                                    <div className="rounded-md border bg-muted/50 p-4 h-64 overflow-y-auto text-sm font-mono">
-                                        {jdText}
+                                    <div className="space-y-3">
+                                        <div className="flex items-center gap-2">
+                                            <h3 className="font-semibold text-base">Job Description</h3>
+                                        </div>
+                                        <div className="rounded-md border bg-background p-4 max-h-64 overflow-y-auto">
+                                            <FormattedJobDescription text={jdText} />
+                                        </div>
                                     </div>
                                 )}
                             </TabsContent>
@@ -394,7 +476,7 @@ export default function CreateJobPage() {
                                             <TableHead>Skill Name</TableHead>
                                             <TableHead className="w-32">Seniority</TableHead>
                                             <TableHead className="w-32">Priority</TableHead>
-                                            <TableHead className="w-[50px]"></TableHead>
+                                            <TableHead className="w-12"></TableHead>
                                         </TableRow>
                                     </TableHeader>
                                     <TableBody>
@@ -622,10 +704,10 @@ export default function CreateJobPage() {
                                     <Table>
                                         <TableHeader className="bg-muted/50">
                                             <TableRow>
-                                                <TableHead className="w-[80px] text-center">Rank</TableHead>
+                                                <TableHead className="w-20 text-center">Rank</TableHead>
                                                 <TableHead>Candidate</TableHead>
                                                 <TableHead className="text-center">Score</TableHead>
-                                                <TableHead className="w-[180px]">Tribunal Verdict</TableHead>
+                                                <TableHead className="w-44">Tribunal Verdict</TableHead>
                                                 <TableHead className="text-right">Actions</TableHead>
                                             </TableRow>
                                         </TableHeader>
@@ -637,7 +719,7 @@ export default function CreateJobPage() {
                                                         <TableCell className="text-center font-mono text-muted-foreground">#{i + 1}</TableCell>
                                                         <TableCell>
                                                             <div className="font-semibold">{candidate?.firstName} {candidate?.lastName}</div>
-                                                            <div className="text-xs text-muted-foreground truncate max-w-[200px]">{candidate?.email}</div>
+                                                            <div className="text-xs text-muted-foreground truncate max-w-48">{candidate?.email}</div>
                                                         </TableCell>
                                                         <TableCell className="text-center">
                                                             <div className="inline-flex items-center justify-center w-12 h-12 rounded-full border-4 border-muted/30 relative">

@@ -2,6 +2,7 @@ import os
 import time
 import httpx
 import logging
+import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 from html import unescape
@@ -13,6 +14,35 @@ def readable_ist_now() -> str:
     """Returns current IST time in readable format: 2026-02-24 16:25:59 IST"""
     ist = timezone(timedelta(hours=5, minutes=30))
     return datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
+
+def format_job_description(raw_desc: str) -> str:
+    """
+    Format raw job description with minimal changes - keep exact text, just clean HTML.
+    No automatic headers, word-for-word preservation of JobDiva content.
+    """
+    if not raw_desc or not raw_desc.strip():
+        return "No job description available."
+    
+    # Convert HTML entities and clean basic HTML tags
+    desc = unescape(raw_desc)
+    
+    # Remove common HTML tags but preserve line breaks
+    import re
+    desc = re.sub(r'<br\s*/?>', '\n', desc)
+    desc = re.sub(r'<p>', '\n', desc) 
+    desc = re.sub(r'</p>', '\n', desc)
+    desc = re.sub(r'<div[^>]*>', '\n', desc)
+    desc = re.sub(r'</div>', '\n', desc)
+    desc = re.sub(r'<[^>]*>', '', desc)  # Remove remaining HTML tags
+    
+    # Clean up excessive whitespace and normalize line breaks
+    desc = re.sub(r'\n\s*\n\s*\n+', '\n\n', desc)  # Max 2 consecutive line breaks
+    desc = re.sub(r'[ \t]+', ' ', desc)  # Normalize spaces and tabs
+    desc = desc.strip()
+    
+    # Return exactly as is - no headers, no modifications
+    return desc
+
 
 class JobDivaService:
     def __init__(self):
@@ -359,10 +389,11 @@ class JobDivaService:
         # MOCK IMPLEMENTATION
         if token == "mock-token-123":
              if job_id == "404": return None
+             mock_description = "Develops and maintains web applications using modern technologies. Creates user-friendly interfaces and ensures optimal performance. Collaborates with cross-functional teams to deliver high-quality software solutions. Participates in code reviews and mentors junior developers. Requires 5+ years of experience in full-stack development. Strong knowledge of JavaScript, React, and Node.js essential. Experience with cloud platforms preferred. Bachelor's degree in Computer Science or related field."
              return {
                  "id": job_id,
-                 "title": "Senior Mock Developer",
-                 "description": f"This is a fetched description for Job {job_id}. Requirements: Python, FastAPI, React.",
+                 "title": "Senior Mock Developer", 
+                 "description": mock_description,
                  "city": "Remote",
                  "state": "US",
                  "company": "Mock Corp",
@@ -433,7 +464,8 @@ class JobDivaService:
                 raw_job_desc = j.get("job description") or j.get("description") or ""
                 raw_posting_desc = j.get("posting description") or ""
                 
-                description = unescape(raw_posting_desc) if raw_posting_desc.strip() else unescape(raw_job_desc)
+                raw_description = raw_posting_desc if raw_posting_desc.strip() else raw_job_desc
+                description = format_job_description(raw_description)
 
                 logger.info(f"🔥 DEBUG: Job {job_id} Desc Length: {len(description)}")
                 logger.info(f"🔥 DEBUG: Job {job_id} Desc Snippet: {description[:200]}...")
