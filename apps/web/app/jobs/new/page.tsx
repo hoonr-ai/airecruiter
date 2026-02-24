@@ -141,6 +141,8 @@ export default function CreateJobPage() {
     // Imported Metadata (JobDiva)
     const [customerName, setCustomerName] = useState("");
     const [jobStatus, setJobStatus] = useState("");
+    const [jobNotes, setJobNotes] = useState("");
+    const [recruiterEmails, setRecruiterEmails] = useState("");
 
     // Parsed Data
     const [title, setTitle] = useState("");
@@ -432,6 +434,26 @@ export default function CreateJobPage() {
                                                 </Button>
                                             </div>
                                             <p className="text-xs text-muted-foreground">Status updates automatically from JobDiva every 5 minutes.</p>
+                                         </div>
+                                         <div className="space-y-2">
+                                            <Label>Recruiter Emails</Label>
+                                            <Input 
+                                                value={recruiterEmails}
+                                                onChange={(e) => setRecruiterEmails(e.target.value)}
+                                                placeholder="email1@company.com, email2@company.com"
+                                                className=""
+                                            />
+                                            <p className="text-xs text-muted-foreground">Enter recruiter emails separated by commas for sending updates.</p>
+                                         </div>
+                                         <div className="space-y-2 col-span-2">
+                                            <Label>Job Notes</Label>
+                                            <Textarea 
+                                                value={jobNotes}
+                                                onChange={(e) => setJobNotes(e.target.value)}
+                                                placeholder="Enter your notes here..."
+                                                className="min-h-[80px]"
+                                            />
+                                            <p className="text-xs text-muted-foreground">Add hiring manager notes, intake call notes, or any important job-related information.</p>
                                          </div>
                                     </div>
                                 )}
