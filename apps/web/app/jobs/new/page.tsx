@@ -473,7 +473,7 @@ export default function CreateJobPage() {
 
                         <Button onClick={handleParse} disabled={!jdText || loading} className="w-full bg-hoonr-gradient text-white">
                             {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
-                            Parse & Extract Criteria
+                            Update Job Posting Description
                         </Button>
                     </CardContent>
                 </Card>
