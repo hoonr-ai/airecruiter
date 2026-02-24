@@ -1,0 +1,12 @@
+{
+  "jobs": {
+    "example-job-id": {
+      "status": "Open",
+      "customer": "Customer Name",
+      "title": "Job Title",
+      "last_updated": "2026-02-24 17:30:00 IST",
+      "added_at": "2026-02-24 17:25:00 IST"
+    }
+  },
+  "last_sync": "2026-02-24 17:30:00 IST"
+}
