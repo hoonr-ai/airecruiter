@@ -2,11 +2,17 @@ import os
 import time
 import httpx
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 from html import unescape
 
 logger = logging.getLogger(__name__)
+
+# Helper function for readable IST timestamps
+def readable_ist_now() -> str:
+    """Returns current IST time in readable format: 2026-02-24 16:25:59 IST"""
+    ist = timezone(timedelta(hours=5, minutes=30))
+    return datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
 
 class JobDivaService:
     def __init__(self):
@@ -563,7 +569,7 @@ class JobDivaService:
                     "job_id": job_id, 
                     "status": "NOT_FOUND", 
                     "customer": "Unknown",
-                    "synced_at": datetime.now().isoformat()
+                    "synced_at": readable_ist_now()
                 }
             
             logger.info(f"Job data for {job_id}: {job}")
@@ -576,7 +582,7 @@ class JobDivaService:
                 "status": job_status,
                 "customer": job.get("customer_name") or job.get("company") or "Unknown Customer",
                 "title": job.get("title", ""),
-                "synced_at": datetime.now().isoformat()
+                "synced_at": readable_ist_now()
             }
             
             logger.info(f"Returning status info: {result}")

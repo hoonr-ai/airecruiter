@@ -5,7 +5,7 @@ import asyncio
 import logging
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -13,6 +13,12 @@ from contextlib import asynccontextmanager
 
 # Load environment variables
 load_dotenv()
+
+# Helper function for readable IST timestamps
+def readable_ist_now() -> str:
+    """Returns current IST time in readable format: 2026-02-24 16:25:59 IST"""
+    ist = timezone(timedelta(hours=5, minutes=30))
+    return datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -36,32 +42,46 @@ JOBS_DB_FILE = "monitored_jobs.json"
 # Global scheduler
 scheduler = AsyncIOScheduler()
 
+def schedule_next_poll():
+    """Schedule next poll 5 minutes from now, canceling any existing poll"""
+    try:
+        # Remove existing scheduled poll if any
+        if scheduler.get_job("job_status_poll"):
+            scheduler.remove_job("job_status_poll")
+        
+        # Schedule new poll 5 minutes from now
+        scheduler.add_job(
+            poll_all_jobs,
+            "date",
+            run_date=datetime.now(timezone(timedelta(hours=5, minutes=30))) + timedelta(minutes=5),
+            id="job_status_poll",
+            replace_existing=True
+        )
+        
+        next_run = datetime.now(timezone(timedelta(hours=5, minutes=30))) + timedelta(minutes=5)
+        logger.info(f"🔄 Next auto-poll scheduled for: {next_run.strftime('%Y-%m-%d %H:%M:%S IST')}")
+    except Exception as e:
+        logger.error(f"Failed to schedule next poll: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle - start/stop scheduler"""
     # Startup
-    logger.info("🚀 Starting job status monitoring scheduler...")
-    
-    # Schedule polling every 5 minutes
-    scheduler.add_job(
-        poll_all_jobs,
-        "interval",
-        minutes=5,
-        id="job_status_poll",
-        replace_existing=True
-    )
+    logger.info("🚀 Starting dynamic job status monitoring scheduler...")
     
     scheduler.start()
-    logger.info("✅ Scheduler started - polling every 5 minutes")
+    # Schedule first poll 5 minutes from now
+    schedule_next_poll()
     
     yield
     
     # Shutdown
     logger.info("📋 Stopping scheduler...")
     scheduler.shutdown()
+    
 from routers import engagement
 
-app = FastAPI(title="Hoonr.ai API")
+app = FastAPI(title="Hoonr.ai API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -265,12 +285,15 @@ async def add_job_to_monitoring_internal(job_id: str):
             "status": status_info["status"],
             "customer": status_info.get("customer", "Unknown"),
             "title": status_info.get("title", ""),
-            "added_at": datetime.now().isoformat(),
-            "last_updated": datetime.now().isoformat()
+            "added_at": readable_ist_now(),
+            "last_updated": readable_ist_now()
         }
         
         save_monitored_jobs(jobs_data)
         logger.info(f"📋 Auto-added Job {job_id} to monitoring")
+        
+        # Reset 5-minute timer since new job was added
+        schedule_next_poll()
     except Exception as e:
         logger.error(f"Failed to auto-add job {job_id} to monitoring: {e}")
 
@@ -372,19 +395,22 @@ async def poll_all_jobs():
             "status": current_status,
             "customer": status.get("customer", "Unknown"),
             "title": status.get("title", ""),
-            "last_updated": datetime.now().isoformat(),
-            "added_at": old_data.get("added_at", datetime.now().isoformat())
+            "last_updated": readable_ist_now(),
+            "added_at": old_data.get("added_at", readable_ist_now())
         }
     
     # Save updated data
     jobs_data["jobs"] = updated_jobs
-    jobs_data["last_sync"] = datetime.now().isoformat()
+    jobs_data["last_sync"] = readable_ist_now()
     save_monitored_jobs(jobs_data)
     
     if changes_detected:
         logger.info(f"📢 Status changes detected: {changes_detected}")
     else:
         logger.info("✅ No status changes detected")
+    
+    # Schedule next poll 5 minutes from now
+    schedule_next_poll()
     
     return {"polled": len(job_ids), "changes": changes_detected}
 
@@ -405,8 +431,8 @@ async def add_job_to_monitoring(job_id: str, background_tasks: BackgroundTasks):
         "status": status_info["status"],
         "customer": status_info.get("customer", "Unknown"),
         "title": status_info.get("title", ""),
-        "added_at": datetime.now().isoformat(),
-        "last_updated": datetime.now().isoformat()
+        "added_at": readable_ist_now(),
+        "last_updated": readable_ist_now()
     }
     
     save_monitored_jobs(jobs_data)
@@ -474,12 +500,15 @@ async def sync_job_status(job_id: str):
                 "status": status_info["status"],
                 "customer": status_info.get("customer", "Unknown"),
                 "title": status_info.get("title", ""),
-                "last_updated": datetime.now().isoformat(),
-                "added_at": old_data.get("added_at", datetime.now().isoformat())
+                "last_updated": readable_ist_now(),
+                "added_at": old_data.get("added_at", readable_ist_now())
             }
-            jobs_data["last_sync"] = datetime.now().isoformat()
+            jobs_data["last_sync"] = readable_ist_now()
             save_monitored_jobs(jobs_data)
             logger.info(f"Updated monitoring data for job {job_id}")
+            
+            # Reset 5-minute timer since user manually reloaded
+            schedule_next_poll()
         
         return status_info
     except Exception as e:
