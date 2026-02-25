@@ -15,6 +15,28 @@ def readable_ist_now() -> str:
     ist = timezone(timedelta(hours=5, minutes=30))
     return datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
 
+# Helper function for case-insensitive/multi-key dictionary access
+def get_field(data: Dict[str, Any], keys: List[str], default: Any = None) -> Any:
+    """
+    Safely extract a value from a dictionary by checking multiple potential keys
+    case-insensitively and ignoring non-alphanumeric characters.
+    """
+    if not isinstance(data, dict):
+        return default
+        
+    def normalize(s):
+        return re.sub(r'[^a-zA-Z0-9]', '', str(s).lower())
+        
+    # Standardize all keys in the data to normalized lowercase
+    normalized_data = {normalize(k): v for k, v in data.items()}
+    
+    for key in keys:
+        norm_key = normalize(key)
+        if norm_key in normalized_data:
+            return normalized_data[norm_key]
+            
+    return default
+
 def format_job_description(raw_desc: str) -> str:
     """
     Format raw job description with minimal changes - keep exact text, just clean HTML.
@@ -59,9 +81,10 @@ class JobDivaService:
         if self.cached_token and time.time() < self.token_expiry:
             return self.cached_token
         
-        # MOCK MODE if no credentials
-        if self.client_id == "mock-client":
-             return "mock-token-123"
+        # Ensure we have real credentials
+        if not self.client_id or self.client_id == "mock-client":
+             logger.error("JobDiva Credentials not configured.")
+             return None
 
         auth_url = f"{self.api_url}/api/authenticate"
         params = {
@@ -314,30 +337,26 @@ class JobDivaService:
             
             print(f"🔥 DEBUG: Final JobDiva Candidates Found: {len(raw_list)}")
 
-            import uuid
             for c in raw_list:
-                # Map fields based on reference JobDivaCandidate interface
-                # ID, FIRSTNAME, LASTNAME, EMAIL, CITY, STATE, COUNTRY, ABSTRACT(jobTitle)
-                # Handle case-insensitive keys or variations
-                c_id = c.get("id") or c.get("candidateId") or c.get("ID") or c.get("CANDIDATEID")
+                # Map fields robustly using case-insensitive helper
+                c_id = get_field(c, ["id", "candidateId", "candidate_id"])
                 if not c_id:
-                    print(f"⚠️ Candidate missing ID. Keys: {c.keys()}")
-                    c_id = str(uuid.uuid4()) # Fallback to random ID if missing
-                
+                    logger.warning(f"Candidate missing ID. Keys: {list(c.keys())}")
+                    continue
                 
                 jd_results.append({
                     "id": str(c_id),
-                    "firstName": c.get("firstName") or c.get("FIRSTNAME") or "Unknown",
-                    "lastName": c.get("lastName") or c.get("LASTNAME") or "Candidate",
-                    "email": c.get("email") or c.get("EMAIL") or "",
-                    "city": c.get("city") or c.get("CITY") or "",
-                    "state": c.get("state") or c.get("STATE") or "",
-                    "title": c.get("title") or c.get("TITLE") or c.get("ABSTRACT") or "",
+                    "firstName": get_field(c, ["firstName", "first_name"]) or "Unknown",
+                    "lastName": get_field(c, ["lastName", "last_name"]) or "Candidate",
+                    "email": get_field(c, ["email"]) or "",
+                    "city": get_field(c, ["city"]) or "",
+                    "state": get_field(c, ["state"]) or "",
+                    "title": get_field(c, ["title", "abstract", "jobTitle"]) or "",
                     "source": "JobDiva",
                     "match_score": 0
                 })
             
-            print(f"🔥 DEBUG: JobDiva returned {len(jd_results)} candidates")
+            logger.info(f"JobDiva processed {len(jd_results)} candidates.")
                 
             # POST-FILTERING for STRICT Location
             if location and location.strip():
@@ -369,13 +388,6 @@ class JobDivaService:
             else:
                 print(f"🔥 DEBUG: No location filter applied. Returning {len(jd_results)} candidates.")
 
-        # MOCK IMPLEMENTATION IF MOCK TOKEN
-        if token == "mock-token-123":
-             jd_results = [
-                 {"id": "101", "firstName": "Alice", "lastName": "Mock", "city": "New York", "state": "NY", "email": "alice@example.com", "source": "JobDiva", "match_score": 85},
-                 {"id": "102", "firstName": "Bob", "lastName": "Builder", "city": "San Francisco", "state": "CA", "email": "bob@example.com", "source": "JobDiva", "match_score": 78}
-             ]
-
         return jd_results
 
     async def get_job_by_id(self, job_id: str) -> Optional[Dict[str, Any]]:
@@ -385,23 +397,8 @@ class JobDivaService:
         if not token:
             logger.error("JobDiva Authentication failed (token is None).")
             return None
-            
-        # MOCK IMPLEMENTATION
-        if token == "mock-token-123":
-             if job_id == "404": return None
-             mock_description = "Develops and maintains web applications using modern technologies. Creates user-friendly interfaces and ensures optimal performance. Collaborates with cross-functional teams to deliver high-quality software solutions. Participates in code reviews and mentors junior developers. Requires 5+ years of experience in full-stack development. Strong knowledge of JavaScript, React, and Node.js essential. Experience with cloud platforms preferred. Bachelor's degree in Computer Science or related field."
-             return {
-                 "id": job_id,
-                 "title": "Senior Mock Developer", 
-                 "description": mock_description,
-                 "city": "Remote",
-                 "state": "US",
-                 "company": "Mock Corp",
-                 "customer_name": "Mock Customer Inc.",
-                 "job_status": "OPEN"
-             }
 
-        # Real Implementation
+        # Real Implementation - Using SearchJob with strict manual verification
         url = f"{self.api_url}/apiv2/jobdiva/SearchJob"
         headers = {"Authorization": f"Bearer {token}"}
         
@@ -412,73 +409,67 @@ class JobDivaService:
         if is_ref:
             payload = {"jobdivaref": job_id, "maxReturned": 1}
         else:
-            # Strip non-numeric just in case
+            # Strip non-numeric and treat as internal Job ID
             safe_id = "".join(filter(str.isdigit, job_id))
             if safe_id:
                 payload = {"jobOrderId": int(safe_id), "maxReturned": 1}
             else:
-                 logger.warning(f"Invalid Job ID format: {job_id}")
-                 return None
+                logger.warning(f"Invalid Job ID format: {job_id}")
+                return None
 
         try:
             logger.info(f"Searching JobDiva: {url} with payload {payload}")
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(url, json=payload, headers=headers)
                 
-                logger.info(f"JobDiva Search Response Status: {response.status_code}")
                 if response.status_code != 200:
-                    logger.error(f"JobDiva Error Response: {response.text}")
+                    logger.error(f"JobDiva Search Error: {response.status_code} - {response.text}")
+                    return None
             
+                data = response.json()
                 jobs_list = []
-                if response.status_code == 200:
-                    data = response.json()
-                    # Response can be list or dict with 'data'
-                    if isinstance(data, list):
-                        jobs_list = data
-                    elif isinstance(data, dict) and "data" in data:
-                        jobs_list = data.get("data", [])
-                    else:
-                        logger.warning(f"Unexpected JSON structure: {data}")
+                if isinstance(data, list):
+                    jobs_list = data
+                elif isinstance(data, dict) and "data" in data:
+                    jobs_list = data.get("data", [])
                 
-                # Fallback: If ref search failed, try treating as numeric ID (sometimes refs like 26-123 work as ID 26123?)
-                # Or if user provided "26-123" but it's actually an ID `26123`
-                if not jobs_list and is_ref:
-                     numeric_id = job_id.replace("-", "")
-                     if numeric_id.isdigit():
-                         logger.info(f"Fallback search by ID: {numeric_id}")
-                         payload_fb = {"jobOrderId": int(numeric_id), "maxReturned": 1}
-                         resp_fb = await client.post(url, json=payload_fb, headers=headers)
-                         if resp_fb.status_code == 200:
-                             d_fb = resp_fb.json()
-                             if isinstance(d_fb, list): jobs_list = d_fb
-                             elif isinstance(d_fb, dict) and "data" in d_fb: jobs_list = d_fb.get("data", [])
-
                 if not jobs_list:
                     logger.warning(f"Job {job_id} not found in JobDiva results.")
                     return None
 
                 j = jobs_list[0]
                 
-                # Extract Description
-                # Use "posting description" if available, else "job description"
-                raw_job_desc = j.get("job description") or j.get("description") or ""
-                raw_posting_desc = j.get("posting description") or ""
+                # STRICT MATCH: JobDiva's SearchJob is fuzzy. We MUST verify the result.
+                returned_id = get_field(j, ["id", "jobOrderId", "jobId"])
+                returned_ref = get_field(j, ["reference", "ref", "jobdivaref", "reference #"])
+                
+                # If we searched by Ref, ensure the Ref matches exactly
+                if is_ref:
+                    if str(returned_ref).strip() != str(job_id).strip():
+                        logger.warning(f"Ghost Data Blocked: Ref mismatch. Expected {job_id}, got {returned_ref}. Returning None.")
+                        return None
+                else:
+                    # If we searched by ID, ensure the ID matches exactly
+                    if str(returned_id).strip() != str(job_id).strip():
+                        logger.warning(f"Ghost Data Blocked: ID mismatch. Expected {job_id}, got {returned_id}. Returning None.")
+                        return None
+                
+                # Extract Metadata Use new get_field to handle casing
+                raw_job_desc = get_field(j, ["job description", "description"]) or ""
+                raw_posting_desc = get_field(j, ["posting description"]) or ""
                 
                 raw_description = raw_posting_desc if raw_posting_desc.strip() else raw_job_desc
                 description = format_job_description(raw_description)
 
-                logger.info(f"🔥 DEBUG: Job {job_id} Desc Length: {len(description)}")
-                logger.info(f"🔥 DEBUG: Job {job_id} Desc Snippet: {description[:200]}...")
-
                 return {
-                    "id": j.get("id"),
-                    "title": j.get("job title") or j.get("title"),
+                    "id": get_field(j, ["id", "jobId"]),
+                    "title": get_field(j, ["job title", "title"]),
                     "description": description,
-                    "city": j.get("city"),
-                    "state": j.get("state"),
-                    "company": j.get("company"),
-                    "customer_name": j.get("customer") or j.get("company") or "Unknown Customer",
-                    "job_status": j.get("job status") or j.get("status") or "OPEN"
+                    "city": get_field(j, ["city"]),
+                    "state": get_field(j, ["state"]),
+                    "company": get_field(j, ["company"]),
+                    "customer_name": get_field(j, ["customer", "company"]) or "Unknown Customer",
+                    "job_status": get_field(j, ["job status", "status"]) or "OPEN"
                 }
 
         except Exception as e:
@@ -494,10 +485,6 @@ class JobDivaService:
         if not token:
             logger.error("Authentication failed during resume fetch.")
             return "Authentication failed. Please check JobDiva credentials."
-            
-        # MOCK
-        if token == "mock-token-123":
-             return f"MOCK RESUME TEXT FOR CANDIDATE {candidate_id}\n\nExperience:\n- Senior Developer at Tech Corp (2020-Present)\n- Junior Dev at StartUp Inc (2018-2020)\n\nSkills: Python, React, TypeScript."
 
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -538,7 +525,7 @@ class JobDivaService:
                             if recs and isinstance(recs, list):
                                 r = recs[0]
                                 # Try plaintext
-                                text = r.get("PLAINTEXT") or r.get("plainText") or r.get("text")
+                                text = get_field(r, ["PLAINTEXT", "plainText", "text"])
                                 if text:
                                     return unescape(text)
                                 
