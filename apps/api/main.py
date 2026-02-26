@@ -79,9 +79,10 @@ async def lifespan(app: FastAPI):
     logger.info("📋 Stopping scheduler...")
     scheduler.shutdown()
     
-from routers import engagement
+from routers import engagement, gemini
 
 app = FastAPI(title="Hoonr.ai API", lifespan=lifespan)
+app.include_router(gemini.router, prefix="/api/v1/gemini")
 
 app.add_middleware(
     CORSMiddleware,
@@ -522,4 +523,4 @@ async def chat_with_aria(request: ChatRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
