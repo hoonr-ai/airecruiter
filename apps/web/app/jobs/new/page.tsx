@@ -318,6 +318,10 @@ export default function CreateJobPage() {
 
 
     const handleUpdateDescription = async () => {
+        if (!recruiterEmails) {
+            alert("Recruiter Email field is required.");
+            return;
+        }
         if (!jdText && !jobNotes) return;
         setIsGenerating(true);
         try {
@@ -346,6 +350,10 @@ export default function CreateJobPage() {
 
 
     const handleParse = async () => {
+        if (!recruiterEmails) {
+            alert("Recruiter Email field is required.");
+            return;
+        }
         setLoading(true);
         try {
             const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -536,13 +544,13 @@ export default function CreateJobPage() {
                                             <p className="text-xs text-muted-foreground">Status updates automatically from JobDiva every 5 minutes.</p>
                                         </div>
                                         <div className="space-y-2">
-                                            <Label>Recruiter Emails</Label>
+                                            <Label>Recruiter Email <span className="text-destructive">*</span></Label>
                                             <Input
                                                 value={recruiterEmails}
                                                 onChange={(e) => setRecruiterEmails(e.target.value)}
                                                 placeholder="email1@company.com, email2@company.com"
                                             />
-                                            <p className="text-xs text-muted-foreground">Enter recruiter emails separated by commas for sending updates.</p>
+                                            <p className="text-xs text-muted-foreground">Enter recruiter email for sending updates.</p>
                                         </div>
                                         <div className="space-y-2 col-span-2">
                                             <Label>Job Notes</Label>
