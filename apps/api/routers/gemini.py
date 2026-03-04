@@ -52,6 +52,8 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         "- Format bullet points by starting the line with the • bullet (e.g., • Responsibility details).\n"
         "- DO NOT use Markdown headings (no #).\n"
         "- ACTIVELY use bolding (**bold**) and italics (*italic*) to emphasize important keywords (e.g., years of experience, specific tools).\n"
+        "- MANDATORY BOLDING: You MUST bold the **Location** and **Pay Rate** (e.g., **New York, NY**, **$60/hr**) whenever they appear.\n"
+        "- STRICT REMOVAL: You MUST NOT include the following internal fields in the final output, regardless of whether they appear in the Job Notes or the original Job Description: Bill Rate, Hiring Manager, Customer Name, and Option Ref No.\n"
         "- DO NOT use any emojis anywhere in the text.\n"
         "- START with a catchy 'Hook' or summary that highlights why someone should join.\n"
         "- INCLUDE sections for: THE ROLE, WHAT YOU'LL DO, WHAT YOU BRING, and WHY WORK WITH US.\n"
