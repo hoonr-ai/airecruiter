@@ -144,9 +144,25 @@ const RawFormattedJobDescription = ({ text }: { text: string }) => {
 // Helper component to format AI-generated postings with rich text copying support
 const AIPostingJobDescription = ({ text }: { text: string }) => {
     const renderInline = (content: string) => {
-        // Parse **bold** and *italic*
-        const parts = content.split(/(\*\*.*?\*\*|\*(?!\*).*?\*(?!\*))/g);
+        // Parse [text](url), **bold** and *italic*
+        const parts = content.split(/(\[.*?\]\(.*?\)+|\*\*.*?\*\*|\*(?!\*).*?\*(?!\*))/g);
         return parts.map((part, i) => {
+            if (part.startsWith('[') && part.includes('](') && part.endsWith(')')) {
+                const match = part.match(/\[(.*?)\]\((.*?)\)/);
+                if (match) {
+                    return (
+                        <a
+                            key={i}
+                            href={match[2]}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-blue-600 hover:underline font-medium"
+                        >
+                            {match[1]}
+                        </a>
+                    );
+                }
+            }
             if (part.startsWith('**') && part.endsWith('**')) {
                 return <strong key={i} style={{ fontWeight: 600 }}>{part.slice(2, -2)}</strong>;
             } else if (part.startsWith('*') && part.endsWith('*')) {
