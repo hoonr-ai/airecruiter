@@ -213,6 +213,7 @@ export default function CreateJobPage() {
     const [customerName, setCustomerName] = useState("");
     const [jobStatus, setJobStatus] = useState("");
     const [jobNotes, setJobNotes] = useState("");
+    const [workAuthorization, setWorkAuthorization] = useState("");
     const [recruiterEmails, setRecruiterEmails] = useState("");
     const [aiDescription, setAiDescription] = useState("");
     const [isGenerating, setIsGenerating] = useState(false);
@@ -332,6 +333,7 @@ export default function CreateJobPage() {
                 body: JSON.stringify({
                     jobTitle: title || "Job Opportunity",
                     jobNotes: jobNotes,
+                    workAuthorization: workAuthorization,
                     jobDescription: jdText
                 })
             });
@@ -561,6 +563,15 @@ export default function CreateJobPage() {
                                                 className="min-h-[80px]"
                                             />
                                             <p className="text-xs text-muted-foreground">Add hiring manager notes, intake call notes, or any important job-related information.</p>
+                                        </div>
+                                        <div className="space-y-2 col-span-2">
+                                            <Label>Work Authorization</Label>
+                                            <Input
+                                                value={workAuthorization}
+                                                onChange={(e) => setWorkAuthorization(e.target.value)}
+                                                placeholder="e.g. US Citizen, Green Card, H1B, Any"
+                                            />
+                                            <p className="text-xs text-muted-foreground">Specify required work authorization for this role.</p>
                                         </div>
                                     </div>
                                 )}

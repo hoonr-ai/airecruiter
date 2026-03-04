@@ -15,6 +15,7 @@ print(f"DEBUG: GEMINI_API_KEY loaded: {'Set' if GEMINI_API_KEY else 'NOT SET'}")
 class JobDescriptionRequest(BaseModel):
     jobTitle: str
     jobNotes: str
+    workAuthorization: str = ""
     jobDescription: str
 
 # Rate limiting variables
@@ -38,11 +39,12 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
     prompt = (
         "You are an expert recruitment copywriter. Your task is to generate a premium, catchy, and concise job description ready for external publication on platforms like LinkedIn and job boards.\n\n"
         "STRICT EXTRACTION PRIORITY (You MUST extract concrete facts based on this hierarchy):\n"
-        "1. HIGHEST PRIORITY - Job Notes: Focus heavily on any specific requirements, hiring manager insights, or details mentioned here.\n"
+        "1. HIGHEST PRIORITY - Job Notes & Work Authorization: Focus heavily on any specific requirements, hiring manager insights, or details mentioned here. Ensure you reflect the Work Authorization requirement clearly if provided.\n"
         "2. SECOND PRIORITY - Existing Job Description: Extensively mine this for concrete facts (e.g., years of experience, mandatory tools, key duties) if they are missing or sparse in the Job Notes. Do NOT summarize away specific numbers like '10 years of experience'.\n"
         "3. LAST PRIORITY - Job Title: Use this for general context and naming conventions.\n\n"
         f"Input Data:\n"
         f"Job Notes: {req.jobNotes}\n"
+        f"Work Authorization: {req.workAuthorization}\n"
         f"Existing Job Description: {req.jobDescription}\n"
         f"Job Title: {req.jobTitle}\n\n"
         "STYLING & STRUCTURE INSTRUCTIONS:\n"
