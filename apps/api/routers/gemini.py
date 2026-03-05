@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 from pydantic import BaseModel
 import requests
 from time import sleep
+from services.jobdiva import jobdiva_service
 
 router = APIRouter()
 
@@ -17,6 +18,38 @@ class JobDescriptionRequest(BaseModel):
     jobNotes: str
     workAuthorization: str = ""
     jobDescription: str
+
+class JobDivaSyncRequest(BaseModel):
+    jobId: str
+    aiDescription: str
+    jobNotes: str = ""
+
+@router.post("/sync-jobdiva")
+async def sync_to_jobdiva(req: JobDivaSyncRequest):
+    """
+    Push AI JD (UDF #230) and Job Notes (UDF #231) to JobDiva,
+    and persist both locally in monitored_jobs.json.
+    """
+    udf_ai_jd  = int(os.getenv("JOBDIVA_AI_JD_UDF_ID", "230"))
+    udf_notes  = int(os.getenv("JOBDIVA_JOB_NOTES_UDF_ID", "231"))
+
+    fields = [
+        {"userfieldId": udf_ai_jd, "value": req.aiDescription},
+        {"userfieldId": udf_notes, "value": req.jobNotes},
+    ]
+
+    jobdiva_ok = await jobdiva_service.update_job_user_fields(req.jobId, fields)
+    local_ok   = jobdiva_service.monitor_job_locally(req.jobId, {
+        "ai_description": req.aiDescription,
+        "job_notes":      req.jobNotes,
+    })
+
+    return {
+        "jobdiva_updated": jobdiva_ok,
+        "locally_tracked": local_ok,
+        "message": "Sync complete" if (jobdiva_ok and local_ok) else
+                   ("Local OK, JobDiva failed (check credentials)" if local_ok else "Both failed"),
+    }
 
 # Rate limiting variables
 RATE_LIMIT = 5  # Maximum requests per minute

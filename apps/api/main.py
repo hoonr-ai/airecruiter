@@ -391,13 +391,13 @@ async def poll_all_jobs():
                 "title": status.get("title", "")
             })
         
-        # Update tracking data - preserve original job_id from monitoring list
+        # Merge poll result into existing entry so ai_description / job_notes are preserved
         updated_jobs[job_id] = {
-            "status": current_status,
-            "customer": status.get("customer", "Unknown"),
-            "title": status.get("title", ""),
+            **old_data,                                      # keep everything (ai_description, job_notes, etc.)
+            "status":       current_status,
+            "customer":     status.get("customer", "Unknown"),
+            "title":        status.get("title", ""),
             "last_updated": readable_ist_now(),
-            "added_at": old_data.get("added_at", readable_ist_now())
         }
     
     # Save updated data

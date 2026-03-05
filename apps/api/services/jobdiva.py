@@ -672,4 +672,60 @@ class JobDivaService:
        return results
 
 
+
+
+   async def update_job_user_fields(self, job_id: str, fields: list) -> bool:
+      import json as _json
+      token = await self.authenticate()
+      if not token:
+         return False
+      internal_id = job_id
+      if "-" in str(job_id):
+         job_data = await self.get_job_by_id(job_id)
+         if job_data and job_data.get("id"):
+            internal_id = job_data["id"]
+         else:
+            return False
+      url = f"{self.api_url}/apiv2/jobdiva/updateJob"
+      headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+      payload = {"jobOrderId": int(internal_id), "userFields": fields}
+      try:
+         import httpx as _httpx
+         async with _httpx.AsyncClient(timeout=15.0) as client:
+            logger.info(f"Pushing UDFs to JobDiva for {job_id} -> internal {internal_id}")
+            response = await client.post(url, json=payload, headers=headers)
+            if response.status_code == 200:
+               logger.info(f"JobDiva UDFs updated for {job_id}")
+               return True
+            logger.error(f"JobDiva UDF update failed ({response.status_code}): {response.text}")
+            return False
+      except Exception as e:
+         logger.error(f"UDF update exception: {e}")
+         return False
+
+   def monitor_job_locally(self, job_id: str, data: dict) -> bool:
+      import json as _json
+      file_path = "monitored_jobs.json"
+      try:
+         db = {"jobs": {}, "last_sync": None}
+         if os.path.exists(file_path):
+            with open(file_path, "r") as f:
+               try:
+                  db = _json.load(f)
+               except Exception:
+                  pass
+         jobs = db.setdefault("jobs", {})
+         entry = jobs.get(job_id, {})
+         entry.update(data)
+         entry["last_updated"] = readable_ist_now()
+         jobs[job_id] = entry
+         with open(file_path, "w") as f:
+            _json.dump(db, f, indent=2)
+         logger.info(f"Locally tracked ai_description + job_notes for {job_id}")
+         return True
+      except Exception as e:
+         logger.error(f"Local tracking failed for {job_id}: {e}")
+         return False
+
+
 jobdiva_service = JobDivaService()

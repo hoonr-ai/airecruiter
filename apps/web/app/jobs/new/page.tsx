@@ -375,6 +375,28 @@ export default function CreateJobPage() {
         setLoading(true);
         try {
             const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+
+            // --- Sync AI JD + Notes to JobDiva UDF #230 / #231 and track locally ---
+            if (jobId && aiDescription) {
+                console.log("🔄 Syncing AI JD & Job Notes to JobDiva...");
+                try {
+                    const syncRes = await fetch(`${apiUrl}/api/v1/gemini/sync-jobdiva`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            jobId,
+                            aiDescription,
+                            jobNotes,
+                        }),
+                    });
+                    const syncData = await syncRes.json();
+                    console.log("✅ Sync result:", syncData);
+                } catch (syncErr) {
+                    console.error("❌ Sync failed (non-blocking):", syncErr);
+                }
+            }
+
+            // --- Parse JD for skills / structured data ---
             const res = await fetch(`${apiUrl}/jobs/parse`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -385,7 +407,7 @@ export default function CreateJobPage() {
             setHardSkills(data.hard_skills || []);
             setSoftSkills(data.soft_skills || []);
             if (data.location_type) setLocationType(data.location_type);
-            if (data.location) setLocation(data.location); // Assume parser might return this
+            if (data.location) setLocation(data.location);
             setStep(2);
         } catch (e) {
             console.error(e);
