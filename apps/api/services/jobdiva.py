@@ -688,7 +688,13 @@ class JobDivaService:
             return False
       url = f"{self.api_url}/apiv2/jobdiva/updateJob"
       headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-      payload = {"jobOrderId": int(internal_id), "userFields": fields}
+      # Normalize field keys to match the exact Swagger schema:
+      # payload key = 'Userfields' (capital U), inner keys = 'userfieldId' + 'userfieldValue'
+      normalized_fields = [
+         {"userfieldId": f.get("userfieldId"), "userfieldValue": f.get("userfieldValue") or f.get("value", "")}
+         for f in fields
+      ]
+      payload = {"jobid": int(internal_id), "Userfields": normalized_fields}
       try:
          import httpx as _httpx
          async with _httpx.AsyncClient(timeout=15.0) as client:
