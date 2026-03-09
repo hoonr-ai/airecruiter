@@ -320,6 +320,10 @@ export default function CreateJobPage() {
                 setCustomerName(data.customer_name || data.company || "Unknown");
                 setJobStatus(data.job_status || "OPEN");
 
+                // RESTORE AI CONTENT FROM UDFs
+                if (data.ai_description) setAiDescription(data.ai_description);
+                if (data.job_notes) setJobNotes(data.job_notes);
+
                 if (data.city) setLocation(`${data.city}, ${data.state || ""}`);
 
                 // Auto-parse logic could be added here if desired.
@@ -377,7 +381,7 @@ export default function CreateJobPage() {
             const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
             // --- Sync AI JD + Notes to JobDiva UDF #230 / #231 and track locally ---
-            if (jobId && aiDescription) {
+            if (jobId && (aiDescription || jobNotes)) {
                 console.log("🔄 Syncing AI JD & Job Notes to JobDiva...");
                 try {
                     const syncRes = await fetch(`${apiUrl}/api/v1/gemini/sync-jobdiva`, {

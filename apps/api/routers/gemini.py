@@ -33,9 +33,12 @@ async def sync_to_jobdiva(req: JobDivaSyncRequest):
     udf_ai_jd  = int(os.getenv("JOBDIVA_AI_JD_UDF_ID", "230"))
     udf_notes  = int(os.getenv("JOBDIVA_JOB_NOTES_UDF_ID", "231"))
 
+    def truncate(s: str) -> str:
+        return s[:3900] if s else ""
+
     fields = [
-        {"userfieldId": udf_ai_jd, "value": req.aiDescription},
-        {"userfieldId": udf_notes, "value": req.jobNotes},
+        {"userfieldId": udf_ai_jd, "value": truncate(req.aiDescription)},
+        {"userfieldId": udf_notes, "value": truncate(req.jobNotes)},
     ]
 
     jobdiva_ok = await jobdiva_service.update_job_user_fields(req.jobId, fields)
