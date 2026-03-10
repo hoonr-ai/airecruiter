@@ -363,7 +363,7 @@ export default function CreateJobPage() {
 
                 // Auto-parse logic could be added here if desired.
             } else {
-                alert("Job not found");
+                alert("No job found");
             }
         } catch (e) {
             console.error(e);

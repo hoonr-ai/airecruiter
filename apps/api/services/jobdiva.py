@@ -201,6 +201,19 @@ class JobDivaService:
                 jobs = data if isinstance(data, list) else data.get("data", [])
                 if not jobs: return None
                 j = jobs[0]
+            
+                # Strict Matching: JobDiva sometimes returns arbitrary jobs for invalid inputs like '1'
+                j_id = str(get_field(j, ["id", "jobId"]) or "")
+                j_ref = str(get_field(j, ["reference #", "jobdivaref", "ref"]) or "")
+                
+                if is_ref:
+                    if job_id.lower() != j_ref.lower():
+                        logger.warning(f"Bogus JobDiva response: requested ref {job_id}, got ref {j_ref}")
+                        return None
+                else:
+                    if safe_id != j_id:
+                        logger.warning(f"Bogus JobDiva response: requested ID {safe_id}, got ID {j_id}")
+                        return None
                 
                 u_fields = j.get("user fields", {}) or {}
                 ai_description = None
