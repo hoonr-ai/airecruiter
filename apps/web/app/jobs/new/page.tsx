@@ -12,7 +12,8 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
     Download, Loader2, Sparkles, Wand2, Search, CheckCircle, AlertTriangle,
-    ShieldAlert, Eye, Gavel, RefreshCw, RotateCcw, Copy, Plus, Trash2, ChevronRight
+    ShieldAlert, Eye, Gavel, RefreshCw, RotateCcw, Copy, Plus, Trash2, ChevronRight,
+    CheckCircle2, XCircle
 } from "lucide-react";
 import { CandidateTable } from "@/components/candidate-table";
 import { AnalysisCard } from "@/components/analysis/analysis-card";
@@ -259,6 +260,40 @@ export default function CreateJobPage() {
     const [analysisResults, setAnalysisResults] = useState<any[]>([]);
     const [showAnalysis, setShowAnalysis] = useState(false);
     const [viewingAnalysis, setViewingAnalysis] = useState<any>(null); // For Modal
+    const [emailError, setEmailError] = useState(false);
+
+
+    // Unified email validation helper with progressive feedback
+    const getEmailValidationStatus = (input: string) => {
+        if (!input || input.trim() === "") return { status: 'empty', message: 'Recruiter email field is required' };
+
+        const emails = input.split(",").map(e => e.trim());
+        // Robust regex: TLD must be 2-6 alpha chars, domain must exist
+        const emailRegex = /^[^\s@]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}$/;
+
+        // Progressive check for the first email to provide specific feedback
+        const firstEmail = emails[0];
+        if (!firstEmail.includes("@")) return { status: 'invalid', message: 'The @ symbol is missing.' };
+
+        const atParts = firstEmail.split("@");
+        const domain = atParts[1];
+        if (!domain || domain.trim() === "") return { status: 'invalid', message: 'Domain name is missing.' };
+
+        const domainParts = domain.split(".");
+        const tld = domainParts[domainParts.length - 1];
+        // Must have at least one dot, domain part (before last dot) must be non-empty, TLD must be 2+ alpha chars
+        const domainBody = domainParts.slice(0, -1).join('.');
+        if (domainParts.length < 2 || !domainBody || !/^[a-zA-Z]{2,6}$/.test(tld)) {
+            return { status: 'invalid', message: 'Suffix is missing or invalid (e.g. .com, .org).' };
+        }
+
+        const allValid = emails.every(e => emailRegex.test(e));
+        return allValid ? { status: 'valid', message: 'Valid' } : { status: 'invalid', message: 'Please enter a valid email address.' };
+    };
+
+    const validateEmails = (input: string) => {
+        return getEmailValidationStatus(input).status === 'valid';
+    };
 
 
     const handleAnalyze = async () => {
@@ -339,10 +374,16 @@ export default function CreateJobPage() {
 
 
     const handleUpdateDescription = async () => {
-        if (!recruiterEmails) {
-            alert("Recruiter Email field is required.");
+        const validation = getEmailValidationStatus(recruiterEmails);
+        if (validation.status !== 'valid') {
+            setEmailError(true);
+            const msg = validation.status === 'empty'
+                ? "Recruiter Email field is required."
+                : validation.message;
+            alert(msg);
             return;
         }
+        setEmailError(false);
         if (!jdText && !jobNotes) return;
         setIsGenerating(true);
         try {
@@ -372,10 +413,16 @@ export default function CreateJobPage() {
 
 
     const handleParse = async () => {
-        if (!recruiterEmails) {
-            alert("Recruiter Email field is required.");
+        const validation = getEmailValidationStatus(recruiterEmails);
+        if (validation.status !== 'valid') {
+            setEmailError(true);
+            const msg = validation.status === 'empty'
+                ? "Recruiter Email field is required."
+                : validation.message;
+            alert(msg);
             return;
         }
+        setEmailError(false);
         setLoading(true);
         try {
             const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -588,13 +635,48 @@ export default function CreateJobPage() {
                                             <p className="text-xs text-muted-foreground">Status updates automatically from JobDiva every 5 minutes.</p>
                                         </div>
                                         <div className="space-y-2">
-                                            <Label>Recruiter Email <span className="text-destructive">*</span></Label>
-                                            <Input
-                                                value={recruiterEmails}
-                                                onChange={(e) => setRecruiterEmails(e.target.value)}
-                                                placeholder="email1@company.com, email2@company.com"
-                                            />
-                                            <p className="text-xs text-muted-foreground">Enter recruiter email for sending updates.</p>
+                                            <Label className="flex items-center justify-between">
+                                                <span>Recruiter Email <span className="text-destructive">*</span></span>
+                                                {recruiterEmails && (
+                                                    <span className="flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider">
+                                                        {getEmailValidationStatus(recruiterEmails).status === 'valid' ? (
+                                                            <>
+                                                                <CheckCircle2 className="w-3 h-3 text-green-500" />
+                                                                <span className="text-green-600">Valid</span>
+                                                            </>
+                                                        ) : (
+                                                            <>
+                                                                <XCircle className="w-3 h-3 text-destructive" />
+                                                                <span className="text-destructive">Invalid</span>
+                                                            </>
+                                                        )}
+                                                    </span>
+                                                )}
+                                            </Label>
+                                            <div className="relative">
+                                                <Input
+                                                    value={recruiterEmails}
+                                                    onChange={(e) => {
+                                                        const newVal = e.target.value;
+                                                        setRecruiterEmails(newVal);
+                                                        // Immediate validation check
+                                                        if (getEmailValidationStatus(newVal).status === 'valid') {
+                                                            setEmailError(false);
+                                                        }
+                                                    }}
+                                                    placeholder="recruiter@example.com"
+                                                    className={cn(
+                                                        "transition-all duration-200",
+                                                        recruiterEmails && getEmailValidationStatus(recruiterEmails).status === 'invalid' && "border-destructive focus-visible:ring-destructive bg-destructive/5",
+                                                        recruiterEmails && getEmailValidationStatus(recruiterEmails).status === 'valid' && "border-green-500/50 focus-visible:ring-green-500 bg-green-50/30"
+                                                    )}
+                                                />
+                                            </div>
+                                            {getEmailValidationStatus(recruiterEmails).status === 'invalid' && (
+                                                <p className="text-[11px] font-medium text-destructive transition-colors">
+                                                    {getEmailValidationStatus(recruiterEmails).message}
+                                                </p>
+                                            )}
                                         </div>
                                         <div className="space-y-2 col-span-2">
                                             <Label>Job Notes</Label>
@@ -617,19 +699,19 @@ export default function CreateJobPage() {
                                         </div>
                                     </div>
                                 )}
-
-                                {jdText && (
-                                    <div className="space-y-3">
-                                        <div className="flex items-center gap-2">
-                                            <h3 className="font-semibold text-base">Job Description</h3>
-                                        </div>
-                                        <div className="rounded-md border bg-background p-4 max-h-64 overflow-y-auto">
-                                            <RawFormattedJobDescription text={jdText} />
-                                        </div>
-                                    </div>
-                                )}
                             </TabsContent>
                         </Tabs>
+
+                        {jdText && (
+                            <div className="space-y-3">
+                                <div className="flex items-center gap-2">
+                                    <h3 className="font-semibold text-base">Job Description</h3>
+                                </div>
+                                <div className="rounded-md border bg-background p-4 max-h-64 overflow-y-auto">
+                                    <RawFormattedJobDescription text={jdText} />
+                                </div>
+                            </div>
+                        )}
 
                         {aiDescription && (
                             <div className="mt-8 space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-700">
@@ -716,8 +798,9 @@ export default function CreateJobPage() {
                             </Button>
                         )}
                     </CardContent>
-                </Card>
-            )}
+                </Card >
+            )
+            }
 
 
             {/* Step 2: Review */}
