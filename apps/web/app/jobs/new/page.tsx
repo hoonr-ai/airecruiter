@@ -9,12 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-    Download, Loader2, Sparkles, Wand2, Search, CheckCircle, AlertTriangle,
-    ShieldAlert, Eye, Gavel, RefreshCw, RotateCcw, Copy, Plus, Trash2, ChevronRight,
-    CheckCircle2, XCircle
-} from "lucide-react";
+import { Download, Loader2, Sparkles, Wand2, Search, CheckCircle, AlertTriangle, ShieldAlert, Eye, Gavel, RefreshCw, RotateCcw, Copy, Plus, Trash2, ChevronRight, CheckCircle2, XCircle } from "lucide-react";
 import { CandidateTable } from "@/components/candidate-table";
 import { AnalysisCard } from "@/components/analysis/analysis-card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -65,82 +60,7 @@ const HighlightText = ({ text, keywords }: { text: string, keywords: string[] })
 };
 
 
-// Helper component to format raw JobDiva descriptions nicely (Original Logic)
-const RawFormattedJobDescription = ({ text }: { text: string }) => {
-    const formatText = (rawText: string) => {
-        if (!rawText) return '';
 
-        // Split by lines and process each
-        return rawText.split('\n').map((line, index) => {
-            const trimmedLine = line.trim();
-
-            // Check if this is a section header (starts with 📋)
-            if (trimmedLine.startsWith('📋')) {
-                const sectionTitle = trimmedLine.replace('📋', '').trim();
-                return (
-                    <div key={index} className="font-semibold text-primary mt-4 mb-2 first:mt-0">
-                        <span className="text-sm tracking-wide">{sectionTitle}</span>
-                    </div>
-                );
-            }
-
-            // Check if this is a bullet point
-            if (trimmedLine.startsWith('•')) {
-                const bulletText = trimmedLine.substring(1).trim();
-                // Split the bullet text on full stops to create multiple bullets, ensuring each ends with a period
-                const sentences = bulletText.split('.').filter(s => s.trim().length > 0);
-
-                return sentences.map((sentence, sentenceIndex) => {
-                    const cleanSentence = sentence.trim();
-                    const sentenceWithPeriod = cleanSentence.endsWith('.') ? cleanSentence : cleanSentence + '.';
-
-                    return (
-                        <div key={`${index}-${sentenceIndex}`} className="flex items-start gap-2 ml-4 my-1">
-                            <div className="h-1.5 w-1.5 bg-muted-foreground rounded-full mt-2 shrink-0"></div>
-                            <span className="text-sm">{sentenceWithPeriod}</span>
-                        </div>
-                    );
-                });
-            }
-
-            // Regular paragraph text - also split on full stops if it contains multiple sentences
-            if (trimmedLine) {
-                if (trimmedLine.includes('.')) {
-                    const sentences = trimmedLine.split('.').filter(s => s.trim().length > 0);
-                    return sentences.map((sentence, sentenceIndex) => {
-                        const cleanSentence = sentence.trim();
-                        const sentenceWithPeriod = cleanSentence.endsWith('.') ? cleanSentence : cleanSentence + '.';
-
-                        return (
-                            <div key={`${index}-${sentenceIndex}`} className="flex items-start gap-2 ml-4 my-1">
-                                <div className="h-1.5 w-1.5 bg-muted-foreground rounded-full mt-2 shrink-0"></div>
-                                <span className="text-sm">{sentenceWithPeriod}</span>
-                            </div>
-                        );
-                    });
-                } else {
-                    // For lines without periods, add one and create a bullet point
-                    const sentenceWithPeriod = trimmedLine.endsWith('.') ? trimmedLine : trimmedLine + '.';
-                    return (
-                        <div key={index} className="flex items-start gap-2 ml-4 my-1">
-                            <div className="h-1.5 w-1.5 bg-muted-foreground rounded-full mt-2 shrink-0"></div>
-                            <span className="text-sm">{sentenceWithPeriod}</span>
-                        </div>
-                    );
-                }
-            }
-
-            // Empty line for spacing
-            return <div key={index} className="h-2"></div>;
-        });
-    };
-
-    return (
-        <div className="space-y-1">
-            {formatText(text)}
-        </div>
-    );
-};
 
 // Helper component to format AI-generated postings with rich text copying support
 const AIPostingJobDescription = ({ text }: { text: string }) => {
@@ -573,143 +493,125 @@ export default function CreateJobPage() {
                 <Card>
                     <CardHeader>
                         <CardTitle>Job Description</CardTitle>
-                        <CardDescription>Paste the raw job description or import from JobDiva.</CardDescription>
+                        <CardDescription>All jobs must be imported from JobDiva. Enter the Job ID below to begin.</CardDescription>
                     </CardHeader>
                     <CardContent className="space-y-4">
-                        <Tabs defaultValue="paste" className="w-full">
-                            <TabsList className="grid w-full grid-cols-2 mb-4">
-                                <TabsTrigger value="paste">Paste Text</TabsTrigger>
-                                <TabsTrigger value="import">Import from JobDiva</TabsTrigger>
-                            </TabsList>
-
-                            <TabsContent value="paste" className="space-y-4">
-                                <Textarea
-                                    placeholder="Paste JD here..."
-                                    rows={10}
-                                    className="font-mono text-sm mb-4"
-                                    value={jdText}
-                                    onChange={(e) => setJdText(e.target.value)}
+                        <div className="space-y-4">
+                            <div className="flex gap-4 mb-4">
+                                <Input
+                                    placeholder="Enter Job ID (e.g. 26-12345)"
+                                    value={jobId}
+                                    onChange={(e) => setJobId(e.target.value)}
                                 />
-                            </TabsContent>
+                                <Button onClick={handleFetchJob} disabled={!jobId || loading} variant="outline">
+                                    {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                                    <Download className="mr-2 h-4 w-4" /> Import
+                                </Button>
+                            </div>
 
-                            <TabsContent value="import" className="space-y-4">
-                                <div className="flex gap-4 mb-4">
-                                    <Input
-                                        placeholder="Enter Job ID (e.g. 26-12345)"
-                                        value={jobId}
-                                        onChange={(e) => setJobId(e.target.value)}
-                                    />
-                                    <Button onClick={handleFetchJob} disabled={!jobId || loading} variant="outline">
-                                        {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                                        <Download className="mr-2 h-4 w-4" /> Import
-                                    </Button>
-                                </div>
-
-                                {title && (
-                                    <div className="grid grid-cols-2 gap-4 mb-4 p-4 border rounded-lg bg-muted/40">
-                                        <div className="space-y-2">
-                                            <Label>Job Title</Label>
-                                            <Input value={title} readOnly className="bg-muted text-muted-foreground cursor-not-allowed" />
-                                        </div>
-                                        <div className="space-y-2">
-                                            <Label>Customer Name</Label>
-                                            <Input value={customerName} readOnly className="bg-muted text-muted-foreground cursor-not-allowed" />
-                                        </div>
-                                        <div className="space-y-2">
-                                            <Label>Job Status</Label>
-                                            <div className="flex items-center gap-2">
-                                                <Input
-                                                    value={jobStatus.charAt(0).toUpperCase() + jobStatus.slice(1).toLowerCase()}
-                                                    readOnly
-                                                    className="bg-muted text-muted-foreground cursor-not-allowed flex-1"
-                                                />
-                                                <Button
-                                                    variant="outline"
-                                                    size="sm"
-                                                    onClick={handleFetchJob}
-                                                    title="Refresh status from JobDiva"
-                                                >
-                                                    <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-                                                </Button>
-                                            </div>
-                                            <p className="text-xs text-muted-foreground">Status updates automatically from JobDiva every 5 minutes.</p>
-                                        </div>
-                                        <div className="space-y-2">
-                                            <Label className="flex items-center justify-between">
-                                                <span>Recruiter Email <span className="text-destructive">*</span></span>
-                                                {recruiterEmails && (
-                                                    <span className="flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider">
-                                                        {getEmailValidationStatus(recruiterEmails).status === 'valid' ? (
-                                                            <>
-                                                                <CheckCircle2 className="w-3 h-3 text-green-500" />
-                                                                <span className="text-green-600">Valid</span>
-                                                            </>
-                                                        ) : (
-                                                            <>
-                                                                <XCircle className="w-3 h-3 text-destructive" />
-                                                                <span className="text-destructive">Invalid</span>
-                                                            </>
-                                                        )}
-                                                    </span>
-                                                )}
-                                            </Label>
-                                            <div className="relative">
-                                                <Input
-                                                    value={recruiterEmails}
-                                                    onChange={(e) => {
-                                                        const newVal = e.target.value;
-                                                        setRecruiterEmails(newVal);
-                                                        // Immediate validation check
-                                                        if (getEmailValidationStatus(newVal).status === 'valid') {
-                                                            setEmailError(false);
-                                                        }
-                                                    }}
-                                                    placeholder="recruiter@example.com"
-                                                    className={cn(
-                                                        "transition-all duration-200",
-                                                        recruiterEmails && getEmailValidationStatus(recruiterEmails).status === 'invalid' && "border-destructive focus-visible:ring-destructive bg-destructive/5",
-                                                        recruiterEmails && getEmailValidationStatus(recruiterEmails).status === 'valid' && "border-green-500/50 focus-visible:ring-green-500 bg-green-50/30"
-                                                    )}
-                                                />
-                                            </div>
-                                            {getEmailValidationStatus(recruiterEmails).status === 'invalid' && (
-                                                <p className="text-[11px] font-medium text-destructive transition-colors">
-                                                    {getEmailValidationStatus(recruiterEmails).message}
-                                                </p>
-                                            )}
-                                        </div>
-                                        <div className="space-y-2 col-span-2">
-                                            <Label>Job Notes</Label>
-                                            <Textarea
-                                                value={jobNotes}
-                                                onChange={(e) => setJobNotes(e.target.value)}
-                                                placeholder="Enter your notes here..."
-                                                className="min-h-[80px]"
-                                            />
-                                            <p className="text-xs text-muted-foreground">Add hiring manager notes, intake call notes, or any important job-related information.</p>
-                                        </div>
-                                        <div className="space-y-2 col-span-2">
-                                            <Label>Work Authorization</Label>
-                                            <Input
-                                                value={workAuthorization}
-                                                onChange={(e) => setWorkAuthorization(e.target.value)}
-                                                placeholder="e.g. US Citizen, Green Card, H1B, Any"
-                                            />
-                                            <p className="text-xs text-muted-foreground">Specify required work authorization for this role.</p>
-                                        </div>
+                            {title && (
+                                <div className="grid grid-cols-2 gap-4 mb-4 p-4 border rounded-lg bg-muted/40">
+                                    <div className="space-y-2">
+                                        <Label>Job Title</Label>
+                                        <Input value={title} readOnly className="bg-muted text-muted-foreground cursor-not-allowed" />
                                     </div>
-                                )}
-                            </TabsContent>
-                        </Tabs>
+                                    <div className="space-y-2">
+                                        <Label>Customer Name</Label>
+                                        <Input value={customerName} readOnly className="bg-muted text-muted-foreground cursor-not-allowed" />
+                                    </div>
+                                    <div className="space-y-2">
+                                        <Label>Job Status</Label>
+                                        <div className="flex items-center gap-2">
+                                            <Input
+                                                value={jobStatus.charAt(0).toUpperCase() + jobStatus.slice(1).toLowerCase()}
+                                                readOnly
+                                                className="bg-muted text-muted-foreground cursor-not-allowed flex-1"
+                                            />
+                                            <Button
+                                                variant="outline"
+                                                size="sm"
+                                                onClick={handleFetchJob}
+                                                title="Refresh status from JobDiva"
+                                            >
+                                                <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                                            </Button>
+                                        </div>
+                                        <p className="text-xs text-muted-foreground">Status updates automatically from JobDiva every 5 minutes.</p>
+                                    </div>
+                                    <div className="space-y-2">
+                                        <Label className="flex items-center justify-between">
+                                            <span>Recruiter Email <span className="text-destructive">*</span></span>
+                                            {recruiterEmails && (
+                                                <span className="flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider">
+                                                    {getEmailValidationStatus(recruiterEmails).status === 'valid' ? (
+                                                        <>
+                                                            <CheckCircle2 className="w-3 h-3 text-green-500" />
+                                                            <span className="text-green-600">Valid</span>
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <XCircle className="w-3 h-3 text-destructive" />
+                                                            <span className="text-destructive">Invalid</span>
+                                                        </>
+                                                    )}
+                                                </span>
+                                            )}
+                                        </Label>
+                                        <div className="relative">
+                                            <Input
+                                                value={recruiterEmails}
+                                                onChange={(e) => {
+                                                    const newVal = e.target.value;
+                                                    setRecruiterEmails(newVal);
+                                                    // Immediate validation check
+                                                    if (getEmailValidationStatus(newVal).status === 'valid') {
+                                                        setEmailError(false);
+                                                    }
+                                                }}
+                                                placeholder="recruiter@example.com"
+                                                className={cn(
+                                                    "transition-all duration-200",
+                                                    recruiterEmails && getEmailValidationStatus(recruiterEmails).status === 'invalid' && "border-destructive focus-visible:ring-destructive bg-destructive/5",
+                                                    recruiterEmails && getEmailValidationStatus(recruiterEmails).status === 'valid' && "border-green-500/50 focus-visible:ring-green-500 bg-green-50/30"
+                                                )}
+                                            />
+                                        </div>
+                                        {getEmailValidationStatus(recruiterEmails).status === 'invalid' && (
+                                            <p className="text-[11px] font-medium text-destructive transition-colors">
+                                                {getEmailValidationStatus(recruiterEmails).message}
+                                            </p>
+                                        )}
+                                    </div>
+                                    <div className="space-y-2 col-span-2">
+                                        <Label>Job Notes</Label>
+                                        <Textarea
+                                            value={jobNotes}
+                                            onChange={(e) => setJobNotes(e.target.value)}
+                                            placeholder="Enter your notes here..."
+                                            className="min-h-[80px]"
+                                        />
+                                        <p className="text-xs text-muted-foreground">Add hiring manager notes, intake call notes, or any important job-related information.</p>
+                                    </div>
+                                    <div className="space-y-2 col-span-2">
+                                        <Label>Work Authorization</Label>
+                                        <Input
+                                            value={workAuthorization}
+                                            onChange={(e) => setWorkAuthorization(e.target.value)}
+                                            placeholder="e.g. US Citizen, Green Card, H1B, Any"
+                                        />
+                                        <p className="text-xs text-muted-foreground">Specify required work authorization for this role.</p>
+                                    </div>
+                                </div>
+                            )}
+                        </div>
 
                         {jdText && (
-                            <div className="space-y-3">
-                                <div className="flex items-center gap-2">
-                                    <h3 className="font-semibold text-base">Job Description</h3>
+                            <div className="space-y-2 pt-4 border-t">
+                                <Label>JobDiva Original Description</Label>
+                                <div className="rounded-md border bg-muted/20 p-4 max-h-60 overflow-y-auto text-sm whitespace-pre-wrap">
+                                    {jdText}
                                 </div>
-                                <div className="rounded-md border bg-background p-4 max-h-64 overflow-y-auto">
-                                    <RawFormattedJobDescription text={jdText} />
-                                </div>
+                                <p className="text-xs text-muted-foreground italic">Raw description imported from JobDiva.</p>
                             </div>
                         )}
 
