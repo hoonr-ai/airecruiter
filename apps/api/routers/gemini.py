@@ -28,7 +28,7 @@ class JobDivaSyncRequest(BaseModel):
 async def sync_to_jobdiva(req: JobDivaSyncRequest):
     """
     Push AI JD (UDF #230) and Job Notes (UDF #231) to JobDiva,
-    and persist both locally in monitored_jobs.json.
+    and also push formatted AI JD to the primary Posting Description field.
     """
     udf_ai_jd  = int(os.getenv("JOBDIVA_AI_JD_UDF_ID", "230"))
     udf_notes  = int(os.getenv("JOBDIVA_JOB_NOTES_UDF_ID", "231"))
@@ -36,13 +36,35 @@ async def sync_to_jobdiva(req: JobDivaSyncRequest):
     def truncate(s: str) -> str:
         return s[:3900] if s else ""
 
+    def markdown_to_html(text: str) -> str:
+        """Simple conversion of AI Markdown to HTML for JobDiva portal."""
+        if not text: return ""
+        import re
+        # Bold: **text** -> <b>text</b>
+        text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+        # Italics: *text* -> <i>text</i>
+        text = re.sub(r'\*(.*?)\*', r'<i>\1</i>', text)
+        # Preserve line breaks for HTML
+        text = text.replace('\n', '<br/>')
+        return text
+
+    # Prepare fields for UDF (Plain Text)
     fields = [
         {"userfieldId": udf_ai_jd, "value": truncate(req.aiDescription)},
         {"userfieldId": udf_notes, "value": truncate(req.jobNotes)},
     ]
 
-    jobdiva_ok = await jobdiva_service.update_job_user_fields(req.jobId, fields)
-    local_ok   = jobdiva_service.monitor_job_locally(req.jobId, {
+    # Convert to HTML for primary Posting Description
+    formatted_jd = markdown_to_html(req.aiDescription)
+
+    # Sync to JobDiva (UDFs + Posting Description)
+    jobdiva_ok = await jobdiva_service.update_job_user_fields(
+        req.jobId, 
+        fields, 
+        posting_description=formatted_jd
+    )
+    
+    local_ok = jobdiva_service.monitor_job_locally(req.jobId, {
         "ai_description": req.aiDescription,
         "job_notes":      req.jobNotes,
     })

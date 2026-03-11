@@ -296,8 +296,8 @@ class JobDivaService:
             results.append(await self.get_job_status(job_id))
         return results
 
-    async def update_job_user_fields(self, job_id: str, fields: list) -> bool:
-        """Update JobDiva UDFs."""
+    async def update_job_user_fields(self, job_id: str, fields: list, posting_description: str = None) -> bool:
+        """Update JobDiva UDFs and optional posting description."""
         token = await self.authenticate()
         if not token: return False
         
@@ -313,11 +313,15 @@ class JobDivaService:
             {"userfieldId": f.get("userfieldId"), "userfieldValue": f.get("userfieldValue") or f.get("value", "")}
             for f in fields
         ]
+        
         payload = {"jobid": int(internal_id), "Userfields": normalized_fields}
+        if posting_description:
+            payload["postingdescription"] = posting_description
+            payload["posttoportal"] = "1"
         
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
-                debug_log(f"Pushing UDFs to {job_id}: {payload}")
+                debug_log(f"Pushing updates to {job_id}: {payload}")
                 response = await client.post(url, json=payload, headers=headers)
                 return response.status_code == 200
         except Exception: return False
