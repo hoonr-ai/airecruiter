@@ -171,4 +171,7 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
             "• Culture: Join a diverse, inclusive, and collaborative environment where your voice matters.\n\n"
         )
 
+    if description and job_id and job_id != "new":
+        description = f"{description}\n\nJobDiva ID: {job_id}"
+
     return {"description": description}
