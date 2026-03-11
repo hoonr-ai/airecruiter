@@ -225,6 +225,19 @@ class JobDivaService:
                 customer_name = str(get_field(j, ["customer", "company"]) or "").title() or "Unknown Customer"
                 description = format_job_description(get_field(j, ["job description", "description"]) or "")
 
+                # Restore full-length UDFs from local DB if JobDiva truncated them
+                local_data = self.get_locally_monitored_job(job_id)
+                if local_data:
+                    local_ai = local_data.get("ai_description")
+                    if local_ai and len(str(local_ai)) > len(str(ai_description or "")):
+                        ai_description = local_ai
+                        logger.info(f"Restored full ai_description from local DB for {job_id}")
+                    
+                    local_notes = local_data.get("job_notes")
+                    if local_notes and len(str(local_notes)) > len(str(job_notes or "")):
+                        job_notes = local_notes
+                        logger.info(f"Restored full job_notes from local DB for {job_id}")
+
                 return {
                     "id": get_field(j, ["id", "jobId"]),
                     "title": get_field(j, ["job title", "title"]),
@@ -327,5 +340,15 @@ class JobDivaService:
                 _json.dump(db, f, indent=2)
             return True
         except: return False
+
+    def get_locally_monitored_job(self, job_id: str) -> dict:
+        import json as _json
+        file_path = "monitored_jobs.json"
+        try:
+            if not os.path.exists(file_path): return {}
+            with open(file_path, "r") as f:
+                db = _json.load(f)
+            return db.get("jobs", {}).get(job_id, {})
+        except: return {}
 
 jobdiva_service = JobDivaService()
