@@ -269,28 +269,24 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
          raise HTTPException(status_code=404, detail="Job not found in JobDiva")
     
     # Auto-add to monitoring when imported
-    background_tasks.add_task(add_job_to_monitoring_internal, request.job_id)
+    job_id = request.job_id
+    background_tasks.add_task(add_job_to_monitoring_internal, job_id, job)
     
     return job
 
-async def add_job_to_monitoring_internal(job_id: str):
-    """Internal function to add job to monitoring without HTTP response"""
+async def add_job_to_monitoring_internal(job_id: str, job_details: dict):
+    """Internal function to add job to monitoring using centralized service logic"""
     try:
-        jobs_data = load_monitored_jobs()
-        
-        # Get initial status
-        status_info = await jobdiva_service.get_job_status(job_id)
-        
-        # Add to monitoring
-        jobs_data["jobs"][job_id] = {
-            "status": status_info["status"],
-            "customer": status_info.get("customer", "Unknown"),
-            "title": status_info.get("title", ""),
-            "added_at": readable_ist_now(),
-            "last_updated": readable_ist_now()
+        # Prepare the monitoring data payload
+        monitoring_data = {
+            "status":       job_details.get("job_status") or job_details.get("status") or "OPEN",
+            "customer":     job_details.get("customer_name") or job_details.get("company") or "Unknown",
+            "title":        job_details.get("title") or "",
+            "added_at":     readable_ist_now()
         }
         
-        save_monitored_jobs(jobs_data)
+        # Use centralized service logic to avoid race conditions and destructive writes
+        jobdiva_service.monitor_job_locally(job_id, monitoring_data)
         logger.info(f"📋 Auto-added Job {job_id} to monitoring")
         
         # Reset 5-minute timer since new job was added
@@ -371,15 +367,21 @@ async def poll_all_jobs():
     # Batch fetch statuses
     statuses = await jobdiva_service.get_multiple_jobs_status(job_ids)
     
-    # Update local tracking
+    # Update local tracking in-place to avoid deleting jobs that failed to poll
     import time
-    updated_jobs = {}
     changes_detected = []
+    
+    # We use the existing jobs_data dict and update it
+    current_jobs = jobs_data.get("jobs", {})
     
     for status in statuses:
         job_id = status["job_id"]
         current_status = status["status"]
-        old_data = jobs_data["jobs"].get(job_id, {})
+        
+        if job_id not in current_jobs:
+            continue
+            
+        old_data = current_jobs[job_id]
         old_status = old_data.get("status", "UNKNOWN")
         
         # Track changes
@@ -391,17 +393,15 @@ async def poll_all_jobs():
                 "title": status.get("title", "")
             })
         
-        # Merge poll result into existing entry so ai_description / job_notes are preserved
-        updated_jobs[job_id] = {
-            **old_data,                                      # keep everything (ai_description, job_notes, etc.)
+        # UPDATE in-place. This preserves ai_description, job_notes, etc.
+        old_data.update({
             "status":       current_status,
             "customer":     status.get("customer", "Unknown"),
             "title":        status.get("title", ""),
             "last_updated": readable_ist_now(),
-        }
+        })
     
     # Save updated data
-    jobs_data["jobs"] = updated_jobs
     jobs_data["last_sync"] = readable_ist_now()
     save_monitored_jobs(jobs_data)
     
