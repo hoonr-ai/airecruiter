@@ -172,6 +172,6 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         )
 
     if description and job_id and job_id != "new":
-        description = f"{description}\n\nJobDiva ID: {job_id}"
+        description = f"{description}\n\n**JobDiva ID**: {job_id}"
 
     return {"description": description}
