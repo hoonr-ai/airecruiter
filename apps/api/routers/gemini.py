@@ -90,6 +90,7 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         "- ACTIVELY use bolding (**bold**) and italics (*italic*) to emphasize important keywords (e.g., years of experience, specific tools).\n"
         "- MANDATORY BOLDING: You MUST bold the **Location** (e.g., **New York, NY**) whenever it appears in the main body.\n"
         "- PAY RATE RULE: The Pay Rate MUST appear ONLY in the PAY RATE TRANSPARENCY section at the end. DO NOT mention the pay rate, salary, or compensation anywhere in the main body of the job description (THE ROLE, WHAT YOU'LL DO, WHAT YOU BRING, WHY WORK WITH US). Bold the pay rate only inside the PAY RATE TRANSPARENCY section.\n"
+        "- PAY RATE FORMAT: When extracting the pay rate, you MUST preserve the EXACT range from the source. If a range is given (e.g., $62 - $62.80/hour or $60 - $80/hour), use the full range — do NOT reduce it to a single value. Only use a single value if the source explicitly provides just one fixed rate.\n"
         "- STRICT REMOVAL: You MUST NOT include the following internal fields in the final output, regardless of whether they appear in the Job Notes or the original Job Description: Bill Rate, Hiring Manager, Customer Name, and Option Ref No.\n"
         "- DO NOT use any emojis anywhere in the text.\n"
         "- START with a catchy 'Hook' or summary that highlights why someone should join.\n"
