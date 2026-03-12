@@ -9,7 +9,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Download, Loader2, Sparkles, Wand2, Search, CheckCircle, AlertTriangle, ShieldAlert, Eye, Gavel, RefreshCw, RotateCcw, Copy, Plus, Trash2, ChevronRight, CheckCircle2, XCircle } from "lucide-react";
+import { Download, Loader2, Sparkles, Wand2, Search, CheckCircle, AlertTriangle, ShieldAlert, Eye, Gavel, RefreshCw, RotateCcw, Copy, Plus, Trash2, ChevronRight, CheckCircle2, XCircle, Globe, LayoutGrid } from "lucide-react";
+import { Checkbox } from "@/components/ui/checkbox";
 import { CandidateTable } from "@/components/candidate-table";
 import { AnalysisCard } from "@/components/analysis/analysis-card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -139,6 +140,15 @@ const AIPostingJobDescription = ({ text }: { text: string }) => {
     );
 };
 
+const JOB_BOARDS = [
+    { id: "skip", name: "Skip External Posting" },
+    { id: "careerbuilder", name: "CareerBuilder" },
+    { id: "dice", name: "Dice" },
+    { id: "monster", name: "Monster" },
+    { id: "indeed", name: "Indeed" },
+    { id: "linkedin", name: "LinkedIn" },
+];
+
 
 export default function CreateJobPage() {
     const [step, setStep] = useState(1);
@@ -153,6 +163,7 @@ export default function CreateJobPage() {
     const [workAuthorization, setWorkAuthorization] = useState("");
     const [recruiterEmails, setRecruiterEmails] = useState("");
     const [aiDescription, setAiDescription] = useState("");
+    const [selectedBoards, setSelectedBoards] = useState<string[]>([]);
     const [isGenerating, setIsGenerating] = useState(false);
 
 
@@ -671,6 +682,77 @@ export default function CreateJobPage() {
                                     <div className="px-6 py-6 text-sm text-foreground">
                                         <AIPostingJobDescription text={aiDescription} />
                                     </div>
+                                </div>
+
+                                <div className="mt-8 space-y-5 pt-8 border-t border-dashed">
+                                    <div className="flex items-center gap-2">
+                                        <Globe className="w-5 h-5 text-muted-foreground mr-1" />
+                                        <div>
+                                            <h4 className="font-bold text-base text-foreground">External Job Board Selection</h4>
+                                            <p className="text-xs text-muted-foreground italic">Select where you'd like to post this job.</p>
+                                        </div>
+                                    </div>
+                                    <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+                                        {JOB_BOARDS.map((board) => {
+                                            const isSkip = board.id === "skip";
+                                            const skipSelected = selectedBoards.includes("skip");
+                                            const isSelected = selectedBoards.includes(board.id);
+                                            const isDisabled = !isSkip && skipSelected;
+
+                                            return (
+                                                <div 
+                                                    key={board.id} 
+                                                    className={cn(
+                                                        "group flex items-center space-x-3 rounded-xl border p-4 transition-all duration-200 select-none",
+                                                        isSelected 
+                                                            ? "border-primary bg-primary/5 shadow-sm" 
+                                                            : "border-border hover:border-primary/40 hover:bg-muted/30",
+                                                        isDisabled && "opacity-40 grayscale cursor-not-allowed border-dashed bg-muted/10"
+                                                    )}
+                                                    onClick={() => {
+                                                        if (isDisabled) return;
+                                                        if (isSkip) {
+                                                            if (isSelected) {
+                                                                setSelectedBoards([]);
+                                                            } else {
+                                                                setSelectedBoards(["skip"]);
+                                                            }
+                                                        } else {
+                                                            if (isSelected) {
+                                                                setSelectedBoards(selectedBoards.filter(b => b !== board.id));
+                                                            } else {
+                                                                setSelectedBoards([...selectedBoards, board.id]);
+                                                            }
+                                                        }
+                                                    }}
+                                                >
+                                                    <div className={cn(
+                                                        "flex h-5 w-5 items-center justify-center rounded border transition-colors",
+                                                        isSelected ? "bg-primary border-primary" : "border-input group-hover:border-primary/50"
+                                                    )}>
+                                                        {isSelected && <CheckCircle2 className="h-3.5 w-3.5 text-primary-foreground" />}
+                                                    </div>
+                                                    <Label 
+                                                        className={cn(
+                                                            "text-sm font-semibold cursor-pointer transition-colors",
+                                                            isSelected ? "text-primary" : "text-muted-foreground group-hover:text-foreground",
+                                                            isDisabled && "cursor-not-allowed"
+                                                        )}
+                                                    >
+                                                        {board.name}
+                                                    </Label>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                    {selectedBoards.includes("skip") && (
+                                        <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 flex items-start gap-3 animate-in zoom-in-95 duration-200">
+                                            <ShieldAlert className="w-4 h-4 text-amber-500 mt-0.5" />
+                                            <div className="text-xs text-amber-700 font-medium">
+                                                External job board posting is skipped. No outreach will be sent to the posting team.
+                                            </div>
+                                        </div>
+                                    )}
                                 </div>
                             </div>
                         )}
