@@ -245,7 +245,13 @@ class JobDivaService:
                     "ai_description": ai_description,
                     "job_notes": job_notes,
                     "customer_name": customer_name,
-                    "job_status": get_field(j, ["job status", "status"]) or "OPEN"
+                    "job_status": get_field(j, ["job status", "status"]) or "OPEN",
+                    "city": get_field(j, ["city", "jobCity"]),
+                    "state": get_field(j, ["state", "jobState"]),
+                    "zip": get_field(j, ["zip", "postalCode"]),
+                    "start_date": get_field(j, ["start date", "startDate", "available"]),
+                    "location_type": get_field(j, ["location type", "location_type", "position type", "work type", "assignment type", "jobType"]),
+                    "work_authorization": get_field(j, ["work authorization", "visa", "legal status"])
                 }
         except Exception as e:
             logger.error(f"SearchJob Error: {e}")

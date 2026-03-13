@@ -165,13 +165,14 @@ export default function CreateJobPage() {
     const [aiDescription, setAiDescription] = useState("");
     const [selectedBoards, setSelectedBoards] = useState<string[]>([]);
     const [isGenerating, setIsGenerating] = useState(false);
+    const [startDate, setStartDate] = useState("");
 
 
     // Parsed Data
     const [title, setTitle] = useState("");
     const [hardSkills, setHardSkills] = useState<any[]>([]); // Array of { name, seniority, priority }
     const [softSkills, setSoftSkills] = useState<string[]>([]);
-    const [locationType, setLocationType] = useState("Onsite");
+    const [locationType, setLocationType] = useState("");
     const [location, setLocation] = useState(""); // Specific location like City, State
     const [sourceFilters, setSourceFilters] = useState({ vetted: true, jobdiva: true, linkedin: false }); // Source filters
     const [openToWork, setOpenToWork] = useState(false);
@@ -292,6 +293,33 @@ export default function CreateJobPage() {
 
                 if (data.city) setLocation(`${data.city}, ${data.state || ""}`);
 
+                let finalLocationType = "";
+                if (data.location_type) {
+                    const lt = data.location_type.toLowerCase();
+                    if (lt.includes("remote")) finalLocationType = "Remote";
+                    else if (lt.includes("hybrid")) finalLocationType = "Hybrid";
+                    else if (lt.includes("onsite") || lt.includes("on-site")) finalLocationType = "Onsite";
+                }
+
+                // Fallback 1: Job Notes
+                if (!finalLocationType && data.job_notes) {
+                    const notesSearch = data.job_notes.toLowerCase();
+                    if (notesSearch.includes("remote")) finalLocationType = "Remote";
+                    else if (notesSearch.includes("hybrid")) finalLocationType = "Hybrid";
+                    else if (notesSearch.includes("onsite") || notesSearch.includes("on-site")) finalLocationType = "Onsite";
+                }
+
+                // Fallback 2: Original JD (Description)
+                if (!finalLocationType && data.description) {
+                    const descSearch = data.description.toLowerCase();
+                    if (descSearch.includes("remote")) finalLocationType = "Remote";
+                    else if (descSearch.includes("hybrid")) finalLocationType = "Hybrid";
+                    else if (descSearch.includes("onsite") || descSearch.includes("on-site")) finalLocationType = "Onsite";
+                }
+                if (finalLocationType) {
+                    setLocationType(finalLocationType);
+                }
+
                 // Auto-parse logic could be added here if desired.
             } else {
                 alert("No job found");
@@ -385,11 +413,17 @@ export default function CreateJobPage() {
                 body: JSON.stringify({ text: jdText })
             });
             const data = await res.json();
-            setTitle(data.title);
+            // Prioritize existing values (likely from JobDiva import) over extracted ones
+            if (!title) setTitle(data.title);
             setHardSkills(data.hard_skills || []);
             setSoftSkills(data.soft_skills || []);
-            if (data.location_type) setLocationType(data.location_type);
-            if (data.location) setLocation(data.location);
+            if (!locationType && data.location_type) {
+                const lt = data.location_type.toLowerCase();
+                if (lt.includes("remote")) setLocationType("Remote");
+                else if (lt.includes("hybrid")) setLocationType("Hybrid");
+                else if (lt.includes("onsite") || lt.includes("on-site")) setLocationType("Onsite");
+            }
+            if (!location && data.location) setLocation(data.location);
             setStep(2);
         } catch (e) {
             console.error(e);
@@ -865,36 +899,50 @@ export default function CreateJobPage() {
                                 <CardContent className="space-y-4">
                                     <div className="space-y-2">
                                         <Label>Job Title</Label>
-                                        <Input value={title} onChange={(e) => setTitle(e.target.value)} />
-                                    </div>
-                                    <div className="space-y-2">
-                                        <Label>Location Type</Label>
-                                        <Select value={locationType} onValueChange={setLocationType}>
-                                            <SelectTrigger>
-                                                <SelectValue />
-                                            </SelectTrigger>
-                                            <SelectContent>
-                                                <SelectItem value="Onsite">Onsite</SelectItem>
-                                                <SelectItem value="Hybrid">Hybrid</SelectItem>
-                                                <SelectItem value="Remote">Remote</SelectItem>
-                                            </SelectContent>
-                                        </Select>
-                                    </div>
-
-
-                                    {/* New Location Input */}
-                                    <div className="space-y-2">
-                                        <Label>Location (City/State)</Label>
-                                        <Input
-                                            placeholder="e.g. New York, NY"
-                                            value={location}
-                                            onChange={(e) => setLocation(e.target.value)}
+                                        <Input 
+                                            value={title} 
+                                            onChange={(e) => setTitle(e.target.value)}
+                                            readOnly={!!jobId}
+                                            className={!!jobId ? "bg-muted cursor-not-allowed" : ""}
                                         />
                                     </div>
 
+                                    <div className="grid grid-cols-2 gap-4">
+                                        <div className="space-y-2">
+                                            <Label>Location Type</Label>
+                                            {!!jobId ? (
+                                                <Input 
+                                                    value={locationType || "Unspecified"} 
+                                                    readOnly 
+                                                    className="bg-muted cursor-not-allowed font-medium text-primary" 
+                                                />
+                                            ) : (
+                                                <Select value={locationType || "Onsite"} onValueChange={setLocationType}>
+                                                    <SelectTrigger>
+                                                        <SelectValue />
+                                                    </SelectTrigger>
+                                                    <SelectContent>
+                                                        <SelectItem value="Onsite">Onsite</SelectItem>
+                                                        <SelectItem value="Hybrid">Hybrid</SelectItem>
+                                                        <SelectItem value="Remote">Remote</SelectItem>
+                                                    </SelectContent>
+                                                </Select>
+                                            )}
+                                        </div>
+                                        <div className="space-y-2">
+                                            <Label>Location (City/State)</Label>
+                                            <Input
+                                                placeholder="e.g. New York, NY"
+                                                value={location}
+                                                onChange={(e) => setLocation(e.target.value)}
+                                                readOnly={!!jobId}
+                                                className={!!jobId ? "bg-muted cursor-not-allowed" : ""}
+                                            />
+                                        </div>
+                                    </div>
 
                                     {/* Source Filters */}
-                                    <div className="space-y-4">
+                                    <div className="space-y-4 pt-4 border-t border-dashed">
                                         <div className="space-y-2">
                                             <Label>Candidate Sources</Label>
                                             <div className="flex flex-col gap-2">
