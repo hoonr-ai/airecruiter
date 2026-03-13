@@ -779,14 +779,21 @@ export default function CreateJobPage() {
                                             );
                                         })}
                                     </div>
-                                    {selectedBoards.includes("skip") && (
+                                    {selectedBoards.includes("skip") ? (
                                         <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 flex items-start gap-3 animate-in zoom-in-95 duration-200">
                                             <ShieldAlert className="w-4 h-4 text-amber-500 mt-0.5" />
                                             <div className="text-xs text-amber-700 font-medium">
                                                 External job board posting is skipped. No outreach will be sent to the posting team.
                                             </div>
                                         </div>
-                                    )}
+                                    ) : selectedBoards.length > 0 ? (
+                                        <div className="bg-green-500/5 border border-green-500/20 rounded-lg p-3 flex items-start gap-3 animate-in zoom-in-95 duration-200">
+                                            <CheckCircle2 className="w-4 h-4 text-green-600 mt-0.5" />
+                                            <div className="text-xs text-green-700 font-medium">
+                                                External job board posting selected. Outreach will be sent to the posting team.
+                                            </div>
+                                        </div>
+                                    ) : null}
                                 </div>
                             </div>
                         )}
