@@ -30,12 +30,12 @@ export default function DashboardPage() {
         <div className="grid gap-6 md:grid-cols-3 max-w-5xl mx-auto w-full">
           {/* Choice 1: Active Jobs */}
           <Card
-            className="group hover:border-primary/50 transition-all cursor-pointer hover:shadow-lg bg-card/50 backdrop-blur-sm"
+            className="group hover:border-primary/50 transition-all cursor-pointer hover:shadow-xl bg-card/50 backdrop-blur-sm border-white/5"
             onClick={() => setShowActiveJobs(true)}
           >
             <CardHeader className="text-center pt-10">
-              <div className="mx-auto p-4 bg-blue-500/10 rounded-full mb-4 group-hover:scale-110 transition-transform">
-                <Briefcase className="h-8 w-8 text-blue-500" />
+              <div className="mx-auto p-4 bg-primary/10 rounded-full mb-4 group-hover:scale-110 transition-transform shadow-sm shadow-primary/5">
+                <Briefcase className="h-8 w-8 text-primary" />
               </div>
               <CardTitle className="text-xl">Look at Active Jobs</CardTitle>
               <CardDescription>View status of your 12 ongoing searches</CardDescription>
@@ -47,10 +47,10 @@ export default function DashboardPage() {
 
           {/* Choice 2: Find Talent */}
           <Link href="/jobs/new" className="block h-full">
-            <Card className="group hover:border-purple-500/50 transition-all cursor-pointer hover:shadow-lg bg-card/50 backdrop-blur-sm h-full border-purple-200/20">
+            <Card className="group hover:border-primary/50 transition-all cursor-pointer hover:shadow-lg bg-card/50 backdrop-blur-sm h-full border-white/5">
               <CardHeader className="text-center pt-10">
-                <div className="mx-auto p-4 bg-purple-500/10 rounded-full mb-4 group-hover:scale-110 transition-transform">
-                  <Target className="h-8 w-8 text-purple-500" />
+                <div className="mx-auto p-4 bg-primary/10 rounded-full mb-4 group-hover:scale-110 transition-transform shadow-sm shadow-primary/5">
+                  <Target className="h-8 w-8 text-primary" />
                 </div>
                 <CardTitle className="text-xl">Find Talent</CardTitle>
                 <CardDescription>Start a new search with AI Sourcing</CardDescription>
@@ -62,16 +62,16 @@ export default function DashboardPage() {
           </Link>
 
           {/* Choice 3: Create Team */}
-          <Card className="group hover:border-emerald-500/50 transition-all cursor-pointer hover:shadow-lg bg-card/50 backdrop-blur-sm opacity-60">
+          <Card className="group hover:border-primary/20 transition-all bg-card/50 backdrop-blur-sm opacity-50 border-white/5">
             <CardHeader className="text-center pt-10">
-              <div className="mx-auto p-4 bg-emerald-500/10 rounded-full mb-4 group-hover:scale-110 transition-transform">
-                <Users2 className="h-8 w-8 text-emerald-500" />
+              <div className="mx-auto p-4 bg-primary/5 rounded-full mb-4">
+                <Users2 className="h-8 w-8 text-primary/40" />
               </div>
-              <CardTitle className="text-xl">Create a Team</CardTitle>
+              <CardTitle className="text-xl text-primary/40">Create a Team</CardTitle>
               <CardDescription>Coming Soon</CardDescription>
             </CardHeader>
             <CardContent className="text-center pb-10">
-              <p className="text-sm text-muted-foreground">Collaborate with colleagues and hiring managers.</p>
+              <p className="text-sm text-muted-foreground/40">Collaborate with colleagues and hiring managers.</p>
             </CardContent>
           </Card>
         </div>
@@ -111,85 +111,85 @@ export default function DashboardPage() {
             {/* ... other stats omitted for brevity/simplicity as user asked to remove clutter, but keeping core summary ... */}
           </div>
 
-          {/* Job List (Existing Cards) */}
+          {/* Job List (Unified Premium Design) */}
           <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
             {/* Job Card 1 */}
-            <Card className="bg-card hover:bg-card/80 transition-colors cursor-pointer border-l-4 border-l-primary">
+            <Card className="bg-card/50 hover:bg-card/80 transition-all cursor-pointer border-l-4 border-l-primary group shadow-md hover:shadow-xl border-white/5">
               <CardHeader className="pb-2">
                 <div className="flex justify-between items-start">
                   <div>
-                    <CardTitle className="text-lg">Senior Frontend Engineer</CardTitle>
+                    <CardTitle className="text-lg group-hover:text-primary transition-colors">Senior Frontend Engineer</CardTitle>
                     <CardDescription>Engineering • Remote</CardDescription>
                   </div>
-                  <Badge variant="secondary" className="bg-blue-500/10 text-blue-400 border-blue-500/20">Active</Badge>
+                  <Badge variant="secondary" className="bg-primary/10 text-primary border-none text-[10px] font-semibold tracking-wide">ACTIVE</Badge>
                 </div>
               </CardHeader>
               <CardContent>
                 <div className="space-y-4">
                   <div className="flex justify-between text-sm">
                     <span className="text-muted-foreground">Candidates</span>
-                    <span className="font-medium">42</span>
+                    <span className="font-bold">42</span>
                   </div>
                   <div className="space-y-1">
-                    <div className="flex justify-between text-xs text-muted-foreground">
+                    <div className="flex justify-between text-[11px] text-muted-foreground font-medium uppercase tracking-tighter">
                       <span>Screening Progress</span>
-                      <span>65% Match Rate</span>
+                      <span className="text-primary font-bold">65% Match</span>
                     </div>
-                    <Progress value={65} className="h-1.5" />
+                    <Progress value={65} className="h-2 rounded-full bg-primary/5" />
                   </div>
-                  <div className="pt-2 flex items-center gap-[-8px]">
+                  <div className="pt-2 flex items-center -space-x-2">
                     {[1, 2, 3].map(i => (
-                      <Avatar key={i} className="w-8 h-8 border-2 border-background -ml-2 first:ml-0">
-                        <AvatarFallback className="bg-primary/20 text-xs">U{i}</AvatarFallback>
+                      <Avatar key={i} className="w-8 h-8 border-2 border-card shadow-sm">
+                        <AvatarFallback className="bg-primary/5 text-primary text-[10px] font-bold">U{i}</AvatarFallback>
                       </Avatar>
                     ))}
-                    <div className="w-8 h-8 rounded-full bg-muted flex items-center justify-center text-xs -ml-2 border-2 border-background">+39</div>
+                    <div className="w-8 h-8 rounded-full bg-muted/50 border-2 border-card flex items-center justify-center text-[10px] font-black text-muted-foreground shadow-sm">+39</div>
                   </div>
                 </div>
               </CardContent>
             </Card>
 
             {/* Job Card 2 */}
-            <Card className="bg-card hover:bg-card/80 transition-colors cursor-pointer border-l-4 border-l-purple-500">
+            <Card className="bg-card/50 hover:bg-card/80 transition-all cursor-pointer border-l-4 border-l-primary/40 group shadow-md hover:shadow-xl border-white/5">
               <CardHeader className="pb-2">
                 <div className="flex justify-between items-start">
                   <div>
-                    <CardTitle className="text-lg">Product Designer</CardTitle>
+                    <CardTitle className="text-lg group-hover:text-primary transition-colors font-semibold tracking-tight">Product Designer</CardTitle>
                     <CardDescription>Design • New York</CardDescription>
                   </div>
-                  <Badge variant="secondary" className="bg-purple-500/10 text-purple-400 border-purple-500/20">Urgent</Badge>
+                  <Badge variant="secondary" className="bg-primary/5 text-primary/60 border-none text-[10px] font-semibold tracking-wide uppercase">Urgent</Badge>
                 </div>
               </CardHeader>
               <CardContent>
                 <div className="space-y-4">
                   <div className="flex justify-between text-sm">
                     <span className="text-muted-foreground">Candidates</span>
-                    <span className="font-medium">18</span>
+                    <span className="font-bold">18</span>
                   </div>
                   <div className="space-y-1">
-                    <div className="flex justify-between text-xs text-muted-foreground">
+                    <div className="flex justify-between text-[11px] text-muted-foreground font-medium uppercase tracking-tighter">
                       <span>Screening Progress</span>
-                      <span>40% Match Rate</span>
+                      <span className="text-primary/60 font-bold">40% Match</span>
                     </div>
-                    <Progress value={40} className="h-1.5" />
+                    <Progress value={40} className="h-2 rounded-full bg-primary/5" />
                   </div>
                 </div>
               </CardContent>
             </Card>
 
             {/* Job Card 3 (Draft) */}
-            <Card className="bg-card hover:bg-card/80 transition-colors cursor-pointer border-l-4 border-l-gray-500">
+            <Card className="bg-card/20 hover:bg-card/40 transition-all cursor-pointer border-l-4 border-l-transparent border-dashed border-muted-foreground/20 opacity-70 shadow-sm border-white/5">
               <CardHeader className="pb-2">
                 <div className="flex justify-between items-start">
                   <div>
-                    <CardTitle className="text-lg">Marketing Manager</CardTitle>
+                    <CardTitle className="text-lg text-muted-foreground font-medium">Marketing Manager</CardTitle>
                     <CardDescription>Marketing • London</CardDescription>
                   </div>
-                  <Badge variant="outline">Draft</Badge>
+                  <Badge variant="outline" className="text-[10px] text-muted-foreground/60 border-muted-foreground/20 font-bold uppercase tracking-widest">DRAFT</Badge>
                 </div>
               </CardHeader>
               <CardContent>
-                <div className="flex items-center justify-center h-12 bg-muted/20 rounded-lg border border-dashed text-xs text-muted-foreground">
+                <div className="flex items-center justify-center h-12 bg-muted/10 rounded-xl border border-dashed border-muted-foreground/10 text-[10px] text-muted-foreground/60 font-bold uppercase tracking-widest">
                   Finish drafting to publish
                 </div>
               </CardContent>
