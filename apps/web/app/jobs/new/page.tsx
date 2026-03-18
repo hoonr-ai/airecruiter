@@ -819,7 +819,7 @@ export default function CreateJobPage() {
                                 className="w-full bg-hoonr-gradient text-white mt-8 h-12 shadow-lg shadow-primary/20 transition-all active:scale-[0.98]"
                             >
                                 {loading ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Plus className="mr-2 h-5 w-5" />}
-                                <span className="font-semibold text-base">Analyze & Find Candidates</span>
+                                <span className="font-semibold text-base">Review & Set Criteria</span>
                             </Button>
                         )}
                     </CardContent>
