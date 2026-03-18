@@ -79,6 +79,22 @@ class CandidateMessageRequest(BaseModel):
     message: str
     source: str = "LinkedIn"
 
+# Job Criteria Models (Iterative Step 1)
+class JobCriterion(BaseModel):
+    id: Optional[str] = None
+    name: str # e.g. "2+ years of Accounts Payable experience"
+    weight: float = 1.0
+    is_required: bool = False # True = Required, False = Preferred
+    is_ai_generated: bool = True
+    category: Optional[str] = "Hard Filter"
+
+class JobCriteriaResponse(BaseModel):
+    job_id: str
+    criteria: List[JobCriterion]
+
+class JobCriteriaUpdate(BaseModel):
+    criteria: List[JobCriterion]
+
 # Legacy / Unused but kept for safety if referenced elsewhere temporarily
 class JobDescription(BaseModel):
     title: str

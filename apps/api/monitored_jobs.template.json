@@ -4,8 +4,12 @@
       "status": "Open",
       "customer": "Customer Name",
       "title": "Job Title",
-      "last_updated": "2026-02-24 17:30:00 IST",
-      "added_at": "2026-02-24 17:25:00 IST"
+      "recruiter_email": "recruiter@example.com",
+      "work_authorization": "US Citizen",
+      "ai_description": "AI generated job description...",
+      "job_notes": "Hiring manager notes...",
+      "added_at": "2026-02-24 17:25:00 IST",
+      "last_updated": "2026-02-24 17:30:00 IST"
     }
   },
   "last_sync": "2026-02-24 17:30:00 IST"

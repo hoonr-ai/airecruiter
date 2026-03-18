@@ -23,6 +23,8 @@ class JobDivaSyncRequest(BaseModel):
     jobId: str
     aiDescription: str
     jobNotes: str = ""
+    workAuthorization: str = ""
+    recruiterEmail: str = ""
 
 @router.post("/sync-jobdiva")
 async def sync_to_jobdiva(req: JobDivaSyncRequest):
@@ -45,6 +47,8 @@ async def sync_to_jobdiva(req: JobDivaSyncRequest):
     local_ok   = jobdiva_service.monitor_job_locally(req.jobId, {
         "ai_description": req.aiDescription,
         "job_notes":      req.jobNotes,
+        "work_authorization": req.workAuthorization,
+        "recruiter_email":     req.recruiterEmail,
     })
 
     return {
@@ -177,5 +181,8 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
 
     if description and job_id and job_id != "new":
         description = f"{description}\n\n**JobDiva ID**: {job_id}"
+        # Auto-persist to local DB so it sticks during regeneration
+        jobdiva_service.monitor_job_locally(job_id, {"ai_description": description})
 
     return {"description": description}
+

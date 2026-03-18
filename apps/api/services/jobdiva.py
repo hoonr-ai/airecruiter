@@ -357,7 +357,7 @@ class JobDivaService:
                     update_parts = []
                     params = {"job_id": job_id}
                     for k, v in data.items():
-                        if k in ["status", "customer", "title", "ai_description", "job_notes", "added_at"]:
+                        if k in ["status", "customer", "title", "recruiter_email", "work_authorization", "ai_description", "job_notes", "added_at"]:
                             update_parts.append(f"{k} = :{k}")
                             params[k] = v
                     
@@ -373,14 +373,16 @@ class JobDivaService:
                         "status": data.get("status"),
                         "customer": data.get("customer"),
                         "title": data.get("title"),
-                        "added_at": data.get("added_at") or readable_ist_now(),
-                        "last_updated": readable_ist_now(),
+                        "recruiter_email": data.get("recruiter_email"),
+                        "work_authorization": data.get("work_authorization"),
                         "ai_description": data.get("ai_description"),
-                        "job_notes": data.get("job_notes")
+                        "job_notes": data.get("job_notes"),
+                        "added_at": data.get("added_at") or readable_ist_now(),
+                        "last_updated": readable_ist_now()
                     }
                     conn.execute(text("""
-                        INSERT INTO monitored_jobs (job_id, status, customer, title, added_at, last_updated, ai_description, job_notes)
-                        VALUES (:job_id, :status, :customer, :title, :added_at, :last_updated, :ai_description, :job_notes)
+                        INSERT INTO monitored_jobs (job_id, status, customer, title, recruiter_email, work_authorization, ai_description, job_notes, added_at, last_updated)
+                        VALUES (:job_id, :status, :customer, :title, :recruiter_email, :work_authorization, :ai_description, :job_notes, :added_at, :last_updated)
                     """), params)
                 
                 conn.commit()

@@ -2,7 +2,8 @@
 
 
 import { cn } from "@/lib/utils";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -150,7 +151,8 @@ const JOB_BOARDS = [
 ];
 
 
-export default function CreateJobPage() {
+export default function NewJobPage() {
+    const router = useRouter();
     const [step, setStep] = useState(1);
     const [loading, setLoading] = useState(false);
     const [jdText, setJdText] = useState("");
@@ -397,6 +399,8 @@ export default function CreateJobPage() {
                             jobId,
                             aiDescription,
                             jobNotes,
+                            workAuthorization: workAuthorization,
+                            recruiterEmail: recruiterEmails,
                         }),
                     });
                     const syncData = await syncRes.json();
@@ -496,6 +500,33 @@ export default function CreateJobPage() {
     };
 
 
+    const handleGoToReview = async () => {
+        if (!jobId) return;
+        setLoading(true);
+        try {
+            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+            // Final sync before moving to criteria page to ensure all edits/regenerations are saved
+            await fetch(`${apiUrl}/api/v1/gemini/sync-jobdiva`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    jobId,
+                    aiDescription,
+                    jobNotes,
+                    workAuthorization: workAuthorization,
+                    recruiterEmail: recruiterEmails,
+                }),
+            });
+            router.push(`/jobs/${jobId}/review-and-set-criteria`);
+        } catch (e) {
+            console.error("Final sync failed:", e);
+            // Navigate anyway if sync fails, but log it
+            router.push(`/jobs/${jobId}/review-and-set-criteria`);
+        }
+        setLoading(false);
+    };
+
+
     // Helper to update a specific skill
     const updateSkill = (index: number, field: string, value: string) => {
         const updated = [...(hardSkills || [])];
@@ -513,7 +544,6 @@ export default function CreateJobPage() {
     const addSkill = () => {
         setHardSkills([...(hardSkills || []), { name: "New Skill", seniority: "Mid", priority: "Must Have" }]);
     }
-
 
     return (
         <div className="container mx-auto py-10">
@@ -813,9 +843,9 @@ export default function CreateJobPage() {
                                 <span className="font-semibold text-base">Update Posting Description</span>
                             </Button>
                         ) : (
-                            <Button
-                                onClick={handleParse}
-                                disabled={loading}
+                            <Button 
+                                onClick={handleGoToReview}
+                                disabled={loading || !jobId}
                                 className="w-full bg-hoonr-gradient text-white mt-8 h-12 shadow-lg shadow-primary/20 transition-all active:scale-[0.98]"
                             >
                                 {loading ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Plus className="mr-2 h-5 w-5" />}
@@ -826,6 +856,7 @@ export default function CreateJobPage() {
                 </Card >
             )
             }
+
 
 
             {/* Step 2: Review */}

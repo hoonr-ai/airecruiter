@@ -31,10 +31,12 @@ def setup_and_migrate():
                     status TEXT,
                     customer TEXT,
                     title TEXT,
-                    added_at TEXT,
-                    last_updated TEXT,
+                    recruiter_email TEXT,
+                    work_authorization TEXT,
                     ai_description TEXT,
-                    job_notes TEXT
+                    job_notes TEXT,
+                    added_at TEXT,
+                    last_updated TEXT
                 );
             """))
             conn.commit()
@@ -58,24 +60,28 @@ def setup_and_migrate():
                 print(f"  - Migrating {job_id}: {details.get('title')}")
                 conn.execute(text("""
                     INSERT INTO monitored_jobs (
-                        job_id, status, customer, title, added_at, last_updated, ai_description, job_notes
-                    ) VALUES (:job_id, :status, :customer, :title, :added_at, :last_updated, :ai_description, :job_notes)
+                        job_id, status, customer, title, recruiter_email, work_authorization, ai_description, job_notes, added_at, last_updated
+                    ) VALUES (:job_id, :status, :customer, :title, :recruiter_email, :work_authorization, :ai_description, :job_notes, :added_at, :last_updated)
                     ON CONFLICT (job_id) DO UPDATE SET
                         status = EXCLUDED.status,
                         customer = EXCLUDED.customer,
                         title = EXCLUDED.title,
-                        last_updated = EXCLUDED.last_updated,
+                        recruiter_email = EXCLUDED.recruiter_email,
+                        work_authorization = EXCLUDED.work_authorization,
                         ai_description = EXCLUDED.ai_description,
-                        job_notes = EXCLUDED.job_notes;
+                        job_notes = EXCLUDED.job_notes,
+                        last_updated = EXCLUDED.last_updated;
                 """), {
                     "job_id": job_id,
                     "status": details.get("status"),
                     "customer": details.get("customer"),
                     "title": details.get("title"),
-                    "added_at": details.get("added_at"),
-                    "last_updated": details.get("last_updated"),
+                    "recruiter_email": details.get("recruiter_email") or details.get("recruiter_emails"),
+                    "work_authorization": details.get("work_authorization"),
                     "ai_description": details.get("ai_description"),
-                    "job_notes": details.get("job_notes")
+                    "job_notes": details.get("job_notes"),
+                    "added_at": details.get("added_at"),
+                    "last_updated": details.get("last_updated")
                 })
             
             conn.commit()

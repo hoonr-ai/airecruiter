@@ -28,8 +28,10 @@ from services.ai_service import ai_service
 from models import (
     JobDescription, MatchResult, ParsedJobRequest, ParsedJobResponse,
     ChatRequest, ChatResponse, CandidateSearchRequest, CandidateMessageRequest, JobFetchRequest,
-    CandidateAnalysisRequest, CandidateAnalysisResponse
+    CandidateAnalysisRequest, CandidateAnalysisResponse, JobCriterion, JobCriteriaResponse,
+    JobCriteriaUpdate
 )
+from services.criteria import criteria_service
 from matcher import mock_match_candidates
 from services.extractor import llm_extractor
 from services.jobdiva import jobdiva_service
@@ -281,6 +283,7 @@ async def add_job_to_monitoring_internal(job_id: str, job_details: dict):
             "status":       job_details.get("job_status") or job_details.get("status") or "OPEN",
             "customer":     job_details.get("customer_name") or job_details.get("company") or "Unknown",
             "title":        job_details.get("title") or "",
+            "work_authorization": job_details.get("work_authorization") or "",
             "added_at":     readable_ist_now()
         }
         
@@ -422,6 +425,7 @@ async def add_job_to_monitoring(job_id: str, background_tasks: BackgroundTasks):
         "status": status_info["status"],
         "customer": status_info.get("customer", "Unknown"),
         "title": status_info.get("title", ""),
+        "work_authorization": status_info.get("work_authorization") or "",
         "added_at": readable_ist_now(),
         "last_updated": readable_ist_now()
     }
@@ -491,6 +495,7 @@ async def sync_job_status(job_id: str):
                 "status": status_info["status"],
                 "customer": status_info.get("customer", "Unknown"),
                 "title": status_info.get("title", ""),
+                "work_authorization": status_info.get("work_authorization") or old_data.get("work_authorization", ""),
                 "last_updated": readable_ist_now(),
                 "added_at": old_data.get("added_at", readable_ist_now())
             }
@@ -510,6 +515,34 @@ async def sync_job_status(job_id: str):
 async def chat_with_aria(request: ChatRequest):
     response = await chat_service.get_response(request.message, request.history)
     return {"response": response}
+
+@app.get("/api/jobs/{job_id}/criteria", response_model=JobCriteriaResponse)
+async def get_job_criteria(job_id: str):
+    """Fetch criteria for a job."""
+    criteria = criteria_service.get_job_criteria(job_id)
+    return JobCriteriaResponse(job_id=job_id, criteria=criteria)
+
+@app.post("/api/jobs/{job_id}/criteria/sync", response_model=JobCriteriaResponse)
+async def sync_job_criteria(job_id: str):
+    """Wait for criteria to be generated then return them."""
+    criteria = await criteria_service.generate_and_save_criteria(job_id)
+    return JobCriteriaResponse(job_id=job_id, criteria=criteria)
+
+@app.put("/api/jobs/{job_id}/criteria")
+async def update_job_criteria(job_id: str, update: JobCriteriaUpdate):
+    """Manually update criteria for a job."""
+    success = criteria_service.save_criteria(job_id, [c.dict() for c in update.criteria])
+    if success:
+        return {"status": "SUCCESS"}
+    return {"status": "ERROR"}
+
+@app.put("/api/jobs/{job_id}/criteria")
+async def update_job_criteria(job_id: str, update: JobCriteriaUpdate):
+    """Manually update criteria for a job."""
+    success = criteria_service.save_criteria(job_id, [c.dict() for c in update.criteria])
+    if success:
+        return {"status": "SUCCESS"}
+    return {"status": "ERROR"}
 
 if __name__ == "__main__":
     import uvicorn
