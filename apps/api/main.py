@@ -36,8 +36,7 @@ from services.jobdiva import jobdiva_service
 from services.unipile import unipile_service
 from services.chat_service import chat_service
 
-# Simple file-based job tracking (in production, use proper DB)
-JOBS_DB_FILE = "monitored_jobs.json"
+# Legacy file-based tracking replaced by monitored_jobs SQL table
 
 # Global scheduler
 scheduler = AsyncIOScheduler()
@@ -334,22 +333,13 @@ async def get_candidate_resume(candidate_id: str):
 
 # Job monitoring utility functions
 def load_monitored_jobs() -> Dict[str, Any]:
-    """Load the list of jobs being monitored from file"""
-    if os.path.exists(JOBS_DB_FILE):
-        try:
-            with open(JOBS_DB_FILE, 'r') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Error loading monitored jobs: {e}")
-    return {"jobs": {}, "last_sync": None}
+    """Load the list of jobs being monitored from PostgreSQL via JobDivaService"""
+    return jobdiva_service.get_all_monitored_jobs()
 
 def save_monitored_jobs(jobs_data: Dict[str, Any]):
-    """Save the monitored jobs data to file"""
-    try:
-        with open(JOBS_DB_FILE, 'w') as f:
-            json.dump(jobs_data, f, indent=2)
-    except Exception as e:
-        logger.error(f"Error saving monitored jobs: {e}")
+    """Save/Update monitored jobs in PostgreSQL via JobDivaService"""
+    for jid, details in jobs_data.get("jobs", {}).items():
+        jobdiva_service.monitor_job_locally(jid, details)
 
 async def poll_all_jobs():
     """Background task to poll all monitored jobs for status changes"""

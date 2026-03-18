@@ -28,7 +28,7 @@ class JobDivaSyncRequest(BaseModel):
 async def sync_to_jobdiva(req: JobDivaSyncRequest):
     """
     Push AI JD (UDF #230) and Job Notes (UDF #231) to JobDiva,
-    and persist both locally in monitored_jobs.json.
+    and persist both locally in PostgreSQL (monitored_jobs table).
     """
     udf_ai_jd  = int(os.getenv("JOBDIVA_AI_JD_UDF_ID", "230"))
     udf_notes  = int(os.getenv("JOBDIVA_JOB_NOTES_UDF_ID", "231"))

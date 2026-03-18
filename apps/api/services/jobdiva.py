@@ -6,6 +6,8 @@ import httpx
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 from html import unescape
+import sqlalchemy
+from sqlalchemy import text
 
 # TEMPORARY DEBUG LOGGER
 debug_log_path = "/tmp/debug_sync.log"
@@ -72,6 +74,17 @@ class JobDivaService:
         self.password = os.getenv("JOBDIVA_PASSWORD", "mock-pass")
         self.cached_token = None
         self.token_expiry = 0
+        
+        self.db_url = os.getenv("DATABASE_URL")
+        if self.db_url and self.db_url.startswith("postgres://"):
+            self.db_url = self.db_url.replace("postgres://", "postgresql://")
+        
+        self.engine = None
+        if self.db_url:
+            try:
+                self.engine = sqlalchemy.create_engine(self.db_url)
+            except Exception as e:
+                logger.error(f"Failed to create JobDiva DB engine: {e}")
 
     async def authenticate(self) -> str:
         """Authenticate with JobDiva and return JWT token."""
@@ -329,32 +342,82 @@ class JobDivaService:
         except Exception: return False
 
     def monitor_job_locally(self, job_id: str, data: dict) -> bool:
-        import json as _json
-        file_path = "monitored_jobs.json"
+        if not self.engine:
+            logger.error("Database engine not initialized for monitoring")
+            return False
+            
         try:
-            db = {"jobs": {}}
-            if os.path.exists(file_path):
-                with open(file_path, "r") as f:
-                    try: db = _json.load(f)
-                    except: pass
-            jobs = db.setdefault("jobs", {})
-            entry = jobs.get(job_id, {})
-            entry.update(data)
-            entry["last_updated"] = readable_ist_now()
-            jobs[job_id] = entry
-            with open(file_path, "w") as f:
-                _json.dump(db, f, indent=2)
+            with self.engine.connect() as conn:
+                # Check if job exists
+                res = conn.execute(text("SELECT 1 FROM monitored_jobs WHERE job_id = :job_id"), {"job_id": job_id})
+                exists = res.fetchone()
+                
+                if exists:
+                    # Update
+                    update_parts = []
+                    params = {"job_id": job_id}
+                    for k, v in data.items():
+                        if k in ["status", "customer", "title", "ai_description", "job_notes", "added_at"]:
+                            update_parts.append(f"{k} = :{k}")
+                            params[k] = v
+                    
+                    update_parts.append("last_updated = :last_updated")
+                    params["last_updated"] = readable_ist_now()
+                    
+                    query = f"UPDATE monitored_jobs SET {', '.join(update_parts)} WHERE job_id = :job_id"
+                    conn.execute(text(query), params)
+                else:
+                    # Insert
+                    params = {
+                        "job_id": job_id,
+                        "status": data.get("status"),
+                        "customer": data.get("customer"),
+                        "title": data.get("title"),
+                        "added_at": data.get("added_at") or readable_ist_now(),
+                        "last_updated": readable_ist_now(),
+                        "ai_description": data.get("ai_description"),
+                        "job_notes": data.get("job_notes")
+                    }
+                    conn.execute(text("""
+                        INSERT INTO monitored_jobs (job_id, status, customer, title, added_at, last_updated, ai_description, job_notes)
+                        VALUES (:job_id, :status, :customer, :title, :added_at, :last_updated, :ai_description, :job_notes)
+                    """), params)
+                
+                conn.commit()
             return True
-        except: return False
+        except Exception as e:
+            logger.error(f"Error monitoring job locally in DB: {e}")
+            return False
 
     def get_locally_monitored_job(self, job_id: str) -> dict:
-        import json as _json
-        file_path = "monitored_jobs.json"
+        if not self.engine:
+             return {}
         try:
-            if not os.path.exists(file_path): return {}
-            with open(file_path, "r") as f:
-                db = _json.load(f)
-            return db.get("jobs", {}).get(job_id, {})
-        except: return {}
+            with self.engine.connect() as conn:
+                res = conn.execute(text("SELECT * FROM monitored_jobs WHERE job_id = :job_id"), {"job_id": job_id})
+                row = res.fetchone()
+                if row:
+                    # Convert row to dict
+                    return dict(row._mapping)
+        except Exception as e:
+            logger.error(f"Error fetching locally monitored job from DB: {e}")
+        return {}
+        
+    def get_all_monitored_jobs(self) -> dict:
+        if not self.engine:
+            return {"jobs": {}}
+        try:
+            with self.engine.connect() as conn:
+                res = conn.execute(text("SELECT * FROM monitored_jobs"))
+                rows = res.fetchall()
+                jobs = {}
+                for row in rows:
+                    j_dict = dict(row._mapping)
+                    jid = j_dict.pop("job_id")
+                    jobs[jid] = j_dict
+                return {"jobs": jobs}
+        except Exception as e:
+            logger.error(f"Error fetching all monitored jobs from DB: {e}")
+            return {"jobs": {}}
 
 jobdiva_service = JobDivaService()
