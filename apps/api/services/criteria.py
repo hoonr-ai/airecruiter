@@ -1,18 +1,17 @@
 import logging
 import uuid
 import os
+import json
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 import sqlalchemy
 from sqlalchemy import text
-from models import JobCriterion, JobCriteriaResponse
-
-# Minimal Ronak-style parsing logic 
-# (Gradually integrated as requested)
-import json
 from openai import OpenAI
 from dotenv import load_dotenv
+
+from models import JobCriterion, JobCriteriaResponse
 from services.usage_logger import usage_logger
+from services.jobdiva import jobdiva_service
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -57,31 +56,21 @@ class CriteriaService:
 
     async def generate_and_save_criteria(self, job_id: str) -> List[JobCriterion]:
         """
-        The core Step 3 logic: 
-        1. Fetch AI JD from monitored_jobs.
-        2. Use LLM to extract specific criteria strings.
+        The core step: 
+        1. Fetch Job from JobDiva (includes AI JD if exists).
+        2. Use LLM to extract crisp criteria.
         3. Save to job_criteria table.
         """
-        if not self.engine: return []
-        
-        # 1. Fetch AI JD
-        ai_description = ""
-        try:
-            with self.engine.connect() as conn:
-                res = conn.execute(
-                    text("SELECT ai_description FROM monitored_jobs WHERE job_id = :job_id"),
-                    {"job_id": job_id}
-                )
-                row = res.fetchone()
-                if row:
-                    ai_description = row._mapping["ai_description"]
-        except Exception as e:
-            logger.error(f"Error fetching AI JD: {e}")
-            return []
+        # 1. Fetch Job from JobDiva (includes AI JD if exists, and raw JD)
+        job = await jobdiva_service.get_job_by_id(job_id)
+        if not job: return []
 
+        ai_description = job.get("ai_description")
         if not ai_description:
-            logger.warning(f"No AI description found for job {job_id}")
-            return []
+            logger.warning(f"No AI description found for job {job_id}, falling back to raw description")
+            ai_description = job.get("description")
+            if not ai_description:
+                return []
 
         # 2. Minimal Parser (LLM Call to get strings like in the image)
         try:
@@ -185,6 +174,9 @@ class CriteriaService:
                         is_ai_generated=True
                     ))
                 conn.commit()
+            
+            # Final sort for immediate UI consistency
+            new_criteria.sort(key=lambda x: x.priority_score, reverse=True)
             return new_criteria
             
         except Exception as e:

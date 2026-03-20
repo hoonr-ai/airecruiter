@@ -24,6 +24,7 @@ export default function SetCriteriaPage() {
   const params = useParams();
   const router = useRouter();
   const jobId = params.jobId as string;
+  const hasSyncedRef = React.useRef(false);
   
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
@@ -41,7 +42,8 @@ export default function SetCriteriaPage() {
         const sortedCriteria = (data.criteria || []).sort((a: any, b: any) => (b.priority_score || 0) - (a.priority_score || 0));
         setCriteria(sortedCriteria);
         // If empty, auto-sync once
-        if (sortedCriteria.length === 0) {
+        if (sortedCriteria.length === 0 && !syncing && !hasSyncedRef.current) {
+          hasSyncedRef.current = true;
           handleSync();
         }
       }
@@ -60,7 +62,8 @@ export default function SetCriteriaPage() {
       });
       if (response.ok) {
         const data = await response.json();
-        setCriteria(data.criteria);
+        const sorted = (data.criteria || []).sort((a: any, b: any) => (b.priority_score || 0) - (a.priority_score || 0));
+        setCriteria(sorted);
         console.log("Criteria pre-populated by AI");
       }
     } catch (error) {
