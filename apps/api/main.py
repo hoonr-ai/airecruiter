@@ -284,6 +284,7 @@ async def add_job_to_monitoring_internal(job_id: str, job_details: dict):
             "customer":     job_details.get("customer_name") or job_details.get("company") or "Unknown",
             "title":        job_details.get("title") or "",
             "work_authorization": job_details.get("work_authorization") or "",
+            "recruiter_email": job_details.get("recruiter_email") or "",
             "added_at":     readable_ist_now()
         }
         

@@ -292,6 +292,8 @@ export default function NewJobPage() {
                 // RESTORE AI CONTENT FROM UDFs
                 if (data.ai_description) setAiDescription(data.ai_description);
                 if (data.job_notes) setJobNotes(data.job_notes);
+                if (data.recruiter_email) setRecruiterEmails(data.recruiter_email);
+                if (data.work_authorization) setWorkAuthorization(data.work_authorization);
 
                 if (data.city) setLocation(`${data.city}, ${data.state || ""}`);
 

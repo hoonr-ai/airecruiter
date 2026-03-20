@@ -264,7 +264,8 @@ class JobDivaService:
                     "zip": get_field(j, ["zip", "postalCode"]),
                     "start_date": get_field(j, ["start date", "startDate", "available"]),
                     "location_type": get_field(j, ["location type", "location_type", "position type", "work type", "assignment type", "jobType"]),
-                    "work_authorization": get_field(j, ["work authorization", "visa", "legal status"])
+                    "work_authorization": get_field(j, ["work authorization", "visa", "legal status"]) or (local_data.get("work_authorization") if local_data else ""),
+                    "recruiter_email": (local_data.get("recruiter_email") if local_data else "")
                 }
         except Exception as e:
             logger.error(f"SearchJob Error: {e}")
