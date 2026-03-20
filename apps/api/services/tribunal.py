@@ -4,6 +4,7 @@ from openai import AsyncOpenAI
 from core.intelligence import TribunalVerdict
 from core.models import CandidateProfile, JobDescription
 from core.toon import encode
+from services.usage_logger import usage_logger
 
 class TribunalService:
     def __init__(self):
@@ -75,15 +76,25 @@ class TribunalService:
         """
 
         try:
+            model = "gpt-4o-mini"
             completion = await self.client.beta.chat.completions.parse(
-                model="gpt-4o", # Use smart model for reasoning
+                model=model, # Optimized model
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
+                    {"role": "user",   "content": user_prompt}
                 ],
                 response_format=TribunalVerdict,
                 temperature=0.2 # low temp for consistent tagging
             )
+            
+            # Log Usage
+            usage_logger.log_usage(
+                service="match_tribunal",
+                model=model,
+                prompt_tokens=completion.usage.prompt_tokens,
+                completion_tokens=completion.usage.completion_tokens
+            )
+            
             return completion.choices[0].message.parsed
             
         except Exception as e:

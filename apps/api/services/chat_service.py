@@ -1,6 +1,7 @@
 import os
 from typing import List
 from openai import AsyncOpenAI
+from services.usage_logger import usage_logger
 
 class ChatService:
     def __init__(self):
@@ -20,10 +21,20 @@ class ChatService:
             messages.extend([{"role": h.role, "content": h.content} for h in history])
             messages.append({"role": "user", "content": message})
 
+            model = "gpt-4o-mini"
             response = await self.client.chat.completions.create(
-                model="gpt-4o",
+                model=model,
                 messages=messages,
             )
+            
+            # Log Usage
+            usage_logger.log_usage(
+                service="aria_chat",
+                model=model,
+                prompt_tokens=response.usage.prompt_tokens,
+                completion_tokens=response.usage.completion_tokens
+            )
+            
             return response.choices[0].message.content
         except Exception as e:
             return f"I'm having trouble connecting to my brain right now. ({str(e)})"

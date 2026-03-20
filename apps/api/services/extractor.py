@@ -3,6 +3,7 @@ import json
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 from typing import List, Optional
+from services.usage_logger import usage_logger
 
 from models import ExtractedData, Skill
 
@@ -32,14 +33,24 @@ class LLMExtractor:
              )
         
         try:
+            model = "gpt-4o-mini"
             response = await self.client.beta.chat.completions.parse(
-                model="gpt-4o",
+                model=model,
                 messages=[
                     {"role": "system", "content": "You are an expert HR Tech extraction engine. Extract the Job Description details into the requested JSON structure. For HARD SKILLS, determine the required Seniority (Junior/Mid/Senior based on context) and Priority (Must Have vs Flexible/Preferred). Also determine Location Type (Remote, Hybrid, Onsite)."},
                     {"role": "user", "content": text},
                 ],
                 response_format=ExtractedData,
             )
+
+            # Log Usage
+            usage_logger.log_usage(
+                service="jd_extractor",
+                model=model,
+                prompt_tokens=response.usage.prompt_tokens,
+                completion_tokens=response.usage.completion_tokens
+            )
+
             return response.choices[0].message.parsed
         except Exception as e:
             print(f"Extraction Error: {e}")

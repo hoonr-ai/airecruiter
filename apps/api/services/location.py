@@ -2,6 +2,7 @@ import os
 import json
 from openai import AsyncOpenAI
 from pydantic import BaseModel
+from services.usage_logger import usage_logger
 
 class LocationVerdict(BaseModel):
     is_within_range: bool
@@ -39,8 +40,9 @@ class LocationService:
         """
 
         try:
+            model = "gpt-4o-mini"
             completion = await self.client.beta.chat.completions.parse(
-                model="gpt-4o-mini", # Cheap model is fine for geography
+                model=model, # Cheap model is fine for geography
                 messages=[
                     {"role": "system", "content": "You are a Geography Distance Calculator. Be realistic about commuting."},
                     {"role": "user", "content": prompt}
@@ -48,6 +50,15 @@ class LocationService:
                 response_format=LocationVerdict,
                 temperature=0.0
             )
+
+            # Log Usage
+            usage_logger.log_usage(
+                service="location_check",
+                model=model,
+                prompt_tokens=completion.usage.prompt_tokens,
+                completion_tokens=completion.usage.completion_tokens
+            )
+
             return completion.choices[0].message.parsed
         except Exception as e:
             print(f"⚠️ Location Check Error: {e}")

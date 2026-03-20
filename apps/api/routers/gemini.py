@@ -5,6 +5,7 @@ from pydantic import BaseModel
 import requests
 from time import sleep
 from services.jobdiva import jobdiva_service
+from services.usage_logger import usage_logger
 
 router = APIRouter()
 
@@ -144,6 +145,25 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
                     .get("text", "")
                 )
                 if description:
+                    # Log Gemini Usage
+                    try:
+                        # Estimate tokens based on prompt length (very rough) if not in response
+                        # Gemini often doesn't provide token usage in the direct generateContent JSON 
+                        # unless requested or in specific formats.
+                        # We will log it with estimated or 0 tokens if not found.
+                        usage_metadata = data.get("usageMetadata", {})
+                        p_tokens = usage_metadata.get("promptTokenCount", len(prompt) // 4)
+                        c_tokens = usage_metadata.get("candidatesTokenCount", len(description) // 4)
+                        
+                        usage_logger.log_usage(
+                            service="gemini_jd_generation",
+                            model=model_url.split('/')[-1].split(':')[0],
+                            prompt_tokens=p_tokens,
+                            completion_tokens=c_tokens,
+                            job_id=job_id
+                        )
+                    except Exception as log_err:
+                        print(f"⚠️ Failed to log Gemini usage: {log_err}")
                     break
             else:
                 last_error = response.text

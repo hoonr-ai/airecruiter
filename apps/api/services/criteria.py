@@ -12,6 +12,7 @@ from models import JobCriterion, JobCriteriaResponse
 import json
 from openai import OpenAI
 from dotenv import load_dotenv
+from services.usage_logger import usage_logger
 
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -96,10 +97,20 @@ class CriteriaService:
             Return ONLY the valid JSON object with exactly 8 items.
             """
             
+            model = "gpt-4o-mini"
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model=model,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={ "type": "json_object" }
+            )
+            
+            # Log Usage
+            usage_logger.log_usage(
+                service="criteria_generator",
+                model=model,
+                prompt_tokens=response.usage.prompt_tokens,
+                completion_tokens=response.usage.completion_tokens,
+                job_id=job_id
             )
             
             content = response.choices[0].message.content

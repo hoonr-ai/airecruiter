@@ -5,6 +5,7 @@ from typing import List, Dict, Any
 import httpx
 from openai import AsyncOpenAI
 from core.models import JobDescription, CandidateProfile
+from services.usage_logger import usage_logger
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +32,9 @@ class AIService:
 
         system_prompt = "You are a Job Description Parser. Extract structured data."
         try:
+            model = "gpt-4o-mini"
             completion = await self.client.beta.chat.completions.parse(
-                model="gpt-4o",
+                model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text[:20000]} # Increased Limit
@@ -40,6 +42,15 @@ class AIService:
                 response_format=JobDescription,
                 temperature=0.0
             )
+
+            # Log Usage
+            usage_logger.log_usage(
+                service="jd_extraction",
+                model=model,
+                prompt_tokens=completion.usage.prompt_tokens,
+                completion_tokens=completion.usage.completion_tokens
+            )
+
             return completion.choices[0].message.parsed
         except Exception as e:
             logger.error(f"JD Extraction Failed: {e}")
@@ -65,8 +76,9 @@ class AIService:
              
         system_prompt = "You are a Resume Parser. Extract structured data including skills, timeline, and education."
         try:
+            model = "gpt-4o-mini"
             completion = await self.client.beta.chat.completions.parse(
-                model="gpt-4o",
+                model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text[:30000]} # Increased Limit
@@ -74,6 +86,15 @@ class AIService:
                 response_format=CandidateProfile,
                 temperature=0.0
             )
+
+            # Log Usage
+            usage_logger.log_usage(
+                service="candidate_parsing",
+                model=model,
+                prompt_tokens=completion.usage.prompt_tokens,
+                completion_tokens=completion.usage.completion_tokens
+            )
+
             profile = completion.choices[0].message.parsed
             profile.id = cid # Ensure ID matches
             return profile
@@ -230,14 +251,24 @@ class AIService:
         user_prompt = f"Profile JSON:\n{json.dumps(profile_data, indent=2)}\n\nPlease format this as a text-based Resume."
         
         try:
+            model = "gpt-4o-mini"
             completion = await self.client.chat.completions.create(
-                model="gpt-4o",
+                model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.3
             )
+
+            # Log Usage
+            usage_logger.log_usage(
+                service="resume_generation",
+                model=model,
+                prompt_tokens=completion.usage.prompt_tokens,
+                completion_tokens=completion.usage.completion_tokens
+            )
+
             return completion.choices[0].message.content
         except Exception as e:
             logger.error(f"Resume Generation Failed: {e}")
