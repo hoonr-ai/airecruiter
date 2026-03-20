@@ -13,6 +13,9 @@ import { Loader2, Plus, ChevronLeft, ChevronRight, Wand2, X } from "lucide-react
 interface Criterion {
   id?: string;
   name: string;
+  skill_id?: string;
+  priority_score: number;
+  weight: number;
   is_required: boolean;
   is_ai_generated: boolean;
 }
@@ -35,7 +38,7 @@ export default function SetCriteriaPage() {
       const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'}/api/jobs/${jobId}/criteria`);
       if (response.ok) {
         const data = await response.json();
-        const sortedCriteria = (data.criteria || []).sort((a: any, b: any) => (b.weight || 0) - (a.weight || 0));
+        const sortedCriteria = (data.criteria || []).sort((a: any, b: any) => (b.priority_score || 0) - (a.priority_score || 0));
         setCriteria(sortedCriteria);
         // If empty, auto-sync once
         if (sortedCriteria.length === 0) {
@@ -74,7 +77,14 @@ export default function SetCriteriaPage() {
   };
 
   const addCriterion = () => {
-    setCriteria([...criteria, { name: "", is_required: false, is_ai_generated: false }]);
+    if (criteria.length >= 12) return;
+    setCriteria([...criteria, { 
+      name: "", 
+      priority_score: 5, 
+      weight: 0.5, 
+      is_required: false, 
+      is_ai_generated: false 
+    }]);
   };
 
   const removeCriterion = (index: number) => {
@@ -164,7 +174,7 @@ export default function SetCriteriaPage() {
                 AI pre-populated
              </Badge>
              <span className="text-sm text-muted-foreground">
-                — edit freely. Changes here apply to new candidates only after sourcing begins.
+                — edit freely. {criteria.length}/12 criteria used.
              </span>
           </div>
         </CardHeader>
@@ -187,8 +197,29 @@ export default function SetCriteriaPage() {
                 
                 <div className="flex items-center gap-3">
                   {item.is_ai_generated && (
-                    <span className="text-[10px] font-bold text-blue-400 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-100 uppercase tracking-tighter">AI</span>
+                    <Badge variant="outline" className="text-[10px] font-bold text-blue-500 bg-blue-50/50 border-blue-200 uppercase tracking-tighter">
+                      AI
+                    </Badge>
                   )}
+                  
+                  <div className="flex items-center gap-1 bg-muted/50 p-1 rounded-lg border border-transparent hover:border-border transition-colors">
+                    <span className="text-[10px] uppercase font-bold text-muted-foreground px-1">Priority</span>
+                    <select 
+                      value={item.priority_score}
+                      onChange={(e) => {
+                        const newC = [...criteria];
+                        newC[index].priority_score = parseInt(e.target.value);
+                        // Live re-sort on change
+                        const reSorted = newC.sort((a, b) => (b.priority_score || 0) - (a.priority_score || 0));
+                        setCriteria([...reSorted]);
+                      }}
+                      className="bg-transparent text-xs font-bold text-primary focus:outline-none cursor-pointer"
+                    >
+                      {[10, 9, 8, 7, 6, 5, 4, 3, 2, 1].map(v => (
+                        <option key={v} value={v}>{v}</option>
+                      ))}
+                    </select>
+                  </div>
                   
                   <div className="flex p-1 bg-muted rounded-lg space-x-1">
                     <button
@@ -218,13 +249,15 @@ export default function SetCriteriaPage() {
             ))}
           </div>
 
-          <button 
+          <Button
+            variant="ghost" 
             onClick={addCriterion}
+            disabled={criteria.length >= 12}
             className="flex items-center gap-2 text-sm font-medium text-primary hover:text-primary/80 transition-colors p-2 mt-4"
           >
             <Plus className="h-4 w-4" />
-            Add Criterion
-          </button>
+            {criteria.length >= 12 ? 'Limit Reached (12)' : 'Add Criterion'}
+          </Button>
         </CardContent>
       </Card>
 

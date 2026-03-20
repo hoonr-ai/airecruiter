@@ -83,7 +83,9 @@ class CandidateMessageRequest(BaseModel):
 class JobCriterion(BaseModel):
     id: Optional[str] = None
     name: str # e.g. "2+ years of Accounts Payable experience"
-    weight: float = 1.0
+    skill_id: Optional[str] = None # e.g. "SKL_BACKEND_JAVA"
+    priority_score: int = 5 # 1-10 human friendly score
+    weight: float = 1.0 # Calculated internal weight
     is_required: bool = False # True = Required, False = Preferred
     is_ai_generated: bool = True
     category: Optional[str] = "Hard Filter"

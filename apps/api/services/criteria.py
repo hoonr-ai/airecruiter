@@ -35,7 +35,7 @@ class CriteriaService:
         try:
             with self.engine.connect() as conn:
                 res = conn.execute(
-                    text("SELECT * FROM job_criteria WHERE job_id = :job_id"),
+                    text("SELECT * FROM job_criteria WHERE job_id = :job_id ORDER BY priority_score DESC, created_at ASC"),
                     {"job_id": job_id}
                 )
                 rows = res.fetchall()
@@ -43,6 +43,8 @@ class CriteriaService:
                     JobCriterion(
                         id=str(row._mapping["id"]),
                         name=row._mapping["name"],
+                        skill_id=row._mapping.get("skill_id"),
+                        priority_score=row._mapping.get("priority_score", 5),
                         weight=row._mapping["weight"],
                         is_required=row._mapping["is_required"],
                         is_ai_generated=row._mapping["is_ai_generated"],
@@ -84,12 +86,16 @@ class CriteriaService:
         # 2. Minimal Parser (LLM Call to get strings like in the image)
         try:
             prompt = f"""
-            Task: Extract EXACTLY 8 specific, high-quality hiring criteria from the Job Description below.
+            Task: Extract EXACTLY 8 crisp and compact hiring criteria from the Job Description below.
+            
+            Rules:
+            1. Keep names brief (e.g., 'Java', 'React', 'Problem Solving') - avoid long sentences.
+            2. Assign a 'priority_score' from 1-10 (10=Highest/Critical, 1=Minor).
+            3. Assign a 'skill_id' following Ronak's normalization (SKL_<DOMAIN>_<SKILL>), e.g., SKL_BACKEND_JAVA.
+            4. Identify if it is 'mandatory' (true for required, false for preferred).
+            
             Format: Return a JSON object with a key 'criteria' containing a list of objects.
-            Each object must have:
-            - 'name': The requirement string (e.g., 'Experience with...')
-            - 'importance': An integer from 1-5 (5=critical, 1=minor)
-            - 'mandatory': Boolean (true if required, false if preferred)
+            Each object: {{ "name": "...", "priority_score": 10, "skill_id": "SKL_...", "mandatory": true }}
             
             Job Description:
             {ai_description}
@@ -147,18 +153,23 @@ class CriteriaService:
                     if not isinstance(item, dict): continue
                     
                     name = item.get("name", "")
-                    importance = int(item.get("importance", 3))
+                    priority_score = int(item.get("priority_score", 5))
+                    skill_id = item.get("skill_id", "")
                     is_required = bool(item.get("mandatory", False))
-                    weight = round(importance / total_importance, 2)
+                    
+                    # Calculate weight internally for compatibility (0.0 to 1.0)
+                    weight = round(priority_score / 10.0, 2)
                     
                     c_id = str(uuid.uuid4())
                     conn.execute(text("""
-                        INSERT INTO job_criteria (id, job_id, name, weight, is_required, is_ai_generated, category)
-                        VALUES (:id, :job_id, :name, :weight, :is_required, true, :cat)
+                        INSERT INTO job_criteria (id, job_id, name, skill_id, priority_score, weight, is_required, is_ai_generated, category)
+                        VALUES (:id, :job_id, :name, :skill_id, :priority_score, :weight, :is_required, true, :cat)
                     """), {
                         "id": c_id, 
                         "job_id": job_id, 
                         "name": name, 
+                        "skill_id": skill_id,
+                        "priority_score": priority_score,
                         "weight": weight,
                         "is_required": is_required,
                         "cat": "Hard Filter"
@@ -167,6 +178,8 @@ class CriteriaService:
                     new_criteria.append(JobCriterion(
                         id=c_id,
                         name=name,
+                        skill_id=skill_id,
+                        priority_score=priority_score,
                         weight=weight,
                         is_required=is_required,
                         is_ai_generated=True
@@ -189,18 +202,22 @@ class CriteriaService:
                 for item in criteria_list:
                     c_id = item.get("id") or str(uuid.uuid4())
                     name = item.get("name", "")
-                    weight = float(item.get("weight", 1.0))
+                    skill_id = item.get("skill_id", "")
+                    priority_score = int(item.get("priority_score", 5))
+                    weight = float(item.get("weight", priority_score / 10.0))
                     is_required = bool(item.get("is_required", False))
                     is_ai_generated = bool(item.get("is_ai_generated", False))
                     category = item.get("category", "Hard Filter")
                     
                     conn.execute(text("""
-                        INSERT INTO job_criteria (id, job_id, name, weight, is_required, is_ai_generated, category)
-                        VALUES (:id, :job_id, :name, :weight, :is_required, :ai, :cat)
+                        INSERT INTO job_criteria (id, job_id, name, skill_id, priority_score, weight, is_required, is_ai_generated, category)
+                        VALUES (:id, :job_id, :name, :skill_id, :priority_score, :weight, :is_required, :ai, :cat)
                     """), {
                         "id": c_id, 
                         "job_id": job_id, 
                         "name": name, 
+                        "skill_id": skill_id,
+                        "priority_score": priority_score,
                         "weight": weight,
                         "is_required": is_required,
                         "ai": is_ai_generated,
