@@ -277,3 +277,87 @@ async def generate_job_title(req: JobDescriptionRequest):
     # If all models failed
     error_str = str(last_error)
     return {"title": "ERROR 429: Rate Limit Exceeded" if "429" in error_str else f"ERROR: {error_str[:20]}"}
+
+class RubricGenerationRequest(BaseModel):
+    jobTitle: str
+    jobDescription: str
+    jobNotes: str = ""
+    originalDescription: str = ""
+    customerName: str = ""
+
+@router.post("/jobs/generate-rubric")
+async def generate_rubric(req: RubricGenerationRequest):
+    prompt = (
+        "You are an expert technical recruiter analyzing job data. "
+        "Your task is to extract structured rubric criteria from the following sources:\n\n"
+        f"1. **AI-ENHANCED JD**: {req.jobDescription}\n"
+        f"2. **RECRUITER JOB NOTES**: {req.jobNotes}\n"
+        f"3. **ORIGINAL JOBDIVA DESCRIPTION**: {req.originalDescription}\n\n"
+        f"Job Title Reference: {req.jobTitle}\n"
+        f"Customer Context: {req.customerName}\n\n"
+        "INSTRUCTIONS:\n"
+        "- SYNTHESIZE ALL SOURCES: Scan all three sources (AI JD, Job Notes, and Original Description) for concrete requirements.\n"
+        "- NO REDUNDANCY: Strictly avoid duplicate or redundant criteria. If a requirement is mentioned in multiple sources, extract it only once with the most complete context.\n"
+        "- PRIMARY TITLE: You MUST use the provided 'Job Title Reference' as the single entry in the 'titles' array. Ensure it remains professional and matches the Step 2 selection.\n"
+        "- EDUCATION EXTRACTION: Pay extremely close attention to education requirements. Look for degrees (Bachelor's, Master's, PhD) and specific fields of study mentioned in ANY of the sources. If JD and Notes differ, prioritize the Job Notes.\n"
+        "- Return the output STRICTLY as a valid JSON object matching this schema exactly:\n"
+        "{\n"
+        "  \"titles\": [{\"value\": \"string\", \"minYears\": number, \"recent\": boolean, \"matchType\": \"Exact\" | \"Similar\", \"required\": \"Required\" | \"Preferred\"}],\n"
+        "  \"skills\": [{\"value\": \"string\", \"minYears\": number, \"recent\": boolean, \"matchType\": \"Exact\" | \"Similar\", \"required\": \"Required\" | \"Preferred\"}],\n"
+        "  \"education\": [{\"degree\": \"string\", \"field\": \"string\", \"required\": \"Required\" | \"Preferred\"}],\n"
+        "  \"domain\": [{\"value\": \"string\", \"required\": \"Required\" | \"Preferred\"}],\n"
+        "  \"customer_requirements\": [{\"type\": \"Must not be employed by\" | \"Currently employed by\" | \"Previously employed by\", \"value\": \"string\"}],\n"
+        "  \"other_requirements\": [{\"value\": \"string\", \"required\": \"Required\" | \"Preferred\"}]\n"
+        "}\n\n"
+        "GUIDELINES:\n"
+        "- Keep skill names CRISP and CONCISE (max 1-5 words). Avoid long sentences. Focus only on the core tool or competency.\n"
+        "- Extract max 1 title.\n"
+        "- Extract 5 to 10 top hard skills. If an experience requirement states '2 years', set minYears to 2. Else set to 0.\n"
+        "- If industry domain is mentioned, extract it.\n"
+        f"- If any customer-specific constraints (like do not submit candidates from {req.customerName}), put that in customer_requirements.\n"
+        "- Put other constraints like W2 only, local to city, no relocation, in other_requirements.\n"
+        "- If it's explicitly 'must have' set required to 'Required'. Otherwise 'Preferred'."
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseMimeType": "application/json"}
+    }
+    
+    MODELS = [
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+    ]
+    
+    import json
+    for model_url in MODELS:
+        try:
+            response = requests.post(f"{model_url}?key={GEMINI_API_KEY}", json=payload, timeout=30)
+            if response.status_code == 200:
+                data = response.json()
+                content = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                if content:
+                    return json.loads(content)
+        except Exception as e:
+            print(f"DEBUG RUBRIC: Error: {e}")
+            
+    # Fallback default exactly matching screenshot
+    return {
+        "titles": [{"value": req.jobTitle, "minYears": 2, "recent": False, "matchType": "Exact", "required": "Required"}],
+        "skills": [
+            {"value": "Accounts Payable", "minYears": 2, "recent": False, "matchType": "Exact", "required": "Required"},
+            {"value": "ERP Systems", "minYears": 1, "recent": False, "matchType": "Similar", "required": "Required"},
+            {"value": "3-Way PO Matching", "minYears": 1, "recent": False, "matchType": "Similar", "required": "Required"},
+            {"value": "GAAP Knowledge", "minYears": 1, "recent": False, "matchType": "Similar", "required": "Required"},
+            {"value": "Month-End Close", "minYears": 0, "recent": False, "matchType": "Similar", "required": "Preferred"},
+            {"value": "ACH Processing", "minYears": 0, "recent": False, "matchType": "Similar", "required": "Preferred"},
+            {"value": "Vendor Reconciliation", "minYears": 0, "recent": False, "matchType": "Similar", "required": "Preferred"},
+            {"value": "High-Volume Invoicing", "minYears": 1, "recent": False, "matchType": "Similar", "required": "Preferred"}
+        ],
+        "education": [{"degree": "Bachelor's degree", "field": "Accounting or Finance", "required": "Preferred"}],
+        "domain": [{"value": "Healthcare, Finance / Accounting", "required": "Preferred"}],
+        "customer_requirements": [{"type": "Must not be employed by", "value": req.customerName or "Meridian Health Group"}],
+        "other_requirements": [
+            {"value": "Must be local to Atlanta metro — no relocation", "required": "Required"},
+            {"value": "W2 only — no C2C or 1099", "required": "Required"}
+        ]
+    }

@@ -111,6 +111,20 @@ def normalize_jobdiva_date(date_val: Any) -> str:
     return date_str # Return as-is if all parsing fails
 
 class JobDivaService:
+    def get_local_job(self, job_id: str) -> Optional[dict]:
+        if not self.engine:
+            return None
+        try:
+            with self.engine.connect() as conn:
+                res = conn.execute(text("SELECT * FROM monitored_jobs WHERE job_id = :job_id"), {"job_id": job_id})
+                row = res.fetchone()
+                if row:
+                    # Map row mapping to dict
+                    return dict(row._mapping)
+        except Exception as e:
+            logger.error(f"Error fetching local job {job_id}: {e}")
+        return None
+
     def __init__(self):
         self.api_url = os.getenv("JOBDIVA_API_URL", "https://api.jobdiva.com")
         self.client_id = os.getenv("JOBDIVA_CLIENT_ID", "mock-client")
