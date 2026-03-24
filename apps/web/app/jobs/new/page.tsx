@@ -38,7 +38,8 @@ import {
   GraduationCap,
   UserCheck,
   Lightbulb,
-  X
+  X,
+  Filter
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -92,6 +93,17 @@ export default function NewJobPage() {
   const [pageSubtitle, setPageSubtitle] = useState(STEP_DESCRIPTIONS[1]);
   const [rubricData, setRubricData] = useState<any>(null);
   const [isGeneratingRubric, setIsGeneratingRubric] = useState(false);
+  
+  // Step 4 - Set Filters state
+  const [resumeMatchFilters, setResumeMatchFilters] = useState<Array<{
+    id: number;
+    category: string;
+    value: string;
+    active: boolean;
+    ai: boolean;
+    fromRubric: boolean;
+  }>>([]);
+  const [filterIdCounter, setFilterIdCounter] = useState(1);
 
   const showToast = (message: string, type: "success" | "info" = "success") => {
     setToast({ message, type });
@@ -1269,6 +1281,301 @@ const intakeStep = (
     </div>
   );
 
+  // Filter management functions
+  const toggleResumeFilter = (id: number, active: boolean) => {
+    setResumeMatchFilters(prev => 
+      prev.map(filter => 
+        filter.id === id ? { ...filter, active } : filter
+      )
+    );
+  };
+
+  const updateResumeFilter = (id: number, value: string) => {
+    setResumeMatchFilters(prev =>
+      prev.map(filter =>
+        filter.id === id ? { ...filter, value } : filter
+      )
+    );
+  };
+
+  const deleteResumeFilter = (id: number) => {
+    setResumeMatchFilters(prev => prev.filter(filter => filter.id !== id));
+  };
+
+  const addResumeFilter = () => {
+    const category = prompt('Filter category (e.g. Skills, Location, Certification):');
+    if (!category || !category.trim()) return;
+    const value = prompt(`Value for "${category.trim()}":`); 
+    if (!value || !value.trim()) return;
+    
+    setResumeMatchFilters(prev => [
+      ...prev,
+      {
+        id: filterIdCounter,
+        category: category.trim(),
+        value: value.trim(),
+        active: true,
+        ai: false,
+        fromRubric: false
+      }
+    ]);
+    setFilterIdCounter(prev => prev + 1);
+  };
+
+  // Initialize filters from rubric data when moving to step 4
+  const initializeFiltersFromRubric = () => {
+    if (!rubricData || resumeMatchFilters.length > 0) return;
+
+    const filters: Array<{
+      id: number;
+      category: string;
+      value: string;
+      active: boolean;
+      ai: boolean;
+      fromRubric: boolean;
+    }> = [];
+
+    let idCounter = 1;
+
+    // Add title filters (all active)
+    if (rubricData.titles) {
+      rubricData.titles.forEach((title: any) => {
+        filters.push({
+          id: idCounter++,
+          category: 'Required Title',
+          value: `${title.value} — ${title.minYears}+ yrs, ${title.matchType} match`,
+          active: true,
+          ai: true,
+          fromRubric: true
+        });
+      });
+    }
+
+    // Add skill filters (first few active, rest inactive to show variety)
+    if (rubricData.skills) {
+      rubricData.skills.forEach((skill: any, index: number) => {
+        filters.push({
+          id: idCounter++,
+          category: skill.required === 'Required' ? 'Required Skill' : 'Preferred Skill', 
+          value: `${skill.value} — ${skill.minYears}+ yrs, ${skill.matchType} match`,
+          active: index < 4, // First 4 skills active, rest inactive
+          ai: true,
+          fromRubric: true
+        });
+      });
+    }
+    
+    // Add education filters (inactive by default)
+    if (jobData && (jobData.title?.toLowerCase().includes('specialist') || jobData.title?.toLowerCase().includes('accountant'))) {
+      filters.push({
+        id: idCounter++,
+        category: 'Education',
+        value: "Bachelor's in Accounting or Finance",
+        active: false,
+        ai: true,
+        fromRubric: true
+      });
+    }
+    
+    // Add domain experience (inactive by default)
+    if (jobData && jobData.customer_name) {
+      filters.push({
+        id: idCounter++,
+        category: 'Domain',
+        value: "Healthcare, Finance / Accounting", 
+        active: false,
+        ai: true,
+        fromRubric: true
+      });
+    }
+
+    // Add common filters based on job data
+    if (jobData) {
+      const location = `${jobData.city || ''}, ${jobData.state || ''}`.trim();
+      if (location) {
+        filters.push({
+          id: idCounter++,
+          category: 'Requirement',
+          value: `Must be local to ${location} metro — no relocation`,
+          active: true,
+          ai: false,
+          fromRubric: true
+        });
+      }
+
+      if (jobData.customer_name || jobData.customer) {
+        filters.push({
+          id: idCounter++,
+          category: 'Customer Req.',
+          value: `Must not be employed by: ${jobData.customer_name || jobData.customer}`,
+          active: true,
+          ai: false,
+          fromRubric: true
+        });
+      }
+    }
+
+    setResumeMatchFilters(filters);
+    setFilterIdCounter(idCounter);
+  };
+
+  const setFiltersStep = (
+    <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
+      <div className="flex flex-row items-start gap-4 px-7 py-6 border-b border-slate-100"
+           style={{ background: "linear-gradient(135deg, #f8f7ff 0%, #ffffff 60%)" }}>
+        <Filter className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
+        <div>
+          <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight">Set Filters</h2>
+          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Each rubric item from Establish Rubric is evaluated here. Toggle, edit, or add filters for resume matching and the PAIR phone screen.</p>
+        </div>
+      </div>
+      
+      <div className="p-7 space-y-7">
+        {/* Resume Match Section */}
+        <section>
+          <div className="flex items-center gap-2 mb-4">
+            <FileText className="w-4 h-4 text-slate-900 flex-shrink-0" />
+            <h3 className="text-[14px] font-bold text-slate-800">Resume Match</h3>
+            <span className="text-[12px] font-normal text-slate-500">Hard filters applied during resume screening</span>
+            <span className="ml-auto bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
+              <Sparkles className="w-3 h-3 inline mr-1" />
+              PAIR pre-filled
+            </span>
+          </div>
+
+          {/* Filter Header */}
+          <div className="flex items-center gap-3 text-[11px] font-bold uppercase tracking-wider text-slate-500 pb-2 border-b-2 border-slate-200 mb-2">
+            <div className="w-[44px] flex-shrink-0"></div>
+            <div className="w-[110px] flex-shrink-0">Category</div>
+            <div className="flex-1">Value</div>
+            <div className="w-[100px] flex-shrink-0"></div>
+          </div>
+
+          {/* Active Filters */}
+          {resumeMatchFilters.filter(f => f.active).length > 0 && (
+            <>
+              <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-slate-500 py-2">
+                <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                <span>Active ({resumeMatchFilters.filter(f => f.active).length})</span>
+              </div>
+              {resumeMatchFilters.filter(f => f.active).map((filter) => (
+                <div key={filter.id} className="flex items-center gap-3 py-3 border-b border-slate-100 last:border-b-0">
+                  <button
+                    onClick={() => toggleResumeFilter(filter.id, false)}
+                    className="w-10 h-7 rounded bg-green-100 border border-green-300 text-green-600 text-[11px] font-bold flex items-center justify-center transition-all hover:bg-green-200"
+                    title="Disable"
+                  >
+                    On
+                  </button>
+                  <span className="w-[110px] flex-shrink-0 bg-slate-100 text-slate-600 text-[11px] font-semibold px-3 py-1 rounded-full text-center">
+                    {filter.category}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <input
+                      type="text"
+                      value={filter.value}
+                      onChange={(e) => updateResumeFilter(filter.id, e.target.value)}
+                      className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium"
+                    />
+                  </div>
+                  <div className="w-[100px] flex-shrink-0 flex items-center justify-end gap-2">
+                    {filter.ai && (
+                      <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
+                        PAIR
+                      </span>
+                    )}
+                    {filter.fromRubric && (
+                      <span className="bg-slate-100 text-slate-600 text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
+                        from rubric
+                      </span>
+                    )}
+                    <button
+                      onClick={() => deleteResumeFilter(filter.id)}
+                      className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-6 h-6 flex items-center justify-center rounded transition-all ml-2"
+                      title="Remove"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+
+          {/* Inactive Filters */}
+          {resumeMatchFilters.filter(f => !f.active).length > 0 && (
+            <>
+              {resumeMatchFilters.filter(f => f.active).length > 0 && (
+                <div className="h-px bg-slate-200 my-4"></div>
+              )}
+              <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wider text-slate-400 py-2">
+                <div className="w-2 h-2 bg-slate-400 rounded-full"></div>
+                <span>Off ({resumeMatchFilters.filter(f => !f.active).length})</span>
+              </div>
+              {resumeMatchFilters.filter(f => !f.active).map((filter) => (
+                <div key={filter.id} className="flex items-center gap-3 py-3 border-b border-slate-100 last:border-b-0 opacity-70">
+                  <button
+                    onClick={() => toggleResumeFilter(filter.id, true)}
+                    className="w-10 h-7 rounded bg-slate-100 border border-slate-300 text-slate-400 text-[11px] font-bold flex items-center justify-center transition-all hover:border-primary hover:text-primary"
+                    title="Enable"
+                  >
+                    Off
+                  </button>
+                  <span className="w-[110px] flex-shrink-0 bg-slate-50 text-slate-400 text-[11px] font-semibold px-3 py-1 rounded-full text-center">
+                    {filter.category}
+                  </span>
+                  <div className="flex-1 min-w-0">
+                    <input
+                      type="text"
+                      value={filter.value}
+                      onChange={(e) => updateResumeFilter(filter.id, e.target.value)}
+                      className="w-full text-[13px] bg-transparent border-none outline-none text-slate-500 font-medium"
+                    />
+                  </div>
+                  <div className="w-[100px] flex-shrink-0 flex items-center justify-end gap-2">
+                    {filter.ai && (
+                      <span className="bg-slate-100 text-slate-400 text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
+                        PAIR
+                      </span>
+                    )}
+                    {filter.fromRubric && (
+                      <span className="bg-slate-50 text-slate-400 text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
+                        from rubric
+                      </span>
+                    )}
+                    <button
+                      onClick={() => deleteResumeFilter(filter.id)}
+                      className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-6 h-6 flex items-center justify-center rounded transition-all ml-2"
+                      title="Remove"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+
+          {/* No filters state */}
+          {resumeMatchFilters.length === 0 && (
+            <p className="text-[13px] text-slate-400 py-4">No filters set.</p>
+          )}
+
+          {/* Add Filter Button */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={addResumeFilter}
+            className="mt-3 border-slate-200 text-slate-600 bg-white hover:bg-slate-50 font-medium text-[13px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
+          >
+            <Plus className="w-3.5 h-3.5 mr-1.5" />
+            Add Resume Filter
+          </Button>
+        </section>
+      </div>
+    </div>
+  );
+
   const PlaceholderStep = ({ stepNumber, title }: { stepNumber: number; title: string }) => (
     <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
       <div className="p-12 text-center">
@@ -1284,7 +1591,13 @@ const intakeStep = (
       case 1: return intakeStep;
       case 2: return publishStep;
       case 3: return establishRubricStep;
-      case 4: return <PlaceholderStep stepNumber={4} title="Set Filters" />;
+      case 4: {
+        // Initialize filters from rubric when entering step 4
+        if (rubricData && resumeMatchFilters.length === 0) {
+          initializeFiltersFromRubric();
+        }
+        return setFiltersStep;
+      }
       case 5: return <PlaceholderStep stepNumber={5} title="Launch & Source" />;
       default: return null;
     }
