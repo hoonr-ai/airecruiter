@@ -285,6 +285,17 @@ async def add_job_to_monitoring_internal(job_id: str, job_details: dict):
             "title":        job_details.get("title") or "",
             "work_authorization": job_details.get("work_authorization") or "",
             "recruiter_email": job_details.get("recruiter_email") or "",
+            "jobdiva_description": job_details.get("jobdiva_description") or job_details.get("description") or "",
+            "ai_description":  job_details.get("ai_description") or "",
+            "job_notes":       job_details.get("job_notes") or "",
+            "city":            job_details.get("city") or "",
+            "state":           job_details.get("state") or "",
+            "zip":             job_details.get("zip") or "",
+            "pay_rate":        job_details.get("pay_rate") or "",
+            "openings":        job_details.get("openings") or "",
+            "posted_date":     job_details.get("posted_date") or "",
+            "start_date":      job_details.get("start_date") or "",
+            "employment_type": job_details.get("employment_type") or "",
             "added_at":     readable_ist_now()
         }
         
@@ -408,6 +419,26 @@ async def poll_all_jobs():
     schedule_next_poll()
     
     return {"polled": len(job_ids), "changes": changes_detected}
+
+@app.post("/jobs/{job_id}/save")
+async def save_job(job_id: str, data: dict):
+    """
+    Save or update job details manually.
+    """
+    try:
+        # Pre-process naming conventions if needed
+        # Ensure description is mapped to jobdiva_description if provided
+        if "description" in data and "jobdiva_description" not in data:
+            data["jobdiva_description"] = data["description"]
+            
+        success = jobdiva_service.monitor_job_locally(job_id, data)
+        if success:
+            return {"status": "success", "message": f"Job {job_id} saved successfully."}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to save job locally.")
+    except Exception as e:
+        logger.error(f"SaveJob Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/jobs/{job_id}/monitor")
 async def add_job_to_monitoring(job_id: str, background_tasks: BackgroundTasks):

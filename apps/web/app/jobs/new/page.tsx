@@ -1,1240 +1,905 @@
 "use client";
 
-
-import { cn } from "@/lib/utils";
-import { useState, useEffect } from "react";
+import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
+import {
+  Plus,
+  Search,
+  Linkedin,
+  Zap,
+  Star,
+  Building2,
+  PawPrint,
+  LayoutGrid,
+  Check,
+  CheckCircle2,
+  ChevronRight,
+  Timer,
+  Users,
+  ArrowRight,
+  Clipboard,
+  Wand2,
+  FileText,
+  RotateCcw,
+  Sparkles,
+  Info,
+  Save,
+  Megaphone,
+  Eye,
+  Type,
+  ArrowLeft,
+  FileInput,
+  CloudDownload,
+  Settings
+} from "lucide-react";
+import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Download, Loader2, Sparkles, Wand2, Search, CheckCircle, AlertTriangle, ShieldAlert, Eye, Gavel, RefreshCw, RotateCcw, Copy, Plus, Trash2, ChevronRight, CheckCircle2, XCircle, Globe, LayoutGrid } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
-import { CandidateTable } from "@/components/candidate-table";
-import { AnalysisCard } from "@/components/analysis/analysis-card";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import {
-    Table,
-    TableBody,
-    TableCell,
-    TableHead,
-    TableHeader,
-    TableRow,
-} from "@/components/ui/table";
-import {
-    Dialog,
-    DialogContent,
-    DialogDescription,
-    DialogHeader,
-    DialogTitle,
-} from "@/components/ui/dialog";
 
+type Step = 1 | 2 | 3 | 4 | 5;
+type ScreeningLevel = "L1" | "L1.5" | "L2";
+type EmploymentType = "W2" | "1099" | "C2C" | "Full-Time";
 
-// Helper to highlight text
-const HighlightText = ({ text, keywords }: { text: string, keywords: string[] }) => {
-    if (!keywords.length || !text) return <>{text}</>;
-
-
-    // Create regex pattern from keywords (escape special chars)
-    const pattern = new RegExp(`(${keywords.map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'gi');
-
-
-    // Split text
-    const parts = text.split(pattern);
-
-
-    return (
-        <>
-            {parts.map((part, i) => {
-                const isMatch = keywords.some(k => k.toLowerCase() === part.toLowerCase());
-                return isMatch ? (
-                    <mark key={i} className="bg-yellow-200 dark:bg-yellow-900/50 text-inherit font-semibold rounded-sm px-0.5">
-                        {part}
-                    </mark>
-                ) : (
-                    <span key={i}>{part}</span>
-                );
-            })}
-        </>
-    );
+const STEP_LABELS = {
+  1: "Intake",
+  2: "Publish",
+  3: "Establish Rubric",
+  4: "Set Filters",
+  5: "Source"
 };
 
-
-
-
-// Helper component to format AI-generated postings with rich text copying support
-const AIPostingJobDescription = ({ text }: { text: string }) => {
-    const renderInline = (content: string) => {
-        // Parse [text](url), **bold** and *italic*
-        const parts = content.split(/(\[.*?\]\(.*?\)+|\*\*.*?\*\*|\*(?!\*).*?\*(?!\*))/g);
-        return parts.map((part, i) => {
-            if (part.startsWith('[') && part.includes('](') && part.endsWith(')')) {
-                const match = part.match(/\[(.*?)\]\((.*?)\)/);
-                if (match) {
-                    return (
-                        <a
-                            key={i}
-                            href={match[2]}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-blue-600 hover:underline font-medium"
-                        >
-                            {match[1]}
-                        </a>
-                    );
-                }
-            }
-            if (part.startsWith('**') && part.endsWith('**')) {
-                return <strong key={i} style={{ fontWeight: 600 }}>{part.slice(2, -2)}</strong>;
-            } else if (part.startsWith('*') && part.endsWith('*')) {
-                return <em key={i} style={{ fontStyle: 'italic' }}>{part.slice(1, -1)}</em>;
-            }
-            return <span key={i}>{part}</span>;
-        });
-    };
-
-    const formatText = (rawText: string) => {
-        if (!rawText) return null;
-
-        // Split by lines and process each
-        return rawText.split('\n').map((line, index) => {
-            const trimmedLine = line.trim();
-            if (!trimmedLine) return <br key={index} />;
-
-            // Check if this is a section header (All caps line or starts with bold all caps)
-            const isHeader = /^[A-Z\s]+$/.test(trimmedLine) || /^\*\*[A-Z\s]+\*\*$/.test(trimmedLine);
-            if (isHeader) {
-                const sectionTitle = trimmedLine.replace(/\*\*/g, '').trim();
-                return (
-                    <div key={index} style={{ fontWeight: 600, marginTop: '1rem', marginBottom: '0.5rem' }}>
-                        {sectionTitle}
-                    </div>
-                );
-            }
-
-            // Check if this is a bullet point
-            if (trimmedLine.startsWith('•') || trimmedLine.startsWith('-')) {
-                const bulletText = trimmedLine.replace(/^[•-]\s*/, '').trim();
-                return (
-                    <div key={index} style={{ display: 'flex', gap: '0.5rem', marginLeft: '1rem', marginTop: '0.25rem', marginBottom: '0.25rem' }}>
-                        <span>•</span>
-                        <span>{renderInline(bulletText)}</span>
-                    </div>
-                );
-            }
-
-            // Regular text line
-            return (
-                <div key={index} style={{ marginBottom: '0.25rem' }}>
-                    {renderInline(trimmedLine)}
-                </div>
-            );
-        });
-    };
-
-    return (
-        <div style={{ fontFamily: 'inherit', fontSize: '14px', lineHeight: 1.5 }}>
-            {formatText(text)}
-        </div>
-    );
+const STEP_DESCRIPTIONS: Record<Step, string> = {
+  1: "Enter a JobDiva Job ID to get started.",
+  2: "Review your PAIR-enhanced job posting and select where to publish externally.",
+  3: "Define evaluation criteria and rubric for candidate assessment.",
+  4: "Configure filters and requirements for candidate matching.",
+  5: "Launch sourcing and begin candidate collection."
 };
-
-const JOB_BOARDS = [
-    { id: "skip", name: "Skip External Posting" },
-    { id: "careerbuilder", name: "CareerBuilder" },
-    { id: "dice", name: "Dice" },
-    { id: "monster", name: "Monster" },
-    { id: "indeed", name: "Indeed" },
-    { id: "linkedin", name: "LinkedIn" },
-];
-
 
 export default function NewJobPage() {
-    const router = useRouter();
-    const [step, setStep] = useState(1);
-    const [loading, setLoading] = useState(false);
-    const [jdText, setJdText] = useState("");
-    const [jobId, setJobId] = useState("");
+  const router = useRouter();
+  const [currentStep, setCurrentStep] = useState<Step>(1);
+  const [jobId, setJobId] = useState("");
+  const [jobData, setJobData] = useState<any>(null);
+  const [isFetching, setIsFetching] = useState(false);
+  const [isFetched, setIsFetched] = useState(false);
+  const [recruiterNotes, setRecruiterNotes] = useState("");
+  const [selectedEmpTypes, setSelectedEmpTypes] = useState<EmploymentType[]>([]);
+  const [recruiterEmails, setRecruiterEmails] = useState<string[]>([]);
+  const [emailInput, setEmailInput] = useState("");
+  const [emailError, setEmailError] = useState(false);
+  const [isInputInvalid, setIsInputInvalid] = useState(false);
+  const [emailErrorMessage, setEmailErrorMessage] = useState("");
+  const [screeningLevel, setScreeningLevel] = useState<ScreeningLevel>("L1.5");
+  const [jobTitle, setJobTitle] = useState("");
+  const [jobPosting, setJobPosting] = useState("");
+  const [isGeneratingJD, setIsGeneratingJD] = useState(false);
+  const [isEnhancingTitle, setIsEnhancingTitle] = useState(false);
+  const [isEditingJD, setIsEditingJD] = useState(false);
+  const [selectedJobBoards, setSelectedJobBoards] = useState<string[]>(["LinkedIn", "Indeed"]);
+  const [toast, setToast] = useState<{ message: string; type: "success" | "info" } | null>(null);
+  const [pageSubtitle, setPageSubtitle] = useState(STEP_DESCRIPTIONS[1]);
 
-    // Imported Metadata (JobDiva)
-    const [customerName, setCustomerName] = useState("");
-    const [jobStatus, setJobStatus] = useState("");
-    const [jobNotes, setJobNotes] = useState("");
-    const [workAuthorization, setWorkAuthorization] = useState("");
-    const [recruiterEmails, setRecruiterEmails] = useState("");
-    const [aiDescription, setAiDescription] = useState("");
-    const [selectedBoards, setSelectedBoards] = useState<string[]>([]);
-    const [isGenerating, setIsGenerating] = useState(false);
-    const [startDate, setStartDate] = useState("");
+  const showToast = (message: string, type: "success" | "info" = "success") => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  };
 
+  const handleFetchJob = async () => {
+    if (!jobId.trim()) return;
 
-    // Parsed Data
-    const [title, setTitle] = useState("");
-    const [hardSkills, setHardSkills] = useState<any[]>([]); // Array of { name, seniority, priority }
-    const [softSkills, setSoftSkills] = useState<string[]>([]);
-    const [locationType, setLocationType] = useState("");
-    const [location, setLocation] = useState(""); // Specific location like City, State
-    const [sourceFilters, setSourceFilters] = useState({ vetted: true, jobdiva: true, linkedin: false }); // Source filters
-    const [openToWork, setOpenToWork] = useState(false);
-    const [candidates, setCandidates] = useState<any[]>([]);
+    setIsFetching(true);
+    setIsFetched(false);
+    try {
+      const response = await fetch("http://localhost:8001/jobs/fetch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: jobId.trim() })
+      });
 
+      if (!response.ok) throw new Error("Job not found");
 
-    // Resume Viewing State
-    const [viewingCandidate, setViewingCandidate] = useState<any>(null);
-    const [resumeText, setResumeText] = useState("");
-    const [resumeLoading, setResumeLoading] = useState(false);
-    const [resumeOpen, setResumeOpen] = useState(false);
+      const data = await response.json();
 
+      setJobData(data); // Store the full data object from backend
 
-    // AI Analysis State
-    const [selectedIds, setSelectedIds] = useState<string[]>([]);
-    const [analysisLoading, setAnalysisLoading] = useState(false);
-    const [analysisResults, setAnalysisResults] = useState<any[]>([]);
-    const [showAnalysis, setShowAnalysis] = useState(false);
-    const [viewingAnalysis, setViewingAnalysis] = useState<any>(null); // For Modal
-    const [emailError, setEmailError] = useState(false);
+      const displayData = {
+        title: data.title,
+        customer: data.customer_name || data.customer,
+        location: `${data.city || ""}, ${data.state || ""}`.trim() || "Remote",
+        openings: data.openings || "1",
+        type: data.employment_type || "Full-Time",
+        rate: data.pay_rate || "Market Rate",
+        startDate: data.start_date || "ASAP",
+        postedDate: data.posted_date || new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        description: data.description
+      };
 
-
-    // Unified email validation helper with progressive feedback
-    const getEmailValidationStatus = (input: string) => {
-        if (!input || input.trim() === "") return { status: 'empty', message: 'Recruiter email field is required' };
-
-        const emails = input.split(",").map(e => e.trim());
-        // Robust regex: TLD must be 2-6 alpha chars, domain must exist
-        const emailRegex = /^[^\s@]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,6}$/;
-
-        // Progressive check for the first email to provide specific feedback
-        const firstEmail = emails[0];
-        if (!firstEmail.includes("@")) return { status: 'invalid', message: 'The @ symbol is missing.' };
-
-        const atParts = firstEmail.split("@");
-        const domain = atParts[1];
-        if (!domain || domain.trim() === "") return { status: 'invalid', message: 'Domain name is missing.' };
-
-        const domainParts = domain.split(".");
-        const tld = domainParts[domainParts.length - 1];
-        // Must have at least one dot, domain part (before last dot) must be non-empty, TLD must be 2+ alpha chars
-        const domainBody = domainParts.slice(0, -1).join('.');
-        if (domainParts.length < 2 || !domainBody || !/^[a-zA-Z]{2,6}$/.test(tld)) {
-            return { status: 'invalid', message: 'Suffix is missing or invalid (e.g. .com, .org).' };
-        }
-
-        const allValid = emails.every(e => emailRegex.test(e));
-        return allValid ? { status: 'valid', message: 'Valid' } : { status: 'invalid', message: 'Please enter a valid email address.' };
-    };
-
-    const validateEmails = (input: string) => {
-        return getEmailValidationStatus(input).status === 'valid';
-    };
-
-
-    const handleAnalyze = async () => {
-        if (selectedIds.length === 0) return;
-        setAnalysisLoading(true);
-        setShowAnalysis(true);
-
-
-        // Filter candidates to just selected ones
-        const selectedCandidates = candidates.filter(c => selectedIds.includes(c.id));
-
-
-        // Construct Structured JD (TOON-ready)
-        const structuredJd = {
-            title: title,
-            location: location,
-            location_type: locationType,
-            hard_skills: hardSkills,
-            soft_skills: softSkills,
-            summary: jdText
-        };
-
-
-        try {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-            const res = await fetch(`${apiUrl}/candidates/analyze`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    job_description: jdText || "Using Structured JD",
-                    structured_jd: structuredJd,
-                    candidates: selectedCandidates
-                })
-            });
-            const data = await res.json();
-            setAnalysisResults(data.results || []);
-        } catch (e) {
-            console.error("Analysis failed", e);
-            alert("Analysis failed");
-        }
-        setAnalysisLoading(false);
-    };
-
-
-    const handleFetchJob = async () => {
-        if (!jobId) return;
-        setLoading(true);
-        try {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-            const res = await fetch(`${apiUrl}/jobs/fetch`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ job_id: jobId })
-            });
-            if (res.ok) {
-                const data = await res.json();
-                setJdText(data.description);
-                setTitle(data.title || "");
-                setCustomerName(data.customer_name || data.company || "Unknown");
-                setJobStatus(data.job_status || "OPEN");
-
-                // RESTORE AI CONTENT FROM UDFs
-                if (data.ai_description) setAiDescription(data.ai_description);
-                if (data.job_notes) setJobNotes(data.job_notes);
-                if (data.recruiter_email) setRecruiterEmails(data.recruiter_email);
-                if (data.work_authorization) setWorkAuthorization(data.work_authorization);
-
-                if (data.city) setLocation(`${data.city}, ${data.state || ""}`);
-
-                let finalLocationType = "";
-                if (data.location_type) {
-                    const lt = data.location_type.toLowerCase();
-                    if (lt.includes("remote")) finalLocationType = "Remote";
-                    else if (lt.includes("hybrid")) finalLocationType = "Hybrid";
-                    else if (lt.includes("onsite") || lt.includes("on-site")) finalLocationType = "Onsite";
-                }
-
-                // Fallback 1: Job Notes
-                if (!finalLocationType && data.job_notes) {
-                    const notesSearch = data.job_notes.toLowerCase();
-                    if (notesSearch.includes("remote")) finalLocationType = "Remote";
-                    else if (notesSearch.includes("hybrid")) finalLocationType = "Hybrid";
-                    else if (notesSearch.includes("onsite") || notesSearch.includes("on-site")) finalLocationType = "Onsite";
-                }
-
-                // Fallback 2: Original JD (Description)
-                if (!finalLocationType && data.description) {
-                    const descSearch = data.description.toLowerCase();
-                    if (descSearch.includes("remote")) finalLocationType = "Remote";
-                    else if (descSearch.includes("hybrid")) finalLocationType = "Hybrid";
-                    else if (descSearch.includes("onsite") || descSearch.includes("on-site")) finalLocationType = "Onsite";
-                }
-                if (finalLocationType) {
-                    setLocationType(finalLocationType);
-                }
-
-                // Auto-parse logic could be added here if desired.
-            } else {
-                alert("No job found");
-            }
-        } catch (e) {
-            console.error(e);
-            alert("Error fetching job");
-        }
-        setLoading(false);
-    };
-
-
-    const handleUpdateDescription = async () => {
-        const validation = getEmailValidationStatus(recruiterEmails);
-        if (validation.status !== 'valid') {
-            setEmailError(true);
-            const msg = validation.status === 'empty'
-                ? "Recruiter Email field is required."
-                : validation.message;
-            alert(msg);
-            return;
-        }
-        setEmailError(false);
-        if (!jdText && !jobNotes) return;
-        setIsGenerating(true);
-        try {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-            const res = await fetch(`${apiUrl}/api/v1/gemini/jobs/${jobId || 'new'}/generate-description`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    jobTitle: title || "Job Opportunity",
-                    jobNotes: jobNotes,
-                    workAuthorization: workAuthorization,
-                    jobDescription: jdText
-                })
-            });
-            if (res.ok) {
-                const data = await res.json();
-                setAiDescription(data.description);
-            } else {
-                alert("Failed to generate description");
-            }
-        } catch (e) {
-            console.error(e);
-            alert("Error generating description");
-        }
-        setIsGenerating(false);
-    };
-
-
-    const handleParse = async () => {
-        const validation = getEmailValidationStatus(recruiterEmails);
-        if (validation.status !== 'valid') {
-            setEmailError(true);
-            const msg = validation.status === 'empty'
-                ? "Recruiter Email field is required."
-                : validation.message;
-            alert(msg);
-            return;
-        }
-        setEmailError(false);
-        setLoading(true);
-        try {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-
-            // --- Sync AI JD + Notes to JobDiva UDF #230 / #231 and track locally ---
-            if (jobId && (aiDescription || jobNotes)) {
-                console.log("🔄 Syncing AI JD & Job Notes to JobDiva...");
-                try {
-                    const syncRes = await fetch(`${apiUrl}/api/v1/gemini/sync-jobdiva`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                            jobId,
-                            aiDescription,
-                            jobNotes,
-                            workAuthorization: workAuthorization,
-                            recruiterEmail: recruiterEmails,
-                        }),
-                    });
-                    const syncData = await syncRes.json();
-                    console.log("✅ Sync result:", syncData);
-                } catch (syncErr) {
-                    console.error("❌ Sync failed (non-blocking):", syncErr);
-                }
-            }
-
-            // --- Parse JD for skills / structured data ---
-            const res = await fetch(`${apiUrl}/jobs/parse`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ text: jdText })
-            });
-            const data = await res.json();
-            // Prioritize existing values (likely from JobDiva import) over extracted ones
-            if (!title) setTitle(data.title);
-            setHardSkills(data.hard_skills || []);
-            setSoftSkills(data.soft_skills || []);
-            if (!locationType && data.location_type) {
-                const lt = data.location_type.toLowerCase();
-                if (lt.includes("remote")) setLocationType("Remote");
-                else if (lt.includes("hybrid")) setLocationType("Hybrid");
-                else if (lt.includes("onsite") || lt.includes("on-site")) setLocationType("Onsite");
-            }
-            if (!location && data.location) setLocation(data.location);
-            setStep(2);
-        } catch (e) {
-            console.error(e);
-            alert("Failed to parse JD");
-        }
-        setLoading(false);
-    };
-
-
-    const handleSearch = async () => {
-        setLoading(true);
-        try {
-            // Build sources array based on checkboxes
-            const sources = [];
-            if (sourceFilters.vetted) sources.push("VettedDB");
-            if (sourceFilters.jobdiva) sources.push("JobDiva");
-            if (sourceFilters.linkedin) sources.push("LinkedIn");
-
-
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-            const res = await fetch(`${apiUrl}/candidates/search`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    skills: hardSkills,
-                    location: location, // Send actual location field
-                    location_type: locationType, // Send location type separately 
-                    sources: sources, // Filter by source
-                    open_to_work: openToWork, // Pass OpenToWork filter
-                    page: 1,      // Added pagination
-                    limit: 100    // Max 100 per page response
-                })
-            });
-            const data = await res.json();
-            if (Array.isArray(data)) {
-                setCandidates(data);
-            } else {
-                setCandidates([]);
-            }
-            setStep(3);
-        } catch (e) {
-            console.error(e);
-            alert("Search failed");
-            setCandidates([]);
-        }
-        setLoading(false);
-    };
-
-
-    const handleViewResume = async (candidate: any) => {
-        setViewingCandidate(candidate);
-        setResumeOpen(true);
-        setResumeLoading(true);
-        setResumeText("");
-
-
-        try {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-            const res = await fetch(`${apiUrl}/candidates/${candidate.id}/resume`);
-            if (res.ok) {
-                const data = await res.json();
-                setResumeText(data.resume_text);
-            } else {
-                setResumeText("Failed to load resume.");
-            }
-        } catch (e) {
-            setResumeText("Error fetching resume.");
-        }
-        setResumeLoading(false);
-    };
-
-
-    const handleGoToReview = async () => {
-        if (!jobId) return;
-        setLoading(true);
-        try {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-            // Final sync before moving to criteria page to ensure all edits/regenerations are saved
-            await fetch(`${apiUrl}/api/v1/gemini/sync-jobdiva`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    jobId,
-                    aiDescription,
-                    jobNotes,
-                    workAuthorization: workAuthorization,
-                    recruiterEmail: recruiterEmails,
-                }),
-            });
-            router.push(`/jobs/${jobId}/review-and-set-criteria`);
-        } catch (e) {
-            console.error("Final sync failed:", e);
-            // Navigate anyway if sync fails, but log it
-            router.push(`/jobs/${jobId}/review-and-set-criteria`);
-        }
-        setLoading(false);
-    };
-
-
-    // Helper to update a specific skill
-    const updateSkill = (index: number, field: string, value: string) => {
-        const updated = [...(hardSkills || [])];
-        updated[index] = { ...updated[index], [field]: value };
-        setHardSkills(updated);
-    };
-
-
-    const removeSkill = (index: number) => {
-        const updated = (hardSkills || []).filter((_, i) => i !== index);
-        setHardSkills(updated);
-    };
-
-
-    const addSkill = () => {
-        setHardSkills([...(hardSkills || []), { name: "New Skill", seniority: "Mid", priority: "Must Have" }]);
+      setJobTitle(data.title || "");
+      setJobPosting(data.description || "");
+      setPageSubtitle(`${displayData.title} · ${displayData.customer}`);
+      setIsFetched(true);
+      showToast("Job data loaded from JobDiva.", "success");
+    } catch (error) {
+      console.error("Error fetching job:", error);
+      showToast("Failed to fetch job. Check the Job ID.", "info");
+    } finally {
+      setIsFetching(false);
     }
+  };
 
-    return (
-        <div className="container mx-auto py-10">
-            <div>
-                <h1 className="text-3xl font-bold tracking-tight bg-hoonr-gradient text-transparent bg-clip-text inline-block">Create New Job</h1>
-                <p className="text-muted-foreground mt-1">AI-Assisted Job Creation & Candidate Matching</p>
-            </div>
+  const handleEnhanceJob = async (titleOverride?: string, descOverride?: string, notesOverride?: string) => {
+    setIsGeneratingJD(true);
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+      const response = await fetch(`${apiUrl}/api/v1/gemini/jobs/${jobId || 'new'}/generate-description`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jobTitle: titleOverride || jobTitle,
+          jobDescription: descOverride || jobData?.description || jobPosting,
+          jobNotes: notesOverride === undefined ? recruiterNotes : notesOverride,
+          workAuthorization: selectedEmpTypes.join(", ")
+        })
+      });
 
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error("Enhance failed:", errorText);
+        throw new Error("Failed to generate JD");
+      }
+      
+      const data = await response.json();
+      setJobPosting(data.description);
+      showToast("AI Job Description enriched!", "success");
+    } catch (error) {
+      console.error("Enhance error:", error);
+      showToast("AI enhancement failed. Please try again.", "info");
+    } finally {
+      setIsGeneratingJD(false);
+    }
+  };
 
-            {/* Progress */}
-            <div className="flex items-center gap-4 text-sm">
-                <div className={`px-4 py-2 rounded-full border ${step >= 1 ? 'bg-primary/10 border-primary text-primary' : 'bg-muted'}`}>1. Input JD</div>
-                <div className="w-8 h-px bg-border"></div>
-                <div className={`px-4 py-2 rounded-full border ${step >= 2 ? 'bg-primary/10 border-primary text-primary' : 'bg-muted'}`}>2. Review Criteria</div>
-                <div className="w-8 h-px bg-border"></div>
-                <div className={`px-4 py-2 rounded-full border ${step >= 3 ? 'bg-primary/10 border-primary text-primary' : 'bg-muted'}`}>3. Candidates</div>
-            </div>
+  const handleEnhanceTitle = async () => {
+    if (!jobTitle) return;
+    setIsEnhancingTitle(true);
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+      const res = await fetch(`${apiUrl}/api/v1/gemini/jobs/generate-title`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          jobTitle, 
+          jobNotes: recruiterNotes,
+          jobDescription: jobPosting 
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setJobTitle(data.title);
+        showToast("Title enhanced by PAIR.", "success");
+      } else {
+        const err = await res.text();
+        console.error("Title enhance failed:", err);
+        showToast("Failed to enhance title.", "info");
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setIsEnhancingTitle(false);
+    }
+  };
 
+  const handleAddEmail = () => {
+    const trimmed = emailInput.trim();
+    if (trimmed && /^\S+@\S+\.\S+$/.test(trimmed) && !recruiterEmails.includes(trimmed)) {
+      setRecruiterEmails([...recruiterEmails, trimmed]);
+      setEmailInput("");
+      setEmailError(false);
+      setIsInputInvalid(false);
+      setEmailErrorMessage("");
+    } else if (trimmed && !/^\S+@\S+\.\S+$/.test(trimmed)) {
+      setIsInputInvalid(true);
+    }
+  };
 
-            {/* Step 1: Input */}
-            {step === 1 && (
-                <Card>
-                    <CardHeader>
-                        <CardTitle>Job Description</CardTitle>
-                        <CardDescription>All jobs must be imported from JobDiva. Enter the Job ID below to begin.</CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                        <div className="space-y-4">
-                            <div className="flex gap-4 mb-4">
-                                <Input
-                                    placeholder="Enter Job ID (e.g. 26-12345)"
-                                    value={jobId}
-                                    onChange={(e) => setJobId(e.target.value)}
-                                />
-                                <Button onClick={handleFetchJob} disabled={!jobId || loading} variant="outline">
-                                    {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                                    <Download className="mr-2 h-4 w-4" /> Import
-                                </Button>
-                            </div>
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" || e.key === "," || e.key === ";") {
+      e.preventDefault();
+      handleAddEmail();
+    }
+  };
 
-                            {title && (
-                                <div className="grid grid-cols-2 gap-4 mb-4 p-4 border rounded-lg bg-muted/40">
-                                    <div className="space-y-2">
-                                        <Label>Job Title</Label>
-                                        <Input value={title} readOnly className="bg-muted text-muted-foreground cursor-not-allowed" />
-                                    </div>
-                                    <div className="space-y-2">
-                                        <Label>Customer Name</Label>
-                                        <Input value={customerName} readOnly className="bg-muted text-muted-foreground cursor-not-allowed" />
-                                    </div>
-                                    <div className="space-y-2">
-                                        <Label>Job Status</Label>
-                                        <div className="flex items-center gap-2">
-                                            <Input
-                                                value={jobStatus.charAt(0).toUpperCase() + jobStatus.slice(1).toLowerCase()}
-                                                readOnly
-                                                className="bg-muted text-muted-foreground cursor-not-allowed flex-1"
-                                            />
-                                            <Button
-                                                variant="outline"
-                                                size="sm"
-                                                onClick={handleFetchJob}
-                                                title="Refresh status from JobDiva"
-                                            >
-                                                <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-                                            </Button>
-                                        </div>
-                                        <p className="text-xs text-muted-foreground">Status updates automatically from JobDiva every 5 minutes.</p>
-                                    </div>
-                                    <div className="space-y-2">
-                                        <Label className="flex items-center justify-between">
-                                            <span>Recruiter Email <span className="text-destructive">*</span></span>
-                                            {recruiterEmails && (
-                                                <span className="flex items-center gap-1 text-[10px] font-medium uppercase tracking-wider">
-                                                    {getEmailValidationStatus(recruiterEmails).status === 'valid' ? (
-                                                        <>
-                                                            <CheckCircle2 className="w-3 h-3 text-green-500" />
-                                                            <span className="text-green-600">Valid</span>
-                                                        </>
-                                                    ) : (
-                                                        <>
-                                                            <XCircle className="w-3 h-3 text-destructive" />
-                                                            <span className="text-destructive">Invalid</span>
-                                                        </>
-                                                    )}
-                                                </span>
-                                            )}
-                                        </Label>
-                                        <div className="relative">
-                                            <Input
-                                                value={recruiterEmails}
-                                                onChange={(e) => {
-                                                    const newVal = e.target.value;
-                                                    setRecruiterEmails(newVal);
-                                                    // Immediate validation check
-                                                    if (getEmailValidationStatus(newVal).status === 'valid') {
-                                                        setEmailError(false);
-                                                    }
-                                                }}
-                                                placeholder="recruiter@example.com"
-                                                className={cn(
-                                                    "transition-all duration-200",
-                                                    recruiterEmails && getEmailValidationStatus(recruiterEmails).status === 'invalid' && "border-destructive focus-visible:ring-destructive bg-destructive/5",
-                                                    recruiterEmails && getEmailValidationStatus(recruiterEmails).status === 'valid' && "border-green-500/50 focus-visible:ring-green-500 bg-green-50/30"
-                                                )}
-                                            />
-                                        </div>
-                                        {getEmailValidationStatus(recruiterEmails).status === 'invalid' && (
-                                            <p className="text-[11px] font-medium text-destructive transition-colors">
-                                                {getEmailValidationStatus(recruiterEmails).message}
-                                            </p>
-                                        )}
-                                    </div>
-                                    <div className="space-y-2 col-span-2">
-                                        <Label>Job Notes</Label>
-                                        <Textarea
-                                            value={jobNotes}
-                                            onChange={(e) => setJobNotes(e.target.value)}
-                                            placeholder="Enter your notes here..."
-                                            className="min-h-[80px]"
-                                        />
-                                        <p className="text-xs text-muted-foreground">Add hiring manager notes, intake call notes, or any important job-related information.</p>
-                                    </div>
-                                    <div className="space-y-2 col-span-2">
-                                        <Label>Work Authorization</Label>
-                                        <Input
-                                            value={workAuthorization}
-                                            onChange={(e) => setWorkAuthorization(e.target.value)}
-                                            placeholder="e.g. US Citizen, Green Card, H1B, Any"
-                                        />
-                                        <p className="text-xs text-muted-foreground">Specify required work authorization for this role.</p>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
+  const removeEmail = (email: string) => {
+    setRecruiterEmails(recruiterEmails.filter(e => e !== email));
+  };
 
-                        {jdText && (
-                            <div className="space-y-2 pt-4 border-t">
-                                <Label>JobDiva Original Description</Label>
-                                <div className="rounded-md border bg-muted/20 p-4 max-h-60 overflow-y-auto text-sm whitespace-pre-wrap">
-                                    {jdText}
-                                </div>
-                                <p className="text-xs text-muted-foreground italic">Raw description imported from JobDiva.</p>
-                            </div>
-                        )}
-
-                        {aiDescription && (
-                            <div className="mt-8 space-y-4 animate-in fade-in slide-in-from-bottom-4 duration-700">
-                                <div className="flex items-center justify-between">
-                                    <div className="flex items-center gap-2">
-                                        <Wand2 className="w-5 h-5 text-foreground" />
-                                        <div>
-                                            <h3 className="font-semibold text-base">AI Generated Posting Description</h3>
-                                        </div>
-                                    </div>
-                                    <div className="flex gap-2">
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            className="h-9"
-                                            onClick={handleUpdateDescription}
-                                            disabled={isGenerating}
-                                        >
-                                            <RotateCcw className={`h-4 w-4 mr-2 ${isGenerating ? 'animate-spin' : ''}`} />
-                                            Regenerate
-                                        </Button>
-                                        <Button
-                                            variant="outline"
-                                            size="sm"
-                                            className="h-9"
-                                            onClick={async () => {
-                                                try {
-                                                    const contentNode = document.getElementById('ai-jd-content');
-                                                    if (contentNode && window.ClipboardItem) {
-                                                        const htmlBlob = new Blob([contentNode.innerHTML], { type: 'text/html' });
-                                                        const textBlob = new Blob([aiDescription], { type: 'text/plain' });
-                                                        await navigator.clipboard.write([
-                                                            new window.ClipboardItem({
-                                                                'text/html': htmlBlob,
-                                                                'text/plain': textBlob
-                                                            })
-                                                        ]);
-                                                        alert("Copied to clipboard with formatting!");
-                                                    } else {
-                                                        throw new Error("Fallback");
-                                                    }
-                                                } catch (err) {
-                                                    navigator.clipboard.writeText(aiDescription);
-                                                    alert("Copied to clipboard as plain text!");
-                                                }
-                                            }}
-                                        >
-                                            <Copy className="h-4 w-4 mr-2" />
-                                            Copy
-                                        </Button>
-                                    </div>
-                                </div>
-
-                                <div className="rounded-xl border border-border bg-background shadow-sm overflow-hidden" id="ai-jd-content">
-                                    <div className="px-6 py-6 text-sm text-foreground">
-                                        <AIPostingJobDescription text={aiDescription} />
-                                    </div>
-                                </div>
-
-                                <div className="mt-8 space-y-5 pt-8 border-t border-dashed">
-                                    <div className="flex items-center gap-2">
-                                        <Globe className="w-5 h-5 text-muted-foreground mr-1" />
-                                        <div>
-                                            <h4 className="font-bold text-base text-foreground">External Job Board Selection</h4>
-                                            <p className="text-xs text-muted-foreground italic">Select where you'd like to post this job.</p>
-                                        </div>
-                                    </div>
-                                    <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
-                                        {JOB_BOARDS.map((board) => {
-                                            const isSkip = board.id === "skip";
-                                            const skipSelected = selectedBoards.includes("skip");
-                                            const isSelected = selectedBoards.includes(board.id);
-                                            const isDisabled = !isSkip && skipSelected;
-
-                                            return (
-                                                <div 
-                                                    key={board.id} 
-                                                    className={cn(
-                                                        "group flex items-center space-x-3 rounded-xl border p-4 transition-all duration-200 select-none",
-                                                        isSelected 
-                                                            ? "border-primary bg-primary/5 shadow-sm" 
-                                                            : "border-border hover:border-primary/40 hover:bg-muted/30",
-                                                        isDisabled && "opacity-40 grayscale cursor-not-allowed border-dashed bg-muted/10"
-                                                    )}
-                                                    onClick={() => {
-                                                        if (isDisabled) return;
-                                                        if (isSkip) {
-                                                            if (isSelected) {
-                                                                setSelectedBoards([]);
-                                                            } else {
-                                                                setSelectedBoards(["skip"]);
-                                                            }
-                                                        } else {
-                                                            if (isSelected) {
-                                                                setSelectedBoards(selectedBoards.filter(b => b !== board.id));
-                                                            } else {
-                                                                setSelectedBoards([...selectedBoards, board.id]);
-                                                            }
-                                                        }
-                                                    }}
-                                                >
-                                                    <div className={cn(
-                                                        "flex h-5 w-5 items-center justify-center rounded border transition-colors",
-                                                        isSelected ? "bg-primary border-primary" : "border-input group-hover:border-primary/50"
-                                                    )}>
-                                                        {isSelected && <CheckCircle2 className="h-3.5 w-3.5 text-primary-foreground" />}
-                                                    </div>
-                                                    <Label 
-                                                        className={cn(
-                                                            "text-sm font-semibold cursor-pointer transition-colors",
-                                                            isSelected ? "text-primary" : "text-muted-foreground group-hover:text-foreground",
-                                                            isDisabled && "cursor-not-allowed"
-                                                        )}
-                                                    >
-                                                        {board.name}
-                                                    </Label>
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                    {selectedBoards.includes("skip") ? (
-                                        <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 flex items-start gap-3 animate-in zoom-in-95 duration-200">
-                                            <ShieldAlert className="w-4 h-4 text-amber-500 mt-0.5" />
-                                            <div className="text-xs text-amber-700 font-medium">
-                                                External job board posting is skipped. No outreach will be sent to the posting team.
-                                            </div>
-                                        </div>
-                                    ) : selectedBoards.length > 0 ? (
-                                        <div className="bg-green-500/5 border border-green-500/20 rounded-lg p-3 flex items-start gap-3 animate-in zoom-in-95 duration-200">
-                                            <CheckCircle2 className="w-4 h-4 text-green-600 mt-0.5" />
-                                            <div className="text-xs text-green-700 font-medium">
-                                                External job board posting selected. Outreach will be sent to the posting team.
-                                            </div>
-                                        </div>
-                                    ) : null}
-                                </div>
-                            </div>
-                        )}
-
-                        {!aiDescription ? (
-                            <Button
-                                onClick={handleUpdateDescription}
-                                disabled={isGenerating || (!jdText && !jobNotes)}
-                                className="w-full bg-purple-600 hover:bg-purple-700 text-white mt-8 h-12 shadow-lg shadow-purple-500/20 group relative overflow-hidden transition-all active:scale-[0.98]"
-                            >
-                                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
-                                {isGenerating ? (
-                                    <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                                ) : (
-                                    <Wand2 className="mr-2 h-5 w-5 group-hover:rotate-12 transition-transform" />
-                                )}
-                                <span className="font-semibold text-base">Update Posting Description</span>
-                            </Button>
-                        ) : (
-                            <Button 
-                                onClick={handleGoToReview}
-                                disabled={loading || !jobId}
-                                className="w-full bg-hoonr-gradient text-white mt-8 h-12 shadow-lg shadow-primary/20 transition-all active:scale-[0.98]"
-                            >
-                                {loading ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Plus className="mr-2 h-5 w-5" />}
-                                <span className="font-semibold text-base">Review & Set Criteria</span>
-                            </Button>
-                        )}
-                    </CardContent>
-                </Card >
-            )
-            }
-
-
-
-            {/* Step 2: Review */}
-            {
-                step === 2 && (
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                        <div className="col-span-2 space-y-6">
-                            <Card>
-                                <CardHeader className="flex flex-row items-center justify-between">
-                                    <div>
-                                        <CardTitle>Skills & Requirements</CardTitle>
-                                        <CardDescription>Refine the extraction.</CardDescription>
-                                    </div>
-                                    <Button size="sm" variant="outline" onClick={addSkill}><Plus className="h-4 w-4 mr-2" /> Add Skill</Button>
-                                </CardHeader>
-                                <CardContent>
-                                    <Table>
-                                        <TableHeader>
-                                            <TableRow>
-                                                <TableHead>Skill Name</TableHead>
-                                                <TableHead className="w-32">Seniority</TableHead>
-                                                <TableHead className="w-32">Priority</TableHead>
-                                                <TableHead className="w-12"></TableHead>
-                                            </TableRow>
-                                        </TableHeader>
-                                        <TableBody>
-                                            {(hardSkills || []).map((skill, i) => (
-                                                <TableRow key={i}>
-                                                    <TableCell>
-                                                        <Input
-                                                            value={skill.name || ""}
-                                                            onChange={(e) => updateSkill(i, 'name', e.target.value)}
-                                                            className="h-8"
-                                                        />
-                                                    </TableCell>
-                                                    <TableCell>
-                                                        <Select value={skill.seniority || "Mid"} onValueChange={(v) => updateSkill(i, 'seniority', v)}>
-                                                            <SelectTrigger className="h-8 text-xs">
-                                                                <SelectValue />
-                                                            </SelectTrigger>
-                                                            <SelectContent>
-                                                                <SelectItem value="Junior">Junior</SelectItem>
-                                                                <SelectItem value="Mid">Mid</SelectItem>
-                                                                <SelectItem value="Senior">Senior</SelectItem>
-                                                            </SelectContent>
-                                                        </Select>
-                                                    </TableCell>
-                                                    <TableCell>
-                                                        <Select value={skill.priority || "Must Have"} onValueChange={(v) => updateSkill(i, 'priority', v)}>
-                                                            <SelectTrigger className="h-8 text-xs">
-                                                                <SelectValue />
-                                                            </SelectTrigger>
-                                                            <SelectContent>
-                                                                <SelectItem value="Must Have">Must Have</SelectItem>
-                                                                <SelectItem value="Flexible">Flexible</SelectItem>
-                                                            </SelectContent>
-                                                        </Select>
-                                                    </TableCell>
-                                                    <TableCell>
-                                                        <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-destructive" onClick={() => removeSkill(i)}>
-                                                            <Trash2 className="h-4 w-4" />
-                                                        </Button>
-                                                    </TableCell>
-                                                </TableRow>
-                                            ))}
-                                        </TableBody>
-                                    </Table>
-                                </CardContent>
-                            </Card>
-                        </div>
-
-
-                        <div className="space-y-6">
-                            <Card>
-                                <CardHeader>
-                                    <CardTitle>Job Details</CardTitle>
-                                </CardHeader>
-                                <CardContent className="space-y-4">
-                                    <div className="space-y-2">
-                                        <Label>Job Title</Label>
-                                        <Input 
-                                            value={title} 
-                                            onChange={(e) => setTitle(e.target.value)}
-                                            readOnly={!!jobId}
-                                            className={!!jobId ? "bg-muted cursor-not-allowed" : ""}
-                                        />
-                                    </div>
-
-                                    <div className="grid grid-cols-2 gap-4">
-                                        <div className="space-y-2">
-                                            <Label>Location Type</Label>
-                                            {!!jobId ? (
-                                                <Input 
-                                                    value={locationType || "Unspecified"} 
-                                                    readOnly 
-                                                    className="bg-muted cursor-not-allowed font-medium text-primary" 
-                                                />
-                                            ) : (
-                                                <Select value={locationType || "Onsite"} onValueChange={setLocationType}>
-                                                    <SelectTrigger>
-                                                        <SelectValue />
-                                                    </SelectTrigger>
-                                                    <SelectContent>
-                                                        <SelectItem value="Onsite">Onsite</SelectItem>
-                                                        <SelectItem value="Hybrid">Hybrid</SelectItem>
-                                                        <SelectItem value="Remote">Remote</SelectItem>
-                                                    </SelectContent>
-                                                </Select>
-                                            )}
-                                        </div>
-                                        <div className="space-y-2">
-                                            <Label>Location (City/State)</Label>
-                                            <Input
-                                                placeholder="e.g. New York, NY"
-                                                value={location}
-                                                onChange={(e) => setLocation(e.target.value)}
-                                                readOnly={!!jobId}
-                                                className={!!jobId ? "bg-muted cursor-not-allowed" : ""}
-                                            />
-                                        </div>
-                                    </div>
-
-                                    {/* Source Filters */}
-                                    <div className="space-y-4 pt-4 border-t border-dashed">
-                                        <div className="space-y-2">
-                                            <Label>Candidate Sources</Label>
-                                            <div className="flex flex-col gap-2">
-                                                <div className="flex gap-4">
-                                                    <label className="flex items-center gap-2 cursor-pointer">
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={sourceFilters.vetted}
-                                                            onChange={(e) => setSourceFilters({ ...sourceFilters, vetted: e.target.checked })}
-                                                            className="w-4 h-4 accent-purple-600"
-                                                        />
-                                                        <span>Vetted DB</span>
-                                                    </label>
-                                                    <label className="flex items-center gap-2 cursor-pointer">
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={sourceFilters.jobdiva}
-                                                            onChange={(e) => setSourceFilters({ ...sourceFilters, jobdiva: e.target.checked })}
-                                                            className="w-4 h-4 accent-purple-600"
-                                                        />
-                                                        <span>JobDiva</span>
-                                                    </label>
-                                                    <label className="flex items-center gap-2 cursor-pointer">
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={sourceFilters.linkedin}
-                                                            onChange={(e) => setSourceFilters({ ...sourceFilters, linkedin: e.target.checked })}
-                                                            className="w-4 h-4 accent-purple-600"
-                                                        />
-                                                        <span>LinkedIn (Unipile)</span>
-                                                    </label>
-                                                </div>
-                                            </div>
-
-                                            {/* LinkedIn Config */}
-                                            {sourceFilters.linkedin && (
-                                                <div className="p-3 bg-blue-50 dark:bg-blue-900/10 rounded-md border border-blue-100 dark:border-blue-900/20">
-                                                    <label className="flex items-center gap-2 cursor-pointer">
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={openToWork}
-                                                            onChange={(e) => setOpenToWork(e.target.checked)}
-                                                            className="w-4 h-4 accent-blue-600"
-                                                        />
-                                                        <span className="text-sm font-medium text-blue-700 dark:text-blue-300">
-                                                            "Open to Work" Only
-                                                        </span>
-                                                    </label>
-                                                    <p className="text-xs text-muted-foreground mt-1 ml-6">
-                                                        Restricts search to candidates signaling they are open to new opportunities.
-                                                    </p>
-                                                </div>
-                                            )}
-                                        </div>
-                                    </div>
-                                </CardContent>
-                            </Card>
-
-
-                            <Card>
-                                <CardHeader>
-                                    <CardTitle>Soft Skills</CardTitle>
-                                </CardHeader>
-                                <CardContent>
-                                    <div className="flex flex-wrap gap-2">
-                                        {(softSkills || []).map((skill, i) => (
-                                            <Badge key={i} variant="outline" className="text-xs">
-                                                {skill}
-                                            </Badge>
-                                        ))}
-                                    </div>
-                                </CardContent>
-                            </Card>
-
-
-
-
-                        </div>
-                    </div>
-                )
-            }
-
-
-            {/* Step 3: Candidates */}
-            {
-                step === 3 && (
-                    <div className="space-y-6">
-                        <Card>
-                            <CardHeader>
-                                <CardTitle>Matched Candidates</CardTitle>
-                                <CardDescription>Based on <strong>{title}</strong> requirements ({locationType}).</CardDescription>
-                            </CardHeader>
-                            <CardContent>
-                                <CandidateTable
-                                    candidates={candidates}
-                                    onView={handleViewResume}
-                                    selectedIds={selectedIds}
-                                    onSelectionChange={setSelectedIds}
-                                />
-                            </CardContent>
-                        </Card>
-                        <div className="flex justify-between items-center">
-                            <div className="text-sm text-muted-foreground">
-                                {selectedIds.length} candidates selected
-                            </div>
-                            <div className="flex gap-2">
-                                <Button variant="outline" onClick={() => setStep(2)}>Adjust Filters</Button>
-                                <Button
-                                    onClick={handleAnalyze}
-                                    disabled={selectedIds.length === 0 || analysisLoading}
-                                    className="bg-purple-600 hover:bg-purple-700 text-white"
-                                >
-                                    {analysisLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
-                                    Analyze Selected with AI
-                                </Button>
-                            </div>
-                        </div>
-
-
-                        {/* Analysis Results Dashboard */}
-                        {showAnalysis && (
-                            <Card className="border-purple-200 bg-purple-50/10 dark:bg-purple-900/10 overflow-hidden">
-                                <CardHeader className="bg-purple-100/5 dark:bg-purple-900/20 border-b border-purple-200/10">
-                                    <div className="flex items-center gap-3">
-                                        <div className="p-2 bg-purple-500/20 rounded-lg">
-                                            <Gavel className="w-5 h-5 text-purple-400" />
-                                        </div>
-                                        <div>
-                                            <CardTitle>Tribunal Analysis</CardTitle>
-                                            <CardDescription>AI-driven evaluation of candidate fit and career narrative.</CardDescription>
-                                        </div>
-                                    </div>
-                                </CardHeader>
-                                <CardContent className="p-0">
-                                    {analysisLoading ? (
-                                        <div className="flex flex-col items-center justify-center py-20">
-                                            <Loader2 className="h-10 w-10 animate-spin text-purple-600 mb-4" />
-                                            <p className="text-muted-foreground animate-pulse">Convening the Tribunal...</p>
-                                        </div>
-                                    ) : (
-                                        <Table>
-                                            <TableHeader className="bg-muted/50">
-                                                <TableRow>
-                                                    <TableHead className="w-20 text-center">Rank</TableHead>
-                                                    <TableHead>Candidate</TableHead>
-                                                    <TableHead className="text-center">Score</TableHead>
-                                                    <TableHead className="w-44">Tribunal Verdict</TableHead>
-                                                    <TableHead className="text-right">Actions</TableHead>
-                                                </TableRow>
-                                            </TableHeader>
-                                            <TableBody>
-                                                {analysisResults.sort((a, b) => b.score - a.score).map((res, i) => {
-                                                    const candidate = candidates.find(c => c.id === res.candidate_id);
-                                                    return (
-                                                        <TableRow key={i} className="group hover:bg-muted/50 cursor-pointer transition-colors" onClick={() => setViewingAnalysis(res)}>
-                                                            <TableCell className="text-center font-mono text-muted-foreground">#{i + 1}</TableCell>
-                                                            <TableCell>
-                                                                <div className="font-semibold">{candidate?.firstName} {candidate?.lastName}</div>
-                                                                <div className="text-xs text-muted-foreground truncate max-w-48">{candidate?.email}</div>
-                                                            </TableCell>
-                                                            <TableCell className="text-center">
-                                                                <div className="inline-flex items-center justify-center w-12 h-12 rounded-full border-4 border-muted/30 relative">
-                                                                    <span className={cn("text-sm font-bold",
-                                                                        res.score >= 80 ? "text-emerald-500" : res.score >= 50 ? "text-amber-500" : "text-rose-500"
-                                                                    )}>{res.score}</span>
-                                                                    <svg className="absolute w-full h-full -rotate-90" viewBox="0 0 36 36">
-                                                                        <path className={cn("fill-none stroke-current stroke-2",
-                                                                            res.score >= 80 ? "text-emerald-500" : res.score >= 50 ? "text-amber-500" : "text-rose-500"
-                                                                        )}
-                                                                            strokeDasharray={`${res.score}, 100`}
-                                                                            d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
-                                                                    </svg>
-                                                                </div>
-                                                            </TableCell>
-                                                            <TableCell>
-                                                                {res.tribunal_status ? (
-                                                                    <Badge variant="outline" className={cn("gap-1.5 py-1 pr-3",
-                                                                        res.tribunal_status === "Green" ? "bg-emerald-500/10 text-emerald-600 border-emerald-200" :
-                                                                            res.tribunal_status === "Red" ? "bg-rose-500/10 text-rose-600 border-rose-200" :
-                                                                                "bg-amber-500/10 text-amber-600 border-amber-200"
-                                                                    )}>
-                                                                        {res.tribunal_status === "Green" && <CheckCircle className="w-3.5 h-3.5" />}
-                                                                        {res.tribunal_status === "Red" && <ShieldAlert className="w-3.5 h-3.5" />}
-                                                                        {res.tribunal_status === "Yellow" && <AlertTriangle className="w-3.5 h-3.5" />}
-                                                                        {res.tribunal_status === "Green" ? "Top Potential" : res.tribunal_status === "Red" ? "High Risk" : "Solid"}
-                                                                    </Badge>
-                                                                ) : (
-                                                                    <span className="text-muted-foreground text-xs italic">Pending...</span>
-                                                                )}
-                                                            </TableCell>
-                                                            <TableCell className="text-right">
-                                                                <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); setViewingAnalysis(res); }}>
-                                                                    View Report <Eye className="ml-2 w-4 h-4" />
-                                                                </Button>
-                                                            </TableCell>
-                                                        </TableRow>
-                                                    )
-                                                })}
-                                            </TableBody>
-                                        </Table>
-                                    )}
-                                </CardContent>
-                            </Card>
-                        )}
-
-
-                        {/* Resume Viewer Dialog */}
-                        <Dialog open={resumeOpen} onOpenChange={setResumeOpen}>
-                            <DialogContent className="max-w-4xl max-h-[90vh] flex flex-col p-0 overflow-hidden bg-zinc-50 dark:bg-zinc-900">
-                                <DialogHeader className="p-6 border-b bg-background">
-                                    <DialogTitle className="text-xl">Resume: {viewingCandidate?.firstName} {viewingCandidate?.lastName}</DialogTitle>
-                                    <DialogDescription className="mt-2 text-sm text-muted-foreground">
-                                        {viewingCandidate?.email} • {viewingCandidate?.city}, {viewingCandidate?.state}
-                                    </DialogDescription>
-                                </DialogHeader>
-                                <div className="flex-1 overflow-y-auto p-8">
-                                    <div className="max-w-3xl mx-auto bg-white dark:bg-zinc-950 shadow-sm border p-10 min-h-full rounded-sm">
-                                        <div className="whitespace-pre-wrap text-sm font-serif leading-relaxed text-zinc-800 dark:text-zinc-300">
-                                            {resumeLoading ? (
-                                                <div className="flex items-center justify-center py-20 text-muted-foreground">
-                                                    <Loader2 className="h-6 w-6 animate-spin mr-2" />
-                                                    Loading resume content...
-                                                </div>
-                                            ) : (
-                                                resumeText ? (
-                                                    <HighlightText
-                                                        text={resumeText}
-                                                        keywords={hardSkills.map(s => s.name)}
-                                                    />
-                                                ) : (
-                                                    <div className="text-center italic text-muted-foreground py-20">No resume content available.</div>
-                                                )
-                                            )}
-                                        </div>
-                                    </div>
-                                </div>
-                            </DialogContent>
-                        </Dialog>
-
-
-                        {/* Analysis Detail Modal */}
-                        <Dialog open={!!viewingAnalysis} onOpenChange={(open) => !open && setViewingAnalysis(null)}>
-                            <DialogContent className="max-w-5xl h-[85vh] p-0 overflow-y-auto bg-background border-border">
-                                <div className="sr-only">
-                                    <DialogTitle>Analysis Report: {viewingAnalysis?.candidate_name}</DialogTitle>
-                                </div>
-                                <AnalysisCard result={viewingAnalysis} />
-                            </DialogContent>
-                        </Dialog>
-                    </div>
-                )
-            }
-        </div >
+  const toggleEmpType = (type: EmploymentType) => {
+    setSelectedEmpTypes(prev =>
+      prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]
     );
+  };
+
+  const toggleJobBoard = (board: string) => {
+    setSelectedJobBoards(prev =>
+      prev.includes(board) ? prev.filter(b => b !== board) : [...prev, board]
+    );
+  };
+
+  const StepIndicator = () => (
+    <div className="flex items-start mb-8 relative">
+      {Object.entries(STEP_LABELS).map(([step, label], index) => {
+        const stepNumber = parseInt(step) as Step;
+        const isActive = stepNumber === currentStep;
+        const isCompleted = stepNumber < currentStep;
+        const isClickable = stepNumber <= currentStep || (stepNumber === currentStep + 1 && !!jobData);
+        const isLast = index === Object.keys(STEP_LABELS).length - 1;
+
+        return (
+          <div key={step} className="flex-1 flex flex-col items-center relative z-10">
+            <div
+              className={`flex flex-col items-center w-full ${isClickable ? "cursor-pointer" : "cursor-not-allowed"}`}
+              onClick={() => isClickable && setCurrentStep(stepNumber)}
+            >
+              <div className="relative flex items-center justify-center w-full mb-3">
+                {/* Connector Line — pinned perfectly between bubbles */}
+                {!isLast && (
+                  <div
+                    className={`absolute top-1/2 left-[calc(50%+24px)] right-[-50%] h-[2.5px] -translate-y-1/2 -z-10 transition-colors duration-300 ${isCompleted ? "bg-[#10b981]" : "bg-slate-200"}`}
+                  />
+                )}
+
+                <div className={`
+                  w-10 h-10 rounded-full flex items-center justify-center text-[15px] font-bold transition-all duration-300 relative z-10
+                  ${isActive ? "bg-primary text-white shadow-[0_0_0_8px_rgba(99,102,241,0.12)]" : ""}
+                  ${isCompleted ? "bg-[#10b981] text-white" : ""}
+                  ${!isActive && !isCompleted ? "bg-slate-200 text-slate-500" : ""}
+                `}>
+                  {isCompleted ? <Check className="w-5 h-5 stroke-[3]" /> : stepNumber}
+                </div>
+              </div>
+              <span className={`text-[12px] font-medium transition-colors duration-200 whitespace-nowrap text-center
+                ${isActive ? "text-primary" : ""}
+                ${isCompleted ? "text-[#10b981]" : ""}
+                ${!isActive && !isCompleted ? "text-slate-400" : ""}
+              `}>
+                {label}
+              </span>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  // Helper component to format AI-generated postings with rich text rendering
+const AIPostingJobDescription = ({ text }: { text: string }) => {
+  const renderInline = (content: string) => {
+    // Parse [text](url), **bold** and *italic*
+    const parts = content.split(/(\[.*?\]\(.*?\)+|\*\*.*?\*\*|\*(?!\*).*?\*(?!\*))/g);
+    return parts.map((part, i) => {
+      if (part.startsWith('[') && part.includes('](') && part.endsWith(')')) {
+        const match = part.match(/\[(.*?)\]\((.*?)\)/);
+        if (match) {
+          return (
+            <a key={i} href={match[2]} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+              {match[1]}
+            </a>
+          );
+        }
+      } else if (part.startsWith('**') && part.endsWith('**')) {
+        return <strong key={i} className="font-semibold text-slate-900">{part.slice(2, -2)}</strong>;
+      } else if (part.startsWith('*') && part.endsWith('*')) {
+        return <em key={i} className="italic text-slate-800">{part.slice(1, -1)}</em>;
+      }
+      return <span key={i}>{part}</span>;
+    });
+  };
+
+  const formatLines = (rawText: string) => {
+    if (!rawText) return null;
+    return rawText.split('\n').map((line, index) => {
+      const trimmedLine = line.trim();
+      if (!trimmedLine) return <div key={index} className="h-2" />;
+
+      // Header check: starts with bold all caps or is just an all caps line
+      const isHeader = /^\*\*[A-Z\s]+\*\*$/.test(trimmedLine) || /^[A-Z\s]{3,25}$/.test(trimmedLine);
+      if (isHeader) {
+        const title = trimmedLine.replace(/\*\*/g, '').trim();
+        return (
+          <div key={index} className="text-[15px] font-semibold text-slate-900 mt-5 mb-2 first:mt-0 uppercase tracking-tight">
+            {title}
+          </div>
+        );
+      }
+
+      // Bullet points
+      if (trimmedLine.startsWith('•') || trimmedLine.startsWith('-')) {
+        const content = trimmedLine.replace(/^[•-]\s*/, '').trim();
+        return (
+          <div key={index} className="flex gap-2.5 ml-1 my-1.5 items-start">
+            <span className="text-slate-400 mt-1">•</span>
+            <div className="flex-1">{renderInline(content)}</div>
+          </div>
+        );
+      }
+
+      return (
+        <div key={index} className="mb-2 text-slate-600 leading-relaxed">
+          {renderInline(trimmedLine)}
+        </div>
+      );
+    });
+  };
+
+  return <div className="text-[13.5px] font-normal">{formatLines(text)}</div>;
+};
+
+const intakeStep = (
+    <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
+      {/* Card Header — reference style: no heavy background, very subtle gradient */}
+      <div className="flex flex-row items-start gap-4 px-7 py-6 border-b border-slate-100"
+        style={{ background: "linear-gradient(135deg, #f8f7ff 0%, #ffffff 60%)" }}>
+        <FileInput className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
+        <div>
+          <h2 className="text-[20px] font-semibold text-slate-900 leading-tight tracking-tight">Intake</h2>
+          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Fetch job details from JobDiva, then add any additional context for PAIR.</p>
+        </div>
+      </div>
+
+      <div className="p-7 space-y-7">
+        {/* JobDiva Job ID */}
+        <div>
+          <label className="block text-[14px] font-medium text-slate-900 mb-3">JobDiva Job ID</label>
+          <div className="flex items-center gap-3">
+            <Input
+              placeholder="e.g. 26-08025"
+              value={jobId}
+              onChange={(e) => setJobId(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && handleFetchJob()}
+              className="max-w-[180px] h-[36px] bg-white border-slate-200 text-[13px]"
+            />
+            <button
+              onClick={handleFetchJob}
+              disabled={!jobId.trim() || isFetching}
+              className={`h-[36px] px-3.5 rounded-lg flex items-center gap-2 text-[13px] font-medium transition-all text-white disabled:opacity-50 disabled:cursor-not-allowed ${isFetched ? "bg-[#16a34a]" : "bg-primary hover:bg-[#5b21b6]"}`}
+            >
+              {isFetching ? (
+                <>
+                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  Fetching...
+                </>
+              ) : isFetched ? (
+                <>
+                  <Check className="w-4 h-4" />
+                  Fetched
+                </>
+              ) : (
+                <>
+                  <CloudDownload className="w-4 h-4" />
+                  Fetch from JobDiva
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {jobData && (
+          <>
+            {/* Data Grid — 3 column, bordered box, reference spec */}
+            <div className="border-t border-slate-100 pt-6">
+              <div
+                className="grid grid-cols-3 gap-y-5 gap-x-6 p-5 rounded-lg mb-6"
+                style={{ background: "#f8fafc", border: "1px solid #e2e8f0" }}
+              >
+                {[
+                  { label: "Job Title", value: jobData.title },
+                  { label: "Customer", value: jobData.customer_name || jobData.customer },
+                  {
+                    label: "Location",
+                    value: `${jobData.city || ""}, ${jobData.state || ""}`.trim() + (jobData.location_type ? ` (${jobData.location_type})` : "") || "Remote"
+                  },
+                  { label: "Openings", value: jobData.openings },
+                  { label: "Employment Type", value: jobData.employment_type },
+                  { label: "Pay Rate", value: jobData.pay_rate },
+                  { label: "Job Start Date", value: jobData.start_date },
+                  { label: "Job Posted Date", value: jobData.posted_date },
+                ].map(({ label, value }) => (
+                  <div key={label} className="flex flex-col gap-1">
+                    <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-slate-400">{label}</span>
+                    <span className="text-[14px] font-medium text-slate-900 truncate" title={value?.toString()}>{value}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Job Description */}
+              <div className="mb-5">
+                <label className="block text-[14px] font-medium text-slate-900 mb-2">
+                  Job Description{" "}
+                  <span className="text-slate-500 font-normal ml-1">— pulled from JobDiva</span>
+                </label>
+                <div
+                  className="rounded-md p-4 text-[13px] text-slate-900 leading-[1.75] max-h-[180px] overflow-y-auto whitespace-pre-wrap"
+                  style={{ background: "#f8fafc", border: "1px solid #e2e8f0" }}
+                >
+                  {jobData.description}
+                </div>
+              </div>
+
+              {/* Recruiter Notes */}
+              <div className="mb-10">
+                <label className="flex items-center gap-1.5 text-[14px] font-medium text-slate-900 mb-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-primary"><path d="M17.414 2.586a2 2 0 00-2.828 0L7 10.172V13h2.828l7.586-7.586a2 2 0 000-2.828z" /><path fillRule="evenodd" d="M2 6a2 2 0 012-2h4a1 1 0 010 2H4v10h10v-4a1 1 0 112 0v4a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" clipRule="evenodd" /></svg>
+                  Recruiter Notes
+                  <span className="text-slate-500 font-normal ml-0.5">— helps PAIR generate better output</span>
+                </label>
+                <Textarea
+                  placeholder="e.g. Client strongly prefers fintech background. Must be local to Atlanta metro — no relocation. W2 only, no C2C. Ideally someone with NetSuite over SAP. Start date is flexible but ASAP preferred..."
+                  value={recruiterNotes}
+                  onChange={(e) => setRecruiterNotes(e.target.value)}
+                  rows={3}
+                  className="text-[14px] border-slate-200 resize-y min-h-[100px]"
+                />
+              </div>
+
+              {/* Employment Type */}
+              <div className="mb-5">
+                <label className="block text-[14px] font-medium text-slate-900 mb-1">Employment Type</label>
+                <p className="text-[13px] text-slate-500 mb-3">Select all that apply for this role.</p>
+                <div className="flex flex-wrap gap-2">
+                  {(["W2", "1099", "C2C", "Full-Time"] as EmploymentType[]).map(type => (
+                    <button
+                      key={type}
+                      onClick={() => toggleEmpType(type)}
+                      className={`px-4 py-1.5 rounded-full border text-[13px] font-medium transition-all cursor-pointer ${selectedEmpTypes.includes(type)
+                          ? "bg-primary border-primary text-white"
+                          : "bg-white border-slate-300 text-slate-500 hover:border-primary hover:text-primary"
+                        }`}
+                    >
+                      {type}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="border-t border-slate-100 my-6" />
+
+              {/* PAIR Setup Section */}
+              <div className="flex items-center gap-2 mb-5">
+                <Settings className="w-5 h-5 text-slate-700 flex-shrink-0" />
+                <span className="text-[14px] font-bold text-slate-900">PAIR Setup</span>
+                <span className="text-[12px] text-slate-500 font-normal">Configure your screening before proceeding</span>
+              </div>
+
+              <div className="mb-7">
+                <label className="block text-[14px] font-medium text-slate-900 mb-2">
+                  Recruiter Email(s) <span className="text-red-500">*</span>
+                </label>
+                <div
+                  className={`flex flex-wrap items-center gap-1.5 border rounded-lg px-2.5 py-1.5 min-h-[44px] max-w-[480px] bg-white cursor-text transition-colors ${emailError || isInputInvalid ? 'border-red-400' : 'border-slate-200 focus-within:border-primary'}`}
+                  onClick={() => document.getElementById('recruiter-email-input')?.focus()}
+                >
+                  {recruiterEmails.map(email => (
+                    <span key={email} className="inline-flex items-center gap-1.5 bg-[#eff6ff] text-[#2563eb] text-[12px] font-medium px-3 py-1 rounded-full border border-[#bfdbfe]">
+                      {email}
+                      <button onClick={(e) => { e.stopPropagation(); removeEmail(email); }} className="text-[#3b82f6] hover:text-[#1d4ed8] ml-0.5 font-bold text-[14px]">×</button>
+                    </span>
+                  ))}
+                  <input
+                    id="recruiter-email-input"
+                    type="text"
+                    placeholder="you@pyramidci.com"
+                    value={emailInput}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setEmailInput(val);
+                      if (val) {
+                        const trimmed = val.trim();
+                        if (!trimmed.includes("@")) {
+                          setIsInputInvalid(true);
+                          setEmailErrorMessage("The @ symbol is missing.");
+                        } else {
+                          const atParts = trimmed.split("@");
+                          const domain = atParts[1];
+                          if (!domain || domain.trim() === "") {
+                            setIsInputInvalid(true);
+                            setEmailErrorMessage("Domain name is missing.");
+                          } else {
+                            const domainParts = domain.split(".");
+                            const tld = domainParts[domainParts.length - 1];
+                            const domainBody = domainParts.slice(0, -1).join('.');
+                            if (domainParts.length < 2 || !domainBody || !/^[a-zA-Z]{2,6}$/.test(tld)) {
+                              setIsInputInvalid(true);
+                              setEmailErrorMessage("Suffix is missing or invalid (e.g. .com, .org).");
+                            } else {
+                              setIsInputInvalid(false);
+                              setEmailErrorMessage("");
+                            }
+                          }
+                        }
+                      } else {
+                        setIsInputInvalid(false);
+                        setEmailErrorMessage("");
+                      }
+                    }}
+                    onKeyDown={handleKeyPress}
+                    onBlur={handleAddEmail}
+                    className="flex-1 min-w-[200px] border-none outline-none text-[14px] bg-transparent py-1 placeholder:text-slate-400"
+                  />
+                  {emailInput && (
+                    <span className="flex items-center gap-1.5 ml-auto text-[10px] font-bold uppercase tracking-wider pr-1">
+                      {!isInputInvalid ? (
+                        <>
+                          <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
+                          <span className="text-green-600">Valid</span>
+                        </>
+                      ) : (
+                        <>
+                          <span className="text-red-500">Invalid</span>
+                        </>
+                      )}
+                    </span>
+                  )}
+                </div>
+                {isInputInvalid && <p className="text-[11px] text-red-500 mt-1">{emailErrorMessage}</p>}
+                <p className="text-[12px] text-slate-500 mt-1.5">Press comma, semicolon, or Enter to add. You'll be notified when candidates complete the PAIR screen.</p>
+              </div>
+
+              {/* Screening Level */}
+              <div>
+                <label className="block text-[14px] font-medium text-slate-900 mb-1">Screening Level</label>
+                <p className="text-[13px] text-slate-500 mb-4">How deeply should PAIR screen each candidate?</p>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {/* L1 */}
+                  <div
+                    className={`flex-1 border-2 rounded-[10px] p-4 cursor-pointer transition-all ${screeningLevel === "L1" ? "border-primary bg-[#f5f3ff]" : "border-slate-200 hover:border-primary"}`}
+                    onClick={() => setScreeningLevel("L1")}
+                  >
+                    <div className="flex items-center gap-2 mb-3 flex-wrap">
+                      <span className="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide bg-[#ede9fe] text-[#5b21b6]">L1</span>
+                      <span className="font-semibold text-[14px] text-slate-900">Basic Screen</span>
+                    </div>
+                    <div className="flex flex-col gap-1.5 text-[12px]">
+                      <p className="flex items-start gap-1.5 text-slate-500"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><circle cx="12" cy="12" r="10" strokeWidth="2" /><polyline points="12 6 12 12 16 14" strokeWidth="2" /></svg> ~4–8 min call</p>
+                      <p className="flex items-start gap-1.5 text-slate-500 leading-snug"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg> Availability, location, work authorization, compensation, 1–2 skills-fit questions</p>
+                      <p className="flex items-start gap-1.5 text-[#166534] font-medium"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg> Higher volume of candidates collected</p>
+                      <p className="flex items-start gap-1.5 text-[#6b7280]"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM7 9a1 1 0 000 2h6a1 1 0 100-2H7z" clipRule="evenodd" /></svg> Less qualifying detail per candidate</p>
+                    </div>
+                  </div>
+
+                  {/* L1.5 */}
+                  <div
+                    className={`flex-1 border-2 rounded-[10px] p-4 cursor-pointer transition-all ${screeningLevel === "L1.5" ? "border-primary bg-[#f5f3ff]" : "border-slate-200 hover:border-primary"}`}
+                    onClick={() => setScreeningLevel("L1.5")}
+                  >
+                    <div className="flex items-center gap-2 mb-3 flex-wrap">
+                      <span className="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide bg-[#ede9fe] text-[#5b21b6]">L1.5</span>
+                      <span className="font-semibold text-[14px] text-slate-900">Standard Screen</span>
+                      <span className="text-[11px] bg-[#dcfce7] text-[#166534] px-2 py-0.5 rounded-full font-semibold">Recommended</span>
+                    </div>
+                    <div className="flex flex-col gap-1.5 text-[12px]">
+                      <p className="flex items-start gap-1.5 text-slate-500"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><circle cx="12" cy="12" r="10" strokeWidth="2" /><polyline points="12 6 12 12 16 14" strokeWidth="2" /></svg> ~8–12 min call</p>
+                      <p className="flex items-start gap-1.5 text-slate-500 leading-snug"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg> All L1 questions + 1–2 more skills-fit questions + probing</p>
+                      <p className="flex items-start gap-1.5 text-[#166534] font-medium"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg> Best balance of depth and candidate volume</p>
+                      <p className="flex items-start gap-1.5 text-[#6b7280]"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM7 9a1 1 0 000 2h6a1 1 0 100-2H7z" clipRule="evenodd" /></svg> Moderate drop-off vs. L1</p>
+                    </div>
+                  </div>
+
+                  {/* L2 */}
+                  <div
+                    className={`flex-1 border-2 rounded-[10px] p-4 cursor-pointer transition-all ${screeningLevel === "L2" ? "border-primary bg-[#f5f3ff]" : "border-slate-200 hover:border-primary"}`}
+                    onClick={() => setScreeningLevel("L2")}
+                  >
+                    <div className="flex items-center gap-2 mb-3 flex-wrap">
+                      <span className="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide bg-[#dcfce7] text-[#166534]">L2</span>
+                      <span className="font-semibold text-[14px] text-slate-900">Deep Screen</span>
+                    </div>
+                    <div className="flex flex-col gap-1.5 text-[12px]">
+                      <p className="flex items-start gap-1.5 text-slate-500"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><circle cx="12" cy="12" r="10" strokeWidth="2" /><polyline points="12 6 12 12 16 14" strokeWidth="2" /></svg> ~12–16 min call</p>
+                      <p className="flex items-start gap-1.5 text-slate-500 leading-snug"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg> All L1.5 topics + 1–2 more skills/cultural fit questions</p>
+                      <p className="flex items-start gap-1.5 text-[#166534] font-medium"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg> Richest candidate profiles, highest fit accuracy</p>
+                      <p className="flex items-start gap-1.5 text-[#6b7280]"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM7 9a1 1 0 000 2h6a1 1 0 100-2H7z" clipRule="evenodd" /></svg> Fewest completions — best for niche or senior roles</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+
+  const publishStep = (
+    <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
+      <div className="flex flex-row items-start gap-4 px-7 py-6 border-b border-slate-100"
+        style={{ background: "linear-gradient(135deg, #f8f7ff 0%, #ffffff 60%)" }}>
+        <Megaphone className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
+        <div>
+          <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight">Publish</h2>
+          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Review your PAIR-enhanced job posting and select where to publish externally.</p>
+        </div>
+      </div>
+      <div className="p-7">
+        <div className="flex flex-col lg:flex-row gap-6 items-start">
+          <div className="flex-1 w-full relative">
+            {/* Job Title Section */}
+            <div className="mb-6">
+              <label className="block text-[14px] font-bold text-slate-900 mb-2 ml-1">Job Title</label>
+              <div className="flex items-center gap-3">
+                <Input
+                  value={jobTitle}
+                  onChange={(e) => setJobTitle(e.target.value)}
+                  placeholder="Job Title"
+                  className="h-10 text-[14px] border-slate-200 focus:border-primary/50 focus:ring-primary/20 bg-white"
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleEnhanceTitle}
+                  disabled={isEnhancingTitle}
+                  className="h-10 px-4 flex items-center gap-2 border-slate-200 bg-white text-slate-900 hover:text-black shadow-sm text-[13px] font-bold rounded-lg disabled:opacity-50"
+                >
+                  <Sparkles className={`w-3.5 h-3.5 text-slate-900 ${isEnhancingTitle ? 'animate-pulse' : ''}`} />
+                  {isEnhancingTitle ? 'Enhancing...' : 'Enhance'}
+                </Button>
+              </div>
+              <p className="text-[11.5px] text-slate-400 mt-2 ml-1 font-normal italic">
+                Pre-filled from JobDiva. Edit or enhance for external posting.
+              </p>
+            </div>
+
+          <div className="flex items-center justify-between mb-3 mt-8">
+            <div className="bg-[#eef2ff] text-[#4f46e5] flex items-center gap-1.5 px-3 py-1 rounded-full text-[11.5px] font-medium border border-[#e0e7ff]">
+              <Sparkles className="w-3.5 h-3.5" />
+              PAIR-Enhanced Job Posting
+            </div>
+            <Button 
+              variant="outline" 
+              size="sm" 
+              onClick={() => handleEnhanceJob()}
+              disabled={isGeneratingJD}
+              className="h-9 px-4 flex items-center gap-2 border-slate-200 bg-white text-slate-900 shadow-sm text-[13px] font-bold rounded-xl hover:bg-slate-50 transition-all disabled:opacity-50"
+            >
+              <RotateCcw className={`w-3.5 h-3.5 text-slate-900 ${isGeneratingJD ? 'animate-spin' : ''}`} />
+              {isGeneratingJD ? 'Regenerating...' : 'Regenerate'}
+            </Button>
+          </div>
+          
+          {isEditingJD ? (
+            <div className="relative group">
+              <textarea
+                autoFocus
+                value={jobPosting}
+                onChange={(e) => setJobPosting(e.target.value)}
+                onBlur={() => setIsEditingJD(false)}
+                className="w-full bg-white border-2 border-primary/40 rounded-lg p-7 h-[500px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 text-[13.5px] font-normal leading-relaxed text-slate-900 focus-visible:outline-none focus:ring-4 focus:ring-primary/10 transition-all resize-none"
+                placeholder="Edit Markdown here..."
+              />
+              <div className="absolute top-4 right-4 bg-primary text-white text-[11px] font-bold px-3 py-1.5 rounded-md shadow-md pointer-events-none animate-in fade-in duration-200">
+                Click outside to save & preview
+              </div>
+            </div>
+          ) : (
+            <div 
+              onClick={() => setIsEditingJD(true)}
+              title="Click to edit job description"
+              className="bg-slate-50/50 border border-slate-200 rounded-lg p-7 h-[500px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 text-[13.5px] font-normal leading-relaxed text-slate-900 cursor-text hover:border-primary/40 hover:bg-white transition-colors group relative"
+            >
+              <div className="absolute top-4 right-4 bg-slate-200 text-slate-600 text-[11px] font-bold px-3 py-1.5 rounded-md shadow-sm opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                Click anywhere to edit
+              </div>
+              <AIPostingJobDescription text={jobPosting} />
+            </div>
+          )}
+        </div>
+
+          <div className="w-full lg:w-[240px] flex-shrink-0">
+            <label className="block text-[15px] font-bold text-slate-900 mb-4 ml-1">Publish To</label>
+            <div className="flex flex-col border border-slate-200 rounded-2xl bg-[#F8FAFC] p-2 shadow-sm">
+              {[
+                { name: "LinkedIn", icon: <Linkedin className="w-4 h-4 text-[#0A66C2]" /> },
+                { name: "Indeed", icon: <Search className="w-4 h-4 text-[#2164f3]" /> },
+                { name: "Dice", icon: <LayoutGrid className="w-4 h-4 text-[#1565c0]" /> },
+                { name: "ZipRecruiter", icon: <Zap className="w-4 h-4 text-[#00873E]" /> },
+                { name: "Glassdoor", icon: <Star className="w-4 h-4 text-[#0caa41]" /> },
+                { name: "Monster", icon: <PawPrint className="w-4 h-4 text-[#6d1f7e]" /> },
+                { name: "CareerBuilder", icon: <Building2 className="w-4 h-4 text-[#00a4bd]" /> },
+              ].map(board => (
+                <label key={board.name} className="flex items-center gap-3 p-2.5 hover:bg-white hover:shadow-sm cursor-pointer transition-all rounded-xl group/item">
+                  <Checkbox
+                    checked={selectedJobBoards.includes(board.name)}
+                    onCheckedChange={() => toggleJobBoard(board.name)}
+                    className="w-[18px] h-[18px] rounded-full border-slate-300 data-[state=checked]:bg-[#4f46e5] data-[state=checked]:border-[#4f46e5] transition-all"
+                  />
+                  <div className="flex items-center gap-3">
+                    <div className="transition-transform group-hover/item:scale-110 duration-200">
+                      {board.icon}
+                    </div>
+                    <span className="text-[14px] font-medium text-slate-700 group-hover/item:text-slate-900 transition-colors">
+                      {board.name}
+                    </span>
+                  </div>
+                </label>
+              ))}
+            </div>
+            <div className="flex items-start gap-2 mt-5 px-1">
+              <Info className="w-4 h-4 text-slate-400 mt-0.5 flex-shrink-0" />
+              <p className="text-[12px] text-slate-500 leading-snug font-medium">
+                Job posting team will receive your request to post after you Launch PAIR.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  const PlaceholderStep = ({ stepNumber, title }: { stepNumber: number; title: string }) => (
+    <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
+      <div className="p-12 text-center">
+        <div className="text-4xl text-gray-300 mb-4">🚧</div>
+        <h3 className="text-lg font-semibold text-gray-800 mb-2">Step {stepNumber}: {title}</h3>
+        <p className="text-gray-500">This step is coming soon. Continue with the previous steps to set up your job.</p>
+      </div>
+    </div>
+  );
+
+  const renderStepContent = () => {
+    switch (currentStep) {
+      case 1: return intakeStep;
+      case 2: return publishStep;
+      case 3: return <PlaceholderStep stepNumber={3} title="Establish Rubric" />;
+      case 4: return <PlaceholderStep stepNumber={4} title="Set Filters" />;
+      case 5: return <PlaceholderStep stepNumber={5} title="Launch & Source" />;
+      default: return null;
+    }
+  };
+
+  return (
+    <div className="p-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
+      {/* Breadcrumb */}
+      <div className="mb-5">
+        <Link href="/jobs" className="text-slate-500 hover:text-slate-700 text-[14px] flex items-center gap-2 transition-colors">
+          <ArrowLeft className="w-4 h-4" />
+          Back to Jobs
+        </Link>
+      </div>
+
+      {/* Page Header */}
+      <div className="mb-7">
+        <h1 className="text-[28px] font-bold text-slate-900 leading-none">New Job</h1>
+        {currentStep !== 2 && <p className="text-slate-500 text-[14px] mt-2">{pageSubtitle}</p>}
+      </div>
+
+      {/* Step Indicator */}
+      <StepIndicator />
+
+      {/* Step Content */}
+      {renderStepContent()}
+
+      {/* Wizard Navigation — reference spec: Back | Save & Exit … Next */}
+      <div className="flex items-center justify-between pt-5 border-t border-slate-100 mt-2">
+        <div className="flex items-center gap-3">
+          {currentStep > 1 && (
+            <Button
+              variant="outline"
+              className="h-11 px-5 border-slate-200 text-slate-700 font-semibold shadow-sm hover:bg-slate-50 flex items-center gap-2"
+              onClick={() => setCurrentStep((currentStep - 1) as Step)}
+            >
+              <ArrowLeft className="w-4 h-4" />
+              Back
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            className="h-11 px-5 border-slate-200 text-slate-700 font-semibold shadow-sm hover:bg-slate-50 flex items-center gap-2"
+            onClick={async () => {
+              if (!jobData) {
+                showToast("Fetch a job first before saving.", "info");
+                return;
+              }
+              if (recruiterEmails.length === 0) {
+                setEmailError(true);
+                showToast("Recruiter Email is required.", "info");
+                return;
+              }
+              try {
+                const payload = {
+                  ...jobData,
+                  recruiter_email: recruiterEmails[0] || "",
+                  job_notes: recruiterNotes,
+                };
+                const response = await fetch(`http://localhost:8001/jobs/${jobData.id || jobId}/save`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(payload)
+                });
+                if (response.ok) {
+                  showToast("Job saved successfully!", "success");
+                  setTimeout(() => router.push('/jobs'), 1000);
+                }
+              } catch (e) { console.error(e); }
+            }}
+          >
+            <Save className="w-4 h-4 text-slate-400" />
+            Save & Exit
+          </Button>
+        </div>
+
+        <div>
+          <Button
+            className="h-11 px-6 bg-primary hover:bg-primary/90 flex items-center gap-2 shadow-sm text-[15px] font-semibold text-white transition-all active:scale-95"
+            onClick={async () => {
+               if (currentStep === 1) {
+                if (!jobData) {
+                  showToast("Fetch a job first before saving.", "info");
+                  return;
+                }
+                if (recruiterEmails.length === 0) {
+                  setEmailError(true);
+                  showToast("Recruiter Email is required.", "info");
+                  return;
+                }
+
+                // AI Enhancement & Save before moving to next step
+                try {
+                  const payload = {
+                    ...jobData,
+                    recruiter_email: recruiterEmails[0] || "",
+                    job_notes: recruiterNotes,
+                  };
+                  
+                  // Save locally
+                  await fetch(`http://localhost:8001/jobs/${jobData.id || jobId}/save`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                  });
+
+                  // Trigger Enhancement
+                  await handleEnhanceJob();
+                  
+                } catch (e) {
+                  console.error("Next step preparation error:", e);
+                }
+              }
+              if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
+            }}
+            disabled={(currentStep === 1 && !jobData) || isGeneratingJD}
+          >
+            {isGeneratingJD ? (
+              <>
+                <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                Enriching...
+              </>
+            ) : (
+              <>
+                {currentStep === 5 ? "Complete Setup" : "Next"}
+                <ArrowRight className="w-5 h-5 ml-1" />
+              </>
+            )}
+          </Button>
+        </div>
+      </div>
+
+      {/* Toast Notification */}
+      {toast && (
+        <div
+          className={`fixed bottom-8 right-8 flex items-center gap-2.5 px-5 py-3 rounded-lg text-[14px] font-medium text-white shadow-xl z-50 transition-all duration-300 ${toast.type === "success" ? "bg-[#166534]" : "bg-primary"}`}
+        >
+          {toast.type === "success" ? (
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
+          ) : (
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" /></svg>
+          )}
+          {toast.message}
+        </div>
+      )}
+    </div>
+  );
 }

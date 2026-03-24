@@ -41,7 +41,13 @@ def get_field(data: Dict[str, Any], keys: List[str], default: Any = None) -> Any
     for key in keys:
         norm_key = normalize(key)
         if norm_key in normalized_data:
-            return normalized_data[norm_key]
+            val = normalized_data[norm_key]
+            # Handle JobDiva's nested date/time objects
+            if isinstance(val, dict):
+                for subkey in ["dateTime", "date", "value", "$"]:
+                    if subkey in val:
+                        return val[subkey]
+            return val
           
     return default
 
@@ -65,6 +71,44 @@ def format_job_description(raw_desc: str) -> str:
     desc = desc.strip()
   
     return desc
+
+def normalize_jobdiva_date(date_val: Any) -> str:
+    """
+    Format JobDiva date/timestamp into a readable YYYY-MM-DD format.
+    Handles numeric timestamps and ISO date strings.
+    """
+    if not date_val:
+        return ""
+    
+    # Handle numeric timestamp (milliseconds)
+    if isinstance(date_val, (int, float)) or (isinstance(date_val, str) and date_val.isdigit()):
+        try:
+            ts = int(date_val)
+            if ts > 10**11: # Likely milliseconds
+                ts = ts / 1000
+            return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%b %d, %Y")
+        except:
+            pass
+
+    # Handle string date formats
+    date_str = str(date_val).strip()
+    if not date_str:
+        return ""
+        
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            # We first parse then format to "Mar 18, 2026"
+            dt = datetime.strptime(date_str[:19].replace('T', ' '), "%Y-%m-%d %H:%M:%S" if ' ' in date_str[:19] else "%Y-%m-%d")
+            return dt.strftime("%b %d, %Y")
+        except:
+            try:
+                # Fallback for common formats
+                dt = datetime.fromisoformat(date_str.split('.')[0])
+                return dt.strftime("%b %d, %Y")
+            except:
+                continue
+                
+    return date_str # Return as-is if all parsing fails
 
 class JobDivaService:
     def __init__(self):
@@ -231,9 +275,14 @@ class JobDivaService:
                 u_fields = j.get("user fields", {}) or {}
                 ai_description = None
                 job_notes = None
+                salary_range_udf = None
+                issued_date_udf = None
                 for k, v in u_fields.items():
-                    if "AI Job Description" in k: ai_description = v
-                    if "Job Notes" in k or k == "231": job_notes = v
+                    k_low = k.lower()
+                    if "ai job description" in k_low: ai_description = v
+                    if "job notes" in k_low or k == "231": job_notes = v
+                    if "salary range" in k_low or "pay range" in k_low or "pay rate" in k_low: salary_range_udf = v
+                    if "issued date" in k_low or "posted date" in k_low or "date issued" in k_low: issued_date_udf = v
 
                 customer_name = str(get_field(j, ["customer", "company"]) or "").title() or "Unknown Customer"
                 description = format_job_description(get_field(j, ["job description", "description"]) or "")
@@ -251,21 +300,45 @@ class JobDivaService:
                         job_notes = local_notes
                         logger.info(f"Restored full job_notes from local DB for {job_id}")
 
+                # Advanced pay_rate logic: try to combine min and max if available for a range
+                p_min = get_field(j, ["minpayrate", "min_pay_rate", "minimum_pay", "payRateMin"])
+                p_max = get_field(j, ["maxpayrate", "max_pay_rate", "maximum_pay", "payRateMax"])
+                p_range = f"${p_min} - ${p_max}" if p_min and p_max else (p_min or p_max or "")
+                
+                # Improved Location Type detection
+                loc_type_raw = get_field(j, ["location type", "location_type", "position type", "work type", "assignment type", "jobType"]) or ""
+                loc_type = "Onsite" # Default
+                if "remote" in loc_type_raw.lower() or "remote" in description.lower():
+                    loc_type = "Remote"
+                elif "hybrid" in loc_type_raw.lower() or "hybrid" in description.lower():
+                    loc_type = "Hybrid"
+                elif "onsite" in loc_type_raw.lower() or "on-site" in loc_type_raw.lower() or "on-site" in description.lower() or "onsite" in description.lower():
+                    loc_type = "Onsite"
+                elif loc_type_raw:
+                    loc_type = loc_type_raw
+                
                 return {
                     "id": get_field(j, ["id", "jobId"]),
                     "title": get_field(j, ["job title", "title"]),
                     "description": description,
+                    "jobdiva_description": description, # Clarified for schema
                     "ai_description": ai_description,
                     "job_notes": job_notes,
                     "customer_name": customer_name,
+                    "customer": customer_name, # Database standard
                     "job_status": get_field(j, ["job status", "status"]) or "OPEN",
-                    "city": get_field(j, ["city", "jobCity"]),
-                    "state": get_field(j, ["state", "jobState"]),
-                    "zip": get_field(j, ["zip", "postalCode"]),
-                    "start_date": get_field(j, ["start date", "startDate", "available"]),
-                    "location_type": get_field(j, ["location type", "location_type", "position type", "work type", "assignment type", "jobType"]),
-                    "work_authorization": get_field(j, ["work authorization", "visa", "legal status"]) or (local_data.get("work_authorization") if local_data else ""),
-                    "recruiter_email": (local_data.get("recruiter_email") if local_data else "")
+                    "status": get_field(j, ["job status", "status"]) or "OPEN", # Database standard
+                    "city": get_field(j, ["city", "jobCity", "locationCity", "worksitecity"]),
+                    "state": get_field(j, ["state", "jobState", "locationState", "worksitestate", "province"]),
+                    "zip": get_field(j, ["zip", "postalCode", "zipcode", "postalcode", "worksitezip", "worksitepostalcode"]),
+                    "start_date": normalize_jobdiva_date(get_field(j, ["start date", "startDate", "available", "startdate"]) or (local_data.get("start_date") if local_data else "")),
+                    "posted_date": normalize_jobdiva_date(issued_date_udf or get_field(j, ["posted date", "date", "created date", "posted", "posteddate", "createtimestamp", "date_posted", "posted_at", "issued date", "issueddate", "issued_date"]) or (local_data.get("posted_date") if local_data else "")),
+                    "location_type": loc_type,
+                    "work_authorization": get_field(j, ["work_authorization", "visa", "legal status", "workauth", "work_auth", "work authorization"]) or (local_data.get("work_authorization") if local_data else ""),
+                    "recruiter_email": (local_data.get("recruiter_email") if local_data else ""),
+                    "pay_rate": salary_range_udf or p_range or get_field(j, ["pay rate", "salary range", "salary", "rate", "bill rate", "compensation", "billrate", "payrate"]) or (local_data.get("pay_rate") if local_data else ""),
+                    "openings": get_field(j, ["openings", "maxReturned", "positions", "number of openings", "openpositions"]) or (local_data.get("openings") if local_data else ""),
+                    "employment_type": get_field(j, ["employment type", "jobType", "assignmentType"]) or (local_data.get("employment_type") if local_data else "")
                 }
         except Exception as e:
             logger.error(f"SearchJob Error: {e}")
@@ -357,8 +430,11 @@ class JobDivaService:
                     # Update
                     update_parts = []
                     params = {"job_id": job_id}
+                    valid_columns = ["status", "customer", "title", "recruiter_email", "work_authorization", 
+                                     "ai_description", "job_notes", "added_at", "pay_rate", "openings", 
+                                     "posted_date", "start_date", "employment_type", "jobdiva_description", "city", "state", "zip"]
                     for k, v in data.items():
-                        if k in ["status", "customer", "title", "recruiter_email", "work_authorization", "ai_description", "job_notes", "added_at"]:
+                        if k in valid_columns:
                             update_parts.append(f"{k} = :{k}")
                             params[k] = v
                     
@@ -382,9 +458,39 @@ class JobDivaService:
                         "last_updated": readable_ist_now()
                     }
                     conn.execute(text("""
-                        INSERT INTO monitored_jobs (job_id, status, customer, title, recruiter_email, work_authorization, ai_description, job_notes, added_at, last_updated)
-                        VALUES (:job_id, :status, :customer, :title, :recruiter_email, :work_authorization, :ai_description, :job_notes, :added_at, :last_updated)
-                    """), params)
+                        INSERT INTO monitored_jobs (
+                            job_id, status, customer, title, recruiter_email, work_authorization, 
+                            ai_description, job_notes, added_at, last_updated,
+                            pay_rate, openings, posted_date, start_date, employment_type,
+                            jobdiva_description, city, state, zip
+                        )
+                        VALUES (
+                            :job_id, :status, :customer, :title, :recruiter_email, :work_authorization, 
+                            :ai_description, :job_notes, :added_at, :last_updated,
+                            :pay_rate, :openings, :posted_date, :start_date, :employment_type,
+                            :jobdiva_description, :city, :state, :zip
+                        )
+                    """), {
+                        "job_id": job_id,
+                        "status": data.get("status"),
+                        "customer": data.get("customer"),
+                        "title": data.get("title"),
+                        "recruiter_email": data.get("recruiter_email"),
+                        "work_authorization": data.get("work_authorization"),
+                        "ai_description": data.get("ai_description"),
+                        "job_notes": data.get("job_notes"),
+                        "added_at": data.get("added_at") or readable_ist_now(),
+                        "last_updated": readable_ist_now(),
+                        "pay_rate": data.get("pay_rate"),
+                        "openings": data.get("openings"),
+                        "posted_date": data.get("posted_date"),
+                        "start_date": data.get("start_date"),
+                        "employment_type": data.get("employment_type"),
+                        "jobdiva_description": data.get("jobdiva_description") or data.get("description"),
+                        "city": data.get("city"),
+                        "state": data.get("state"),
+                        "zip": data.get("zip")
+                    })
                 
                 conn.commit()
             return True

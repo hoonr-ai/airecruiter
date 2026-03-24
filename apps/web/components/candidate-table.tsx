@@ -292,8 +292,8 @@ function CandidateRow({
                         <a href={candidate.profile_url} target="_blank" rel="noopener noreferrer">
                             <Badge variant={candidate.source === "VettedDB" ? "default" : "outline"}
                                 className={
-                                    candidate.source === "VettedDB" ? "bg-purple-100 text-purple-700 hover:bg-purple-100 border-purple-200" :
-                                        candidate.source === "LinkedIn" ? "bg-blue-100 text-blue-700 hover:bg-blue-100 border-blue-200 cursor-pointer" : ""
+                                    candidate.source === "VettedDB" ? "bg-primary/10 text-primary hover:bg-primary/20 border-primary/20" :
+                                        candidate.source === "LinkedIn" ? "bg-sky-100 text-sky-700 hover:bg-sky-200 border-sky-200 cursor-pointer" : "bg-slate-100 text-slate-700 border-slate-200"
                                 }>
                                 {candidate.source || "JobDiva"}
                             </Badge>
@@ -301,8 +301,8 @@ function CandidateRow({
                     ) : (
                         <Badge variant={candidate.source === "VettedDB" ? "default" : "outline"}
                             className={
-                                candidate.source === "VettedDB" ? "bg-purple-100 text-purple-700 hover:bg-purple-100 border-purple-200" :
-                                    candidate.source === "LinkedIn" ? "bg-blue-100 text-blue-700 hover:bg-blue-100 border-blue-200" : ""
+                                candidate.source === "VettedDB" ? "bg-primary/10 text-primary hover:bg-primary/20 border-primary/20" :
+                                    candidate.source === "LinkedIn" ? "bg-sky-100 text-sky-700 hover:bg-sky-200 border-sky-200" : "bg-slate-100 text-slate-700 border-slate-200"
                             }>
                             {candidate.source || "JobDiva"}
                         </Badge>
@@ -325,9 +325,9 @@ function CandidateRow({
                     <Button
                         size="sm"
                         variant="outline"
-                        className={isMessaged ? "bg-green-50 text-green-600 border-green-200" :
-                            candidate.source === "LinkedIn" ? "hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200" :
-                                "hover:bg-orange-50 hover:text-orange-600 hover:border-orange-200"}
+                        className={isMessaged ? "bg-emerald-50 text-emerald-600 border-emerald-200" :
+                            candidate.source === "LinkedIn" ? "hover:bg-sky-50 hover:text-sky-600 hover:border-sky-200 shadow-sm" :
+                                "hover:bg-primary/5 hover:text-primary hover:border-primary/20 shadow-sm"}
                         onClick={(e) => { e.stopPropagation(); onMessageClick(); }}
                         disabled={isMessaged}
                     >
@@ -352,7 +352,7 @@ function CandidateRow({
                             <Button
                                 size="sm"
                                 variant="outline"
-                                className={assessed ? "bg-purple-50 text-purple-600 border-purple-200" : ""}
+                                className={assessed ? "bg-primary/5 text-primary border-primary/20" : ""}
                                 onClick={handleAssess}
                                 disabled={assessing || assessed}
                             >

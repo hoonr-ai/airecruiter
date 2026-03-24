@@ -15,10 +15,10 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini
 print(f"DEBUG: GEMINI_API_KEY loaded: {'Set' if GEMINI_API_KEY else 'NOT SET'}")
 
 class JobDescriptionRequest(BaseModel):
-    jobTitle: str
-    jobNotes: str
+    jobTitle: str = ""
+    jobNotes: str = ""
     workAuthorization: str = ""
-    jobDescription: str
+    jobDescription: str = ""
 
 class JobDivaSyncRequest(BaseModel):
     jobId: str
@@ -205,4 +205,75 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         jobdiva_service.monitor_job_locally(job_id, {"ai_description": description})
 
     return {"description": description}
+@router.post("/jobs/generate-title")
+async def generate_job_title(req: JobDescriptionRequest):
+    """
+    Generate a polished, professional job title based on the original title and notes.
+    """
+    prompt = (
+        "You are an expert recruitment copywriter. Your task is to polish a job title to make it catchy, professional, and clear for external posting.\n\n"
+        f"Original Title: {req.jobTitle}\n"
+        f"Job Notes Context: {req.jobNotes}\n"
+        f"Generated Job Description Content: {req.jobDescription}\n\n"
+        "MANDATORY GUIDELINES:\n"
+        "- BE AGGRESSIVE: If the original title is simple (e.g., 'Analyst'), you MUST enhance it based on the JD content (e.g., 'Senior Business Analyst — Remote').\n"
+        "- PRIORITY: Look for seniority (Senior/Junior), employment type (Contract/Hybrid/W2), and specialized skills in the 'Generated Job Description Content'.\n"
+        "- If appropriate, add clear suffixes like '— Remote', '— Contract', or '— Hybrid'.\n"
+        "- Ensure the title is concise (under 80 characters) but highly descriptive.\n"
+        "- Use Title Case and remove internal job codes or IDs.\n\n"
+        "Return ONLY the final polished job title. No preamble or meta-commentary."
+    )
+    
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    
+    if not GEMINI_API_KEY:
+        print("DEBUG TITLE: No API Key found.")
+        return {"title": f"ERROR: No API Key"}
 
+    MODELS = [
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+    ]
+
+    last_error = ""
+    for model_url in MODELS:
+        try:
+            print(f"DEBUG TITLE: Attempting model {model_url.split('/')[-1]}...")
+            response = requests.post(f"{model_url}?key={GEMINI_API_KEY}", json=payload, timeout=20)
+            print(f"DEBUG TITLE: Gemini Status Code: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                new_title = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
+                # Strip accidental surrounding quotes
+                import re
+                new_title = re.sub(r'^[\"\']|[\"\']$', '', new_title).strip()
+                new_title = new_title.replace("**", "")
+                
+                print(f"DEBUG TITLE: Original: '{req.jobTitle}' -> New: '{new_title}'")
+                
+                if new_title.lower() == req.jobTitle.lower():
+                    # Basic forced update based on presence of remote/contract in JD
+                    if 'contract' in req.jobDescription.lower():
+                        new_title = f"{new_title} (Contract)"
+                    elif 'remote' in req.jobDescription.lower():
+                        new_title = f"{new_title} (Remote)"
+                    else:
+                        new_title = f"{new_title} - Enhanced"
+                
+                if new_title:
+                    return {"title": new_title}
+            else:
+                last_error = f"{response.status_code} - {response.text}"
+                print(f"DEBUG TITLE: Error from AI: {last_error}")
+                if response.status_code != 429:
+                    # If it's a hard error (not rate limit), we could break, but let's just try the next model.
+                    pass
+        except Exception as e:
+            last_error = str(e)
+            print(f"DEBUG TITLE: Title enhancement failed: {e}")
+            
+    # If all models failed
+    error_str = str(last_error)
+    return {"title": "ERROR 429: Rate Limit Exceeded" if "429" in error_str else f"ERROR: {error_str[:20]}"}
