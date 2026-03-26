@@ -14,10 +14,11 @@ class SkillsGraph:
         Connects to Postgres and populates the graph/alias maps.
         """
         if not db_url:
-            db_url = os.getenv("SUPABASE_URL")
+            # Use SUPABASE_DB_URL for PostgreSQL connection, not SUPABASE_URL (HTTP API)
+            db_url = os.getenv("SUPABASE_DB_URL")
             
         if not db_url and not os.getenv("CLOUDSQL_CONNECTION_NAME"):
-            print("⚠️ Ontology: No DB configuration found (SUPABASE_URL or Cloud SQL), graph will be empty.")
+            print("⚠️ Ontology: No DB configuration found (SUPABASE_DB_URL or Cloud SQL), graph will be empty.")
             return
 
         print("🔗 Ontology: Connecting to Database...")

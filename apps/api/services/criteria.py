@@ -1,13 +1,19 @@
 import logging
 import uuid
 import os
+import sys
 import json
+import re
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
 import sqlalchemy
 from sqlalchemy import text
 from openai import OpenAI
 from dotenv import load_dotenv
+
+# Add Ronak's JD Parser to path
+sys.path.append('/Users/swatipandey/Desktop/airecruiter/JD_Parser_Ronak/src')
+from jd_parser.jdparser.jd_parser import parse_jd
 
 from models import JobCriterion, JobCriteriaResponse
 from services.usage_logger import usage_logger
@@ -17,6 +23,134 @@ load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 logger = logging.getLogger(__name__)
+
+def parse_toon_to_criteria(toon_output: str) -> List[Dict[str, Any]]:
+    """
+    Parse TOON format output from Ronak's JD Parser into criteria format.
+    Extracts skills from REQUIRED_SKILLS and OPTIONAL_SKILLS sections.
+    """
+    criteria_list = []
+    
+    # Split into lines and clean up
+    lines = [line.strip() for line in toon_output.split('\n') if line.strip()]
+    
+    current_section = None
+    current_skill = {}
+    
+    for line in lines:
+        # Detect sections
+        if line.startswith("SECTION"):
+            if "REQUIRED_SKILLS" in line:
+                current_section = "required"
+            elif "OPTIONAL_SKILLS" in line:
+                current_section = "optional"
+            else:
+                current_section = None
+            continue
+            
+        if current_section is None:
+            continue
+            
+        # Start of new skill block
+        if line == "SKILL":
+            # Save previous skill if exists
+            if current_skill:
+                criteria_list.append(current_skill)
+            current_skill = {"section": current_section}
+            continue
+        
+        # Parse skill attributes
+        if current_skill:
+            if line.startswith("SKILL_ID"):
+                current_skill["skill_id"] = line.replace("SKILL_ID", "").strip()
+            elif line.startswith("CANONICAL_NAME"):
+                current_skill["name"] = line.replace("CANONICAL_NAME", "").strip()
+            elif line.startswith("MINIMUM_YEARS"):
+                try:
+                    current_skill["min_years"] = int(line.replace("MINIMUM_YEARS", "").strip())
+                except:
+                    current_skill["min_years"] = 0
+            elif line.startswith("IMPORTANCE_SCORE"):
+                try:
+                    current_skill["importance_score"] = int(line.replace("IMPORTANCE_SCORE", "").strip())
+                except:
+                    current_skill["importance_score"] = 3
+            elif line.startswith("MANDATORY"):
+                mandatory = line.replace("MANDATORY", "").strip().lower()
+                current_skill["is_required"] = mandatory == "true"
+    
+    # Add the last skill
+    if current_skill:
+        criteria_list.append(current_skill)
+    
+    # Convert to our criteria format
+    formatted_criteria = []
+    for skill in criteria_list:
+        if "name" in skill and skill["name"]:
+            # Map importance score (1-5) to priority score (1-10)
+            importance = skill.get("importance_score", 3)
+            priority_score = min(10, max(1, importance * 2))
+            
+            # Determine if required based on section and MANDATORY flag
+            is_required = (skill.get("section") == "required" or 
+                          skill.get("is_required", False))
+            
+            formatted_criteria.append({
+                "name": skill["name"],
+                "skill_id": skill.get("skill_id", ""),
+                "priority_score": priority_score,
+                "weight": round(priority_score / 10.0, 2),
+                "is_required": is_required,
+                "is_ai_generated": True,
+                "category": "Hard Filter",
+                "min_years": skill.get("min_years", 0)
+            })
+    
+    return formatted_criteria
+
+def extract_customer_requirements(job_data: dict) -> List[Dict[str, Any]]:
+    """
+    Extract customer-specific requirements from job data.
+    Only extracts from AI JD, job notes, or JobDiva reference - strict source control.
+    """
+    customer_criteria = []
+    
+    # Get text sources - STRICT extraction only from these sources
+    ai_description = job_data.get("ai_description", "")
+    recruiter_notes = job_data.get("recruiter_notes") or job_data.get("recruiter_remarks") or job_data.get("job_notes") or ""
+    jobdiva_description = job_data.get("description", "")
+    
+    # Combine all source text
+    combined_text = f"{ai_description}\n{recruiter_notes}\n{jobdiva_description}".lower()
+    
+    # Common customer requirement patterns - only extract what's explicitly mentioned
+    requirement_patterns = {
+        "citizenship": r"(us citizen|citizenship|green card|work authorization|eligible to work)",
+        "clearance": r"(security clearance|secret clearance|top secret|clearance required)",
+        "location": r"(onsite|on-site|local|remote|hybrid|must be located)",
+        "employment": r"(w2|1099|corp to corp|c2c|contract|permanent|full-time|part-time)",
+        "travel": r"(travel required|no travel|up to \d+% travel|willing to travel)",
+        "background": r"(background check|drug test|drug screening)",
+        "education": r"(degree required|bachelor|master|phd|certification required)",
+        "experience_level": r"(senior level|junior|mid-level|entry level)",
+    }
+    
+    for req_type, pattern in requirement_patterns.items():
+        matches = re.findall(pattern, combined_text, re.IGNORECASE)
+        if matches:
+            # Take the first match and create a crisp requirement
+            requirement = matches[0]
+            customer_criteria.append({
+                "name": requirement.title(),
+                "skill_id": f"CUST_{req_type.upper()}",
+                "priority_score": 8,  # High priority for customer requirements
+                "weight": 0.8,
+                "is_required": True,
+                "is_ai_generated": True,
+                "category": "Customer Requirement"
+            })
+    
+    return customer_criteria
 
 class CriteriaService:
     def __init__(self):
@@ -56,131 +190,113 @@ class CriteriaService:
 
     async def generate_and_save_criteria(self, job_id: str) -> List[JobCriterion]:
         """
-        The core step: 
-        1. Fetch Job from JobDiva (includes AI JD if exists).
-        2. Use LLM to extract crisp criteria.
-        3. Save to job_criteria table.
+        Enhanced step 3: Use Ronak's JD Parser for STRICT skills extraction.
+        1. Fetch Job from JobDiva (includes AI JD, job notes, JobDiva reference).
+        2. Use Ronak's JD Parser to extract crisp criteria in TOON format.
+        3. Extract customer requirements from job-specific sources only.
+        4. Convert to criteria format and save to job_criteria table.
         """
+        logger.info(f"🔄 Starting strict criteria extraction for job {job_id} using Ronak's JD Parser")
+        
         # 1. Fetch Job from JobDiva (includes AI JD if exists, and raw JD)
         job = await jobdiva_service.get_job_by_id(job_id)
-        if not job: return []
+        if not job: 
+            logger.error(f"Job {job_id} not found")
+            return []
 
-        ai_description = job.get("ai_description")
-        if not ai_description:
-            logger.warning(f"No AI description found for job {job_id}, falling back to raw description")
-            ai_description = job.get("description")
-            if not ai_description:
-                return []
+        # Prepare input for Ronak's JD Parser - STRICT source control
+        ai_description = job.get("ai_description", "")
+        jobdiva_description = job.get("description", "")  # JobDiva reference
+        recruiter_notes = job.get("recruiter_notes") or job.get("recruiter_remarks") or job.get("job_notes") or ""
+        
+        # Create TOON_JOB format input for Ronak's parser
+        toon_input = f"""
+JOB_TITLE: {job.get("title", "")}
+AI_DESCRIPTION: {ai_description}
+RECRUITER_REMARKS: {recruiter_notes}
+JOBDIVA_DESCRIPTION: {jobdiva_description}
+JOB_DIVA_ID: {job_id}
+        """.strip()
+        
+        if not any([ai_description, jobdiva_description, recruiter_notes]):
+            logger.warning(f"No valid source data found for job {job_id}")
+            return []
 
-        # 2. Minimal Parser (LLM Call to get strings like in the image)
         try:
-            prompt = f"""
-            Task: Extract EXACTLY 8 crisp and compact hiring criteria from the Job Description below.
+            logger.info(f"🧠 Calling Ronak's JD Parser for strict skills extraction...")
             
-            Rules:
-            1. Keep names brief (e.g., 'Java', 'React', 'Problem Solving') - avoid long sentences.
-            2. Assign a 'priority_score' from 1-10 (10=Highest/Critical, 1=Minor).
-            3. Assign a 'skill_id' following Ronak's normalization (SKL_<DOMAIN>_<SKILL>), e.g., SKL_BACKEND_JAVA.
-            4. Identify if it is 'mandatory' (true for required, false for preferred).
+            # 2. Use Ronak's JD Parser for STRICT extraction
+            toon_output = parse_jd(toon_input)
+            logger.info(f"✅ Ronak's parser completed. Processing TOON output...")
             
-            Format: Return a JSON object with a key 'criteria' containing a list of objects.
-            Each object: {{ "name": "...", "priority_score": 10, "skill_id": "SKL_...", "mandatory": true }}
+            # Parse TOON format to criteria
+            skills_criteria = parse_toon_to_criteria(toon_output)
             
-            Job Description:
-            {ai_description}
+            # 3. Extract customer requirements - STRICT extraction only
+            customer_criteria = extract_customer_requirements(job)
             
-            Return ONLY the valid JSON object with exactly 8 items.
-            """
+            # Combine all criteria
+            all_criteria = skills_criteria + customer_criteria
             
-            model = "gpt-4o-mini"
-            response = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={ "type": "json_object" }
-            )
+            # Ensure we have crisp names (no long sentences)
+            for criterion in all_criteria:
+                name = criterion["name"]
+                if len(name) > 50 or "," in name or " and " in name:
+                    # Split long names into crisp terms
+                    parts = re.split(r'[,/&]|\s+and\s+', name)
+                    criterion["name"] = parts[0].strip().title()
             
-            # Log Usage
-            usage_logger.log_usage(
-                service="criteria_generator",
-                model=model,
-                prompt_tokens=response.usage.prompt_tokens,
-                completion_tokens=response.usage.completion_tokens,
-                job_id=job_id
-            )
+            # Limit to 12 criteria max, prioritize by importance
+            all_criteria.sort(key=lambda x: x["priority_score"], reverse=True)
+            all_criteria = all_criteria[:12]
             
-            content = response.choices[0].message.content
-            data = json.loads(content)
-            
-            # Robust extraction of the list
-            criteria_list = []
-            if isinstance(data, list):
-                criteria_list = data
-            elif isinstance(data, dict):
-                # Try common keys or just take the first list found
-                criteria_list = data.get("criteria") or data.get("results")
-                if not isinstance(criteria_list, list):
-                    for val in data.values():
-                        if isinstance(val, list):
-                            criteria_list = val
-                            break
-            
-            if not isinstance(criteria_list, list):
-                logger.error(f"LLM returned non-list data: {data}")
-                return []
-
-            # Step 4: Weight Normalization (Ronak's logic)
-            total_importance = sum(int(c.get("importance", 3)) for c in criteria_list if isinstance(c, dict))
-            if total_importance == 0: total_importance = 1
-
-            # 3. Save to DB
+            # 4. Save to database
             new_criteria = []
-            with self.engine.connect() as conn:
-                # Clear existing for this job
-                conn.execute(text("DELETE FROM job_criteria WHERE job_id = :job_id"), {"job_id": job_id})
-                
-                for item in criteria_list:
-                    if not isinstance(item, dict): continue
+            if self.engine:
+                with self.engine.connect() as conn:
+                    # Clear existing for this job
+                    conn.execute(text("DELETE FROM job_criteria WHERE job_id = :job_id"), {"job_id": job_id})
                     
-                    name = item.get("name", "")
-                    priority_score = int(item.get("priority_score", 5))
-                    skill_id = item.get("skill_id", "")
-                    is_required = bool(item.get("mandatory", False))
-                    
-                    # Calculate weight internally for compatibility (0.0 to 1.0)
-                    weight = round(priority_score / 10.0, 2)
-                    
-                    c_id = str(uuid.uuid4())
-                    conn.execute(text("""
-                        INSERT INTO job_criteria (id, job_id, name, skill_id, priority_score, weight, is_required, is_ai_generated, category)
-                        VALUES (:id, :job_id, :name, :skill_id, :priority_score, :weight, :is_required, true, :cat)
-                    """), {
-                        "id": c_id, 
-                        "job_id": job_id, 
-                        "name": name, 
-                        "skill_id": skill_id,
-                        "priority_score": priority_score,
-                        "weight": weight,
-                        "is_required": is_required,
-                        "cat": "Hard Filter"
-                    })
-                    
-                    new_criteria.append(JobCriterion(
-                        id=c_id,
-                        name=name,
-                        skill_id=skill_id,
-                        priority_score=priority_score,
-                        weight=weight,
-                        is_required=is_required,
-                        is_ai_generated=True
-                    ))
-                conn.commit()
+                    for item in all_criteria:
+                        c_id = str(uuid.uuid4())
+                        conn.execute(text("""
+                            INSERT INTO job_criteria (id, job_id, name, skill_id, priority_score, weight, is_required, is_ai_generated, category)
+                            VALUES (:id, :job_id, :name, :skill_id, :priority_score, :weight, :is_required, :ai, :cat)
+                        """), {
+                            "id": c_id, 
+                            "job_id": job_id, 
+                            "name": item["name"], 
+                            "skill_id": item["skill_id"],
+                            "priority_score": item["priority_score"],
+                            "weight": item["weight"],
+                            "is_required": item["is_required"],
+                            "ai": item["is_ai_generated"],
+                            "cat": item["category"]
+                        })
+                        
+                        new_criteria.append(JobCriterion(
+                            id=c_id,
+                            name=item["name"],
+                            skill_id=item["skill_id"],
+                            priority_score=item["priority_score"],
+                            weight=item["weight"],
+                            is_required=item["is_required"],
+                            is_ai_generated=item["is_ai_generated"],
+                            category=item["category"]
+                        ))
+                    conn.commit()
             
-            # Final sort for immediate UI consistency
+            # Sort for UI consistency
             new_criteria.sort(key=lambda x: x.priority_score, reverse=True)
+            
+            logger.info(f"✅ Extracted and saved {len(new_criteria)} crisp criteria using Ronak's parser")
+            logger.info(f"📊 Skills: {len(skills_criteria)}, Customer Requirements: {len(customer_criteria)}")
+            
             return new_criteria
             
         except Exception as e:
-            logger.error(f"Error generating criteria: {e}")
+            logger.error(f"❌ Error in Ronak's strict extraction for job {job_id}: {e}")
+            # Return empty list instead of fallback to maintain strict extraction
             return []
 
     def save_criteria(self, job_id: str, criteria_list: List[Dict[str, Any]]) -> bool:

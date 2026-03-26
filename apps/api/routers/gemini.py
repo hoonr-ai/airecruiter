@@ -4,8 +4,15 @@ from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 from pydantic import BaseModel
 import requests
 from time import sleep
+import hashlib
+from dataclasses import asdict
+from datetime import datetime
+
 from services.jobdiva import jobdiva_service
 from services.usage_logger import usage_logger
+from services.job_skills_extractor import JobSkillsExtractor, ExtractedSkill
+from services.job_skills_db import JobSkillsDB
+from services.job_rubric_db import JobRubricDB
 
 router = APIRouter()
 
@@ -47,7 +54,7 @@ async def sync_to_jobdiva(req: JobDivaSyncRequest):
     jobdiva_ok = await jobdiva_service.update_job_user_fields(req.jobId, fields)
     local_ok   = jobdiva_service.monitor_job_locally(req.jobId, {
         "ai_description": req.aiDescription,
-        "job_notes":      req.jobNotes,
+        "recruiter_notes": req.jobNotes,
         "work_authorization": req.workAuthorization,
         "recruiter_email":     req.recruiterEmail,
     })
@@ -211,16 +218,17 @@ async def generate_job_title(req: JobDescriptionRequest):
     Generate a polished, professional job title based on the original title and notes.
     """
     prompt = (
-        "You are an expert recruitment copywriter. Your task is to polish a job title to make it catchy, professional, and clear for external posting.\n\n"
+        "You are an expert recruitment copywriter. Your task is to polish a job title to make it professional, clear, and focused for external posting.\n\n"
         f"Original Title: {req.jobTitle}\n"
         f"Job Notes Context: {req.jobNotes}\n"
         f"Generated Job Description Content: {req.jobDescription}\n\n"
         "MANDATORY GUIDELINES:\n"
-        "- BE AGGRESSIVE: If the original title is simple (e.g., 'Analyst'), you MUST enhance it based on the JD content (e.g., 'Senior Business Analyst — Remote').\n"
-        "- PRIORITY: Look for seniority (Senior/Junior), employment type (Contract/Hybrid/W2), and specialized skills in the 'Generated Job Description Content'.\n"
-        "- If appropriate, add clear suffixes like '— Remote', '— Contract', or '— Hybrid'.\n"
-        "- Ensure the title is concise (under 80 characters) but highly descriptive.\n"
-        "- Use Title Case and remove internal job codes or IDs.\n\n"
+        "- FOCUS ONLY ON THE TITLE: Enhancement should only include functional title, seniority (Senior/Junior), and employment type (Contract/W2/Full-Time).\n"
+        "- NO LOCATION DETAILS: Do NOT include city, state, or zip code in the title (e.g., avoid '— Atlanta, GA').\n"
+        "- NO EXTRA DETAILS: Do NOT include internal codes, project names, or company names.\n"
+        "- PRIORITY: Look for seniority and core specialized skills in the 'Generated Job Description Content'.\n"
+        "- Ensure the title is concise (under 60 characters).\n"
+        "- Use Title Case and remove all internal identifiers.\n\n"
         "Return ONLY the final polished job title. No preamble or meta-commentary."
     )
     
@@ -253,15 +261,6 @@ async def generate_job_title(req: JobDescriptionRequest):
                 
                 print(f"DEBUG TITLE: Original: '{req.jobTitle}' -> New: '{new_title}'")
                 
-                if new_title.lower() == req.jobTitle.lower():
-                    # Basic forced update based on presence of remote/contract in JD
-                    if 'contract' in req.jobDescription.lower():
-                        new_title = f"{new_title} (Contract)"
-                    elif 'remote' in req.jobDescription.lower():
-                        new_title = f"{new_title} (Remote)"
-                    else:
-                        new_title = f"{new_title} - Enhanced"
-                
                 if new_title:
                     return {"title": new_title}
             else:
@@ -279,85 +278,101 @@ async def generate_job_title(req: JobDescriptionRequest):
     return {"title": "ERROR 429: Rate Limit Exceeded" if "429" in error_str else f"ERROR: {error_str[:20]}"}
 
 class RubricGenerationRequest(BaseModel):
+    jobId: str = ""  # Add job_id for database saving
     jobTitle: str
     jobDescription: str
     jobNotes: str = ""
     originalDescription: str = ""
     customerName: str = ""
+    requiredDegree: str = ""
 
 @router.post("/jobs/generate-rubric")
 async def generate_rubric(req: RubricGenerationRequest):
-    prompt = (
-        "You are an expert technical recruiter analyzing job data. "
-        "Your task is to extract structured rubric criteria from the following sources:\n\n"
-        f"1. **AI-ENHANCED JD**: {req.jobDescription}\n"
-        f"2. **RECRUITER JOB NOTES**: {req.jobNotes}\n"
-        f"3. **ORIGINAL JOBDIVA DESCRIPTION**: {req.originalDescription}\n\n"
-        f"Job Title Reference: {req.jobTitle}\n"
-        f"Customer Context: {req.customerName}\n\n"
-        "INSTRUCTIONS:\n"
-        "- SYNTHESIZE ALL SOURCES: Scan all three sources (AI JD, Job Notes, and Original Description) for concrete requirements.\n"
-        "- NO REDUNDANCY: Strictly avoid duplicate or redundant criteria. If a requirement is mentioned in multiple sources, extract it only once with the most complete context.\n"
-        "- PRIMARY TITLE: You MUST use the provided 'Job Title Reference' as the single entry in the 'titles' array. Ensure it remains professional and matches the Step 2 selection.\n"
-        "- EDUCATION EXTRACTION: Pay extremely close attention to education requirements. Look for degrees (Bachelor's, Master's, PhD) and specific fields of study mentioned in ANY of the sources. If JD and Notes differ, prioritize the Job Notes.\n"
-        "- Return the output STRICTLY as a valid JSON object matching this schema exactly:\n"
-        "{\n"
-        "  \"titles\": [{\"value\": \"string\", \"minYears\": number, \"recent\": boolean, \"matchType\": \"Exact\" | \"Similar\", \"required\": \"Required\" | \"Preferred\"}],\n"
-        "  \"skills\": [{\"value\": \"string\", \"minYears\": number, \"recent\": boolean, \"matchType\": \"Exact\" | \"Similar\", \"required\": \"Required\" | \"Preferred\"}],\n"
-        "  \"education\": [{\"degree\": \"string\", \"field\": \"string\", \"required\": \"Required\" | \"Preferred\"}],\n"
-        "  \"domain\": [{\"value\": \"string\", \"required\": \"Required\" | \"Preferred\"}],\n"
-        "  \"customer_requirements\": [{\"type\": \"Must not be employed by\" | \"Currently employed by\" | \"Previously employed by\", \"value\": \"string\"}],\n"
-        "  \"other_requirements\": [{\"value\": \"string\", \"required\": \"Required\" | \"Preferred\"}]\n"
-        "}\n\n"
-        "GUIDELINES:\n"
-        "- Keep skill names CRISP and CONCISE (max 1-5 words). Avoid long sentences. Focus only on the core tool or competency.\n"
-        "- Extract max 1 title.\n"
-        "- Extract 5 to 10 top hard skills. If an experience requirement states '2 years', set minYears to 2. Else set to 0.\n"
-        "- If industry domain is mentioned, extract it.\n"
-        f"- If any customer-specific constraints (like do not submit candidates from {req.customerName}), put that in customer_requirements.\n"
-        "- Put other constraints like W2 only, local to city, no relocation, in other_requirements.\n"
-        "- If it's explicitly 'must have' set required to 'Required'. Otherwise 'Preferred'."
-    )
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json"}
-    }
-    
-    MODELS = [
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
-    ]
-    
-    import json
-    for model_url in MODELS:
-        try:
-            response = requests.post(f"{model_url}?key={GEMINI_API_KEY}", json=payload, timeout=30)
-            if response.status_code == 200:
-                data = response.json()
-                content = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                if content:
-                    return json.loads(content)
-        except Exception as e:
-            print(f"DEBUG RUBRIC: Error: {e}")
-            
-    # Fallback default exactly matching screenshot
-    return {
-        "titles": [{"value": req.jobTitle, "minYears": 2, "recent": False, "matchType": "Exact", "required": "Required"}],
-        "skills": [
-            {"value": "Accounts Payable", "minYears": 2, "recent": False, "matchType": "Exact", "required": "Required"},
-            {"value": "ERP Systems", "minYears": 1, "recent": False, "matchType": "Similar", "required": "Required"},
-            {"value": "3-Way PO Matching", "minYears": 1, "recent": False, "matchType": "Similar", "required": "Required"},
-            {"value": "GAAP Knowledge", "minYears": 1, "recent": False, "matchType": "Similar", "required": "Required"},
-            {"value": "Month-End Close", "minYears": 0, "recent": False, "matchType": "Similar", "required": "Preferred"},
-            {"value": "ACH Processing", "minYears": 0, "recent": False, "matchType": "Similar", "required": "Preferred"},
-            {"value": "Vendor Reconciliation", "minYears": 0, "recent": False, "matchType": "Similar", "required": "Preferred"},
-            {"value": "High-Volume Invoicing", "minYears": 1, "recent": False, "matchType": "Similar", "required": "Preferred"}
-        ],
-        "education": [{"degree": "Bachelor's degree", "field": "Accounting or Finance", "required": "Preferred"}],
-        "domain": [{"value": "Healthcare, Finance / Accounting", "required": "Preferred"}],
-        "customer_requirements": [{"type": "Must not be employed by", "value": req.customerName or "Meridian Health Group"}],
-        "other_requirements": [
-            {"value": "Must be local to Atlanta metro — no relocation", "required": "Required"},
-            {"value": "W2 only — no C2C or 1099", "required": "Required"}
-        ]
-    }
+    try:
+        import os
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        
+        # Use provided job_id or create temporary one
+        job_id = req.jobId if req.jobId else f"temp_{hashlib.md5(req.jobTitle.encode()).hexdigest()[:8]}"
+        
+        # Initialize our rubric extractor
+        extractor = JobSkillsExtractor(os.getenv("OPENAI_API_KEY"))
+        
+        # Run full rubric extraction
+        logger.info(f"🧠 Extracting full rubric strictly from job {job_id} text...")
+        rubric_obj = extractor.extract_full_rubric(
+            job_id=job_id,
+            job_title=req.jobTitle,
+            jobdiva_description=req.originalDescription,
+            ai_description=req.jobDescription,
+            recruiter_notes=req.jobNotes,
+            customer_name=req.customerName
+        )
+        
+        # If JobDiva has a structured degree, and AI found nothing, use it
+        if not rubric_obj.education and req.requiredDegree:
+             # Basic mapping from JobDiva strings if needed, 
+             # but we can just add it as a fact for the AI if we pass it in the prompt
+             pass
+        
+        # Convert dataclass to dict for JSON response
+        rubric = asdict(rubric_obj) # Moved this line up to ensure 'rubric' is defined for legacy saving
+        
+        # Save all rubric components to structured database if we have a job context
+        if req.jobId and not req.jobId.startswith("temp_"):
+            try:
+                # We need the correct jobdiva_id (ref code) for cross-referencing
+                # Fetch fresh from JobDiva or trust monitored_jobs
+                job_context = await jobdiva_service.get_job_by_id(req.jobId)
+                ref_id = job_context.get('jobdiva_id') if job_context else req.jobId
+                
+                logger.info(f"💾 Persisting full rubric for ref_id: {ref_id}")
+                rubric_db = JobRubricDB()
+                rubric_db.save_full_rubric(
+                    jobdiva_id=ref_id,
+                    rubric_obj=rubric_obj,
+                    recruiter_notes=req.jobNotes
+                )
+                
+                # Legacy compatibility: also save skills to old table if needed
+                # (Optional, but helps keep existing dashboards working)
+                extracted_skills = []
+                for s in rubric.get('skills', []):
+                    extracted_skills.append(ExtractedSkill(
+                        original_text=s.get('value', ''),
+                        normalized_name=s.get('value', ''),
+                        skill_id=None,
+                        importance=s.get('required', 'preferred').lower(),
+                        min_years=s.get('minYears', 0),
+                        confidence=1.0
+                    ))
+                
+                db_service = JobSkillsDB()
+                db_service.save_job_skills(
+                    job_id=req.jobId,
+                    extracted_skills=extracted_skills,
+                    analysis_metadata={"source": "Step 3 Generation"}
+                )
+                logger.info(f"💾 Saved skills to database for job {req.jobId}")
+            except Exception as e:
+                logger.error(f"❌ Failed to persist rubric: {e}")
+        
+        logger.info(f"✅ Full rubric extracted: {len(rubric['skills'])} skills, {len(rubric['titles'])} titles")
+        return rubric
+        
+    except Exception as e:
+        import traceback
+        logger.error(f"🚨 Error in full rubric extraction: {e}")
+        logger.debug(traceback.format_exc())
+        
+        # Fallback to minimal rubric if extraction fails
+        return {
+            "titles": [{"value": req.jobTitle, "minYears": 2, "recent": False, "matchType": "Exact", "required": "Required"}],
+            "skills": [],
+            "education": [{"degree": "Bachelor's degree", "field": "Relevant field", "required": "Preferred"}],
+            "domain": [],
+            "customer_requirements": [],
+            "other_requirements": []
+        }

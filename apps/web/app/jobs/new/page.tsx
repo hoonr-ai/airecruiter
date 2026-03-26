@@ -48,6 +48,28 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 
+// Utility function to clean location_type values and filter out employment terms
+function cleanLocationType(locationType: string | null | undefined): string {
+  if (!locationType) return "";
+  
+  const employmentTerms = [
+    "direct placement", "contract", "full-time", "part-time", 
+    "w2", "1099", "c2c", "corp to corp", "open", "pending",
+    "temporary", "permanent", "temp to perm", "fulltime", "parttime",
+    "consultant", "consulting", "employee", "contractor"
+  ];
+  
+  const cleanType = locationType.toLowerCase().trim();
+  
+  // If the location type contains any employment terms, return empty string
+  if (employmentTerms.some(term => cleanType.includes(term))) {
+    return "";
+  }
+  
+  // Return the original value if it's clean
+  return locationType.trim();
+}
+
 type Step = 1 | 2 | 3 | 4 | 5;
 type ScreeningLevel = "L1" | "L1.5" | "L2";
 type EmploymentType = "W2" | "1099" | "C2C" | "Full-Time";
@@ -82,17 +104,19 @@ export default function NewJobPage() {
   const [emailError, setEmailError] = useState(false);
   const [isInputInvalid, setIsInputInvalid] = useState(false);
   const [emailErrorMessage, setEmailErrorMessage] = useState("");
-  const [screeningLevel, setScreeningLevel] = useState<ScreeningLevel>("L1.5");
   const [jobTitle, setJobTitle] = useState("");
+  const [enhancedTitle, setEnhancedTitle] = useState("");
   const [jobPosting, setJobPosting] = useState("");
   const [isGeneratingJD, setIsGeneratingJD] = useState(false);
   const [isEnhancingTitle, setIsEnhancingTitle] = useState(false);
   const [isEditingJD, setIsEditingJD] = useState(false);
-  const [selectedJobBoards, setSelectedJobBoards] = useState<string[]>(["LinkedIn", "Indeed"]);
+  const [selectedJobBoards, setSelectedJobBoards] = useState<string[]>([]);
+  const [screeningLevel, setScreeningLevel] = useState<ScreeningLevel>("L1.5");
   const [toast, setToast] = useState<{ message: string; type: "success" | "info" } | null>(null);
   const [pageSubtitle, setPageSubtitle] = useState(STEP_DESCRIPTIONS[1]);
   const [rubricData, setRubricData] = useState<any>(null);
   const [isGeneratingRubric, setIsGeneratingRubric] = useState(false);
+  const [workAuthorization, setWorkAuthorization] = useState("");
   
   // Step 4 - Set Filters state
   const [resumeMatchFilters, setResumeMatchFilters] = useState<Array<{
@@ -110,13 +134,62 @@ export default function NewJobPage() {
     setTimeout(() => setToast(null), 3000);
   };
 
+  const loadJobDraft = async (jobIdToLoad: string) => {
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+      const response = await fetch(`${apiUrl}/jobs/${jobIdToLoad}/draft`, {
+        method: "GET",
+        headers: { "Content-Type": "application/json" }
+      });
+
+      if (response.ok) {
+        const draftResponse = await response.json();
+        const draft = draftResponse.draft_data;
+        
+        // Restore all the step data from the draft
+        if (draft.title !== undefined && draft.title !== null) setJobTitle(draft.title || "");
+        if (draft.enhanced_title !== undefined && draft.enhanced_title !== null) setEnhancedTitle(draft.enhanced_title || "");
+        if (draft.ai_description !== undefined && draft.ai_description !== null) setJobPosting(draft.ai_description || "");
+        if (draft.recruiter_notes !== undefined && draft.recruiter_notes !== null) setRecruiterNotes(draft.recruiter_notes || "");
+        if (draft.selected_employment_types?.length) setSelectedEmpTypes(draft.selected_employment_types);
+        if (draft.recruiter_emails?.length) setRecruiterEmails(draft.recruiter_emails);
+        if (draft.pair_level) setScreeningLevel(draft.pair_level);
+        if (draft.selected_job_boards?.length) setSelectedJobBoards(draft.selected_job_boards);
+        if (draft.work_authorization) setWorkAuthorization(draft.work_authorization);
+        
+        // Set step to the saved step or continue from where they left off
+        // DISABLED: Auto-advancing to draft step to follow normal workflow
+        // Always start from step 1 for consistent experience - V2.0 will handle drafts
+        // if (draftResponse.current_step > 1) {
+        //   setCurrentStep(draftResponse.current_step);
+        //   setPageSubtitle(STEP_DESCRIPTIONS[draftResponse.current_step]);
+        // }
+        
+        return true;
+      }
+    } catch (error) {
+      console.error("Failed to load draft:", error);
+    }
+    return false;
+  };
+
   const handleFetchJob = async () => {
     if (!jobId.trim()) return;
 
     setIsFetching(true);
     setIsFetched(false);
+    
+    // RESET all states before new fetch to prevent stale data
+    setJobTitle("");
+    setEnhancedTitle("");
+    setJobPosting("");
+    setRecruiterNotes("");
+    setRecruiterEmails([]);
+    setSelectedEmpTypes([]);
+    
     try {
-      const response = await fetch("http://localhost:8001/jobs/fetch", {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+      const response = await fetch(`${apiUrl}/jobs/fetch`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_id: jobId.trim() })
@@ -127,25 +200,88 @@ export default function NewJobPage() {
       const data = await response.json();
 
       setJobData(data); // Store the full data object from backend
+      
+      // CRITICAL: Update jobId state to the Numeric ID (Primary Key) for database consistency
+      // This ensures all subsequent 'Next' button clicks (saveJobDraft) use the Numeric PK.
+      if (data.id) {
+        console.log(`🔄 Identifier Resolved: Syncing UI jobId from '${jobId}' to Numeric PK '${data.id}'`);
+        setJobId(data.id.toString());
+      }
 
       const displayData = {
         title: data.title,
-        customer: data.customer_name || data.customer,
+        customer_name: data.customer_name || data.customer,
         location: `${data.city || ""}, ${data.state || ""}`.trim() || "Remote",
         openings: data.openings || "1",
         type: data.employment_type || "Full-Time",
         rate: data.pay_rate || "Market Rate",
         startDate: data.start_date || "ASAP",
-        postedDate: data.posted_date || new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        postedDate: data.posted_date || "Recently posted",
         description: data.description
       };
 
+      // Auto-populate intake form fields from JobDiva data
+      console.log("Auto-populating intake form with JobDiva data...", data);
+      
+      // 1. Job Title and Description
       setJobTitle(data.title || "");
-      // Set JD from AI if available, otherwise original JobDiva
-      setJobPosting(data.ai_description || data.description || ""); 
-      setPageSubtitle(`${displayData.title} · ${displayData.customer}`);
+      setEnhancedTitle(data.enhanced_title || data.title || "");
+      
+      // Strict Check for AI Description (UDF 230)
+      // If JobDiva result has "" or null for ai_description, then setJobPosting to ""
+      // We no longer fall back to data.description to respect clearing intentionality
+      if (data.ai_description !== undefined && data.ai_description !== null) {
+        setJobPosting(data.ai_description);
+      } else {
+        // Only use description if we have ABSOLUTELY no AI description UDF info at all
+        setJobPosting(data.description || "");
+      }
+      setPageSubtitle(`${displayData.title} · ${displayData.customer_name}`);
+      
+      // 2. Employment Type - auto-select from JobDiva OR restore previously selected types
+      if (data.selected_employment_types && Array.isArray(data.selected_employment_types) && data.selected_employment_types.length > 0) {
+        console.log("Restoring previously selected employment types:", data.selected_employment_types);
+        setSelectedEmpTypes(data.selected_employment_types as EmploymentType[]);
+      } else if (data.employment_type) {
+        const empType = data.employment_type as EmploymentType;
+        if (["W2", "1099", "C2C", "Full-Time"].includes(empType)) {
+          setSelectedEmpTypes([empType]);
+          showToast(`Employment type set to: ${empType}`, "info");
+        }
+      }
+      
+      // 3. Recruiter Notes - populate from JobDiva job_notes or local recruiter_notes if available
+      const notes = data.recruiter_notes !== undefined ? data.recruiter_notes : data.job_notes;
+      setRecruiterNotes(notes || "");
+      if (notes) {
+        showToast("Recruiter notes populated", "info");
+      }
+      
+      // 4. Recruiter Emails - auto-populate from local database OR JobDiva recruiter_emails
+      if (data.recruiter_emails && Array.isArray(data.recruiter_emails) && data.recruiter_emails.length > 0) {
+        const validEmails = data.recruiter_emails.filter((email: string) => 
+          email && typeof email === 'string' && /^\S+@\S+\.\S+$/.test(email.trim())
+        );
+        if (validEmails.length > 0) {
+          setRecruiterEmails(validEmails);
+          showToast(`${validEmails.length} recruiter email(s) populated`, "info");
+        }
+      }
+      
+      // 5. Set default screening level to L1.5 (recommended)
+      setScreeningLevel("L1.5");
+
+      // 6. Set Work Authorization from JobDiva
+      if (data.work_authorization) {
+        setWorkAuthorization(data.work_authorization);
+      }
+      
       setIsFetched(true);
-      showToast("Job data loaded from JobDiva.", "success");
+
+      // FORCE: Always stay on step 1 for newly imported jobs to follow normal workflow
+      setCurrentStep(1);
+      setPageSubtitle(`${displayData.title} · ${displayData.customer_name}`);
+      showToast("Job intake form auto-populated from JobDiva.", "success");
     } catch (error) {
       console.error("Error fetching job:", error);
       showToast("Failed to fetch job. Check the Job ID.", "info");
@@ -177,6 +313,7 @@ export default function NewJobPage() {
       
       const data = await response.json();
       setJobPosting(data.description);
+      
       showToast("AI Job Description enriched!", "success");
     } catch (error) {
       console.error("Enhance error:", error);
@@ -195,14 +332,16 @@ export default function NewJobPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
-          jobTitle, 
+          jobTitle: jobTitle, // Always use original title as base for enhancement
+          enhancedTitle: enhancedTitle, // Pass current enhanced title just in case 
           jobNotes: recruiterNotes,
           jobDescription: jobPosting 
         })
       });
       if (res.ok) {
         const data = await res.json();
-        setJobTitle(data.title);
+        setEnhancedTitle(data.title);
+        
         showToast("Title enhanced by PAIR.", "success");
       } else {
         const err = await res.text();
@@ -211,6 +350,7 @@ export default function NewJobPage() {
       }
     } catch (e) {
       console.error(e);
+      showToast("Failed to enhance title.", "info");
     } finally {
       setIsEnhancingTitle(false);
     }
@@ -241,15 +381,70 @@ export default function NewJobPage() {
   };
 
   const toggleEmpType = (type: EmploymentType) => {
-    setSelectedEmpTypes(prev =>
-      prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]
-    );
+    setSelectedEmpTypes(prev => {
+      const newTypes = prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type];
+      return newTypes;
+    });
   };
 
   const toggleJobBoard = (board: string) => {
-    setSelectedJobBoards(prev =>
-      prev.includes(board) ? prev.filter(b => b !== board) : [...prev, board]
-    );
+    setSelectedJobBoards(prev => {
+      const newSelection = prev.includes(board) ? prev.filter(b => b !== board) : [...prev, board];
+      return newSelection;
+    });
+  };
+
+  const saveJobDraft = async (stepData: { 
+    currentStep: number, 
+    saveType?: string,
+    skipToast?: boolean 
+  }) => {
+    if (!jobData || !jobId) {
+      showToast("Job data not available for saving.", "info");
+      return false;
+    }
+
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+      // Use the new endpoint that saves directly to monitored_jobs
+      const response = await fetch(`${apiUrl}/jobs/${jobId}/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          job_id: jobId,
+          jobdiva_id: jobData?.id?.toString(),
+          user_session: "default", // Add user session parameter required by API
+          current_step: stepData.currentStep,
+          title: jobTitle,
+          enhanced_title: enhancedTitle,
+          ai_description: jobPosting,
+          recruiter_notes: recruiterNotes,
+          work_authorization: workAuthorization || jobData?.work_authorization || "",
+          selected_employment_types: selectedEmpTypes,
+          recruiter_emails: recruiterEmails,
+          pair_level: screeningLevel,
+          selected_job_boards: selectedJobBoards,
+          step1_completed: stepData.currentStep >= 1,
+          step2_completed: stepData.currentStep >= 2,
+          step3_completed: stepData.currentStep >= 3,
+          is_auto_saved: stepData.saveType === "auto"
+        })
+      });
+
+      if (!response.ok) throw new Error("Save failed");
+
+      const result = await response.json();
+      if (!stepData.skipToast) {
+        showToast(stepData.saveType === "auto" ? "Auto-saved to monitored jobs" : "Saved to monitored jobs successfully", "success");
+      }
+      return true;
+    } catch (error) {
+      console.error("Error saving job to monitored jobs:", error);
+      if (!stepData.skipToast) {
+        showToast("Failed to save. Please try again.", "info");
+      }
+      return false;
+    }
   };
 
   const StepIndicator = () => (
@@ -423,7 +618,7 @@ const intakeStep = (
                   { label: "Customer", value: jobData.customer_name || jobData.customer },
                   {
                     label: "Location",
-                    value: `${jobData.city || ""}, ${jobData.state || ""}`.trim() + (jobData.location_type ? ` (${jobData.location_type})` : "") || "Remote"
+                    value: `${jobData.city || ""}, ${jobData.state || ""}`.trim() + (cleanLocationType(jobData.location_type) ? ` (${cleanLocationType(jobData.location_type)})` : "") || "Remote"
                   },
                   { label: "Openings", value: jobData.openings },
                   { label: "Employment Type", value: jobData.employment_type },
@@ -462,7 +657,9 @@ const intakeStep = (
                 <Textarea
                   placeholder="e.g. Client strongly prefers fintech background. Must be local to Atlanta metro — no relocation. W2 only, no C2C. Ideally someone with NetSuite over SAP. Start date is flexible but ASAP preferred..."
                   value={recruiterNotes}
-                  onChange={(e) => setRecruiterNotes(e.target.value)}
+                  onChange={(e) => {
+                    setRecruiterNotes(e.target.value);
+                  }}
                   rows={3}
                   className="text-[14px] border-slate-200 resize-y min-h-[100px]"
                 />
@@ -570,7 +767,7 @@ const intakeStep = (
                   )}
                 </div>
                 {isInputInvalid && <p className="text-[11px] text-red-500 mt-1">{emailErrorMessage}</p>}
-                <p className="text-[12px] text-slate-500 mt-1.5">Press comma, semicolon, or Enter to add. You'll be notified when candidates complete the PAIR screen.</p>
+                <p className="text-[12px] text-slate-500 mt-1.5">Press comma, semicolon, or Enter to add. You'll receive notifications for this job.</p>
               </div>
 
               {/* Screening Level */}
@@ -581,7 +778,9 @@ const intakeStep = (
                   {/* L1 */}
                   <div
                     className={`flex-1 border-2 rounded-[10px] p-4 cursor-pointer transition-all ${screeningLevel === "L1" ? "border-primary bg-[#f5f3ff]" : "border-slate-200 hover:border-primary"}`}
-                    onClick={() => setScreeningLevel("L1")}
+                    onClick={() => {
+                      setScreeningLevel("L1");
+                    }}
                   >
                     <div className="flex items-center gap-2 mb-3 flex-wrap">
                       <span className="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide bg-[#ede9fe] text-[#5b21b6]">L1</span>
@@ -598,7 +797,9 @@ const intakeStep = (
                   {/* L1.5 */}
                   <div
                     className={`flex-1 border-2 rounded-[10px] p-4 cursor-pointer transition-all ${screeningLevel === "L1.5" ? "border-primary bg-[#f5f3ff]" : "border-slate-200 hover:border-primary"}`}
-                    onClick={() => setScreeningLevel("L1.5")}
+                    onClick={() => {
+                      setScreeningLevel("L1.5");
+                    }}
                   >
                     <div className="flex items-center gap-2 mb-3 flex-wrap">
                       <span className="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide bg-[#ede9fe] text-[#5b21b6]">L1.5</span>
@@ -616,7 +817,9 @@ const intakeStep = (
                   {/* L2 */}
                   <div
                     className={`flex-1 border-2 rounded-[10px] p-4 cursor-pointer transition-all ${screeningLevel === "L2" ? "border-primary bg-[#f5f3ff]" : "border-slate-200 hover:border-primary"}`}
-                    onClick={() => setScreeningLevel("L2")}
+                    onClick={() => {
+                      setScreeningLevel("L2");
+                    }}
                   >
                     <div className="flex items-center gap-2 mb-3 flex-wrap">
                       <span className="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide bg-[#dcfce7] text-[#166534]">L2</span>
@@ -656,9 +859,11 @@ const intakeStep = (
               <label className="block text-[14px] font-bold text-slate-900 mb-2 ml-1">Job Title</label>
               <div className="flex items-center gap-3">
                 <Input
-                  value={jobTitle}
-                  onChange={(e) => setJobTitle(e.target.value)}
-                  placeholder="Job Title"
+                  value={enhancedTitle}
+                  onChange={(e) => {
+                    setEnhancedTitle(e.target.value);
+                  }}
+                  placeholder="Enhanced Job Title"
                   className="h-10 text-[14px] border-slate-200 focus:border-primary/50 focus:ring-primary/20 bg-white"
                 />
                 <Button
@@ -699,8 +904,12 @@ const intakeStep = (
               <textarea
                 autoFocus
                 value={jobPosting}
-                onChange={(e) => setJobPosting(e.target.value)}
-                onBlur={() => setIsEditingJD(false)}
+                onChange={(e) => {
+                  setJobPosting(e.target.value);
+                }}
+                onBlur={() => {
+                  setIsEditingJD(false);
+                }}
                 className="w-full bg-white border-2 border-primary/40 rounded-lg p-7 h-[500px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 text-[13.5px] font-normal leading-relaxed text-slate-900 focus-visible:outline-none focus:ring-4 focus:ring-primary/10 transition-all resize-none"
                 placeholder="Edit Markdown here..."
               />
@@ -712,12 +921,41 @@ const intakeStep = (
             <div 
               onClick={() => setIsEditingJD(true)}
               title="Click to edit job description"
-              className="bg-slate-50/50 border border-slate-200 rounded-lg p-7 h-[500px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 text-[13.5px] font-normal leading-relaxed text-slate-900 cursor-text hover:border-primary/40 hover:bg-white transition-colors group relative"
+              className="bg-slate-50/50 border border-slate-200 rounded-lg p-7 h-[500px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 text-[13.5px] font-normal leading-relaxed text-slate-900 cursor-text hover:border-primary/40 hover:bg-white transition-colors group relative flex items-center justify-center text-center"
             >
-              <div className="absolute top-4 right-4 bg-slate-200 text-slate-600 text-[11px] font-bold px-3 py-1.5 rounded-md shadow-sm opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-                Click anywhere to edit
-              </div>
-              <AIPostingJobDescription text={jobPosting} />
+              {jobPosting ? (
+                <>
+                  <div className="absolute top-4 right-4 bg-slate-200 text-slate-600 text-[11px] font-bold px-3 py-1.5 rounded-md shadow-sm opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                    Click anywhere to edit
+                  </div>
+                  <div className="w-full h-full text-left">
+                    <AIPostingJobDescription text={jobPosting} />
+                  </div>
+                </>
+              ) : (
+                <div className="flex flex-col items-center gap-4 max-w-sm px-6">
+                  <div className="w-16 h-16 bg-white rounded-full shadow-sm flex items-center justify-center border border-slate-100">
+                    <Sparkles className="w-8 h-8 text-primary/40" />
+                  </div>
+                  <div>
+                    <h4 className="text-[17px] font-bold text-slate-900">No AI Description Yet</h4>
+                    <p className="text-[14px] text-slate-500 mt-2 leading-relaxed">
+                      This job doesn't have an AI-enhanced description. Click the 
+                      <strong> "Regenerate"</strong> button above to generate one now.
+                    </p>
+                  </div>
+                  <Button 
+                    variant="outline" 
+                    className="mt-2 border-primary/20 hover:bg-white hover:text-primary hover:border-primary/40"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleEnhanceJob();
+                    }}
+                  >
+                    Generate AI JD
+                  </Button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -729,8 +967,6 @@ const intakeStep = (
                 { name: "LinkedIn", icon: <Linkedin className="w-4 h-4 text-[#0A66C2]" /> },
                 { name: "Indeed", icon: <Search className="w-4 h-4 text-[#2164f3]" /> },
                 { name: "Dice", icon: <LayoutGrid className="w-4 h-4 text-[#1565c0]" /> },
-                { name: "ZipRecruiter", icon: <Zap className="w-4 h-4 text-[#00873E]" /> },
-                { name: "Glassdoor", icon: <Star className="w-4 h-4 text-[#0caa41]" /> },
                 { name: "Monster", icon: <PawPrint className="w-4 h-4 text-[#6d1f7e]" /> },
                 { name: "CareerBuilder", icon: <Building2 className="w-4 h-4 text-[#00a4bd]" /> },
               ].map(board => (
@@ -738,7 +974,7 @@ const intakeStep = (
                   <Checkbox
                     checked={selectedJobBoards.includes(board.name)}
                     onCheckedChange={() => toggleJobBoard(board.name)}
-                    className="w-[18px] h-[18px] rounded-full border-slate-300 data-[state=checked]:bg-[#4f46e5] data-[state=checked]:border-[#4f46e5] text-white transition-all"
+                    className="w-[18px] h-[18px] rounded-md border-slate-300 data-[state=checked]:bg-[#4f46e5] data-[state=checked]:border-[#4f46e5] text-white transition-all"
                   />
                   <div className="flex items-center gap-3">
                     <div className="transition-transform group-hover/item:scale-110 duration-200">
@@ -762,7 +998,6 @@ const intakeStep = (
       </div>
     </div>
   );
-
 
   const updateRubricItem = (category: string, index: number, field: string, value: any) => {
     setRubricData((prev: any) => {
@@ -1625,7 +1860,7 @@ const intakeStep = (
       {/* Step Content */}
       {renderStepContent()}
 
-      {/* Wizard Navigation — reference spec: Back | Save & Exit … Next */}
+      {/* Wizard Navigation — Back | Save & Exit … Next */}
       <div className="flex items-center justify-between pt-8 border-t border-slate-200 mt-8">
           <div className="flex items-center gap-3">
             {currentStep > 1 && (
@@ -1641,13 +1876,17 @@ const intakeStep = (
             <Button
               variant="outline"
               className="h-[38px] px-5 border-slate-200 text-slate-700 font-bold text-[14px] shadow-none hover:bg-slate-50 flex items-center gap-2 rounded-xl transition-all active:scale-95"
-              onClick={() => {
-                showToast("Returning to jobs list", "info");
-                router.push('/jobs');
+              onClick={async () => {
+                if (currentStep > 1) {
+                  const saved = await saveJobDraft({ currentStep, saveType: "manual" });
+                  if (saved) window.location.href = "/";
+                } else {
+                  window.location.href = "/";
+                }
               }}
             >
               <Save className="w-4 h-4 text-slate-400" />
-              Exit Without Saving
+              Save & Exit
             </Button>
           </div>
           <div className="flex items-center gap-3">
@@ -1665,12 +1904,24 @@ const intakeStep = (
                     return;
                   }
 
-                  // Move to next step without saving to database
-                  // Job data remains in local state only
+                  // Save Step 1 data to monitored jobs before moving to next step
+                  const saved = await saveJobDraft({ currentStep: 1, skipToast: true });
+                  if (!saved) {
+                    showToast("Failed to save Step 1 data. Please try again.", "info");
+                    return;
+                  }
                   setCurrentStep(2);
+                  showToast("Step 1 data saved successfully!", "success");
                 }
                 
                 if (currentStep === 2) {
+                  // Save Step 2 data to monitored jobs before proceeding
+                  const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
+                  if (!saved) {
+                    showToast("Failed to save Step 2 data to monitored jobs. Please try again.", "info");
+                    return;
+                  }
+                  
                   if (!rubricData) {
                      setIsGeneratingRubric(true);
                      setCurrentStep(3);
@@ -1680,16 +1931,19 @@ const intakeStep = (
                          method: "POST",
                          headers: { "Content-Type": "application/json" },
                          body: JSON.stringify({
+                           jobId: jobId, // Include job_id for skills database saving
                            jobTitle: jobTitle || jobData?.title,
                            jobDescription: jobPosting,
                            jobNotes: recruiterNotes,
                            originalDescription: jobData?.description || "",
-                           customerName: jobData?.customer_name || jobData?.customer || ""
+                           customerName: jobData?.customer_name || jobData?.customer || "",
+                           requiredDegree: jobData?.required_degree || ""
                          })
                        });
                        if (res.ok) {
                          const data = await res.json();
                          setRubricData(data);
+                         showToast("Step 2 saved and rubric generated!", "success");
                        } else {
                          throw new Error("API failed");
                        }
@@ -1702,6 +1956,8 @@ const intakeStep = (
                        setIsGeneratingRubric(false);
                      }
                      return;
+                  } else {
+                    showToast("Step 2 data saved to monitored jobs successfully!", "success");
                   }
                 }
                 if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);

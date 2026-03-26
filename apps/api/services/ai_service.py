@@ -20,8 +20,13 @@ class AIService:
         # In a real app, this should be done on startup event
         # But we'll do lazy load here for safety
         if len(ontology.graph.nodes) == 0:
-             # Try loading from DB
-             ontology.load_from_db()
+             # Try loading from DB (Ronak's skills database)
+             try:
+                 ontology.load_from_db()
+                 print("✅ Skills ontology loaded successfully")
+             except Exception as e:
+                 print(f"⚠️ Skills ontology unavailable (requires Ronak's credentials): {str(e)[:100]}")
+                 print("ℹ️ Core job functionality will work without advanced skills matching")
 
     async def _extract_jd(self, text: str) -> JobDescription:
         """

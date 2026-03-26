@@ -34,6 +34,7 @@ class CandidateAnalysisResponse(BaseModel):
 
 class ParsedJobRequest(BaseModel):
     text: str
+    job_id: Optional[str] = None  # Optional job_id for saving to database
 
 class CandidateProfile(BaseModel):
     id: str
@@ -97,9 +98,115 @@ class JobCriteriaResponse(BaseModel):
 class JobCriteriaUpdate(BaseModel):
     criteria: List[JobCriterion]
 
+# Job Draft Models for Multi-Step Workflow
+class JobDraftData(BaseModel):
+    """Data model for job draft updates"""
+    job_id: str
+    jobdiva_id: Optional[str] = None
+    current_step: int = 1
+    user_session: str = "default"
+    
+    # Step 1 fields
+    title: Optional[str] = None
+    recruiter_notes: Optional[str] = None
+    work_authorization: Optional[str] = None
+    
+    # Step 2 fields
+    enhanced_title: Optional[str] = None
+    ai_description: Optional[str] = None
+    selected_employment_types: List[str] = []
+    recruiter_emails: List[str] = []
+    pair_level: str = "L1.5"
+    selected_job_boards: List[str] = []
+    
+    # Progress tracking
+    step1_completed: bool = False
+    step2_completed: bool = False
+    step3_completed: bool = False
+    
+    # Save metadata
+    is_auto_saved: bool = False
+    draft_notes: Optional[str] = None
+
+class JobDraftRequirement(BaseModel):
+    """Model for draft requirements"""
+    requirement_type: str  # 'skills', 'education', 'domain', 'customer_requirements'
+    value: str
+    field: Optional[str] = None
+    priority: str = "Required"  # 'Required', 'Preferred'
+    min_years: int = 0
+    is_user_added: bool = False
+    display_order: int = 0
+
+class JobDraftRequirements(BaseModel):
+    """Collection of draft requirements"""
+    draft_id: str
+    requirements: List[JobDraftRequirement]
+
+class JobDraftResponse(BaseModel):
+    """Response model for getting a job draft"""
+    draft_id: str
+    job_id: str
+    current_step: int
+    workflow_status: str
+    draft_data: JobDraftData
+    requirements: List[JobDraftRequirement] = []
+    created_at: str
+    updated_at: str
+    last_step_completed_at: Optional[str] = None
+
+class JobPublishRequest(BaseModel):
+    """Request to publish a draft to live data"""
+    draft_id: str
+    final_validation: bool = True
+    publish_notes: Optional[str] = None
+
+# Job field update models
+class JobBasicInfoUpdate(BaseModel):
+    """Request to update basic job information"""
+    employment_type: Optional[str] = None
+    recruiter_notes: Optional[str] = None
+    work_authorization: Optional[str] = None
+    recruiter_emails: Optional[List[str]] = None
+
 # Legacy / Unused but kept for safety if referenced elsewhere temporarily
 class JobDescription(BaseModel):
     title: str
     content: str
     required_skills: List[str] = []
     min_experience_years: int = 0
+
+# =====================================================
+# RONAK SKILLS INTEGRATION MODELS  
+# =====================================================
+
+class SkillsExtractionRequest(BaseModel):
+    """Request to extract and map skills from job descriptions using Ronak's ontology"""
+    job_id: str
+    jobdiva_description: Optional[str] = None
+    ai_description: Optional[str] = None  
+    recruiter_notes: Optional[str] = None
+
+class ExtractedSkillResponse(BaseModel):
+    """Individual skill extracted from job descriptions"""
+    skill_id: str          # Ronak's skill_nodes.slug 
+    normalized_name: str   # Ronak's display name
+    original_text: str     # Text context from job description
+    importance: str        # 'required', 'preferred', 'nice-to-have'
+    min_years: int        # Minimum experience required
+    confidence: float     # AI confidence score (0.0-1.0)
+
+class SkillsExtractionResponse(BaseModel):
+    """Response from skills extraction and mapping process"""
+    job_id: str
+    extracted_skills: List[ExtractedSkillResponse]
+    unmapped_skills: List[str]  # Skills AI found but couldn't map to Ronak's ontology
+    analysis_metadata: Dict[str, Any]
+    mapping_rate: float
+
+class JobSkillsSummaryResponse(BaseModel):
+    """Summary of skills stored for a job"""
+    job_id: str
+    total_skills: int
+    by_importance: Dict[str, int]  # {"required": 5, "preferred": 3}
+    analysis_metadata: Dict[str, Any]

@@ -1,242 +1,280 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import Link from "next/link";
-import { cn } from "@/lib/utils";
-import { PlusCircle, Search, Filter, MoreVertical, Briefcase, Users, Clock, ArrowUpRight, Zap, Target, Users2 } from "lucide-react";
+import { Search, Plus, FileText, ArrowUpDown, MoreVertical, Link as LinkIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Progress } from "@/components/ui/progress";
-import { useState } from "react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
-const MONITORED_JOBS = [
-  {
-    id: "26-05604",
-    title: "Digital Marketing Specialist IV",
-    customer: "Intuit",
-    status: "Open",
-    location: "San Francisco, CA",
-    type: "Hybrid",
-    matchRate: 65,
-    candidates: 42
-  },
-  {
-    id: "26-06182",
-    title: "X-Ray Technician",
-    customer: "Staffing Engine",
-    status: "Open",
-    location: "Rowlett, TX",
-    type: "Onsite",
-    matchRate: 88,
-    candidates: 12
-  },
-  {
-    id: "25-68140",
-    title: "Java Full Stack Developer",
-    customer: "American Boa Inc",
-    status: "Open",
-    location: "Remote",
-    type: "Remote",
-    matchRate: 40,
-    candidates: 18
-  },
-  {
-    id: "26-06183",
-    title: "IT Quality Assur Anlyt Sr",
-    customer: "Progressive",
-    status: "Open",
-    location: "Columbus, OH",
-    type: "Remote",
-    matchRate: 72,
-    candidates: 24
-  },
-  {
-    id: "16-06182",
-    title: "Software Developer",
-    customer: "Cox Media",
-    status: "Closed",
-    location: "Atlanta, GA",
-    type: "Hybrid",
-    matchRate: 0,
-    candidates: 0
-  },
-  {
-    id: "24-00123",
-    title: "Sr. Software Engineer",
-    customer: "Tech Mahindra",
-    status: "Closed",
-    location: "Remote",
-    type: "Remote",
-    matchRate: 0,
-    candidates: 0
-  },
-  {
-    id: "26-06118",
-    title: "Field Service Technician II US",
-    customer: "Compucom Systems",
-    status: "Cancelled",
-    location: "Lancaster, PA",
-    type: "Onsite",
-    matchRate: 0,
-    candidates: 0
-  }
-];
+interface Job {
+  id: string;
+  title: string;
+  customer_name: string;
+  status: string;
+  pairStatus: string;
+  candidatesSourced: number;
+  resumesShortlisted: number;
+  completeSubmissions: number;
+  passSubmissions: number;
+  pairExternalSubs: number;
+  feedbackCompleted: number;
+  timeToFirstPass: number;
+}
+
+type SortField = keyof Job;
+type SortDirection = "asc" | "desc";
 
 export default function DashboardPage() {
-  const [showActiveJobs, setShowActiveJobs] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sortField, setSortField] = useState<keyof Job>("id");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+  const [allJobs, setAllJobs] = useState<Job[]>([]);
+  const [filteredJobs, setFilteredJobs] = useState<Job[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    fetchJobs();
+  }, []);
+
+  const fetchJobs = async () => {
+    setIsLoading(true);
+    try {
+      const response = await fetch("http://localhost:8001/jobs/monitored");
+      const data = await response.json();
+      
+      const jobs: Job[] = Object.entries(data.jobs).map(([id, details]: [string, any]) => {
+        const status = details.status || "Open";
+        // Simple logic to determine PAIR status based on job status or data
+        let pairStatus = "Unpublished";
+        if (status.toLowerCase() === "open") pairStatus = "Active";
+        if (status.toLowerCase() === "closed" || status.toLowerCase() === "cancelled") pairStatus = "Inactive";
+        
+        return {
+          id,
+          title: details.title || "Untitled Job",
+          customer_name: details.customer_name || "Unknown",
+          status: status,
+          pairStatus: pairStatus,
+          candidatesSourced: details.candidates_sourced || 0,
+          resumesShortlisted: details.resumes_shortlisted || 0,
+          completeSubmissions: details.complete_submissions || 0,
+          passSubmissions: details.pass_submissions || 0,
+          pairExternalSubs: details.pair_external_subs || 0,
+          feedbackCompleted: details.feedback_completed || 0,
+          timeToFirstPass: details.time_to_first_pass || 0,
+        };
+      });
+      
+      setAllJobs(jobs);
+      setFilteredJobs(jobs);
+    } catch (error) {
+      console.error("Error fetching jobs:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleSort = (field: SortField) => {
+    const newDirection = sortField === field && sortDirection === "asc" ? "desc" : "asc";
+    setSortField(field);
+    setSortDirection(newDirection);
+    
+    const sorted = [...filteredJobs].sort((a, b) => {
+      const aVal = a[field as keyof Job];
+      const bVal = b[field as keyof Job];
+      
+      if (typeof aVal === "string" && typeof bVal === "string") {
+        return newDirection === "asc" ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+      }
+      
+      if (typeof aVal === "number" && typeof bVal === "number") {
+        return newDirection === "asc" ? aVal - bVal : bVal - aVal;
+      }
+      
+      return 0;
+    });
+    
+    setFilteredJobs(sorted);
+  };
+
+  const handleSearch = (query: string) => {
+    setSearchQuery(query);
+    const filtered = allJobs.filter(job =>
+      Object.values(job).some(value => 
+        (value?.toString() || "").toLowerCase().includes(query.toLowerCase())
+      )
+    );
+    setFilteredJobs(filtered);
+  };
+
+  const getStatusColor = (status: string) => {
+    const s = status.toLowerCase();
+    if (s === 'open') return 'bg-[#dcfce7] text-[#166534]'; // Custom soft green
+    if (s === 'completed') return 'bg-[#ffedd5] text-[#c2410c]'; // Custom soft orange
+    if (s === 'cancelled' || s === 'closed') return 'bg-[#fee2e2] text-[#b91c1c]'; // Custom soft red
+    return 'bg-slate-100 text-slate-700';
+  };
+
+  const getPairStatusColor = (status: string) => {
+    const s = status.toLowerCase();
+    if (s === 'active') return 'bg-[#dcfce7] text-[#166534]';
+    if (s === 'inactive' || s === 'paused') return 'bg-[#fee2e2] text-[#b91c1c]';
+    if (s === 'unpublished') return 'bg-[#f1f5f9] text-[#475569]'; // Custom gray
+    return 'bg-slate-100 text-slate-700';
+  };
+
+  const SortableHeader = ({ field, children, className = "" }: { field: keyof Job; children: React.ReactNode; className?: string }) => (
+    <th className={`px-6 py-4 text-left text-[12.5px] font-bold text-slate-500 uppercase tracking-wide border-b border-slate-100 whitespace-nowrap ${className}`}>
+      <div className="flex items-center gap-1.5 cursor-pointer hover:text-slate-800 transition-colors" onClick={() => handleSort(field)}>
+        {children}
+        <ArrowUpDown className="h-3.5 w-3.5 text-slate-400" />
+      </div>
+    </th>
+  );
 
   return (
-    <div className="space-y-8 min-h-[80vh] flex flex-col justify-center">
-      {/* Welcome Header */}
-      {!showActiveJobs && (
-        <div className="text-center space-y-4 mb-8">
-          <h1 className="text-4xl font-bold tracking-tight text-hoonr-gradient inline-block pb-1">
-            Welcome back, John
-          </h1>
-          <p className="text-xl text-muted-foreground">What would you like to do today?</p>
+    <div className="space-y-6 max-w-[1240px] mx-auto pb-10">
+      {/* Page Header */}
+      <h1 className="text-[28px] font-bold text-slate-900 tracking-tight mt-2">Jobs Portfolio</h1>
+
+      {/* Controls Bar */}
+      <div className="flex justify-between items-center gap-4 mt-4">
+        <div className="relative w-[360px]">
+          <Search className="absolute left-3.5 top-1/2 transform -translate-y-1/2 text-slate-400 h-[18px] w-[18px]" />
+          <Input
+            placeholder="Search across all fields..."
+            value={searchQuery}
+            onChange={(e) => handleSearch(e.target.value)}
+            className="pl-10 h-11 border-slate-200 focus:border-primary/50 focus:ring-primary/20 bg-white rounded-xl text-[14px] shadow-sm"
+          />
         </div>
-      )}
-
-      {/* Navigation Hub */}
-      {!showActiveJobs ? (
-        <div className="grid gap-6 md:grid-cols-3 max-w-5xl mx-auto w-full">
-          {/* Choice 1: Active Jobs */}
-          <Card
-            className="group hover:border-primary/50 transition-all cursor-pointer hover:shadow-xl bg-card/50 backdrop-blur-sm border-white/5"
-            onClick={() => setShowActiveJobs(true)}
-          >
-            <CardHeader className="text-center pt-10">
-              <div className="mx-auto p-4 bg-primary/10 rounded-full mb-4 group-hover:scale-110 transition-transform shadow-sm shadow-primary/5">
-                <Briefcase className="h-8 w-8 text-primary" />
-              </div>
-              <CardTitle className="text-xl">Look at Active Jobs</CardTitle>
-              <CardDescription>View status of your {MONITORED_JOBS.filter(j => j.status === 'Open').length} ongoing searches</CardDescription>
-            </CardHeader>
-            <CardContent className="text-center pb-10">
-              <p className="text-sm text-muted-foreground">Monitor pipeline, tribunal results, and interviews.</p>
-            </CardContent>
-          </Card>
-
-          {/* Choice 2: Find Talent */}
-          <Link href="/jobs/new" className="block h-full">
-            <Card className="group hover:border-primary/50 transition-all cursor-pointer hover:shadow-lg bg-card/50 backdrop-blur-sm h-full border-white/5">
-              <CardHeader className="text-center pt-10">
-                <div className="mx-auto p-4 bg-primary/10 rounded-full mb-4 group-hover:scale-110 transition-transform shadow-sm shadow-primary/5">
-                  <Target className="h-8 w-8 text-primary" />
-                </div>
-                <CardTitle className="text-xl">Find Talent</CardTitle>
-                <CardDescription>Start a new search with AI Sourcing</CardDescription>
-              </CardHeader>
-              <CardContent className="text-center pb-10">
-                <p className="text-sm text-muted-foreground">Create a job, set filters, and let AI match candidates.</p>
-              </CardContent>
-            </Card>
-          </Link>
-
-          {/* Choice 3: Create Team */}
-          <Card className="group hover:border-primary/20 transition-all bg-card/50 backdrop-blur-sm opacity-50 border-white/5">
-            <CardHeader className="text-center pt-10">
-              <div className="mx-auto p-4 bg-primary/5 rounded-full mb-4">
-                <Users2 className="h-8 w-8 text-primary/40" />
-              </div>
-              <CardTitle className="text-xl text-primary/40">Create a Team</CardTitle>
-              <CardDescription>Coming Soon</CardDescription>
-            </CardHeader>
-            <CardContent className="text-center pb-10">
-              <p className="text-sm text-muted-foreground/40">Collaborate with colleagues and hiring managers.</p>
-            </CardContent>
-          </Card>
+        <div className="flex items-center gap-3">
+          <Button variant="outline" className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-700 font-semibold text-[13px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all">
+            <FileText className="h-4 w-4" />
+            Export to Excel
+          </Button>
+          <Button asChild className="flex items-center gap-2 h-10 px-5 bg-[#4f46e5] hover:bg-[#4338ca] text-white font-semibold text-[13px] rounded-lg shadow-sm transition-all active:scale-95 border-none">
+            <Link href="/jobs/new">
+              <Plus className="h-4 w-4" />
+              New Job
+            </Link>
+          </Button>
         </div>
-      ) : (
-        /* Active Jobs Dashboard View (Revealed on Click) */
-        <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-          <div className="flex items-center justify-between mb-6">
-            <div>
-              <h2 className="text-2xl font-bold tracking-tight">Active Jobs</h2>
-              <p className="text-muted-foreground">Overview of your recruitment pipeline.</p>
-            </div>
-            <Button variant="ghost" onClick={() => setShowActiveJobs(false)}>Back to Hub</Button>
-          </div>
+      </div>
 
-          {/* Stats Row */}
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4 mb-8">
-            <Card className="bg-card/50 backdrop-blur-sm border-white/10">
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Active Jobs</CardTitle>
-                <Briefcase className="h-4 w-4 text-primary" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{MONITORED_JOBS.filter(j => j.status === 'Open').length}</div>
-                <p className="text-xs text-muted-foreground">+2 from last week</p>
-              </CardContent>
-            </Card>
-            <Card className="bg-card/50 backdrop-blur-sm border-white/10">
-              <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">Total Tracked</CardTitle>
-                <Clock className="h-4 w-4 text-primary" />
-              </CardHeader>
-              <CardContent>
-                <div className="text-2xl font-bold">{MONITORED_JOBS.length}</div>
-                <p className="text-xs text-muted-foreground">Across all stages</p>
-              </CardContent>
-            </Card>
-          </div>
-
-          {/* Job List (Unified Premium Design) */}
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {MONITORED_JOBS.map((job) => (
-              <Card key={job.id} className={cn(
-                "bg-card/50 hover:bg-card/80 transition-all cursor-pointer group shadow-md hover:shadow-xl border-white/5 border-l-4",
-                job.status === 'Open' ? "border-l-primary" : job.status === 'Closed' ? "border-l-muted-foreground/40 opacity-70" : "border-l-destructive/40 opacity-60"
-              )}>
-                <CardHeader className="pb-2">
-                  <div className="flex justify-between items-start">
-                    <div>
-                      <CardTitle className="text-lg group-hover:text-primary transition-colors line-clamp-1">{job.title}</CardTitle>
-                      <CardDescription>{job.customer} • {job.location} ({job.type})</CardDescription>
+      {/* Jobs Table */}
+      <div className="bg-white rounded-2xl shadow-[0_2px_10px_-4px_rgba(0,0,0,0.1)] border border-slate-200 overflow-hidden mt-2">
+        <div className="overflow-x-auto">
+          <table className="min-w-full divide-y divide-slate-100">
+            <thead className="bg-[#fcfdfd]">
+              <tr>
+                <SortableHeader field="id">JOB ID #</SortableHeader>
+                <SortableHeader field="title" className="sticky left-0 bg-[#fcfdfd] z-10 shadow-[5px_0_15px_-5px_rgba(0,0,0,0.03)] border-r border-slate-100/50">JOB TITLE</SortableHeader>
+                <SortableHeader field="status">JOB STATUS</SortableHeader>
+                <SortableHeader field="customer_name">CUSTOMER NAME</SortableHeader>
+                <SortableHeader field="pairStatus">PAIR STATUS</SortableHeader>
+                <SortableHeader field="candidatesSourced">CANDIDATES SOURCED</SortableHeader>
+                <SortableHeader field="resumesShortlisted">RESUMES SHORTLISTED</SortableHeader>
+                <SortableHeader field="completeSubmissions">COMPLETE SUBMISSIONS</SortableHeader>
+                <SortableHeader field="passSubmissions">PASS SUBMISSIONS</SortableHeader>
+                <SortableHeader field="pairExternalSubs">PAIR EXTERNAL SUBS</SortableHeader>
+                <SortableHeader field="feedbackCompleted">FEEDBACK COMPLETED</SortableHeader>
+                <SortableHeader field="timeToFirstPass">TIME TO FIRST PASS</SortableHeader>
+                <th className="px-6 py-4 text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide border-b border-l border-slate-100/50 sticky right-0 bg-[#fcfdfd] z-10 shadow-[-10px_0_15px_-5px_rgba(0,0,0,0.03)] whitespace-nowrap">
+                  ACTIONS
+                </th>
+              </tr>
+            </thead>
+            <tbody className="bg-white divide-y divide-slate-100">
+              {filteredJobs.length > 0 ? filteredJobs.map((job) => (
+                <tr key={job.id} className="hover:bg-slate-50/70 transition-colors group">
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-[#4f46e5]">
+                    <div className="flex items-center gap-1.5">
+                      {job.id}
+                      {job.pairStatus !== 'Unpublished' && <LinkIcon className="h-3 w-3 text-[#4f46e5]/70" />}
                     </div>
-                    <Badge variant="secondary" className={cn(
-                      "border-none text-[10px] font-semibold tracking-wide uppercase",
-                      job.status === 'Open' ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"
-                    )}>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap sticky left-0 bg-white group-hover:bg-[#f6f8fb] transition-colors border-r border-slate-100/50 z-10 shadow-[5px_0_15px_-5px_rgba(0,0,0,0.03)]">
+                     <div className="flex items-center gap-2">
+                      <span className="text-[13.5px] font-semibold text-slate-900">{job.title}</span>
+                      {job.pairStatus === 'Unpublished' && (
+                        <span className="text-[11px] text-slate-400 font-medium">(draft)</span>
+                      )}
+                    </div>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <div className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11.5px] font-bold tracking-wide ${getStatusColor(job.status)}`}>
                       {job.status}
-                    </Badge>
-                  </div>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-4">
-                    <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground truncate mr-2">Job ID: {job.id}</span>
-                      <span className="font-bold flex-shrink-0">{job.candidates || 0} Candidates</span>
                     </div>
-                    {job.status === 'Open' && (
-                      <div className="space-y-1">
-                        <div className="flex justify-between text-[11px] text-muted-foreground font-medium uppercase tracking-tighter">
-                          <span>Screening Progress</span>
-                          <span className="text-primary font-bold">{job.matchRate}% Match</span>
-                        </div>
-                        <Progress value={job.matchRate} className="h-2 rounded-full bg-primary/5" />
-                      </div>
-                    )}
-                    {job.status === 'Open' && (
-                       <div className="pt-2 flex items-center -space-x-2">
-                       {[1, 2, 3].map(i => (
-                         <Avatar key={i} className="w-8 h-8 border-2 border-card shadow-sm">
-                           <AvatarFallback className="bg-primary/5 text-primary text-[10px] font-bold">U{i}</AvatarFallback>
-                         </Avatar>
-                       ))}
-                       <div className="w-8 h-8 rounded-full bg-muted/50 border-2 border-card flex items-center justify-center text-[10px] font-black text-muted-foreground shadow-sm">+{job.candidates - 3}</div>
-                     </div>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                    {job.customer_name}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap">
+                    <div className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11.5px] font-bold tracking-wide ${getPairStatusColor(job.pairStatus)}`}>
+                      {job.pairStatus}
+                    </div>
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                    {job.candidatesSourced}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                    {job.resumesShortlisted}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                    {job.completeSubmissions}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                    {job.passSubmissions}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                    {job.pairExternalSubs}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                    {job.feedbackCompleted}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                    {job.timeToFirstPass ? `${job.timeToFirstPass} mins` : "—"}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-center text-slate-400 sticky right-0 bg-white group-hover:bg-[#f6f8fb] transition-colors border-l border-slate-100/50 z-10 shadow-[-10px_0_15px_-5px_rgba(0,0,0,0.03)]">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button variant="ghost" className="h-8 w-8 p-0 rounded-full hover:bg-slate-200 transition-colors">
+                          <MoreVertical className="h-4 w-4 text-slate-500" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="rounded-xl border-slate-200 font-medium text-[13px] shadow-lg">
+                        <DropdownMenuItem className="cursor-pointer">
+                          <Link href={`/jobs/${job.id}`} className="w-full">
+                            View Details
+                          </Link>
+                        </DropdownMenuItem>
+                        <DropdownMenuItem className="cursor-pointer">Edit Job</DropdownMenuItem>
+                        <DropdownMenuItem className="cursor-pointer">View Candidates</DropdownMenuItem>
+                        <DropdownMenuItem className="text-red-600 focus:text-red-700 cursor-pointer">
+                          Archive Job
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </td>
+                </tr>
+              )) : (
+                <tr>
+                  <td colSpan={13} className="text-center py-10 px-6">
+                     <p className="text-[14px] font-medium text-slate-400 italic">No job results to display.</p>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
-      )}
+      </div>
     </div>
   );
 }
