@@ -39,7 +39,7 @@ const employmentTypeOptions = [
 
 // Work Authorization Options
 const workAuthOptions = [
-  { value: "", label: "Not specified" },
+  { value: "unspecified", label: "Not specified" },
   { value: "US Citizen", label: "US Citizen" },
   { value: "Green Card", label: "Green Card" },
   { value: "H1B", label: "H1B" },
@@ -86,7 +86,7 @@ export default function JobDetailPage() {
   const [formData, setFormData] = useState({
     employment_type: "",
     recruiter_notes: "",
-    work_authorization: "",
+    work_authorization: "unspecified",
     recruiter_emails: [] as string[],
   });
   const [recruiterEmailInput, setRecruiterEmailInput] = useState("");
@@ -128,7 +128,7 @@ export default function JobDetailPage() {
         setFormData({
           employment_type: job.employment_type || "",
           recruiter_notes: job.recruiter_notes || "",
-          work_authorization: job.work_authorization || "",
+          work_authorization: job.work_authorization || "unspecified",
           recruiter_emails: Array.isArray(job.recruiter_emails) ? job.recruiter_emails : [],
         });
       } else {
@@ -143,6 +143,10 @@ export default function JobDetailPage() {
   };
 
   const handleSave = async () => {
+    if (!formData.employment_type) {
+      setToast({ message: "Employment Type is required", type: "error" });
+      return;
+    }
     setSaving(true);
     try {
       const response = await fetch(`http://localhost:8001/jobs/${jobId}/basic-info`, {
@@ -150,7 +154,10 @@ export default function JobDetailPage() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(formData),
+        body: JSON.stringify({
+          ...formData,
+          work_authorization: formData.work_authorization === "unspecified" ? "" : formData.work_authorization
+        }),
       });
 
       if (response.ok) {
@@ -296,7 +303,9 @@ export default function JobDetailPage() {
             <CardContent className="space-y-4">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
-                  <Label htmlFor="employment_type">Employment Type</Label>
+                  <Label htmlFor="employment_type">
+                    Employment Type <span className="text-red-500">*</span>
+                  </Label>
                   {isEditing ? (
                     <Select value={formData.employment_type} onValueChange={(value) => setFormData({...formData, employment_type: value})}>
                       <SelectTrigger>

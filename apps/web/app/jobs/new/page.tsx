@@ -667,7 +667,9 @@ const intakeStep = (
 
               {/* Employment Type */}
               <div className="mb-5">
-                <label className="block text-[14px] font-medium text-slate-900 mb-1">Employment Type</label>
+                <label className="block text-[14px] font-medium text-slate-900 mb-1">
+                  Employment Type <span className="text-red-500">*</span>
+                </label>
                 <p className="text-[13px] text-slate-500 mb-3">Select all that apply for this role.</p>
                 <div className="flex flex-wrap gap-2">
                   {(["W2", "1099", "C2C", "Full-Time"] as EmploymentType[]).map(type => (
@@ -1901,6 +1903,10 @@ const intakeStep = (
                   if (recruiterEmails.length === 0) {
                     setEmailError(true);
                     showToast("Recruiter Email is required.", "info");
+                    return;
+                  }
+                  if (selectedEmpTypes.length === 0) {
+                    showToast("Employment Type is required.", "info");
                     return;
                   }
 
