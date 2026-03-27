@@ -115,7 +115,7 @@ export default function JobDetailPage() {
   const fetchJobDetail = async () => {
     setIsLoading(true);
     try {
-      const response = await fetch(`http://localhost:8001/jobs/monitored`);
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/jobs/monitored`);
       const data = await response.json();
       const job = data.jobs[jobId];
       
@@ -149,7 +149,7 @@ export default function JobDetailPage() {
     }
     setSaving(true);
     try {
-      const response = await fetch(`http://localhost:8001/jobs/${jobId}/basic-info`, {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/jobs/${jobId}/basic-info`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",

@@ -13,10 +13,14 @@ from services.usage_logger import usage_logger
 from services.job_skills_extractor import JobSkillsExtractor, ExtractedSkill
 from services.job_skills_db import JobSkillsDB
 from services.job_rubric_db import JobRubricDB
+from core import (
+    GEMINI_API_KEY, OPENAI_API_KEY, 
+    JOBDIVA_AI_JD_UDF_ID, JOBDIVA_JOB_NOTES_UDF_ID
+)
 
 router = APIRouter()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# GEMINI_API_KEY is now managed by core.config
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 print(f"DEBUG: GEMINI_API_KEY loaded: {'Set' if GEMINI_API_KEY else 'NOT SET'}")
@@ -40,8 +44,8 @@ async def sync_to_jobdiva(req: JobDivaSyncRequest):
     Push AI JD (UDF #230) and Job Notes (UDF #231) to JobDiva,
     and persist both locally in PostgreSQL (monitored_jobs table).
     """
-    udf_ai_jd  = int(os.getenv("JOBDIVA_AI_JD_UDF_ID", "230"))
-    udf_notes  = int(os.getenv("JOBDIVA_JOB_NOTES_UDF_ID", "231"))
+    udf_ai_jd  = JOBDIVA_AI_JD_UDF_ID
+    udf_notes  = JOBDIVA_JOB_NOTES_UDF_ID
 
     def truncate(s: str) -> str:
         return s[:3900] if s else ""
@@ -298,7 +302,7 @@ async def generate_rubric(req: RubricGenerationRequest):
         job_id = req.jobId if req.jobId else f"temp_{hashlib.md5(req.jobTitle.encode()).hexdigest()[:8]}"
         
         # Initialize our rubric extractor
-        extractor = JobSkillsExtractor(os.getenv("OPENAI_API_KEY"))
+        extractor = JobSkillsExtractor(OPENAI_API_KEY)
         
         # Run full rubric extraction
         logger.info(f"🧠 Extracting full rubric strictly from job {job_id} text...")

@@ -153,7 +153,7 @@ function NewJobPageContent() {
 
   const loadJobDraft = async (jobIdToLoad: string) => {
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
       
       // 1. Fetch the basic draft info from monitored_jobs
       const draftResponse = await fetch(`${apiUrl}/jobs/${jobIdToLoad}/draft`);
@@ -239,7 +239,7 @@ function NewJobPageContent() {
     setSelectedEmpTypes([]);
     
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
       const response = await fetch(`${apiUrl}/jobs/fetch`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -344,7 +344,7 @@ function NewJobPageContent() {
   const handleEnhanceJob = async (titleOverride?: string, descOverride?: string, notesOverride?: string) => {
     setIsGeneratingJD(true);
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
       const response = await fetch(`${apiUrl}/api/v1/gemini/jobs/${jobId || 'new'}/generate-description`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -378,7 +378,7 @@ function NewJobPageContent() {
     if (!jobTitle) return;
     setIsEnhancingTitle(true);
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
       const res = await fetch(`${apiUrl}/api/v1/gemini/jobs/generate-title`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -456,7 +456,7 @@ function NewJobPageContent() {
     }
 
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
       // Use the new endpoint that saves directly to monitored_jobs
       const response = await fetch(`${apiUrl}/jobs/${jobId}/save`, {
         method: "POST",
@@ -1983,7 +1983,7 @@ const intakeStep = (
                      setIsGeneratingRubric(true);
                      setCurrentStep(3);
                      try {
-                       const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
+                       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
                        const res = await fetch(`${apiUrl}/api/v1/gemini/jobs/generate-rubric`, {
                          method: "POST",
                          headers: { "Content-Type": "application/json" },

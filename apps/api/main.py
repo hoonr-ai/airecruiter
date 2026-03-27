@@ -16,7 +16,12 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from contextlib import asynccontextmanager
 
-# Load environment variables
+from core import (
+    OPENAI_API_KEY, GEMINI_API_KEY, DATABASE_URL, 
+    JOBDIVA_JOB_NOTES_UDF_ID
+)
+
+# Load environment variables (core handles .env, but keeping load_dotenv for compatibility)
 load_dotenv()
 
 # Helper function for readable IST timestamps
@@ -809,7 +814,7 @@ def get_db_connection():
     """Get database connection using existing pattern"""
     import psycopg2
     import os
-    db_url = os.getenv("DATABASE_URL")
+    db_url = DATABASE_URL
     if not db_url:
         raise Exception("DATABASE_URL not configured")
     return psycopg2.connect(db_url)
@@ -1164,7 +1169,7 @@ async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData)
         # Push recruiter notes to JobDiva UDF so it's reflected in the system
         if draft_data.recruiter_notes:
             try:
-                udf_notes = int(os.getenv("JOBDIVA_JOB_NOTES_UDF_ID", "231"))
+                udf_notes = JOBDIVA_JOB_NOTES_UDF_ID
                 fields = [{"userfieldId": udf_notes, "value": draft_data.recruiter_notes[:3900]}]
                 jobdiva_ok = await jobdiva_service.update_job_user_fields(job_id, fields)
                 if jobdiva_ok:

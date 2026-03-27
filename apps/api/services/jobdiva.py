@@ -1,7 +1,6 @@
 import logging
 import re
 import time
-import os
 import json
 import httpx
 from datetime import datetime, timezone, timedelta
@@ -9,6 +8,10 @@ from typing import Optional, Dict, Any, List
 from html import unescape
 import sqlalchemy
 from sqlalchemy import text
+from core import (
+    JOBDIVA_API_URL, JOBDIVA_CLIENT_ID, JOBDIVA_USERNAME, 
+    JOBDIVA_PASSWORD, DATABASE_URL
+)
 
 # TEMPORARY DEBUG LOGGER
 debug_log_path = "/tmp/debug_sync.log"
@@ -380,14 +383,14 @@ class JobDivaService:
         return None
 
     def __init__(self):
-        self.api_url = os.getenv("JOBDIVA_API_URL", "https://api.jobdiva.com")
-        self.client_id = os.getenv("JOBDIVA_CLIENT_ID", "mock-client")
-        self.username = os.getenv("JOBDIVA_USERNAME", "mock-user")
-        self.password = os.getenv("JOBDIVA_PASSWORD", "mock-pass")
+        self.api_url = JOBDIVA_API_URL
+        self.client_id = JOBDIVA_CLIENT_ID
+        self.username = JOBDIVA_USERNAME
+        self.password = JOBDIVA_PASSWORD
         self.cached_token = None
         self.token_expiry = 0
         
-        self.db_url = os.getenv("DATABASE_URL")
+        self.db_url = DATABASE_URL
         if self.db_url and self.db_url.startswith("postgres://"):
             self.db_url = self.db_url.replace("postgres://", "postgresql://")
         
@@ -403,8 +406,8 @@ class JobDivaService:
         if self.cached_token and time.time() < self.token_expiry:
             return self.cached_token
         
-        if not self.client_id or self.client_id == "mock-client" or not self.username:
-            logger.error(f"JobDiva Credentials not configured. client_id={self.client_id}, username={self.username}")
+        if not self.client_id or not self.username:
+            logger.error(f"JobDiva Credentials not configured properly.")
             return None
 
         auth_url = f"{self.api_url}/api/authenticate"

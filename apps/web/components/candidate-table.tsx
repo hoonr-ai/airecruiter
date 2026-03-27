@@ -103,7 +103,7 @@ export function CandidateTable({ candidates, onView, onSelectionChange, selected
         if (!currentCandidate) return;
         setSending(true);
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/candidates/message`, {
+            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates/message`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -226,7 +226,7 @@ function CandidateRow({
         e.stopPropagation();
         setEngaging(true);
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/candidates/${candidate.id}/engage`, {
+            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates/${candidate.id}/engage`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ candidate_id: candidate.id })
@@ -243,7 +243,7 @@ function CandidateRow({
         e.stopPropagation();
         setAssessing(true);
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/candidates/${candidate.id}/assess`, {
+            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates/${candidate.id}/assess`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ candidate_id: candidate.id })

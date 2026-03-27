@@ -20,6 +20,12 @@ interface Criterion {
   is_ai_generated: boolean;
 }
 
+const MAX_CRITERIA_LIMIT = parseInt(process.env.NEXT_PUBLIC_MAX_CRITERIA_LIMIT || '12', 10);
+const DEFAULT_PRIORITY_SCORE = parseInt(process.env.NEXT_PUBLIC_DEFAULT_PRIORITY_SCORE || '5', 10);
+const DEFAULT_WEIGHT = parseFloat(process.env.NEXT_PUBLIC_DEFAULT_WEIGHT || '0.5');
+const MAX_PRIORITY_SCORE = parseInt(process.env.NEXT_PUBLIC_MAX_PRIORITY_SCORE || '10', 10);
+const PRIORITY_OPTIONS = Array.from({ length: MAX_PRIORITY_SCORE }, (_, i) => MAX_PRIORITY_SCORE - i);
+
 export default function SetCriteriaPage() {
   const params = useParams();
   const router = useRouter();
@@ -36,7 +42,7 @@ export default function SetCriteriaPage() {
 
   const fetchCriteria = async () => {
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'}/api/jobs/${jobId}/criteria`);
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/jobs/${jobId}/criteria`);
       if (response.ok) {
         const data = await response.json();
         const sortedCriteria = (data.criteria || []).sort((a: any, b: any) => (b.priority_score || 0) - (a.priority_score || 0));
@@ -57,7 +63,7 @@ export default function SetCriteriaPage() {
   const handleSync = async () => {
     setSyncing(true);
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'}/api/jobs/${jobId}/criteria/sync`, {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/jobs/${jobId}/criteria/sync`, {
         method: 'POST'
       });
       if (response.ok) {
@@ -80,11 +86,11 @@ export default function SetCriteriaPage() {
   };
 
   const addCriterion = () => {
-    if (criteria.length >= 12) return;
+    if (criteria.length >= MAX_CRITERIA_LIMIT) return;
     setCriteria([...criteria, { 
       name: "", 
-      priority_score: 5, 
-      weight: 0.5, 
+      priority_score: DEFAULT_PRIORITY_SCORE, 
+      weight: DEFAULT_WEIGHT, 
       is_required: false, 
       is_ai_generated: false 
     }]);
@@ -103,7 +109,7 @@ export default function SetCriteriaPage() {
   const handleSave = async () => {
     setSyncing(true);
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001'}/api/jobs/${jobId}/criteria`, {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/jobs/${jobId}/criteria`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -177,7 +183,7 @@ export default function SetCriteriaPage() {
                 AI pre-populated
              </Badge>
              <span className="text-sm text-muted-foreground">
-                — edit freely. {criteria.length}/12 criteria used.
+                — edit freely. {criteria.length}/{MAX_CRITERIA_LIMIT} criteria used.
              </span>
           </div>
         </CardHeader>
@@ -218,7 +224,7 @@ export default function SetCriteriaPage() {
                       }}
                       className="bg-transparent text-xs font-bold text-primary focus:outline-none cursor-pointer"
                     >
-                      {[10, 9, 8, 7, 6, 5, 4, 3, 2, 1].map(v => (
+                      {PRIORITY_OPTIONS.map(v => (
                         <option key={v} value={v}>{v}</option>
                       ))}
                     </select>
@@ -255,11 +261,11 @@ export default function SetCriteriaPage() {
           <Button
             variant="ghost" 
             onClick={addCriterion}
-            disabled={criteria.length >= 12}
+            disabled={criteria.length >= MAX_CRITERIA_LIMIT}
             className="flex items-center gap-2 text-sm font-medium text-primary hover:text-primary/80 transition-colors p-2 mt-4"
           >
             <Plus className="h-4 w-4" />
-            {criteria.length >= 12 ? 'Limit Reached (12)' : 'Add Criterion'}
+            {criteria.length >= MAX_CRITERIA_LIMIT ? `Limit Reached (${MAX_CRITERIA_LIMIT})` : 'Add Criterion'}
           </Button>
         </CardContent>
       </Card>

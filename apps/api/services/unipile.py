@@ -1,21 +1,23 @@
-import os
 import httpx
 import logging
 import asyncio
 from typing import List, Dict, Any, Optional
+from core import (
+    UNIPILE_API_KEY, UNIPILE_DSN, UNIPILE_ACCOUNT_ID
+)
 
 logger = logging.getLogger(__name__)
 
 class UnipileService:
     def __init__(self):
-        # Defaults to api1.unipile.com if not set
-        dsn = os.getenv("UNIPILE_DSN", "api1.unipile.com")
+        # Use centralized config
+        dsn = UNIPILE_DSN
         if not dsn.startswith("http"):
             dsn = f"https://{dsn}"
         self.api_url = f"{dsn}/api/v1"
         
-        self.api_key = os.getenv("UNIPILE_API_KEY", "")
-        self.account_id = None # Cached Account ID
+        self.api_key = UNIPILE_API_KEY
+        self.account_id = UNIPILE_ACCOUNT_ID # Use from config if available
 
     def _get_headers(self):
         return {
@@ -24,18 +26,11 @@ class UnipileService:
         }
 
     async def get_account_id(self) -> Optional[str]:
-        """Fetches the first connected LinkedIn account ID."""
         if self.account_id:
             return self.account_id
-
-        # Check environment variable first
-        env_id = os.getenv("UNIPILE_ACCOUNT_ID")
-        if env_id:
-            self.account_id = env_id
-            return env_id
             
-        if not self.api_key or "placeholder" in self.api_key:
-            logger.warning("Unipile API Key is missing or placeholder.")
+        if not self.api_key:
+            logger.warning("Unipile API Key is missing.")
             return None
 
         url = f"{self.api_url}/accounts"

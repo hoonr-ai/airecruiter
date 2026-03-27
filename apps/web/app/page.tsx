@@ -45,7 +45,7 @@ export default function DashboardPage() {
   const fetchJobs = async () => {
     setIsLoading(true);
     try {
-      const response = await fetch("http://localhost:8001/jobs/monitored");
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/jobs/monitored`);
       const data = await response.json();
       
       const jobs: Job[] = Object.entries(data.jobs).map(([id, details]: [string, any]) => {
