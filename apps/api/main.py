@@ -861,6 +861,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                 selected_employment_types = %s,
                 work_authorization = %s,
                 processing_status = %s,
+                current_step = %s,
                 jobdiva_id = %s, -- This is the reference string
                 updated_at = NOW()
             WHERE job_id = %s -- This is the numeric ID
@@ -874,6 +875,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
             json.dumps(draft_data.selected_employment_types or []), # selected_employment_types
             draft_data.work_authorization,                       # work_authorization
             f"step_{draft_data.current_step}_complete",         # processing_status
+            draft_data.current_step,                            # current_step
             ref_code,                                           # 26-06182 (swapped)
             db_job_id                                           # 31920032 (PK)
         ))
@@ -885,8 +887,8 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                     job_id, title, enhanced_title, ai_description, 
                     selected_job_boards, recruiter_notes, recruiter_emails, 
                     selected_employment_types, work_authorization, 
-                    processing_status, jobdiva_id, created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                    processing_status, current_step, jobdiva_id, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
             """, (
                 db_job_id,                                           # 31920032 (Numeric PK)
                 draft_data.title,
@@ -898,6 +900,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                 json.dumps(draft_data.selected_employment_types or []),
                 draft_data.work_authorization,
                 f"step_{draft_data.current_step}_complete",
+                draft_data.current_step,
                 ref_code                                              # 26-06182 (Ref)
             ))
             logger.info(f"✅ Created new monitored_jobs record for job {db_job_id}")
@@ -936,23 +939,33 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
 @app.get("/jobs/{job_id}/draft")
 async def get_job_draft(job_id: str, user_session: str = "default"):
     """
-    Retrieve existing job data from monitored_jobs using reference code.
+    Retrieve existing job data from monitored_jobs.
+    Tries job_id first, then falls back to jobdiva_id to handle both
+    numeric PK and reference string formats.
     """
     try:
-        # User explicitly wants the ref string (26-06182) used throughout
         db_job_id = job_id
         
         conn = get_db_connection()
         import psycopg2.extras
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         
-        # Get from monitored_jobs by reference code
+        # Primary lookup: by job_id (numeric PK stored as text)
         cursor.execute(
-            "SELECT * FROM monitored_jobs WHERE job_id = %s",
-            (db_job_id,)
+            "SELECT * FROM monitored_jobs WHERE job_id = %s OR job_id = %s",
+            (db_job_id, db_job_id.lstrip('0'))
         )
         job_row = cursor.fetchone()
         
+        # Fallback: try jobdiva_id (the ref string like '26-06182')
+        if not job_row:
+            logger.info(f"No match on job_id={db_job_id}, trying jobdiva_id fallback")
+            cursor.execute(
+                "SELECT * FROM monitored_jobs WHERE jobdiva_id = %s",
+                (db_job_id,)
+            )
+            job_row = cursor.fetchone()
+
         cursor.close()
         conn.close()
         
@@ -982,7 +995,8 @@ async def get_job_draft(job_id: str, user_session: str = "default"):
                 "selected_job_boards": parse_json(job_row.get("selected_job_boards")),
                 "recruiter_emails": parse_json(job_row.get("recruiter_emails")),
                 "selected_employment_types": parse_json(job_row.get("selected_employment_types")),
-                "current_step": 1 # Default starting point; could be derived from processing_status
+                "current_step": job_row.get("current_step") or 1,
+                "pair_level": job_row.get("pair_level") or "L1.5"
             }
         }
         

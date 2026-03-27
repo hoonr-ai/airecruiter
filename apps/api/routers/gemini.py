@@ -376,3 +376,29 @@ async def generate_rubric(req: RubricGenerationRequest):
             "customer_requirements": [],
             "other_requirements": []
         }
+
+@router.get("/jobs/{job_id}/rubric")
+async def get_job_rubric(job_id: str):
+    """
+    Retrieve the saved rubric for a job.
+    """
+    try:
+        # First resolve the jobdiva_id (ref code) if only numeric ID is provided
+        # The rubric tables use jobdiva_id (e.g. 26-06182)
+        ref_id = job_id
+        if "-" not in job_id:
+            job_context = await jobdiva_service.get_job_by_id(job_id)
+            if job_context:
+                ref_id = job_context.get('jobdiva_id', job_id)
+        
+        rubric_db = JobRubricDB()
+        rubric = rubric_db.get_full_rubric(ref_id)
+        
+        if not rubric:
+            raise HTTPException(status_code=404, detail="Rubric not found for this job")
+            
+        return rubric
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error fetching rubric: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

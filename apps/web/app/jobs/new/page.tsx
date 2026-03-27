@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, Suspense } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   Plus,
   Search,
@@ -91,7 +91,16 @@ const STEP_DESCRIPTIONS: Record<Step, string> = {
 };
 
 export default function NewJobPage() {
+  return (
+    <Suspense fallback={<div>Loading...</div>}>
+      <NewJobPageContent />
+    </Suspense>
+  );
+}
+
+function NewJobPageContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [currentStep, setCurrentStep] = useState<Step>(1);
   const [jobId, setJobId] = useState("");
   const [jobData, setJobData] = useState<any>(null);
@@ -129,6 +138,14 @@ export default function NewJobPage() {
   }>>([]);
   const [filterIdCounter, setFilterIdCounter] = useState(1);
 
+  useEffect(() => {
+    const jobIdFromUrl = searchParams.get("jobId");
+    if (jobIdFromUrl) {
+      setJobId(jobIdFromUrl);
+      loadJobDraft(jobIdFromUrl);
+    }
+  }, [searchParams]);
+
   const showToast = (message: string, type: "success" | "info" = "success") => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3000);
@@ -137,36 +154,70 @@ export default function NewJobPage() {
   const loadJobDraft = async (jobIdToLoad: string) => {
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
-      const response = await fetch(`${apiUrl}/jobs/${jobIdToLoad}/draft`, {
-        method: "GET",
-        headers: { "Content-Type": "application/json" }
-      });
-
-      if (response.ok) {
-        const draftResponse = await response.json();
-        const draft = draftResponse.draft_data;
-        
-        // Restore all the step data from the draft
-        if (draft.title !== undefined && draft.title !== null) setJobTitle(draft.title || "");
-        if (draft.enhanced_title !== undefined && draft.enhanced_title !== null) setEnhancedTitle(draft.enhanced_title || "");
-        if (draft.ai_description !== undefined && draft.ai_description !== null) setJobPosting(draft.ai_description || "");
-        if (draft.recruiter_notes !== undefined && draft.recruiter_notes !== null) setRecruiterNotes(draft.recruiter_notes || "");
-        if (draft.selected_employment_types?.length) setSelectedEmpTypes(draft.selected_employment_types);
-        if (draft.recruiter_emails?.length) setRecruiterEmails(draft.recruiter_emails);
-        if (draft.pair_level) setScreeningLevel(draft.pair_level);
-        if (draft.selected_job_boards?.length) setSelectedJobBoards(draft.selected_job_boards);
-        if (draft.work_authorization) setWorkAuthorization(draft.work_authorization);
-        
-        // Set step to the saved step or continue from where they left off
-        // DISABLED: Auto-advancing to draft step to follow normal workflow
-        // Always start from step 1 for consistent experience - V2.0 will handle drafts
-        // if (draftResponse.current_step > 1) {
-        //   setCurrentStep(draftResponse.current_step);
-        //   setPageSubtitle(STEP_DESCRIPTIONS[draftResponse.current_step]);
-        // }
-        
-        return true;
+      
+      // 1. Fetch the basic draft info from monitored_jobs
+      const draftResponse = await fetch(`${apiUrl}/jobs/${jobIdToLoad}/draft`);
+      if (!draftResponse.ok) {
+        console.error("Draft fetch HTTP error:", draftResponse.status);
+        return false;
       }
+      const draftResult = await draftResponse.json();
+      
+      // Backend returns HTTP 200 with status:error when not found
+      if (draftResult.status === "error" || !draftResult.data) {
+        console.error("Draft not found:", draftResult.message);
+        return false;
+      }
+      
+      const draft = draftResult.data;
+
+      // 2. Fetch full job details from JobDiva to populate 'jobData'
+      // This is critical for subsequent "Save & Exit" or "Next" actions
+      const detailsResponse = await fetch(`${apiUrl}/jobs/fetch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job_id: jobIdToLoad.trim() })
+      });
+      
+      if (detailsResponse.ok) {
+        const details = await detailsResponse.json();
+        setJobData(details);
+      }
+
+      // 3. If we are on or past step 3, try to fetch existing rubric data
+      if (draft.current_step >= 3) {
+        try {
+          const rubricRes = await fetch(`${apiUrl}/api/v1/gemini/jobs/${jobIdToLoad}/rubric`);
+          if (rubricRes.ok) {
+            const rData = await rubricRes.json();
+            setRubricData(rData);
+          }
+        } catch (e) {
+          console.error("Failed to load existing rubric:", e);
+        }
+      }
+
+      // 4. Restore form state (Draft values overlay JobDiva values)
+      if (draft.title !== undefined && draft.title !== null) setJobTitle(draft.title || "");
+      if (draft.enhanced_title !== undefined && draft.enhanced_title !== null) setEnhancedTitle(draft.enhanced_title || "");
+      if (draft.ai_description !== undefined && draft.ai_description !== null) setJobPosting(draft.ai_description || "");
+      if (draft.recruiter_notes !== undefined && draft.recruiter_notes !== null) setRecruiterNotes(draft.recruiter_notes || "");
+      if (draft.selected_employment_types?.length) setSelectedEmpTypes(draft.selected_employment_types);
+      if (draft.recruiter_emails?.length) setRecruiterEmails(draft.recruiter_emails);
+      if (draft.pair_level) setScreeningLevel(draft.pair_level);
+      if (draft.selected_job_boards?.length) setSelectedJobBoards(draft.selected_job_boards);
+      if (draft.work_authorization) setWorkAuthorization(draft.work_authorization);
+      
+      // 5. Navigate to the saved step
+      if (draft.current_step) {
+        const savedStep = draft.current_step as Step;
+        setCurrentStep(savedStep);
+        setPageSubtitle(STEP_DESCRIPTIONS[savedStep]);
+        setIsFetched(true);
+        setJobId(jobIdToLoad);
+      }
+      
+      return true;
     } catch (error) {
       console.error("Failed to load draft:", error);
     }

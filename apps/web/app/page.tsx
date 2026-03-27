@@ -50,10 +50,21 @@ export default function DashboardPage() {
       
       const jobs: Job[] = Object.entries(data.jobs).map(([id, details]: [string, any]) => {
         const status = details.status || "Open";
-        // Simple logic to determine PAIR status based on job status or data
+        const procStatus = details.processing_status || "";
+        
+        // PAIR status logic: 
+        // 1. If processing_status indicates setup is in progress (step_X_complete), it's a draft
+        // 2. Otherwise, check JobDiva status
         let pairStatus = "Unpublished";
-        if (status.toLowerCase() === "open") pairStatus = "Active";
-        if (status.toLowerCase() === "closed" || status.toLowerCase() === "cancelled") pairStatus = "Inactive";
+        
+        if (procStatus.includes("step_") && !procStatus.includes("step_5_complete")) {
+          // It's a draft
+          pairStatus = "Unpublished";
+        } else if (status.toLowerCase() === "open") {
+          pairStatus = "Active";
+        } else if (status.toLowerCase() === "closed" || status.toLowerCase() === "cancelled") {
+          pairStatus = "Inactive";
+        }
         
         return {
           id,
@@ -250,11 +261,19 @@ export default function DashboardPage() {
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="rounded-xl border-slate-200 font-medium text-[13px] shadow-lg">
-                        <DropdownMenuItem className="cursor-pointer">
-                          <Link href={`/jobs/${job.id}`} className="w-full">
-                            View Details
-                          </Link>
-                        </DropdownMenuItem>
+                        {job.pairStatus === 'Unpublished' ? (
+                          <DropdownMenuItem className="cursor-pointer bg-primary/5 text-primary font-bold">
+                            <Link href={`/jobs/new?jobId=${job.id}`} className="w-full">
+                              Resume Setup
+                            </Link>
+                          </DropdownMenuItem>
+                        ) : (
+                          <DropdownMenuItem className="cursor-pointer">
+                            <Link href={`/jobs/${job.id}`} className="w-full">
+                              View Details
+                            </Link>
+                          </DropdownMenuItem>
+                        )}
                         <DropdownMenuItem className="cursor-pointer">Edit Job</DropdownMenuItem>
                         <DropdownMenuItem className="cursor-pointer">View Candidates</DropdownMenuItem>
                         <DropdownMenuItem className="text-red-600 focus:text-red-700 cursor-pointer">
