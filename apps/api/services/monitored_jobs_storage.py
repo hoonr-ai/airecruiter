@@ -3,23 +3,19 @@ Enhanced storage service for monitored_jobs table.
 Stores all processed data in existing table with new fields.
 """
 
-import os
 import json
 import time
 from typing import Optional, Dict, Any
 import sqlalchemy
 from sqlalchemy import text
-from dotenv import load_dotenv
+from core.config import DATABASE_URL, SUPABASE_DB_URL
 from models import ExtractedData, Skill
 
 class MonitoredJobsStorage:
     """Service to store all processed data in the updated monitored_jobs table."""
     
     def __init__(self):
-        load_dotenv()
-        self.db_url = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
-        if self.db_url and self.db_url.startswith("postgres://"):
-            self.db_url = self.db_url.replace("postgres://", "postgresql://")
+        self.db_url = DATABASE_URL or SUPABASE_DB_URL
     
     def update_job_with_extracted_data(self, 
                                      job_id: str, 

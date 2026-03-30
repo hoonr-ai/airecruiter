@@ -7,19 +7,14 @@ from datetime import datetime, timezone
 from typing import Optional
 from dotenv import load_dotenv
 
+from core.config import DATABASE_URL
+
 logger = logging.getLogger(__name__)
 
 class UsageLogger:
     def __init__(self):
-        # Determine the .env path relative to this file
-        env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
-        load_dotenv(env_path)
-        
         # Use local DATABASE_URL for project-wide consistency
-        self.db_url = os.getenv("DATABASE_URL")
-        if self.db_url and self.db_url.startswith("postgres://"):
-            self.db_url = self.db_url.replace("postgres://", "postgresql://")
-        
+        self.db_url = DATABASE_URL
         self.engine = None
         if self.db_url:
             self.engine = sqlalchemy.create_engine(self.db_url)

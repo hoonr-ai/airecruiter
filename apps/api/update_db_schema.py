@@ -1,13 +1,11 @@
-import os
 import psycopg2
-from dotenv import load_dotenv
+from core.config import SUPABASE_DB_URL
 
 # Step 2: Database Migration - Create job_criteria Table
 def update_db():
-    load_dotenv()
-    db_url = os.getenv("SUPABASE_DB_URL")
+    db_url = SUPABASE_DB_URL
     if not db_url:
-        print("❌ SUPABASE_DB_URL not found in .env")
+        print("❌ SUPABASE_DB_URL not found in config")
         return
 
     try:

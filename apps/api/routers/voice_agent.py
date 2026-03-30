@@ -3,10 +3,7 @@ from services.job_rubric_db import JobRubricDB
 from services.jobdiva import jobdiva_service
 import psycopg2
 import psycopg2.extras
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
+from core.config import DATABASE_URL
 
 router = APIRouter(tags=["Voice Agent Integration"])
 
@@ -25,14 +22,7 @@ async def get_voice_job_context(job_id: str):
                 ref_id = job_context.get('jobdiva_id', job_id)
 
         # 2. Fetch Job Details from monitored_jobs
-        db_url = os.getenv("DATABASE_URL")
-        if not db_url:
-            raise HTTPException(status_code=500, detail="DATABASE_URL not found in environment")
-            
-        if db_url.startswith("postgres://"):
-            db_url = db_url.replace("postgres://", "postgresql://")
-            
-        with psycopg2.connect(db_url, connect_timeout=5) as conn:
+        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("""
                     SELECT job_id, jobdiva_id, title, customer_name, city, state, location_type, 

@@ -15,9 +15,22 @@ def get_env_with_default(var_name: str, default: str) -> str:
     """Retrieve an environment variable with a default value."""
     return os.getenv(var_name, default)
 
-# ---- Required Variables ----
+# ---- API/Environment Settings ----
+ALLOWED_ORIGINS = get_env_with_default("ALLOWED_ORIGINS", "*").split(",")
+
+# AI Models (Configurable for deployment flexibility)
+GEMINI_MODEL = get_env_with_default("GEMINI_MODEL", "gemini-1.5-flash")
+OPENAI_MODEL = get_env_with_default("OPENAI_MODEL", "gpt-4-turbo-preview")
+
+# Gemini specific configuration
+GEMINI_API_URL = get_env_with_default(
+    "GEMINI_API_URL", 
+    "https://generativelanguage.googleapis.com/v1beta/models"
+)
+
+# Debugging
+DEBUG_LOG_PATH = os.getenv("DEBUG_LOG_PATH")
 OPENAI_API_KEY = get_env_or_fail("OPENAI_API_KEY")
-DATABASE_URL = get_env_or_fail("DATABASE_URL")
 GEMINI_API_KEY = get_env_or_fail("GEMINI_API_KEY")
 
 # JobDiva Configuration
@@ -31,11 +44,20 @@ UNIPILE_API_KEY = get_env_or_fail("UNIPILE_API_KEY")
 UNIPILE_DSN = get_env_with_default("UNIPILE_DSN", "api1.unipile.com")
 UNIPILE_ACCOUNT_ID = get_env_or_fail("UNIPILE_ACCOUNT_ID")
 
-# ---- Database Settings (Legacy/Specific scripts) ----
+# ---- Database Settings ----
+DATABASE_URL = get_env_or_fail("DATABASE_URL")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
+if SUPABASE_DB_URL and SUPABASE_DB_URL.startswith("postgres://"):
+    SUPABASE_DB_URL = SUPABASE_DB_URL.replace("postgres://", "postgresql://", 1)
+
 DB_USER = get_env_with_default("DB_USER", "postgres")
 DB_PASSWORD = get_env_with_default("DB_PASSWORD", "password")
-DB_NAME = get_env_with_default("DB_NAME", "postgres")
+DB_NAME = get_env_with_default("DB_NAME", "skills_db")
 CLOUDSQL_CONNECTION_NAME = os.getenv("CLOUDSQL_CONNECTION_NAME")
+INSTANCE_CONNECTION_NAME = CLOUDSQL_CONNECTION_NAME
 
 # ---- UDF Mappings ----
 JOBDIVA_AI_JD_UDF_ID = int(get_env_with_default("JOBDIVA_AI_JD_UDF_ID", "230"))
@@ -43,4 +65,4 @@ JOBDIVA_JOB_NOTES_UDF_ID = int(get_env_with_default("JOBDIVA_JOB_NOTES_UDF_ID", 
 
 # ---- Encryption ----
 ENCRYPTION_KEY = get_env_or_fail("ENCRYPTION_KEY")
-ENCRYPTION_SALT = get_env_or_fail("ENCRYPTION_SALT")
+ENCRYPTION_SALT = os.getenv("ENCRYPTION_SALT")

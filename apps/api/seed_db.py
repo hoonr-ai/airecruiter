@@ -1,20 +1,18 @@
-
-import os
 import psycopg2
 from google.cloud.sql.connector import Connector, IPTypes
 import pg8000
 import sqlalchemy
+from core.config import (
+    CLOUDSQL_CONNECTION_NAME, INSTANCE_CONNECTION_NAME, DB_USER, DB_PASSWORD, DB_NAME
+)
 
-# Configuration
-INSTANCE_CONNECTION_NAME = os.getenv("CLOUDSQL_CONNECTION_NAME")
-DB_USER = os.getenv("DB_USER")
-DB_PASS = os.getenv("DB_PASSWORD")
-DB_NAME = os.getenv("DB_NAME", "skills_db")
+# Configuration mapping (DB_PASS = DB_PASSWORD)
+DB_PASS = DB_PASSWORD
 
-print(f"🌱 Seeding Database '{DB_NAME}' on '{INSTANCE_CONNECTION_NAME}'...")
+print(f"🌱 Seeding Database '{DB_NAME}' on '{CLOUDSQL_CONNECTION_NAME}'...")
 
-if not INSTANCE_CONNECTION_NAME:
-    print("❌ CLOUDSQL_CONNECTION_NAME is missing via env!")
+if not CLOUDSQL_CONNECTION_NAME:
+    print("❌ CLOUDSQL_CONNECTION_NAME is missing via config!")
     exit(1)
 
 # Connect

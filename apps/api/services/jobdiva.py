@@ -10,14 +10,15 @@ import sqlalchemy
 from sqlalchemy import text
 from core import (
     JOBDIVA_API_URL, JOBDIVA_CLIENT_ID, JOBDIVA_USERNAME, 
-    JOBDIVA_PASSWORD, DATABASE_URL
+    JOBDIVA_PASSWORD, DATABASE_URL, DEBUG_LOG_PATH
 )
 
 # TEMPORARY DEBUG LOGGER
-debug_log_path = "/tmp/debug_sync.log"
 def debug_log(msg):
+    if not DEBUG_LOG_PATH:
+        return
     try:
-        with open(debug_log_path, "a") as f:
+        with open(DEBUG_LOG_PATH, "a") as f:
             f.write(f"[{time.ctime()}] {msg}\n")
     except:
         pass
@@ -391,8 +392,6 @@ class JobDivaService:
         self.token_expiry = 0
         
         self.db_url = DATABASE_URL
-        if self.db_url and self.db_url.startswith("postgres://"):
-            self.db_url = self.db_url.replace("postgres://", "postgresql://")
         
         self.engine = None
         if self.db_url:

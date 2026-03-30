@@ -1,14 +1,12 @@
-import os
 import sqlalchemy
 from google.cloud.sql.connector import Connector, IPTypes
 import pg8000
 import json
-
-# Configuration
-INSTANCE_CONNECTION_NAME = os.getenv("CLOUDSQL_CONNECTION_NAME")
-DB_USER = os.getenv("DB_USER")
-DB_PASS = os.getenv("DB_PASSWORD")
-DB_NAME = os.getenv("DB_NAME", "skills_db")
+from .config import (
+    INSTANCE_CONNECTION_NAME, DB_USER, DB_PASSWORD, DB_NAME
+)
+# Note: DB_PASS is mapped to DB_PASSWORD from config
+DB_PASS = DB_PASSWORD
 
 # Global Pool
 pool = None

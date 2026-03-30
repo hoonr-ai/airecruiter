@@ -9,13 +9,13 @@ import psycopg2.extras
 from typing import List, Dict
 import uuid
 from datetime import datetime
-import os
+from core.config import DATABASE_URL
 
 class JobSkillsDB:
     """Handles database operations for job skills integrated with Ronak's ontology"""
     
     def __init__(self, db_url: str = None):
-        self.db_url = db_url or os.getenv("DATABASE_URL")
+        self.db_url = db_url or DATABASE_URL
     
     def save_job_skills(self, job_id: str, extracted_skills: List, analysis_metadata: Dict) -> Dict:
         """

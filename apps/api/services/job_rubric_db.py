@@ -1,17 +1,15 @@
-import os
 import json
 import psycopg2
 import psycopg2.extras
 from typing import List, Dict, Optional
 from dataclasses import asdict
+from core.config import DATABASE_URL
 
 class JobRubricDB:
     """Handles structured persistent storage for all components of a job rubric."""
     
     def __init__(self, db_url: str = None):
-        self.db_url = db_url or os.getenv("DATABASE_URL")
-        if self.db_url and self.db_url.startswith("postgres://"):
-            self.db_url = self.db_url.replace("postgres://", "postgresql://")
+        self.db_url = db_url or DATABASE_URL
 
     def save_full_rubric(self, jobdiva_id: str, rubric_obj: any, recruiter_notes: str = None) -> bool:
         """

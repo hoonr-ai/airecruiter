@@ -1,15 +1,23 @@
-
+import sys
 import os
 import asyncio
 import httpx
-from dotenv import load_dotenv
 
-load_dotenv("apps/api/.env")
+# Dynamically add apps/api to path
+api_path = os.path.join(os.path.dirname(__file__), "apps", "api")
+if api_path not in sys.path:
+    sys.path.append(api_path)
 
-USERNAME = os.getenv("JOBDIVA_USERNAME")
-PASSWORD = os.getenv("JOBDIVA_PASSWORD")
-CLIENT_ID = os.getenv("JOBDIVA_CLIENT_ID")
-API_URL = os.getenv("JOBDIVA_API_URL", "https://api.jobdiva.com")
+from core.config import (
+    JOBDIVA_API_URL, JOBDIVA_CLIENT_ID, 
+    JOBDIVA_USERNAME, JOBDIVA_PASSWORD
+)
+
+# Use imported config
+API_URL = JOBDIVA_API_URL
+CLIENT_ID = JOBDIVA_CLIENT_ID
+USERNAME = JOBDIVA_USERNAME
+PASSWORD = JOBDIVA_PASSWORD
 
 print(f"Testing JobDiva Auth with User: {USERNAME}, ClientID: {CLIENT_ID}")
 

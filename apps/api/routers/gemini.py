@@ -15,13 +15,13 @@ from services.job_skills_db import JobSkillsDB
 from services.job_rubric_db import JobRubricDB
 from core import (
     GEMINI_API_KEY, OPENAI_API_KEY, 
-    JOBDIVA_AI_JD_UDF_ID, JOBDIVA_JOB_NOTES_UDF_ID
+    JOBDIVA_AI_JD_UDF_ID, JOBDIVA_JOB_NOTES_UDF_ID,
+    GEMINI_API_URL, GEMINI_MODEL
 )
 
 router = APIRouter()
 
-# GEMINI_API_KEY is now managed by core.config
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+# GEMINI_API_KEY and GEMINI_API_URL are now managed by core.config
 
 print(f"DEBUG: GEMINI_API_KEY loaded: {'Set' if GEMINI_API_KEY else 'NOT SET'}")
 
@@ -129,9 +129,11 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
     }
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not set in environment variables.")
+    # Dynamically build model URLs using the base URL from config
     MODELS = [
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+        f"{GEMINI_API_URL}/{GEMINI_MODEL}:generateContent",
+        f"{GEMINI_API_URL}/gemini-2.5-flash:generateContent",
+        f"{GEMINI_API_URL}/gemini-2.0-flash:generateContent"
     ]
 
     description = None
@@ -242,10 +244,12 @@ async def generate_job_title(req: JobDescriptionRequest):
         print("DEBUG TITLE: No API Key found.")
         return {"title": f"ERROR: No API Key"}
 
+    # Dynamically build model URLs using the base URL from config
     MODELS = [
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+        f"{GEMINI_API_URL}/{GEMINI_MODEL}:generateContent",
+        f"{GEMINI_API_URL}/gemini-2.5-flash:generateContent",
+        f"{GEMINI_API_URL}/gemini-2.0-flash:generateContent",
+        f"{GEMINI_API_URL}/gemini-1.5-flash:generateContent"
     ]
 
     last_error = ""

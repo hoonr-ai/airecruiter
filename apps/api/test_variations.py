@@ -1,4 +1,3 @@
-import os
 import base64
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
@@ -6,9 +5,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import sqlalchemy
 from sqlalchemy import text
-
-ENCRYPTION_KEY = '014f5c76a37102e57a9426964b16a22e358741266b4a7c67dabcd1ed2eedf72e'
-ENCRYPTION_SALT = 'b7695998d935a6b4a3f2daff2faed9d2b5cb0f2e50624c7f693ea12c7c6b09c7'
+from core.config import ENCRYPTION_KEY, ENCRYPTION_SALT, DATABASE_URL
 
 def try_decrypt_with_static_salt_ctr(encrypted_value):
     """Try using the static ENCRYPTION_SALT instead of per-encryption salt"""
@@ -114,10 +111,6 @@ def try_decrypt_different_iterations(encrypted_value, iterations):
         return None
 
 # Connect to database
-DATABASE_URL = os.getenv("DATABASE_URL")
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://")
-
 try:
     engine = sqlalchemy.create_engine(DATABASE_URL)
     conn = engine.connect()

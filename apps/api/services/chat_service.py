@@ -1,12 +1,11 @@
-import os
 from typing import List
 from openai import AsyncOpenAI
+from core.config import OPENAI_API_KEY
 from services.usage_logger import usage_logger
 
 class ChatService:
     def __init__(self):
-        api_key = os.getenv("OPENAI_API_KEY")
-        self.client = AsyncOpenAI(api_key=api_key) if api_key else None
+        self.client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
     async def get_response(self, message: str, history: List[dict]) -> str:
         if not self.client:

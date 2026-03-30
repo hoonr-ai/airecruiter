@@ -1,16 +1,15 @@
-import os
 import json
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 from typing import List, Optional
 from services.usage_logger import usage_logger
+from core.config import OPENAI_API_KEY
 
 from models import ExtractedData, Skill
 
 class LLMExtractor:
     def __init__(self):
-        api_key = os.getenv("OPENAI_API_KEY")
-        self.client = AsyncOpenAI(api_key=api_key) if api_key else None
+        self.client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
     async def extract_from_jd(self, text: str) -> ExtractedData:
         """

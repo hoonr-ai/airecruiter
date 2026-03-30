@@ -1,9 +1,9 @@
-import os
 import json
 import logging
 from typing import List, Dict, Any
 import httpx
 from openai import AsyncOpenAI
+from core.config import OPENAI_API_KEY
 from core.models import JobDescription, CandidateProfile
 from services.usage_logger import usage_logger
 
@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 class AIService:
     def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.api_key = OPENAI_API_KEY
         self.client = AsyncOpenAI(api_key=self.api_key) if self.api_key else None
         
         # Initialize Ontology (Graph) if not loaded

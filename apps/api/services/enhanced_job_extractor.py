@@ -1,13 +1,8 @@
-"""
-Enhanced job extractor that produces structured JobDescription models
-and stores them via JobStorageService.
-"""
-
-import os
 import uuid
 from typing import List, Optional
 from openai import AsyncOpenAI
 from pydantic import BaseModel
+from core.config import OPENAI_API_KEY
 
 from core.models import (
     JobDescription, 
@@ -24,8 +19,8 @@ class EnhancedJobExtractor:
     """Enhanced job extractor that produces full JobDescription models."""
     
     def __init__(self):
-        api_key = os.getenv("OPENAI_API_KEY")
-        self.client = AsyncOpenAI(api_key=api_key) if api_key else None
+        self.api_key = OPENAI_API_KEY
+        self.client = AsyncOpenAI(api_key=self.api_key) if self.api_key else None
         self.storage_service = JobStorageService()
     
     async def extract_and_store_job(self, raw_description: str, job_id: Optional[str] = None, source_job_id: Optional[str] = None) -> JobDescription:

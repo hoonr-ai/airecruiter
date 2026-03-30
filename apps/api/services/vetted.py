@@ -1,10 +1,9 @@
-
-import os
 import logging
 import sqlalchemy
 from sqlalchemy import text
 from typing import List, Dict, Any
 from utils.crypto import decrypt_field
+from core.config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
 
@@ -19,10 +18,7 @@ class VettedService:
     """
 
     def __init__(self):
-        self.db_url = os.getenv("DATABASE_URL")
-        # Fix legacy scheme if present
-        if self.db_url and self.db_url.startswith("postgres://"):
-            self.db_url = self.db_url.replace("postgres://", "postgresql://")
+        self.db_url = DATABASE_URL
             
         self.engine = None
         if self.db_url:

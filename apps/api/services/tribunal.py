@@ -1,14 +1,14 @@
 import json
-import os
 from openai import AsyncOpenAI
 from core.intelligence import TribunalVerdict
 from core.models import CandidateProfile, JobDescription
 from core.toon import encode
 from services.usage_logger import usage_logger
+from core.config import OPENAI_API_KEY
 
 class TribunalService:
     def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.api_key = OPENAI_API_KEY
         self.client = AsyncOpenAI(api_key=self.api_key) if self.api_key else None
         
     async def evaluate_narrative(

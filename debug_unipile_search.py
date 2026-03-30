@@ -1,16 +1,11 @@
 import asyncio
+import sys
 import os
-# from dotenv import load_dotenv
 
-# Manually load env
-def load_env_manual(path):
-    with open(path, 'r') as f:
-        for line in f:
-            if line.strip() and not line.startswith('#'):
-                key, value = line.strip().split('=', 1)
-                os.environ[key] = value.strip('"').strip("'")
-
-load_env_manual("apps/api/.env")
+# Dynamically add apps/api to path
+api_path = os.path.join(os.path.dirname(__file__), "apps", "api")
+if api_path not in sys.path:
+    sys.path.append(api_path)
 
 from apps.api.services.unipile import UnipileService
 

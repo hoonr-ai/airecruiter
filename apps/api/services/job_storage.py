@@ -3,10 +3,10 @@ Storage service for structured job data from pre-fetch phase.
 Handles saving and retrieving rich JobDescription data.
 """
 
-import os
 import json
 from typing import Optional, Dict, Any
 from sqlalchemy import create_engine, text
+from core.config import CLOUDSQL_CONNECTION_NAME
 from core.db import getconn
 from core.models import JobDescription, JobMetadata, GatingRules, Requirement, Competency, SenioritySignals
 
@@ -15,7 +15,7 @@ class JobStorageService:
     
     def __init__(self):
         self.engine = None
-        if os.getenv("CLOUDSQL_CONNECTION_NAME"):
+        if CLOUDSQL_CONNECTION_NAME:
             self.engine = create_engine("postgresql+pg8000://", creator=getconn)
     
     async def store_job_data(self, job_description: JobDescription, source_job_id: Optional[str] = None, raw_description: Optional[str] = None) -> bool:

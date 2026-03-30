@@ -1,23 +1,22 @@
-
-import os
 import psycopg2
 from google.cloud.sql.connector import Connector, IPTypes
 import pg8000
 import sqlalchemy
+from core.config import (
+    CLOUDSQL_CONNECTION_NAME, DB_USER, DB_PASSWORD
+)
 
-# Configuration
-INSTANCE_CONNECTION_NAME = os.getenv("CLOUDSQL_CONNECTION_NAME")
-DB_USER = os.getenv("DB_USER")
-DB_PASS = os.getenv("DB_PASSWORD")
+# Configuration Mapping (DB_PASS = DB_PASSWORD)
+DB_PASS = DB_PASSWORD
 # Try these DBs in order
 TARGET_DBS = ["postgres", "skills-db-v1", "skills_db", "test", "cloudsqladmin"]
 
 print(f"🔍 Testing Cloud SQL Connection...")
-print(f"   Instance: {INSTANCE_CONNECTION_NAME}")
+print(f"   Instance: {CLOUDSQL_CONNECTION_NAME}")
 print(f"   User:     {DB_USER}")
 
-if not INSTANCE_CONNECTION_NAME:
-    print("❌ CLOUDSQL_CONNECTION_NAME is missing in env!")
+if not CLOUDSQL_CONNECTION_NAME:
+    print("❌ CLOUDSQL_CONNECTION_NAME is missing in config!")
     exit(1)
 
 connector = Connector()
@@ -26,7 +25,7 @@ def getconn(db_name):
     print(f"   -> Connecting to DB: '{db_name}'...")
     try:
         conn = connector.connect(
-            INSTANCE_CONNECTION_NAME,
+            CLOUDSQL_CONNECTION_NAME,
             "pg8000",
             user=DB_USER,
             password=DB_PASS,

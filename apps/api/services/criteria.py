@@ -9,18 +9,29 @@ from typing import List, Dict, Any, Optional
 import sqlalchemy
 from sqlalchemy import text
 from openai import OpenAI
-from dotenv import load_dotenv
+from core.config import OPENAI_API_KEY, DATABASE_URL
 
-# Add Ronak's JD Parser to path
-sys.path.append('/Users/swatipandey/Desktop/airecruiter/JD_Parser_Ronak/src')
-from jd_parser.jdparser.jd_parser import parse_jd
+# Add Ronak's JD Parser to path dynamically
+# Project root is 2 levels up from apps/api/services/
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+jd_parser_src = os.path.join(project_root, "JD_Parser_Ronak", "src")
+
+if os.path.exists(jd_parser_src):
+    sys.path.append(jd_parser_src)
+    try:
+        from jd_parser.jdparser.jd_parser import parse_jd
+    except ImportError:
+        logging.warning("⚠️ JD_Parser_Ronak found but could not import parse_jd.")
+        parse_jd = None
+else:
+    logging.warning(f"⚠️ JD_Parser_Ronak not found at {jd_parser_src}. Criteria parsing may be limited.")
+    parse_jd = None
 
 from models import JobCriterion, JobCriteriaResponse
 from services.usage_logger import usage_logger
 from services.jobdiva import jobdiva_service
 
-load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 logger = logging.getLogger(__name__)
 
@@ -154,10 +165,7 @@ def extract_customer_requirements(job_data: dict) -> List[Dict[str, Any]]:
 
 class CriteriaService:
     def __init__(self):
-        self.db_url = os.getenv("DATABASE_URL")
-        if self.db_url and self.db_url.startswith("postgres://"):
-            self.db_url = self.db_url.replace("postgres://", "postgresql://")
-        
+        self.db_url = DATABASE_URL
         self.engine = None
         if self.db_url:
             self.engine = sqlalchemy.create_engine(self.db_url)

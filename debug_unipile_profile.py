@@ -3,20 +3,15 @@ import httpx
 import os
 import sys
 
-# Manually load env
-def load_env_manual(path):
-    with open(path, 'r') as f:
-        for line in f:
-            if line.strip() and not line.startswith('#'):
-                try:
-                    key, value = line.strip().split('=', 1)
-                    os.environ[key] = value.strip('"').strip("'")
-                except ValueError: pass
+# Dynamically add apps/api to path
+api_path = os.path.join(os.path.dirname(__file__), "apps", "api")
+if api_path not in sys.path:
+    sys.path.append(api_path)
 
-load_env_manual("apps/api/.env")
+from core.config import UNIPILE_API_KEY, UNIPILE_DSN
 
-API_KEY = os.getenv("UNIPILE_API_KEY")
-DSN = os.getenv("UNIPILE_DSN", "api1.unipile.com")
+API_KEY = UNIPILE_API_KEY
+DSN = UNIPILE_DSN
 if not DSN.startswith("http"): DSN = f"https://{DSN}"
 API_URL = f"{DSN}/api/v1"
 

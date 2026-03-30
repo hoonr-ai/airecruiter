@@ -1,4 +1,3 @@
-
 import os
 import base64
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -9,8 +8,8 @@ from utils.crypto import decrypt_field, ENCRYPTION_KEY, ENCRYPTION_SALT
 
 def encrypt_mock(text: str) -> str:
     # Mirroring TS Logic
-    password = os.getenv('ENCRYPTION_SALT', ENCRYPTION_SALT).encode('utf-8')
-    salt = os.getenv('ENCRYPTION_KEY', ENCRYPTION_KEY).encode('utf-8')
+    password = ENCRYPTION_SALT.encode('utf-8')
+    salt = ENCRYPTION_KEY.encode('utf-8')
 
     kdf = PBKDF2HMAC(
         algorithm=hashes.SHA256(),

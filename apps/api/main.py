@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 
 from core import (
     OPENAI_API_KEY, GEMINI_API_KEY, DATABASE_URL, 
-    JOBDIVA_JOB_NOTES_UDF_ID
+    JOBDIVA_JOB_NOTES_UDF_ID, ALLOWED_ORIGINS, GEMINI_MODEL
 )
 
 # Load environment variables (core handles .env, but keeping load_dotenv for compatibility)
@@ -101,7 +101,7 @@ app.include_router(voice_agent.router, prefix="/api/v1/voice")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allow all origins for local dev
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -120,7 +120,7 @@ async def parse_job_description(request: ParsedJobRequest):
         if request.job_id:
             storage = MonitoredJobsStorage()
             processing_metadata = {
-                "model": "gemini-1.5-flash",
+                "model": GEMINI_MODEL,
                 "processing_time_ms": 0,  # Could track actual processing time
                 "tokens_used": 0,  # Could track actual token usage
                 "confidence": 0.8
@@ -670,7 +670,7 @@ def auto_extract_job_skills(job_id: str, job_details: dict):
         logger.info(f"🧠 Auto-extracting skills for job {job_id}...")
         
         # Initialize extractor
-        extractor = JobSkillsExtractor(os.getenv("OPENAI_API_KEY"))
+        extractor = JobSkillsExtractor(OPENAI_API_KEY)
         
         # Extract skills from the job data
         analysis = extractor.analyze_job_skills(
@@ -1681,7 +1681,7 @@ async def extract_job_skills(job_id: str, request: SkillsExtractionRequest):
         from services.job_skills_db import JobSkillsDB
         
         # Initialize extractor with Ronak's ontology
-        extractor = JobSkillsExtractor(os.getenv("OPENAI_API_KEY"))
+        extractor = JobSkillsExtractor(OPENAI_API_KEY)
         
         # Extract skills and map to Ronak's ontology
         analysis = extractor.analyze_job_skills(

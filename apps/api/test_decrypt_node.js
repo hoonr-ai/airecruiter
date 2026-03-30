@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { Client } = require('pg');
 
-const ENCRYPTION_KEY = '014f5c76a37102e57a9426964b16a22e358741266b4a7c67dabcd1ed2eedf72e';
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '0000000000000000000000000000000000000000000000000000000000000000'; // Fallback for local tests only
 
 // Database connection
 const DATABASE_URL = process.env.DATABASE_URL;

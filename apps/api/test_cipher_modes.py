@@ -1,4 +1,3 @@
-import os
 import base64
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
@@ -6,8 +5,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import sqlalchemy
 from sqlalchemy import text
-
-ENCRYPTION_KEY = '014f5c76a37102e57a9426964b16a22e358741266b4a7c67dabcd1ed2eedf72e'
+from core.config import ENCRYPTION_KEY, DATABASE_URL
 
 def try_decrypt_gcm_no_tag_split(encrypted_value):
     """Try GCM with entire Part 2 as ciphertext (no tag splitting)"""
@@ -139,10 +137,6 @@ def try_decrypt_direct_key(encrypted_value):
         return None
 
 # Connect to database
-DATABASE_URL = os.getenv("DATABASE_URL")
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://")
-
 try:
     engine = sqlalchemy.create_engine(DATABASE_URL)
     conn = engine.connect()

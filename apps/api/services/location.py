@@ -1,8 +1,8 @@
-import os
 import json
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 from services.usage_logger import usage_logger
+from core.config import OPENAI_API_KEY
 
 class LocationVerdict(BaseModel):
     is_within_range: bool
@@ -11,7 +11,7 @@ class LocationVerdict(BaseModel):
 
 class LocationService:
     def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.api_key = OPENAI_API_KEY
         self.client = AsyncOpenAI(api_key=self.api_key) if self.api_key else None
         
     async def check_proximity(self, candidate_loc: str, job_loc: str, work_mode: str) -> LocationVerdict:

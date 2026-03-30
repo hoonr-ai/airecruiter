@@ -1,13 +1,6 @@
-import os
 import sqlalchemy
 from sqlalchemy import text
-from dotenv import load_dotenv
-
-load_dotenv()
-
-DATABASE_URL = os.getenv("DATABASE_URL")
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://")
+from core.config import DATABASE_URL
 
 def verify():
     if not DATABASE_URL:
