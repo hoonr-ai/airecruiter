@@ -286,7 +286,8 @@ async def generate_job_title(req: JobDescriptionRequest):
     return {"title": "ERROR 429: Rate Limit Exceeded" if "429" in error_str else f"ERROR: {error_str[:20]}"}
 
 class RubricGenerationRequest(BaseModel):
-    jobId: str = ""  # Add job_id for database saving
+    jobId: str = ""      # Numeric PK for database linking
+    jobdivaId: str = ""  # Alphanumeric Ref Code for rubric tables
     jobTitle: str
     jobDescription: str
     jobNotes: str = ""
@@ -332,9 +333,17 @@ async def generate_rubric(req: RubricGenerationRequest):
         if req.jobId and not req.jobId.startswith("temp_"):
             try:
                 # We need the correct jobdiva_id (ref code) for cross-referencing
-                # Fetch fresh from JobDiva or trust monitored_jobs
-                job_context = await jobdiva_service.get_job_by_id(req.jobId)
-                ref_id = job_context.get('jobdiva_id') if job_context else req.jobId
+                # Use provided jobdivaId or try to resolve from background service
+                ref_id = req.jobdivaId
+                
+                if not ref_id or "-" not in str(ref_id):
+                    logger.info(f"🔍 Resolving ref_id for numeric jobId: {req.jobId}")
+                    job_context = await jobdiva_service.get_job_by_id(req.jobId)
+                    if job_context and job_context.get('jobdiva_id'):
+                        ref_id = job_context.get('jobdiva_id')
+                        logger.info(f"✅ Resolved to {ref_id}")
+                    else:
+                        ref_id = req.jobId # Fallback if resolution fails
                 
                 logger.info(f"💾 Persisting full rubric for ref_id: {ref_id}")
                 rubric_db = JobRubricDB()
@@ -359,11 +368,11 @@ async def generate_rubric(req: RubricGenerationRequest):
                 
                 db_service = JobSkillsDB()
                 db_service.save_job_skills(
-                    job_id=req.jobId,
+                    jobdiva_id=ref_id,
                     extracted_skills=extracted_skills,
                     analysis_metadata={"source": "Step 3 Generation"}
                 )
-                logger.info(f"💾 Saved skills to database for job {req.jobId}")
+                logger.info(f"💾 Saved skills to legacy table for jobid: {ref_id}")
             except Exception as e:
                 logger.error(f"❌ Failed to persist rubric: {e}")
         

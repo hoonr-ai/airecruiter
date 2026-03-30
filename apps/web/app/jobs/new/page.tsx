@@ -102,7 +102,8 @@ function NewJobPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [currentStep, setCurrentStep] = useState<Step>(1);
-  const [jobId, setJobId] = useState("");
+  const [numericJobId, setNumericJobId] = useState("");
+  const [jobdivaId, setJobdivaId] = useState("");
   const [jobData, setJobData] = useState<any>(null);
   const [isFetching, setIsFetching] = useState(false);
   const [isFetched, setIsFetched] = useState(false);
@@ -141,7 +142,11 @@ function NewJobPageContent() {
   useEffect(() => {
     const jobIdFromUrl = searchParams.get("jobId");
     if (jobIdFromUrl) {
-      setJobId(jobIdFromUrl);
+      if (jobIdFromUrl.includes("-")) {
+        setJobdivaId(jobIdFromUrl);
+      } else {
+        setNumericJobId(jobIdFromUrl);
+      }
       loadJobDraft(jobIdFromUrl);
     }
   }, [searchParams]);
@@ -182,6 +187,9 @@ function NewJobPageContent() {
       if (detailsResponse.ok) {
         const details = await detailsResponse.json();
         setJobData(details);
+        if (details.jobdiva_id) {
+          setJobdivaId(details.jobdiva_id);
+        }
       }
 
       // 3. If we are on or past step 3, try to fetch existing rubric data
@@ -214,7 +222,7 @@ function NewJobPageContent() {
         setCurrentStep(savedStep);
         setPageSubtitle(STEP_DESCRIPTIONS[savedStep]);
         setIsFetched(true);
-        setJobId(jobIdToLoad);
+        setNumericJobId(jobIdToLoad);
       }
       
       return true;
@@ -225,7 +233,14 @@ function NewJobPageContent() {
   };
 
   const handleFetchJob = async () => {
-    if (!jobId.trim()) return;
+    const isValidJobDivaId = (id: string) => id.trim().includes("-");
+
+    if (!isValidJobDivaId(jobdivaId)) {
+        showToast("Please enter a valid JobDiva Reference code (e.g., 26-06182)", "info");
+        return;
+    }
+
+    const searchId = jobdivaId.trim();
 
     setIsFetching(true);
     setIsFetched(false);
@@ -243,20 +258,31 @@ function NewJobPageContent() {
       const response = await fetch(`${apiUrl}/jobs/fetch`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ job_id: jobId.trim() })
+        body: JSON.stringify({ job_id: searchId })
       });
 
-      if (!response.ok) throw new Error("Job not found");
+      if (!response.ok) {
+        showToast("Job not found. Check the ID.", "info");
+        return;
+      }
 
       const data = await response.json();
 
+      // Completeness Check: Ensure the job has at least a title
+      if (!data.title) {
+        showToast("Job not found or incomplete data from JobDiva.", "info");
+        return;
+      }
+
       setJobData(data); // Store the full data object from backend
       
-      // CRITICAL: Update jobId state to the Numeric ID (Primary Key) for database consistency
-      // This ensures all subsequent 'Next' button clicks (saveJobDraft) use the Numeric PK.
       if (data.id) {
-        console.log(`🔄 Identifier Resolved: Syncing UI jobId from '${jobId}' to Numeric PK '${data.id}'`);
-        setJobId(data.id.toString());
+        console.log(`🔄 Identifier Resolved: Syncing internal numericJobId to Numeric PK '${data.id}'`);
+        setNumericJobId(data.id.toString());
+      }
+      if (data.jobdiva_id) {
+        console.log(`🔄 Ref Code Resolved: Setting UI jobdivaId to '${data.jobdiva_id}'`);
+        setJobdivaId(data.jobdiva_id.toString());
       }
 
       const displayData = {
@@ -333,9 +359,9 @@ function NewJobPageContent() {
       setCurrentStep(1);
       setPageSubtitle(`${displayData.title} · ${displayData.customer_name}`);
       showToast("Job intake form auto-populated from JobDiva.", "success");
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error fetching job:", error);
-      showToast("Failed to fetch job. Check the Job ID.", "info");
+      showToast(error.message === "Job not found or incomplete data from JobDiva." ? "Job not found. Check the ID." : "Failed to fetch job. Use format: 26-06182", "info");
     } finally {
       setIsFetching(false);
     }
@@ -345,7 +371,7 @@ function NewJobPageContent() {
     setIsGeneratingJD(true);
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-      const response = await fetch(`${apiUrl}/api/v1/gemini/jobs/${jobId || 'new'}/generate-description`, {
+      const response = await fetch(`${apiUrl}/api/v1/gemini/jobs/${numericJobId || jobdivaId || 'new'}/generate-description`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -445,12 +471,12 @@ function NewJobPageContent() {
     });
   };
 
-  const saveJobDraft = async (stepData: { 
+   const saveJobDraft = async (stepData: { 
     currentStep: number, 
     saveType?: string,
     skipToast?: boolean 
   }) => {
-    if (!jobData || !jobId) {
+    if (!jobData || (!numericJobId && !jobdivaId)) {
       showToast("Job data not available for saving.", "info");
       return false;
     }
@@ -458,12 +484,12 @@ function NewJobPageContent() {
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
       // Use the new endpoint that saves directly to monitored_jobs
-      const response = await fetch(`${apiUrl}/jobs/${jobId}/save`, {
+      const response = await fetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          job_id: jobId,
-          jobdiva_id: jobData?.id?.toString(),
+          job_id: numericJobId || jobdivaId,
+          jobdiva_id: jobdivaId || jobData?.jobdiva_id || jobData?.id?.toString(),
           user_session: "default", // Add user session parameter required by API
           current_step: stepData.currentStep,
           title: jobTitle,
@@ -620,20 +646,19 @@ const intakeStep = (
       </div>
 
       <div className="p-7 space-y-7">
-        {/* JobDiva Job ID */}
         <div>
           <label className="block text-[14px] font-medium text-slate-900 mb-3">JobDiva Job ID</label>
           <div className="flex items-center gap-3">
             <Input
               placeholder="e.g. 26-08025"
-              value={jobId}
-              onChange={(e) => setJobId(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleFetchJob()}
+              value={jobdivaId}
+              onChange={(e) => setJobdivaId(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && jobdivaId.trim().includes("-") && handleFetchJob()}
               className="max-w-[180px] h-[36px] bg-white border-slate-200 text-[13px]"
             />
             <button
               onClick={handleFetchJob}
-              disabled={!jobId.trim() || isFetching}
+              disabled={!jobdivaId.trim().includes("-") || isFetching}
               className={`h-[36px] px-3.5 rounded-lg flex items-center gap-2 text-[13px] font-medium transition-all text-white disabled:opacity-50 disabled:cursor-not-allowed ${isFetched ? "bg-[#16a34a]" : "bg-primary hover:bg-[#5b21b6]"}`}
             >
               {isFetching ? (
@@ -1988,7 +2013,8 @@ const intakeStep = (
                          method: "POST",
                          headers: { "Content-Type": "application/json" },
                          body: JSON.stringify({
-                           jobId: jobId, // Include job_id for skills database saving
+                           jobId: numericJobId || jobdivaId, // Numeric PK for internal linking
+                           jobdivaId: jobdivaId, // Alphanumeric Ref Code for rubric tables
                            jobTitle: jobTitle || jobData?.title,
                            jobDescription: jobPosting,
                            jobNotes: recruiterNotes,

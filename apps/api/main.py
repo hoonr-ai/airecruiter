@@ -318,6 +318,10 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
             fetched_ref = job.get("jobdiva_id")
             ref_code = str(fetched_ref) if fetched_ref and str(fetched_ref).strip() and str(fetched_ref) != "None" else search_id
             
+            # Ensure the returned job object has both IDs clearly labeled
+            job["id"] = numeric_id
+            job["jobdiva_id"] = ref_code
+            
         # 2. Check local DB using the NUMERIC ID as the primary key
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
@@ -330,7 +334,16 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
         if local_data:
             logger.info(f"📍 Found local data for Job {numeric_id} (Ref: {ref_code})")
             # If JobDiva fetch failed but local exists, we still have some data
-            if not job: job = {"id": numeric_id, "job_id": ref_code} 
+            if not job: 
+                job = {
+                    "id": numeric_id, 
+                    "job_id": ref_code,
+                    "jobdiva_id": ref_code # Ensure both keys point to ref code if missing JobDiva fetch
+                } 
+            
+            # Sync mapping again after potentially merging local data
+            job["id"] = str(numeric_id)
+            job["jobdiva_id"] = str(ref_code)
             
             # Merge local overrides
             if "recruiter_notes" in local_data and local_data["recruiter_notes"] is not None:
@@ -346,8 +359,8 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
             elif _validate_job_completeness(local_data):
                 return job # Return if complete enough
             
-        if not job:
-            raise HTTPException(status_code=404, detail="Job not found in JobDiva or Local DB")
+        if not job or not job.get("title"):
+            raise HTTPException(status_code=404, detail="Job not found or incomplete data in JobDiva")
             
         logger.info(f"📋 Successfully fetched job {numeric_id} (Ref: {ref_code}) from JobDiva API")
         

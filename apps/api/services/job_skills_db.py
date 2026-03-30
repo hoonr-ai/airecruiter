@@ -17,7 +17,7 @@ class JobSkillsDB:
     def __init__(self, db_url: str = None):
         self.db_url = db_url or DATABASE_URL
     
-    def save_job_skills(self, job_id: str, extracted_skills: List, analysis_metadata: Dict) -> Dict:
+    def save_job_skills(self, jobdiva_id: str, extracted_skills: List, analysis_metadata: Dict) -> Dict:
         """
         Saves extracted skills to job_skills table
         """
@@ -25,21 +25,21 @@ class JobSkillsDB:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                 
                 # Clear existing skills for this job (if re-analyzing)
-                cursor.execute("DELETE FROM job_skills WHERE job_id = %s", (job_id,))
+                cursor.execute("DELETE FROM job_skills WHERE jobdiva_id = %s", (jobdiva_id,))
                 
                 skills_saved = 0
                 for skill in extracted_skills:
                     try:
                         cursor.execute("""
                             INSERT INTO job_skills (
-                                job_id, skill_id, skill_name, importance_level,
+                                jobdiva_id, skill_id, skill_name, importance_level,
                                 min_years, proficiency_level, extracted_from,
                                 original_text, confidence_score, is_active
                             ) VALUES (
                                 %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                             )
                         """, (
-                            job_id,
+                            jobdiva_id,
                             skill.skill_id,
                             skill.normalized_name,
                             skill.importance,
@@ -61,7 +61,7 @@ class JobSkillsDB:
                         skills_found, skills_mapped, status
                     ) VALUES (%s, %s, %s, %s, %s, %s)
                 """, (
-                    job_id,
+                    jobdiva_id,
                     'skills_extraction',
                     psycopg2.extras.Json({'description': 'Combined job descriptions', 'analysis': analysis_metadata}),
                     len(extracted_skills),
@@ -74,12 +74,12 @@ class JobSkillsDB:
                 print(f"✅ Saved {skills_saved} skills for job {job_id}")
                 
                 return {
-                    'job_id': job_id,
+                    'jobdiva_id': jobdiva_id,
                     'skills_saved': skills_saved,
                     'status': 'success'
                 }
     
-    def get_job_skills(self, job_id: str) -> List[Dict]:
+    def get_job_skills(self, jobdiva_id: str) -> List[Dict]:
         """Retrieve all skills for a job"""
         with psycopg2.connect(self.db_url) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
@@ -95,7 +95,7 @@ class JobSkillsDB:
                         is_verified,
                         display_order
                     FROM job_skills 
-                    WHERE job_id = %s AND is_active = true
+                    WHERE jobdiva_id = %s AND is_active = true
                     ORDER BY 
                         CASE importance_level 
                             WHEN 'required' THEN 1 
@@ -104,11 +104,11 @@ class JobSkillsDB:
                         END,
                         display_order,
                         skill_name
-                """, (job_id,))
+                """, (jobdiva_id,))
                 
                 return [dict(row) for row in cursor.fetchall()]
     
-    def get_skills_summary(self, job_id: str) -> Dict:
+    def get_skills_summary(self, jobdiva_id: str) -> Dict:
         """Get summary of skills analysis for a job"""
         with psycopg2.connect(self.db_url) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
@@ -119,9 +119,9 @@ class JobSkillsDB:
                         importance_level,
                         COUNT(*) as count
                     FROM job_skills 
-                    WHERE job_id = %s AND is_active = true
+                    WHERE jobdiva_id = %s AND is_active = true
                     GROUP BY importance_level
-                """, (job_id,))
+                """, (jobdiva_id,))
                 
                 importance_counts = {row['importance_level']: row['count'] for row in cursor.fetchall()}
                 
@@ -129,8 +129,8 @@ class JobSkillsDB:
                 cursor.execute("""
                     SELECT COUNT(*) as total_skills
                     FROM job_skills 
-                    WHERE job_id = %s AND is_active = true
-                """, (job_id,))
+                    WHERE jobdiva_id = %s AND is_active = true
+                """, (jobdiva_id,))
                 
                 total_skills = cursor.fetchone()['total_skills']
                 
@@ -141,13 +141,13 @@ class JobSkillsDB:
                     WHERE job_id = %s AND extraction_type = 'skills_extraction'
                     ORDER BY created_at DESC 
                     LIMIT 1
-                """, (job_id,))
+                """, (jobdiva_id,))
                 
                 metadata_row = cursor.fetchone()
                 metadata = metadata_row['source_data'] if metadata_row else {}
                 
                 return {
-                    'job_id': job_id,
+                    'jobdiva_id': jobdiva_id,
                     'total_skills': total_skills,
                     'by_importance': importance_counts,
                     'analysis_metadata': metadata,
