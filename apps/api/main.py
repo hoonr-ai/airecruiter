@@ -93,10 +93,11 @@ async def lifespan(app: FastAPI):
     logger.info("📋 Stopping scheduler...")
     scheduler.shutdown()
     
-from routers import engagement, gemini
+from routers import engagement, gemini, voice_agent
 
 app = FastAPI(title="Hoonr.ai API", lifespan=lifespan)
 app.include_router(gemini.router, prefix="/api/v1/gemini")
+app.include_router(voice_agent.router, prefix="/api/v1/voice")
 
 app.add_middleware(
     CORSMiddleware,
