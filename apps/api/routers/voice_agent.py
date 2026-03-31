@@ -52,11 +52,18 @@ async def get_voice_job_context(job_id: str):
         numeric_id = job_base.pop('job_id')
         ref_id_val = job_base.pop('jobdiva_id')
         
+        # Pop fields from rubric to avoid duplication or unwanted fields
+        pre_screen_questions = rubric.pop('screen_questions', [])
+        for q in pre_screen_questions:
+            q.pop('order_index', None)
+        rubric.pop('bot_introduction', None)
+        
         return {
-            "job_id": numeric_id,       # Numeric ID at top level
-            "jobdiva_id": ref_id_val,   # Ref Code at top level
-            "context": job_base,        # No more duplicate IDs here
-            "rubric": rubric
+            "job_id": numeric_id,           # Numeric ID at top level
+            "jobdiva_id": ref_id_val,       # Ref Code at top level
+            "context": job_base,            # No more duplicate IDs here
+            "rubric": rubric,
+            "pre_screen_questions": pre_screen_questions
         }
 
     except Exception as e:
