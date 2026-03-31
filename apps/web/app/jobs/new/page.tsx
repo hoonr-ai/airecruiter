@@ -1570,17 +1570,14 @@ function NewJobPageContent() {
                       onChange={(e) => updateRubricItem('customer_requirements', idx, 'type', e.target.value)}
                     >
                       <option value="Must not be employed by">Must not be employed by</option>
-                      <option value="Must be employed by">Must be employed by</option>
-                      <option value="Must not work with">Must not work with</option>
-                      <option value="Geographic restriction">Geographic restriction</option>
-                      <option value="Citizenship requirement">Citizenship requirement</option>
-                      <option value="Security clearance">Security clearance</option>
+                      <option value="Currently employed by">Currently employed by</option>
+                      <option value="Previously employed by">Previously employed by</option>
                     </select>
                     <Input
                       value={req.value}
                       onChange={(e) => updateRubricItem('customer_requirements', idx, 'value', e.target.value)}
-                      className="w-[350px] flex-shrink-0 h-[34px] text-[13px] font-medium text-slate-700 bg-white border-slate-200"
-                      placeholder="Requirement details..."
+                      className="w-[350px] flex-shrink-0 h-[34px] text-[13px] font-medium text-slate-700 bg-[#fffafb] border-[#fecaca] focus:border-rose-300 focus:ring-0"
+                      placeholder="Company name"
                     />
                   </div>
                   <div className="w-[110px] flex-shrink-0"></div>
@@ -1640,16 +1637,12 @@ function NewJobPageContent() {
                       placeholder="Requirement..."
                     />
                   </div>
-                  <div className="w-[110px] flex-shrink-0"></div>
-                  <div className="w-[70px] flex-shrink-0"></div>
-                  <div className="w-[170px] flex-shrink-0"></div>
                   <div className="w-[190px] flex-shrink-0 flex items-center justify-center">
                     <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[135px] bg-white cursor-pointer select-none shadow-sm">
                       <button onClick={() => updateRubricItem("other_requirements", idx, "required", "Required")} className={`flex-1 py-[2.5px] rounded-full transition-all ${req.required === "Required" ? "bg-[#dcfce7] text-[#166534]" : "text-slate-400"}`}>Required</button>
                       <button onClick={() => updateRubricItem("other_requirements", idx, "required", "Preferred")} className={`flex-1 py-[2.5px] rounded-full transition-all ${req.required === "Preferred" ? "bg-[#ede9fe] text-[#6d28d9]" : "text-slate-400"}`}>Preferred</button>
                     </div>
                   </div>
-                  <div className="w-[70px] flex-shrink-0"></div>
                   <div className="w-[36px] flex-shrink-0 text-center">
                     <button 
                       type="button"

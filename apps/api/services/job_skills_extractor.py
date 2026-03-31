@@ -275,11 +275,11 @@ class JobSkillsExtractor:
            - value, required ("Required" or "Preferred").
         
         5. CUSTOMER REQUIREMENTS:
-           - type: Choose ONLY from ["Must not be employed by", "Must be employed by", "Must not work with", "Geographic restriction", "Citizenship requirement", "Security clearance"].
+           - type: Choose ONLY from ["Must not be employed by", "Currently employed by", "Previously employed by"].
            - value: Specific detail if mentioned.
         
         6. OTHER REQUIREMENTS:
-           - Location constraints, shift requirements, specific physical/schedule needs.
+           - Location constraints, shift requirements, and specific physical or schedule needs.
            - value, required ("Required" or "Preferred").
         
         Input Context:
@@ -390,6 +390,21 @@ class JobSkillsExtractor:
                     "field": "Relevant field",
                     "required": "Preferred"
                 }]
+
+            # 5. Inject default Customer Requirement if customer_name exists
+            if customer_name and customer_name.strip():
+                # Check for existing "Must not be employed by" for this customer
+                exists = any(
+                    req.get('type') == 'Must not be employed by' and 
+                    customer_name.lower() in str(req.get('value', '')).lower()
+                    for req in rubric_data.get('customer_requirements', [])
+                )
+                if not exists:
+                    rubric_data.setdefault('customer_requirements', []).insert(0, {
+                        "type": "Must not be employed by",
+                        "value": customer_name,
+                        "required": "Required"
+                    })
 
             return JobRubric(
                 titles=deduped_titles,
