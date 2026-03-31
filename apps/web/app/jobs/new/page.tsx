@@ -1770,26 +1770,30 @@ function NewJobPageContent() {
     }
 
     // Add education filters (inactive by default)
-    if (jobData && (jobData.title?.toLowerCase().includes('specialist') || jobData.title?.toLowerCase().includes('accountant'))) {
-      filters.push({
-        id: idCounter++,
-        category: 'Education',
-        value: "Bachelor's in Accounting or Finance",
-        active: false,
-        ai: true,
-        fromRubric: true
+    if (rubricData.education) {
+      rubricData.education.forEach((edu: any) => {
+        filters.push({
+          id: idCounter++,
+          category: 'Education',
+          value: `${edu.degree}${edu.field ? ` in ${edu.field}` : ''}`,
+          active: false,
+          ai: true,
+          fromRubric: true
+        });
       });
     }
 
     // Add domain experience (inactive by default)
-    if (jobData && jobData.customer_name) {
-      filters.push({
-        id: idCounter++,
-        category: 'Domain',
-        value: "Healthcare, Finance / Accounting",
-        active: false,
-        ai: true,
-        fromRubric: true
+    if (rubricData.domain) {
+      rubricData.domain.forEach((dom: any) => {
+        filters.push({
+          id: idCounter++,
+          category: 'Domain',
+          value: dom.value,
+          active: false,
+          ai: true,
+          fromRubric: true
+        });
       });
     }
 
