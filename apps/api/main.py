@@ -834,7 +834,7 @@ async def poll_all_jobs():
     
     return {"polled": len(job_ids), "changes": changes_detected}
 
-def persist_rubric_background_task(jobdiva_id: str, rubric: Any, recruiter_notes: Optional[str]):
+def persist_rubric_background_task(jobdiva_id: str, rubric: Any, recruiter_notes: Optional[str], bot_introduction: Optional[str] = None):
     """
     Background task to persist the structured rubric.
     This runs in a separate connection after the main save has committed.
@@ -842,7 +842,7 @@ def persist_rubric_background_task(jobdiva_id: str, rubric: Any, recruiter_notes
     try:
         logger.info(f"⏳ [Background] Persisting rubric for Job {jobdiva_id}...")
         rubric_db = JobRubricDB()
-        rubric_db.save_full_rubric(jobdiva_id, rubric, recruiter_notes)
+        rubric_db.save_full_rubric(jobdiva_id, rubric, recruiter_notes, bot_introduction)
         logger.info(f"✅ [Background] Rubric persisted for Job {jobdiva_id}")
     except Exception as e:
         logger.error(f"❌ [Background] Failed to persist rubric for {jobdiva_id}: {e}")
@@ -907,6 +907,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                 recruiter_emails = %s,
                 selected_employment_types = %s,
                 work_authorization = %s,
+                bot_introduction = %s,
                 processing_status = %s,
                 current_step = %s,
                 jobdiva_id = %s, -- This is the reference string
@@ -921,6 +922,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
             json.dumps(draft_data.recruiter_emails or []),       # recruiter_emails
             json.dumps(draft_data.selected_employment_types or []), # selected_employment_types
             draft_data.work_authorization,                       # work_authorization
+            draft_data.bot_introduction,                        # bot_introduction
             f"step_{draft_data.current_step}_complete",         # processing_status
             draft_data.current_step,                            # current_step
             ref_code,                                           # 26-06182 (swapped)
@@ -933,9 +935,9 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                 INSERT INTO monitored_jobs (
                     job_id, title, enhanced_title, ai_description, 
                     selected_job_boards, recruiter_notes, recruiter_emails, 
-                    selected_employment_types, work_authorization, 
+                    selected_employment_types, work_authorization, bot_introduction,
                     processing_status, current_step, jobdiva_id, created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
             """, (
                 db_job_id,                                           # 31920032 (Numeric PK)
                 draft_data.title,
@@ -946,6 +948,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                 json.dumps(draft_data.recruiter_emails or []),
                 json.dumps(draft_data.selected_employment_types or []),
                 draft_data.work_authorization,
+                draft_data.bot_introduction,
                 f"step_{draft_data.current_step}_complete",
                 draft_data.current_step,
                 ref_code                                              # 26-06182 (Ref)
@@ -964,7 +967,8 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                 persist_rubric_background_task, 
                 ref_code, 
                 draft_data.rubric, 
-                draft_data.recruiter_notes
+                draft_data.recruiter_notes,
+                draft_data.bot_introduction
             )
         
         # 2. Synchronize with JobDiva UDFs in background (using Numeric PK)
@@ -1054,7 +1058,8 @@ async def get_job_draft(job_id: str, user_session: str = "default"):
                 "recruiter_emails": parse_json(job_row.get("recruiter_emails")),
                 "selected_employment_types": parse_json(job_row.get("selected_employment_types")),
                 "current_step": job_row.get("current_step") or 1,
-                "pair_level": job_row.get("pair_level") or "L1.5"
+                "pair_level": job_row.get("pair_level") or "L1.5",
+                "bot_introduction": job_row.get("bot_introduction") or ""
             }
         }
         

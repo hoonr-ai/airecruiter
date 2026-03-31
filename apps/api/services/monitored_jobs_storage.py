@@ -60,6 +60,8 @@ class MonitoredJobsStorage:
                 "confidence": processing_metadata.get("confidence", 0.8) if processing_metadata else 0.8
             }
             
+            bot_introduction = processing_metadata.get("bot_introduction") if processing_metadata else None
+            
             # First, ensure columns exist
             conn.execute(text("""
                 ALTER TABLE monitored_jobs 
@@ -67,7 +69,8 @@ class MonitoredJobsStorage:
                 ADD COLUMN IF NOT EXISTS hard_skills JSONB,
                 ADD COLUMN IF NOT EXISTS soft_skills JSONB,
                 ADD COLUMN IF NOT EXISTS experience_level TEXT,
-                ADD COLUMN IF NOT EXISTS extraction_metadata JSONB
+                ADD COLUMN IF NOT EXISTS extraction_metadata JSONB,
+                ADD COLUMN IF NOT EXISTS bot_introduction TEXT
             """))
             
             # Update the monitored_jobs record with all processed data
@@ -78,6 +81,7 @@ class MonitoredJobsStorage:
                     soft_skills = :soft_skills,
                     experience_level = :experience_level,
                     extraction_metadata = :extraction_metadata,
+                    bot_introduction = COALESCE(:bot_introduction, bot_introduction),
                     updated_at = :updated_at
                 WHERE job_id = :job_id
             """), {
@@ -86,6 +90,7 @@ class MonitoredJobsStorage:
                 "soft_skills": json.dumps(extracted_data.soft_skills),
                 "experience_level": extracted_data.experience_level,
                 "extraction_metadata": json.dumps(extraction_meta),
+                "bot_introduction": bot_introduction,
                 "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "job_id": job_id
             })

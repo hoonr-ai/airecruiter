@@ -73,6 +73,14 @@ function cleanLocationType(locationType: string | null | undefined): string {
 type Step = 1 | 2 | 3 | 4 | 5;
 type ScreeningLevel = "L1" | "L1.5" | "L2";
 type EmploymentType = "W2" | "1099" | "C2C" | "Full-Time";
+type ScreenQuestion = {
+  id: number;
+  question_text: string;
+  pass_criteria: string;
+  is_default: boolean;
+  category: string;
+  order_index: number;
+};
 
 const STEP_LABELS = {
   1: "Intake",
@@ -138,6 +146,10 @@ function NewJobPageContent() {
     fromRubric: boolean;
   }>>([]);
   const [filterIdCounter, setFilterIdCounter] = useState(1);
+  // Step 4 - Phone Screen state
+  const [botIntroduction, setBotIntroduction] = useState("");
+  const [screenQuestions, setScreenQuestions] = useState<ScreenQuestion[]>([]);
+  const [questionIdCounter, setQuestionIdCounter] = useState(1);
 
   useEffect(() => {
     const jobIdFromUrl = searchParams.get("jobId");
@@ -199,6 +211,13 @@ function NewJobPageContent() {
           if (rubricRes.ok) {
             const rData = await rubricRes.json();
             setRubricData(rData);
+            if (rData.screen_questions?.length) {
+              setScreenQuestions(rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1 })));
+              setQuestionIdCounter(rData.screen_questions.length + 1);
+            }
+            if (rData.bot_introduction) {
+              setBotIntroduction(rData.bot_introduction);
+            }
           }
         } catch (e) {
           console.error("Failed to load existing rubric:", e);
@@ -215,6 +234,7 @@ function NewJobPageContent() {
       if (draft.pair_level) setScreeningLevel(draft.pair_level);
       if (draft.selected_job_boards?.length) setSelectedJobBoards(draft.selected_job_boards);
       if (draft.work_authorization) setWorkAuthorization(draft.work_authorization);
+      if (draft.bot_introduction) setBotIntroduction(draft.bot_introduction);
 
       // 5. Navigate to the saved step
       if (draft.current_step) {
@@ -501,7 +521,11 @@ function NewJobPageContent() {
           recruiter_emails: recruiterEmails,
           pair_level: screeningLevel,
           selected_job_boards: selectedJobBoards,
-          rubric: rubricData, // 🔥 SEND FULL RUBRIC DATA
+          rubric: {
+            ...rubricData,
+            screen_questions: screenQuestions
+          }, // 🔥 SEND FULL RUBRIC DATA + Screen Questions
+          bot_introduction: botIntroduction,
           step1_completed: stepData.currentStep >= 1,
           step2_completed: stepData.currentStep >= 2,
           step3_completed: stepData.currentStep >= 3,
@@ -1827,6 +1851,84 @@ function NewJobPageContent() {
     setFilterIdCounter(idCounter);
   };
 
+  const initializeScreenQuestionsFromRubric = () => {
+    if (!jobData) return;
+
+    const location = `${jobData.city || ""}, ${jobData.state || ""}`.trim().replace(/^, |, $/g, "");
+    const isRemote = jobData.location_type?.toLowerCase() === "remote";
+    
+    let idCounter = 1;
+    const questions: ScreenQuestion[] = [];
+
+    // 1. Bot Introduction
+    const intro = `Hi {{candidate name}}, I'm Nova, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${jobTitle || "role"} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+    setBotIntroduction(intro);
+
+    // 2. Default Questions
+    const defaultQs = [
+      { text: "Are you open to exploring new job opportunities?", criteria: "Must be open to new job opportunities" },
+      { text: "What is your current or most recent role and key responsibilities?", criteria: "" },
+      { text: "What is your current location?", criteria: "" },
+      ...(isRemote ? [] : [{ text: "Are you open to working onsite if required for the role?", criteria: "Must be willing to work onsite" }]),
+      { text: "What is your earliest availability to start a new role?", criteria: "Must be available by [role start date]" },
+      { text: "What is your current compensation and expected compensation?", criteria: "" },
+      { text: "Are you authorized to work in the United States?", criteria: "" },
+      { text: "Will you now or in the future require visa sponsorship to continue working in the United States?", criteria: "" }
+    ];
+
+    defaultQs.forEach((q, index) => {
+      questions.push({
+        id: idCounter++,
+        question_text: q.text,
+        pass_criteria: q.criteria,
+        is_default: true,
+        category: "default",
+        order_index: index
+      });
+    });
+
+    // 3. Role-Specific Questions (from rubric skills)
+    if (rubricData?.skills) {
+      rubricData.skills.forEach((skill: any, index: number) => {
+        // Only generate questions for required skills or first 4 skills
+        if (questions.length < 12) {
+          questions.push({
+            id: idCounter++,
+            question_text: `Can you describe your experience with ${skill.value}? We're looking for ${skill.minYears}+ years of experience.`,
+            pass_criteria: `Must have ${skill.minYears}+ yrs of ${skill.value} experience`,
+            is_default: false,
+            category: "role-specific",
+            order_index: questions.length
+          });
+        }
+      });
+    }
+
+    setScreenQuestions(questions);
+    setQuestionIdCounter(idCounter);
+  };
+
+  const addScreenQuestion = () => {
+    const newQuestion: ScreenQuestion = {
+      id: questionIdCounter,
+      question_text: "",
+      pass_criteria: "",
+      is_default: false,
+      category: "other",
+      order_index: screenQuestions.length
+    };
+    setScreenQuestions([...screenQuestions, newQuestion]);
+    setQuestionIdCounter(questionIdCounter + 1);
+  };
+
+  const updateScreenQuestion = (id: number, field: keyof ScreenQuestion, value: any) => {
+    setScreenQuestions(prev => prev.map(q => q.id === id ? { ...q, [field]: value } : q));
+  };
+
+  const deleteScreenQuestion = (id: number) => {
+    setScreenQuestions(prev => prev.filter(q => q.id !== id));
+  };
+
   const setFiltersStep = (
     <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
       <div className="flex flex-row items-start gap-4 px-7 py-6 border-b border-slate-100"
@@ -1980,6 +2082,98 @@ function NewJobPageContent() {
             Add Resume Filter
           </Button>
         </section>
+
+        <div className="h-px bg-slate-100 my-2"></div>
+
+        {/* Screen Section */}
+        <section className="pt-2">
+          <div className="flex items-center gap-2 mb-4">
+            <Users className="w-4 h-4 text-slate-900 flex-shrink-0" />
+            <h3 className="text-[14px] font-bold text-slate-800">Screen</h3>
+            <span className="text-[12px] font-normal text-slate-500">Questions asked during PAIR phone screen</span>
+            <span className="ml-auto text-slate-400 text-[11px] font-bold">
+              {screenQuestions.length} / 12 questions
+            </span>
+          </div>
+
+          {/* Bot Introduction */}
+          <div className="bg-[#f8faff] rounded-xl border border-[#e0e7ff] p-5 mb-6 relative">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="w-5 h-5 bg-[#6d28d9] rounded flex items-center justify-center">
+                <Users className="w-3 h-3 text-white" />
+              </div>
+              <span className="text-[12px] font-bold text-slate-800">Bot Introduction</span>
+              <span className="text-[11px] text-slate-400 font-normal">— what Nova says at the start of each call. Variables in {"{{brackets}}"} are filled at runtime.</span>
+            </div>
+            <textarea
+              value={botIntroduction}
+              onChange={(e) => setBotIntroduction(e.target.value)}
+              className="w-full bg-transparent border-none outline-none text-[13px] text-slate-600 leading-relaxed resize-none h-24"
+              placeholder="Enter bot introduction..."
+            />
+          </div>
+
+          {/* Questions Table */}
+          <div className="flex items-center gap-3 text-[11px] font-bold uppercase tracking-wider text-slate-500 pb-2 border-b-2 border-slate-200 mb-2">
+            <div className="w-8 flex-shrink-0">#</div>
+            <div className="flex-1">Question</div>
+            <div className="flex-1">Pass Criteria <span className="text-[10px] font-normal lowercase">(blank = informational only)</span></div>
+            <div className="w-10 flex-shrink-0"></div>
+          </div>
+
+          {screenQuestions.map((q, index) => (
+            <div key={q.id} className="flex items-start gap-3 py-3 border-b border-slate-100 last:border-b-0 group">
+              <div className="w-8 h-8 rounded-full bg-[#6366f1] text-white flex items-center justify-center text-[12px] font-bold flex-shrink-0 mt-0.5">
+                {index + 1}
+              </div>
+              
+              <div className="flex-1 min-w-0">
+                <textarea
+                  value={q.question_text}
+                  onChange={(e) => updateScreenQuestion(q.id, 'question_text', e.target.value)}
+                  className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium resize-none"
+                  rows={2}
+                />
+              </div>
+
+              <div className="flex-1 min-w-0 border-l border-slate-100 pl-3">
+                <input
+                  type="text"
+                  value={q.pass_criteria}
+                  onChange={(e) => updateScreenQuestion(q.id, 'pass_criteria', e.target.value)}
+                  className={`w-full text-[13px] bg-transparent border-none outline-none font-medium ${q.pass_criteria ? 'text-[#4338ca]' : 'text-slate-300 italic'}`}
+                  placeholder="No hard filter"
+                />
+              </div>
+
+              <div className="w-10 flex-shrink-0 flex flex-col items-end gap-2 pr-1">
+                {q.category === 'role-specific' && (
+                  <span className="bg-[#f0fdf4] text-[#166534] text-[9px] font-bold px-1.5 py-0.5 rounded border border-[#bbf7d0] whitespace-nowrap mb-1">
+                    role-specific
+                  </span>
+                )}
+                <button
+                  onClick={() => deleteScreenQuestion(q.id)}
+                  className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-6 h-6 flex items-center justify-center rounded transition-all opacity-0 group-hover:opacity-100"
+                  title="Remove"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+          ))}
+
+          {/* Add Question Button */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={addScreenQuestion}
+            className="mt-3 border-slate-200 text-slate-600 bg-white hover:bg-slate-50 font-medium text-[13px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
+          >
+            <Plus className="w-3.5 h-3.5 mr-1.5" />
+            Add Question
+          </Button>
+        </section>
       </div>
     </div>
   );
@@ -2003,6 +2197,9 @@ function NewJobPageContent() {
         // Initialize filters from rubric when entering step 4
         if (rubricData && resumeMatchFilters.length === 0) {
           initializeFiltersFromRubric();
+          if (screenQuestions.length === 0) {
+            initializeScreenQuestionsFromRubric();
+          }
         }
         return setFiltersStep;
       }

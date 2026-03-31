@@ -11,7 +11,7 @@ class JobRubricDB:
     def __init__(self, db_url: str = None):
         self.db_url = db_url or DATABASE_URL
 
-    def save_full_rubric(self, jobdiva_id: str, rubric_obj: any, recruiter_notes: str = None) -> bool:
+    def save_full_rubric(self, jobdiva_id: str, rubric_obj: any, recruiter_notes: str = None, bot_introduction: str = None) -> bool:
         """
         Saves all rubric sections to their respective tables.
         Uses jobdiva_id (ref code) as the primary cross-reference key.
@@ -107,14 +107,20 @@ class JobRubricDB:
                     cur.execute("""
                         UPDATE monitored_jobs 
                         SET domains = %s,
-                            recruiter_notes = COALESCE(%s, recruiter_notes)
+                            recruiter_notes = COALESCE(%s, recruiter_notes),
+                            bot_introduction = COALESCE(%s, bot_introduction)
                         WHERE jobdiva_id = %s OR job_id = %s
                     """, (
                         json.dumps(domains),
                         recruiter_notes,
+                        bot_introduction,
                         jobdiva_id,
                         jobdiva_id # Fallback if jobdiva_id is actually the job_id
                     ))
+                    
+                    # 8. Save Screen Questions
+                    if rubric.get('screen_questions'):
+                        self._save_screen_questions_internal(cur, jobdiva_id, rubric.get('screen_questions'))
 
                 conn.commit()
                 return True
@@ -130,8 +136,8 @@ class JobRubricDB:
         try:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    # Fetch domains from monitored_jobs
-                    cur.execute("SELECT domains FROM monitored_jobs WHERE jobdiva_id = %s OR job_id = %s", (jobdiva_id, jobdiva_id))
+                    # Fetch domains and bot_introduction from monitored_jobs
+                    cur.execute("SELECT domains, bot_introduction FROM monitored_jobs WHERE jobdiva_id = %s OR job_id = %s", (jobdiva_id, jobdiva_id))
                     job_row = cur.fetchone()
                     domains_list = job_row['domains'] if job_row and job_row['domains'] else []
                     domain_objs = [{"value": d, "required": "Required"} for d in domains_list]
@@ -180,8 +186,42 @@ class JobRubricDB:
                         "education": education,
                         "domain": domain_objs,
                         "customer_requirements": customer_reqs,
-                        "other_requirements": other_reqs
+                        "other_requirements": other_reqs,
+                        "bot_introduction": job_row.get('bot_introduction') if job_row else None,
+                        "screen_questions": self._get_screen_questions_internal(cur, jobdiva_id)
                     }
         except Exception as e:
             print(f"❌ Failed to fetch rubric for {jobdiva_id}: {e}")
             return None
+    def _save_screen_questions_internal(self, cur, jobdiva_id: str, questions: List[Dict]):
+        """Internal helper to save screen questions using an existing cursor."""
+        cur.execute("DELETE FROM job_screen_questions WHERE jobdiva_id = %s", (jobdiva_id,))
+        for i, q in enumerate(questions):
+            cur.execute("""
+                INSERT INTO job_screen_questions (
+                    jobdiva_id, question_text, pass_criteria, is_default, category, order_index
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+            """, (
+                jobdiva_id,
+                q.get('question_text', ''),
+                q.get('pass_criteria', ''),
+                bool(q.get('is_default', False)),
+                q.get('category', 'other'),
+                q.get('order_index', i)
+            ))
+
+    def _get_screen_questions_internal(self, cur, jobdiva_id: str) -> List[Dict]:
+        """Internal helper to fetch screen questions using an existing cursor."""
+        cur.execute("""
+            SELECT question_text, pass_criteria, is_default, category, order_index 
+            FROM job_screen_questions 
+            WHERE jobdiva_id = %s 
+            ORDER BY order_index
+        """, (jobdiva_id,))
+        return [{
+            "question_text": r['question_text'],
+            "pass_criteria": r['pass_criteria'],
+            "is_default": r['is_default'],
+            "category": r['category'],
+            "order_index": r['order_index']
+        } for r in cur.fetchall()]

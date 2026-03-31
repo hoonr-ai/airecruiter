@@ -128,6 +128,8 @@ class JobDraftData(BaseModel):
     is_auto_saved: bool = False
     draft_notes: Optional[str] = None
     rubric: Optional[Dict] = None
+    bot_introduction: Optional[str] = None
+    screen_questions: List[Dict[str, Any]] = []
 
 class JobDraftRequirement(BaseModel):
     """Model for draft requirements"""
