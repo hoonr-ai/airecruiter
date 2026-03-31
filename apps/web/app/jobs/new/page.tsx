@@ -1870,7 +1870,7 @@ function NewJobPageContent() {
       { text: "What is your current or most recent role and key responsibilities?", criteria: "" },
       { text: "What is your current location?", criteria: "" },
       ...(isRemote ? [] : [{ text: "Are you open to working onsite if required for the role?", criteria: "Must be willing to work onsite" }]),
-      { text: "What is your earliest availability to start a new role?", criteria: "Must be available by [role start date]" },
+      { text: "What is your earliest availability to start a new role?", criteria: `Must be available by ${jobData.start_date || 'ASAP'}` },
       { text: "What is your current compensation and expected compensation?", criteria: "" },
       { text: "Are you authorized to work in the United States?", criteria: "" },
       { text: "Will you now or in the future require visa sponsorship to continue working in the United States?", criteria: "" }
