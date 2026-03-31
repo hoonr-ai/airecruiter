@@ -241,6 +241,8 @@ class JobSkillsExtractor:
         Analyze the following job details and extract a structured assessment rubric.
         YOU MUST ONLY EXTRACT FACTS PRESENT IN THE TEXT. DO NOT INVENT REQUIREMENTS.
         
+        FORMATTING RULE: Every extracted value (titles, skills, degrees, etc.) MUST be in Title Case (e.g. "Radiographic Positioning", NOT "radiographic positioning").
+        
         STRICT EXTRACTION PRIORITY:
         1. Recruiter Notes (highest authority)
         2. AI Enhanced Job Description
@@ -250,18 +252,22 @@ class JobSkillsExtractor:
         
         1. TITLES:
            - Extract any acceptable alternative job titles mentioned in the text.
-           - For each, provide: value, minYears, recent (boolean), matchType ("Exact" or "Similar"), required ("Required" or "Preferred").
+           - For each, provide: value, minYears, recent (boolean), matchType ("Similar" or "Exact" - default to "Similar"), required ("Required" or "Preferred").
         
-        2. SKILLS (Technical/Hard Skills):
-           - Extract top 8 relevant technical skills or certifications (e.g., BLS, ARRT).
-           - For each: value, minYears, recent (boolean), matchType ("Exact" or "Similar"), required ("Required" or "Preferred").
+        2. SKILLS (Measurable Hard Skills Only):
+           - Extract the **top 8 most critical** technical skills, tools, or methodologies.
+           - PRIORITIZATION: If more than 8 skills are found, prioritize the most essential ones for the role and group related tools if possible (e.g., "Adobe Creative Suite" instead of separate entries) to maximize the value of each slot.
+           - STRICT EXCLUSION: DO NOT extract soft skills (e.g., "Communication", "Teamwork", "Leadership", "Problem Solving").
+           - STRICT EXCLUSION: DO NOT extract certifications or licenses (e.g., "ARRT", "BLS", "ACLS"). These go into EDUCATION.
+           - For each: value, minYears, recent (boolean), matchType (ALWAYS return "Similar"), required ("Required" or "Preferred").
         
         3. EDUCATION & CERTIFICATIONS:
-           - degree: Choose ONLY from ["No requirement", "High School / GED", "Associate's degree", "Bachelor's degree", "Master's degree", "PhD or equivalent", "Certification / License"].
+           - Extract ONLY specific academic degrees and professional certifications mentioned in the text.
+           - degree: Choose ONLY from ["High School / GED", "Associate's degree", "Bachelor's degree", "Master's degree", "PhD or equivalent", "Certification / License"].
            - MAPPING RULES: 
-             - If "Completion of program", "Vocational school", "Accredited program", or "Certification" is mentioned (like "Radiologic Technology program"), use "Certification / License".
-             - If no education is mentioned, default to "Bachelor's degree" IF it's a professional white-collar role where that is standard, otherwise use "No requirement".
-           - field: Field of study (e.g., "Radiologic Technology", "Computer Science").
+             - Use "Certification / License" for any professional certification (e.g. "CPR", "ARRT").
+             - **STRICT EXCLUSION**: DO NOT invent "No requirement" rows. If no specific academic degree is mentioned beyond a required license/certification, ONLY return the license/certification.
+           - field: Field of study or Certification name (e.g., "Radiologic Technology" or "Basic Life Support").
            - required: "Required" or "Preferred".
         
         4. DOMAIN:
@@ -284,7 +290,7 @@ class JobSkillsExtractor:
         Return ONLY a JSON object with this structure:
         {{
             "titles": [{{ "value": "Alternative Title", "minYears": 3, "recent": false, "matchType": "Similar", "required": "Preferred" }}],
-            "skills": [{{ "value": "Python", "minYears": 3, "recent": false, "matchType": "Exact", "required": "Required" }}],
+            "skills": [{{ "value": "Python", "minYears": 3, "recent": false, "matchType": "Similar", "required": "Required" }}],
             "education": [{{ "degree": "Bachelor's degree", "field": "Computer Science", "required": "Required" }}],
             "domain": [{{ "value": "Healthcare", "required": "Preferred" }}],
             "customer_requirements": [],
@@ -357,11 +363,15 @@ class JobSkillsExtractor:
                         'normalized_name': s.get('value', ''),
                         'importance': s.get('required', 'preferred').lower(),
                         'min_years': s.get('minYears', 0),
-                        'confidence': 1.0
+                        'confidence': 1.0,
+                        'match_type': s.get('matchType', 'Similar')
                     })
 
                 mapped = self._map_skills_to_ontology(raw_skills)
                 for i, s in enumerate(rubric_data['skills']):
+                    # Per USER requirement: Force all extracted skills to 'Similar' by default
+                    rubric_data['skills'][i]['matchType'] = 'Similar'
+
                     for ms in mapped['mapped']:
                         if ms.original_text == s['value']:
                             rubric_data['skills'][i]['value'] = ms.normalized_name

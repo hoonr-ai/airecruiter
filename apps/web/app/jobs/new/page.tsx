@@ -1273,6 +1273,9 @@ function NewJobPageContent() {
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
                   Add Title
                 </Button>
+                <span className={`ml-3 text-[13.5px] font-medium ${(rubricData.titles?.length || 0) >= 5 ? 'text-rose-600' : 'text-slate-500'}`}>
+                  {(rubricData.titles?.length || 0)} / 5
+                </span>
               </div>
             </div>
           </section>
@@ -1389,13 +1392,16 @@ function NewJobPageContent() {
                 <Button
                   variant="outline"
                   size="sm"
+                  disabled={(rubricData.skills?.length || 0) >= 8}
                   onClick={() => addRubricItem('skills', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred' })}
-                  className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
+                  className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
                   Add Skill
                 </Button>
-                <span className="ml-3 text-[13.5px] font-normal text-rose-500">{(rubricData.skills?.length || 0)} / 8</span>
+                <span className={`ml-3 text-[13.5px] font-medium ${(rubricData.skills?.length || 0) >= 8 ? 'text-rose-600' : 'text-slate-500'}`}>
+                  {(rubricData.skills?.length || 0)} / 8
+                </span>
               </div>
             </div>
           </section>
