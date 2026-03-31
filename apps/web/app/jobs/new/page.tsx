@@ -743,10 +743,17 @@ function NewJobPageContent() {
 
               {/* Recruiter Notes */}
               <div className="mb-10">
-                <label className="flex items-center gap-1.5 text-[14px] font-medium text-slate-900 mb-2">
-                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-primary"><path d="M17.414 2.586a2 2 0 00-2.828 0L7 10.172V13h2.828l7.586-7.586a2 2 0 000-2.828z" /><path fillRule="evenodd" d="M2 6a2 2 0 012-2h4a1 1 0 010 2H4v10h10v-4a1 1 0 112 0v4a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" clipRule="evenodd" /></svg>
-                  Recruiter Notes
-                  <span className="text-slate-500 font-normal ml-0.5">— helps PAIR generate better output</span>
+                <label className="flex flex-col gap-1 mb-2">
+                  <div className="flex items-center gap-1.5 text-[14px] font-medium text-slate-900">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-primary"><path d="M17.414 2.586a2 2 0 00-2.828 0L7 10.172V13h2.828l7.586-7.586a2 2 0 000-2.828z" /><path fillRule="evenodd" d="M2 6a2 2 0 012-2h4a1 1 0 010 2H4v10h10v-4a1 1 0 112 0v4a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" clipRule="evenodd" /></svg>
+                    Recruiter Notes
+                  </div>
+                  <div className="flex items-start gap-1.5 px-2 py-1.5 bg-amber-50 border border-amber-100 rounded-md">
+                    <Info className="w-3.5 h-3.5 text-amber-600 mt-0.5 flex-shrink-0" />
+                    <span className="text-[12px] font-medium text-amber-700 leading-tight">
+                      Whatever you write here will be used to generate the AI Job Description for external posting. Please be cautious of what you include.
+                    </span>
+                  </div>
                 </label>
                 <Textarea
                   placeholder="e.g. Client strongly prefers fintech background. Must be local to Atlanta metro — no relocation. W2 only, no C2C. Ideally someone with NetSuite over SAP. Start date is flexible but ASAP preferred..."
