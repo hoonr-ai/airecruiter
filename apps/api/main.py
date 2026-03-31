@@ -353,11 +353,10 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
             if "enhanced_title" in local_data and local_data["enhanced_title"] is not None:
                 job["enhanced_title"] = local_data["enhanced_title"]
             
-            # If everything else is missing, we might still need the refetch
+            # Always continue to re-save from JobDiva to ensure all columns are fresh.
+            # priority, pay_rate, max_allowed_submittals etc. are now standard schema columns.
             if not _validate_job_completeness(local_data) and job.get("title"):
                 pass # Already have title from JD fetch
-            elif _validate_job_completeness(local_data):
-                return job # Return if complete enough
             
         if not job or not job.get("title"):
             raise HTTPException(status_code=404, detail="Job not found or incomplete data in JobDiva")
@@ -405,6 +404,16 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
                     job["recruiter_emails"] = json.loads(val) if isinstance(val, str) else val
                 except:
                     job["recruiter_emails"] = []
+            
+            # Merge stored supplemental fields back into the live response
+            if local_data.get("priority") and not job.get("priority"):
+                job["priority"] = local_data["priority"]
+            if local_data.get("pay_rate") and not job.get("pay_rate"):
+                job["pay_rate"] = local_data["pay_rate"]
+            if local_data.get("max_allowed_submittals") and not job.get("max_allowed_submittals"):
+                job["max_allowed_submittals"] = local_data["max_allowed_submittals"]
+            if local_data.get("program_duration") and not job.get("program_duration"):
+                job["program_duration"] = local_data["program_duration"]
         
         return job
         
@@ -459,7 +468,7 @@ async def save_job_to_monitoring_enhanced(job_id: str, job_details: dict) -> boo
             # Location details
             "city": job_details.get("city") or "",
             "state": job_details.get("state") or "",
-            "zip": job_details.get("zip") or "",
+            "zip_code": job_details.get("zip_code") or "",
             "location_type": job_details.get("location_type") or "Onsite",
             
             # Job descriptions and notes
@@ -476,7 +485,11 @@ async def save_job_to_monitoring_enhanced(job_id: str, job_details: dict) -> boo
             "openings": job_details.get("openings") or "",
             "posted_date": job_details.get("posted_date") or "",
             "start_date": job_details.get("start_date") or "",
-            # "jobdiva_id": numeric_id, # THE ACTUAL NUMERIC ID (31920032) - now stored in job_id
+            
+            # Additional Job Details
+            "priority": job_details.get("priority") or "",
+            "program_duration": job_details.get("program_duration") or "",
+            "max_allowed_submittals": job_details.get("max_allowed_submittals") or "",
             
             # Recruiter information
             "recruiter_emails": job_details.get("recruiter_emails") or [],
@@ -1466,6 +1479,9 @@ async def add_job_to_monitoring(job_id: str, background_tasks: BackgroundTasks):
             "posted_date": status_info.get("posted_date", ""),
             "start_date": status_info.get("start_date", ""),
             "openings": status_info.get("openings", ""),
+            "priority": status_info.get("priority", ""),
+            "program_duration": status_info.get("program_duration", ""),
+            "max_allowed_submittals": status_info.get("max_allowed_submittals", ""),
             "processing_status": "monitoring_added",
             "created_at": readable_ist_now(),
             "updated_at": readable_ist_now()
@@ -1487,6 +1503,9 @@ async def add_job_to_monitoring(job_id: str, background_tasks: BackgroundTasks):
                 "customer_name": status_info.get("customer_name", "Unknown"),
                 "title": status_info.get("title", ""),
                 "work_authorization": status_info.get("work_authorization", ""),
+                "priority": status_info.get("priority", ""),
+                "program_duration": status_info.get("program_duration", ""),
+                "max_allowed_submittals": status_info.get("max_allowed_submittals", ""),
                 "created_at": readable_ist_now(),
                 "updated_at": readable_ist_now()
             }
@@ -1528,7 +1547,7 @@ async def create_new_job(job_data: Dict[str, Any]):
             # Location information  
             "city": job_data.get("city", ""),
             "state": job_data.get("state", ""),
-            "zip": job_data.get("zip", ""),
+            "zip_code": job_data.get("zip_code", ""),
             "location_type": job_data.get("location_type", "Onsite"),
             
             # Job details
@@ -1538,6 +1557,11 @@ async def create_new_job(job_data: Dict[str, Any]):
             "work_authorization": job_data.get("work_authorization", ""),
             "pay_rate": job_data.get("pay_rate", ""),
             "openings": job_data.get("openings", "1"),
+            
+            # Additional Job Details
+            "priority": job_data.get("priority", ""),
+            "program_duration": job_data.get("program_duration", ""),
+            "max_allowed_submittals": job_data.get("max_allowed_submittals", ""),
             
             # Dates
             "posted_date": job_data.get("posted_date", readable_ist_now()),

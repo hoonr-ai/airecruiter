@@ -211,6 +211,40 @@ def extract_posted_date_from_text(description: str) -> str:
   
     return desc
 
+def calculate_date_duration(start_date_str: str, end_date_str: str) -> str:
+    """Calculate human-readable duration between two date strings of format '%b %d, %Y'."""
+    if not start_date_str or not end_date_str: 
+        return ""
+    try:
+        from datetime import datetime
+        start_dt = datetime.strptime(start_date_str, "%b %d, %Y")
+        end_dt = datetime.strptime(end_date_str, "%b %d, %Y")
+        
+        if end_dt < start_dt:
+            return ""
+            
+        total_days = (end_dt - start_dt).days + 1 # Inclusive
+        if total_days <= 0:
+            return ""
+            
+        years = total_days // 365
+        rem_days = total_days % 365
+        
+        months = int(rem_days / 30.436875)
+        days_diff = round(rem_days - (months * 30.436875))
+            
+        parts = []
+        if years > 0:
+            parts.append(f"{years} year" if years == 1 else f"{years} years")
+        if months > 0:
+            parts.append(f"{months} month" if months == 1 else f"{months} months")
+        if days_diff > 0:
+            parts.append(f"{days_diff} day" if days_diff == 1 else f"{days_diff} days")
+            
+        return " ".join(parts) if parts else "0 days"
+    except Exception:
+        return ""
+
 def normalize_jobdiva_date(date_val: Any) -> str:
     """
     Format JobDiva date/timestamp into a readable YYYY-MM-DD format.
@@ -541,6 +575,31 @@ class JobDivaService:
                     if safe_id != j_id:
                         logger.warning(f"Bogus JobDiva response: requested ID {safe_id}, got ID {j_id}")
                         return None
+                        
+                # ----------------------------------------------------
+                # CRITICAL: JobDiva v2 SearchJob endpoint randomly drops fields like MAXALLOWEDSUBMITTALS
+                # We supplement it here using the /apiv2/bi/JobDetail BI endpoint which retains them.
+                # ----------------------------------------------------
+                detail_url = f"{self.api_url}/apiv2/bi/JobDetail"
+                detail_params = {"jobdivaref": j_ref} if j_ref else {"jobId": j_id}
+                try:
+                    det_resp = await client.get(detail_url, params=detail_params, headers=headers)
+                    if det_resp.status_code == 200:
+                        det_data = det_resp.json()
+                        det_list = det_data.get("data", []) if isinstance(det_data, dict) else det_data
+                        if det_list and len(det_list) > 0:
+                            d = det_list[0]
+                            max_sub = d.get("MAXALLOWEDSUBMITTALS")
+                            if max_sub:
+                                j["maxAllowedSubmittals"] = max_sub
+                            
+                            # Add robust BI Date Extraction
+                            if d.get("DATEISSUED"):
+                                j["DATEISSUED_BI"] = d.get("DATEISSUED")
+                            if d.get("STARTDATE"):
+                                j["STARTDATE_BI"] = d.get("STARTDATE")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch JobDetail supplemental data: {e}")
                 
                 u_fields = j.get("user fields", {}) or {}
                 ai_description = None
@@ -573,9 +632,21 @@ class JobDivaService:
                         logger.info(f"Restored full recruiter_notes from local DB for {job_id}")
 
                 # Advanced pay_rate logic: try to combine min and max if available for a range
-                p_min = get_field(j, ["minpayrate", "min_pay_rate", "minimum_pay", "payRateMin"])
-                p_max = get_field(j, ["maxpayrate", "max_pay_rate", "maximum_pay", "payRateMax"])
-                p_range = f"${p_min} - ${p_max}" if p_min and p_max else (p_min or p_max or "")
+                p_min = get_field(j, ["minpayrate", "min_pay_rate", "minimum_pay", "payRateMin", "minimum rate"])
+                p_max = get_field(j, ["maxpayrate", "max_pay_rate", "maximum_pay", "payRateMax", "maximum rate"])
+                
+                # Format to ignore zeros
+                if str(p_min) == "0" or str(p_min) == "0.0": p_min = None
+                if str(p_max) == "0" or str(p_max) == "0.0": p_max = None
+                
+                if p_min and p_max:
+                    p_range = f"${p_min} - ${p_max}/h"
+                elif p_max:
+                    p_range = f"${p_max}/h"
+                elif p_min:
+                    p_range = f"${p_min}/h"
+                else:
+                    p_range = ""
                 
                 # Improved Location Type detection - Only use actual location fields, not employment fields
                 loc_type_raw = get_field(j, ["location type", "location_type"]) or ""
@@ -617,7 +688,7 @@ class JobDivaService:
                     elif "on-site" in description.lower() or "onsite" in description.lower():
                         loc_type = "Onsite"
                 
-                return {
+                result = {
                     "id": get_field(j, ["id", "jobId"]),
                     "jobdiva_id": get_field(j, ["jobdivano", "reference #", "refno", "jobdivaref", "ref"]),
                     "title": get_field(j, ["job title", "title"]),
@@ -630,10 +701,10 @@ class JobDivaService:
                     "status": get_field(j, ["job status", "status"]) or "OPEN", # Database standard
                     "city": _clean_location_field(get_field(j, ["city", "jobCity", "locationCity", "worksitecity"])),
                     "state": _clean_location_field(get_field(j, ["state", "jobState", "locationState", "worksitestate", "province"])),
-                    "zip": _clean_location_field(get_field(j, ["zip", "postalCode", "zipcode", "postalcode", "worksitezip", "worksitepostalcode"])),
-                    "start_date": normalize_jobdiva_date(get_field(j, ["start date", "startDate", "available", "startdate"]) or (local_data.get("start_date") if local_data else "")),
-                    "issued_date": normalize_jobdiva_date(issued_date_udf or get_field(j, ["issued date", "issueddate", "issued_date", "issued"]) or (local_data.get("issued_date") if local_data else "")),
-                    "posted_date": normalize_jobdiva_date(get_field(j, ["posted date", "date", "created date", "posted", "posteddate", "createtimestamp", "date_posted", "posted_at", "start date", "startDate", "available", "startdate"]) or issued_date_udf or get_field(j, ["issued date", "issueddate", "issued_date", "issued"]) or extract_posted_date_from_text(description) or (local_data.get("posted_date") if local_data else "")) or get_fallback_posted_date(),
+                    "zip_code": _clean_location_field(get_field(j, ["zip", "postalCode", "zipcode", "postalcode", "worksitezip", "worksitepostalcode"])),
+                    "start_date": normalize_jobdiva_date(j.get("STARTDATE_BI") or get_field(j, ["start date", "startDate", "available", "startdate"]) or (local_data.get("start_date") if local_data else "")),
+                    "issued_date": normalize_jobdiva_date(j.get("DATEISSUED_BI") or issued_date_udf or get_field(j, ["issued date", "issueddate", "issued_date", "issued"]) or (local_data.get("issued_date") if local_data else "")),
+                    "posted_date": normalize_jobdiva_date(j.get("DATEISSUED_BI") or get_field(j, ["posted date", "date", "created date", "posted", "posteddate", "createtimestamp", "date_posted", "posted_at"]) or issued_date_udf or get_field(j, ["issued date", "issueddate", "issued_date", "issued"]) or extract_posted_date_from_text(description) or (local_data.get("posted_date") if local_data else "")) or get_fallback_posted_date(),
                     "location_type": loc_type,
                     "work_authorization": get_field(j, ["work_authorization", "visa", "legal status", "workauth", "work_auth", "work authorization"]) or (local_data.get("work_authorization") if local_data else ""),
                     
@@ -643,8 +714,24 @@ class JobDivaService:
                     "pay_rate": salary_range_udf or p_range or get_field(j, ["pay rate", "salary range", "salary", "rate", "bill rate", "compensation", "billrate", "payrate"]) or extract_pay_rate_from_text(description) or (local_data.get("pay_rate") if local_data else ""),
                     "openings": get_field(j, ["openings", "maxReturned", "positions", "number of openings", "openpositions"]) or (local_data.get("openings") if local_data else ""),
                     "employment_type": normalize_employment_type(get_field(j, ["employment type", "jobType", "assignmentType"]) or (local_data.get("employment_type") if local_data else "")),
-                    "required_degree": get_field(j, ["required degree", "required_degree", "criteria degree", "criteria_degree"]) or ""
+                    "required_degree": get_field(j, ["required degree", "required_degree", "criteria degree", "criteria_degree"]) or "",
+
+                    # Extended JobDiva fields
+                    "priority": str(get_field(j, ["priority", "jobPriority", "job priority"]) or (local_data.get("priority") if local_data else "") or ""),
+                    "program_duration": str(get_field(j, ["duration", "program duration", "contract duration", "program_duration", "assignment duration", "assignmentDuration", "contractDuration"]) or (local_data.get("program_duration") if local_data else "") or ""),
+                    "max_allowed_submittals": str(get_field(j, ["max submittals", "maxsubmittals", "max submissions", "maximum submittals", "max_allowed_submittals", "maxResumeSubmittal", "maxAllowedSubmittals"]) or (local_data.get("max_allowed_submittals") if local_data else "") or ""),
                 }
+                
+                # Dynamic Duration Calculation if missing
+                if not result.get("program_duration") or result.get("program_duration") == "None":
+                    raw_end_date = get_field(j, ["end date", "endDate", "enddate"])
+                    if raw_end_date:
+                        end_date_str = normalize_jobdiva_date(raw_end_date)
+                        calc_duration = calculate_date_duration(result.get("start_date", ""), end_date_str)
+                        if calc_duration:
+                            result["program_duration"] = calc_duration
+
+                return result
         except Exception as e:
             logger.error(f"SearchJob Error: {e}")
             return None
@@ -787,12 +874,15 @@ class JobDivaService:
                         "job_id", "jobdiva_id", "title", "enhanced_title", "customer_name", "status",
                         
                         # Location information
-                        "city", "state", "zip", "location_type",
+                        "city", "state", "zip_code", "location_type",
                         
                         # Job details
                         "jobdiva_description", "ai_description", "recruiter_notes", 
                         "employment_type", "pay_rate", "openings", "work_authorization",
                         "posted_date", "start_date",
+
+                        # Extended JobDiva fields
+                        "priority", "program_duration", "max_allowed_submittals",
                         
                         # Application state
                         "processing_status", "processing_stage", "screening_level",
@@ -805,8 +895,8 @@ class JobDivaService:
                         "pass_submissions", "pair_external_subs", "feedback_completed", "time_to_first_pass"
                     ]
                     
-                    # Fields where an empty string IS a valid intentional value (cleared UDFs)
-                    allow_empty_fields = {"recruiter_notes", "ai_description"}
+                    # Fields where an empty string IS a valid intentional value (cleared UDFs or optional fields)
+                    allow_empty_fields = {"recruiter_notes", "ai_description", "priority", "program_duration", "max_allowed_submittals"}
                     
                     for k, v in data.items():
                         if k in valid_columns:
@@ -816,11 +906,15 @@ class JobDivaService:
                             # For cleared-UDF fields, allow empty strings through
                             if v == "" and k not in allow_empty_fields:
                                 continue
+                            # Store [null] marker for new fields that have no JobDiva value
+                            if v == "" and k in {"priority", "program_duration", "max_allowed_submittals"}:
+                                v = "[null]"
                             # Clean location fields before storing
                             if k in ["city", "state", "zip"]:
                                 v = _clean_location_field(v)
                                 if not v:  # Skip empty location values
                                     continue
+
                                     
                             update_parts.append(f"{k} = :{k}")
                             if k in ["selected_employment_types", "selected_job_boards", "enhancement_metadata"]:
@@ -859,7 +953,7 @@ class JobDivaService:
                         # Location information
                         "city": _clean_location_field(data.get("city")) or "",
                         "state": _clean_location_field(data.get("state")) or "",
-                        "zip": _clean_location_field(data.get("zip")) or "",
+                        "zip_code": _clean_location_field(data.get("zip_code") or data.get("zip")) or "",
                         "location_type": data.get("location_type") or "Onsite",
                         
                         # Job descriptions and content
@@ -877,6 +971,11 @@ class JobDivaService:
                         # Dates
                         "posted_date": data.get("posted_date") or "",
                         "start_date": data.get("start_date") or "",
+                        
+                        # Extended JobDiva fields — store [null] if not provided by JobDiva
+                        "priority": data.get("priority") or "[null]",
+                        "program_duration": data.get("program_duration") or "[null]",
+                        "max_allowed_submittals": data.get("max_allowed_submittals") or "[null]",
                         
                         # Configuration and processing
                         "recruiter_emails": json.dumps(recruiter_emails) if recruiter_emails else '[]',

@@ -14,9 +14,14 @@ import {
 
 interface Job {
   id: string;
+  jobdiva_id?: string;
   title: string;
   customer_name: string;
   status: string;
+  location: string;
+  priority: string;
+  programDuration: string;
+  maxAllowedSubmittals: string;
   pairStatus: string;
   candidatesSourced: number;
   resumesShortlisted: number;
@@ -47,30 +52,43 @@ export default function DashboardPage() {
     try {
       const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/jobs/monitored`);
       const data = await response.json();
-      
+
       const jobs: Job[] = Object.entries(data.jobs).map(([id, details]: [string, any]) => {
         const status = details.status || "Open";
-        const procStatus = details.processing_status || "";
-        
-        // PAIR status logic: 
-        // 1. If processing_status indicates setup is in progress (step_X_complete), it's a draft
-        // 2. Otherwise, check JobDiva status
+        const procStatus = details.processing_status || "pending";
+
         let pairStatus = "Unpublished";
-        
-        if (procStatus.includes("step_") && !procStatus.includes("step_5_complete")) {
-          // It's a draft
+
+        // PAIR Status mapping based on internal processing_status
+        if (procStatus === "monitoring_added" || procStatus === "manual_created") {
+          // Setup is finished. Check JobDiva status for Active/Inactive
+          if (status.toLowerCase() === "closed" || status.toLowerCase() === "cancelled") {
+            pairStatus = "Inactive";
+          } else {
+            pairStatus = "Active";
+          }
+        } else {
+          // If pending, step_X_complete, or any other state, wizard is not finished
           pairStatus = "Unpublished";
-        } else if (status.toLowerCase() === "open") {
-          pairStatus = "Active";
-        } else if (status.toLowerCase() === "closed" || status.toLowerCase() === "cancelled") {
-          pairStatus = "Inactive";
         }
-        
+
         return {
           id,
-          title: details.title || "Untitled Job",
-          customer_name: details.customer_name || "Unknown",
-          status: status,
+          jobdiva_id: details.jobdiva_id || "",
+          title: details.title || "—",
+          customer_name: details.customer_name || "—",
+          status: status || "—",
+          location: [
+            details.city ? `${details.city}, ${details.state || ""}`.trim() : "",
+            details.zip_code || ""
+          ].filter(Boolean).join(" ") || "—",
+          priority: (!details.priority || details.priority === "[null]") ? "—" : details.priority,
+          programDuration: (!details.program_duration && !details.duration) || details.program_duration === "[null]" || details.duration === "[null]"
+            ? "—" 
+            : details.program_duration || details.duration,
+          maxAllowedSubmittals: (!details.max_allowed_submittals || details.max_allowed_submittals === "[null]" || Number.isNaN(Number.parseInt(details.max_allowed_submittals, 10)))
+            ? "—"
+            : Number.parseInt(details.max_allowed_submittals, 10).toString(),
           pairStatus: pairStatus,
           candidatesSourced: details.candidates_sourced || 0,
           resumesShortlisted: details.resumes_shortlisted || 0,
@@ -81,7 +99,7 @@ export default function DashboardPage() {
           timeToFirstPass: details.time_to_first_pass || 0,
         };
       });
-      
+
       setAllJobs(jobs);
       setFilteredJobs(jobs);
     } catch (error) {
@@ -95,29 +113,29 @@ export default function DashboardPage() {
     const newDirection = sortField === field && sortDirection === "asc" ? "desc" : "asc";
     setSortField(field);
     setSortDirection(newDirection);
-    
+
     const sorted = [...filteredJobs].sort((a, b) => {
       const aVal = a[field as keyof Job];
       const bVal = b[field as keyof Job];
-      
+
       if (typeof aVal === "string" && typeof bVal === "string") {
         return newDirection === "asc" ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
       }
-      
+
       if (typeof aVal === "number" && typeof bVal === "number") {
         return newDirection === "asc" ? aVal - bVal : bVal - aVal;
       }
-      
+
       return 0;
     });
-    
+
     setFilteredJobs(sorted);
   };
 
   const handleSearch = (query: string) => {
     setSearchQuery(query);
     const filtered = allJobs.filter(job =>
-      Object.values(job).some(value => 
+      Object.values(job).some(value =>
         (value?.toString() || "").toLowerCase().includes(query.toLowerCase())
       )
     );
@@ -185,10 +203,14 @@ export default function DashboardPage() {
           <table className="min-w-full divide-y divide-slate-100">
             <thead className="bg-[#fcfdfd]">
               <tr>
-                <SortableHeader field="id">JOB ID #</SortableHeader>
+                <SortableHeader field="id">JOBDIVA ID</SortableHeader>
                 <SortableHeader field="title" className="sticky left-0 bg-[#fcfdfd] z-10 shadow-[5px_0_15px_-5px_rgba(0,0,0,0.03)] border-r border-slate-100/50">JOB TITLE</SortableHeader>
-                <SortableHeader field="status">JOB STATUS</SortableHeader>
                 <SortableHeader field="customer_name">CUSTOMER NAME</SortableHeader>
+                <SortableHeader field="location">LOCATION / ZIP</SortableHeader>
+                <SortableHeader field="priority">PRIORITY</SortableHeader>
+                <SortableHeader field="programDuration">PROGRAM DURATION</SortableHeader>
+                <SortableHeader field="maxAllowedSubmittals">MAX ALLOWED SUBMITTALS</SortableHeader>
+                <SortableHeader field="status">JOB STATUS</SortableHeader>
                 <SortableHeader field="pairStatus">PAIR STATUS</SortableHeader>
                 <SortableHeader field="candidatesSourced">CANDIDATES SOURCED</SortableHeader>
                 <SortableHeader field="resumesShortlisted">RESUMES SHORTLISTED</SortableHeader>
@@ -207,25 +229,37 @@ export default function DashboardPage() {
                 <tr key={job.id} className="hover:bg-slate-50/70 transition-colors group">
                   <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-[#4f46e5]">
                     <div className="flex items-center gap-1.5">
-                      {job.id}
+                      {job.jobdiva_id || job.id}
                       {job.pairStatus !== 'Unpublished' && <LinkIcon className="h-3 w-3 text-[#4f46e5]/70" />}
                     </div>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap sticky left-0 bg-white group-hover:bg-[#f6f8fb] transition-colors border-r border-slate-100/50 z-10 shadow-[5px_0_15px_-5px_rgba(0,0,0,0.03)]">
-                     <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2">
                       <span className="text-[13.5px] font-semibold text-slate-900">{job.title}</span>
                       {job.pairStatus === 'Unpublished' && (
                         <span className="text-[11px] text-slate-400 font-medium">(draft)</span>
                       )}
                     </div>
                   </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                    {job.customer_name}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                    {job.location}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                    {job.priority}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                    {job.programDuration}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                    {job.maxAllowedSubmittals}
+                  </td>
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11.5px] font-bold tracking-wide ${getStatusColor(job.status)}`}>
                       {job.status}
                     </div>
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
-                    {job.customer_name}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap">
                     <div className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11.5px] font-bold tracking-wide ${getPairStatusColor(job.pairStatus)}`}>
@@ -285,8 +319,8 @@ export default function DashboardPage() {
                 </tr>
               )) : (
                 <tr>
-                  <td colSpan={13} className="text-center py-10 px-6">
-                     <p className="text-[14px] font-medium text-slate-400 italic">No job results to display.</p>
+                  <td colSpan={16} className="text-center py-10 px-6">
+                    <p className="text-[14px] font-medium text-slate-400 italic">No job results to display.</p>
                   </td>
                 </tr>
               )}

@@ -51,21 +51,21 @@ import { Checkbox } from "@/components/ui/checkbox";
 // Utility function to clean location_type values and filter out employment terms
 function cleanLocationType(locationType: string | null | undefined): string {
   if (!locationType) return "";
-  
+
   const employmentTerms = [
-    "direct placement", "contract", "full-time", "part-time", 
+    "direct placement", "contract", "full-time", "part-time",
     "w2", "1099", "c2c", "corp to corp", "open", "pending",
     "temporary", "permanent", "temp to perm", "fulltime", "parttime",
     "consultant", "consulting", "employee", "contractor"
   ];
-  
+
   const cleanType = locationType.toLowerCase().trim();
-  
+
   // If the location type contains any employment terms, return empty string
   if (employmentTerms.some(term => cleanType.includes(term))) {
     return "";
   }
-  
+
   // Return the original value if it's clean
   return locationType.trim();
 }
@@ -127,7 +127,7 @@ function NewJobPageContent() {
   const [rubricData, setRubricData] = useState<any>(null);
   const [isGeneratingRubric, setIsGeneratingRubric] = useState(false);
   const [workAuthorization, setWorkAuthorization] = useState("");
-  
+
   // Step 4 - Set Filters state
   const [resumeMatchFilters, setResumeMatchFilters] = useState<Array<{
     id: number;
@@ -159,7 +159,7 @@ function NewJobPageContent() {
   const loadJobDraft = async (jobIdToLoad: string) => {
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-      
+
       // 1. Fetch the basic draft info from monitored_jobs
       const draftResponse = await fetch(`${apiUrl}/jobs/${jobIdToLoad}/draft`);
       if (!draftResponse.ok) {
@@ -167,13 +167,13 @@ function NewJobPageContent() {
         return false;
       }
       const draftResult = await draftResponse.json();
-      
+
       // Backend returns HTTP 200 with status:error when not found
       if (draftResult.status === "error" || !draftResult.data) {
         console.error("Draft not found:", draftResult.message);
         return false;
       }
-      
+
       const draft = draftResult.data;
 
       // 2. Fetch full job details from JobDiva to populate 'jobData'
@@ -183,7 +183,7 @@ function NewJobPageContent() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_id: jobIdToLoad.trim() })
       });
-      
+
       if (detailsResponse.ok) {
         const details = await detailsResponse.json();
         setJobData(details);
@@ -215,7 +215,7 @@ function NewJobPageContent() {
       if (draft.pair_level) setScreeningLevel(draft.pair_level);
       if (draft.selected_job_boards?.length) setSelectedJobBoards(draft.selected_job_boards);
       if (draft.work_authorization) setWorkAuthorization(draft.work_authorization);
-      
+
       // 5. Navigate to the saved step
       if (draft.current_step) {
         const savedStep = draft.current_step as Step;
@@ -224,7 +224,7 @@ function NewJobPageContent() {
         setIsFetched(true);
         setNumericJobId(jobIdToLoad);
       }
-      
+
       return true;
     } catch (error) {
       console.error("Failed to load draft:", error);
@@ -236,15 +236,15 @@ function NewJobPageContent() {
     const isValidJobDivaId = (id: string) => id.trim().includes("-");
 
     if (!isValidJobDivaId(jobdivaId)) {
-        showToast("Please enter a valid JobDiva Reference code (e.g., 26-06182)", "info");
-        return;
+      showToast("Please enter a valid JobDiva Reference code (e.g., 26-06182)", "info");
+      return;
     }
 
     const searchId = jobdivaId.trim();
 
     setIsFetching(true);
     setIsFetched(false);
-    
+
     // RESET all states before new fetch to prevent stale data
     setJobTitle("");
     setEnhancedTitle("");
@@ -252,7 +252,7 @@ function NewJobPageContent() {
     setRecruiterNotes("");
     setRecruiterEmails([]);
     setSelectedEmpTypes([]);
-    
+
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
       const response = await fetch(`${apiUrl}/jobs/fetch`, {
@@ -275,7 +275,7 @@ function NewJobPageContent() {
       }
 
       setJobData(data); // Store the full data object from backend
-      
+
       if (data.id) {
         console.log(`🔄 Identifier Resolved: Syncing internal numericJobId to Numeric PK '${data.id}'`);
         setNumericJobId(data.id.toString());
@@ -299,11 +299,11 @@ function NewJobPageContent() {
 
       // Auto-populate intake form fields from JobDiva data
       console.log("Auto-populating intake form with JobDiva data...", data);
-      
+
       // 1. Job Title and Description
       setJobTitle(data.title || "");
       setEnhancedTitle(data.enhanced_title || data.title || "");
-      
+
       // Strict Check for AI Description (UDF 230)
       // If JobDiva result has "" or null for ai_description, then setJobPosting to ""
       // We no longer fall back to data.description to respect clearing intentionality
@@ -314,7 +314,7 @@ function NewJobPageContent() {
         setJobPosting(data.description || "");
       }
       setPageSubtitle(`${displayData.title} · ${displayData.customer_name}`);
-      
+
       // 2. Employment Type - auto-select from JobDiva OR restore previously selected types
       if (data.selected_employment_types && Array.isArray(data.selected_employment_types) && data.selected_employment_types.length > 0) {
         console.log("Restoring previously selected employment types:", data.selected_employment_types);
@@ -326,17 +326,17 @@ function NewJobPageContent() {
           showToast(`Employment type set to: ${empType}`, "info");
         }
       }
-      
+
       // 3. Recruiter Notes - populate from JobDiva job_notes or local recruiter_notes if available
       const notes = data.recruiter_notes !== undefined ? data.recruiter_notes : data.job_notes;
       setRecruiterNotes(notes || "");
       if (notes) {
         showToast("Recruiter notes populated", "info");
       }
-      
+
       // 4. Recruiter Emails - auto-populate from local database OR JobDiva recruiter_emails
       if (data.recruiter_emails && Array.isArray(data.recruiter_emails) && data.recruiter_emails.length > 0) {
-        const validEmails = data.recruiter_emails.filter((email: string) => 
+        const validEmails = data.recruiter_emails.filter((email: string) =>
           email && typeof email === 'string' && /^\S+@\S+\.\S+$/.test(email.trim())
         );
         if (validEmails.length > 0) {
@@ -344,7 +344,7 @@ function NewJobPageContent() {
           showToast(`${validEmails.length} recruiter email(s) populated`, "info");
         }
       }
-      
+
       // 5. Set default screening level to L1.5 (recommended)
       setScreeningLevel("L1.5");
 
@@ -352,7 +352,7 @@ function NewJobPageContent() {
       if (data.work_authorization) {
         setWorkAuthorization(data.work_authorization);
       }
-      
+
       setIsFetched(true);
 
       // FORCE: Always stay on step 1 for newly imported jobs to follow normal workflow
@@ -387,10 +387,10 @@ function NewJobPageContent() {
         console.error("Enhance failed:", errorText);
         throw new Error("Failed to generate JD");
       }
-      
+
       const data = await response.json();
       setJobPosting(data.description);
-      
+
       showToast("AI Job Description enriched!", "success");
     } catch (error) {
       console.error("Enhance error:", error);
@@ -408,17 +408,17 @@ function NewJobPageContent() {
       const res = await fetch(`${apiUrl}/api/v1/gemini/jobs/generate-title`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
+        body: JSON.stringify({
           jobTitle: jobTitle, // Always use original title as base for enhancement
           enhancedTitle: enhancedTitle, // Pass current enhanced title just in case 
           jobNotes: recruiterNotes,
-          jobDescription: jobPosting 
+          jobDescription: jobPosting
         })
       });
       if (res.ok) {
         const data = await res.json();
         setEnhancedTitle(data.title);
-        
+
         showToast("Title enhanced by PAIR.", "success");
       } else {
         const err = await res.text();
@@ -471,10 +471,10 @@ function NewJobPageContent() {
     });
   };
 
-   const saveJobDraft = async (stepData: { 
-    currentStep: number, 
+  const saveJobDraft = async (stepData: {
+    currentStep: number,
     saveType?: string,
-    skipToast?: boolean 
+    skipToast?: boolean
   }) => {
     if (!jobData || (!numericJobId && !jobdivaId)) {
       showToast("Job data not available for saving.", "info");
@@ -571,69 +571,69 @@ function NewJobPageContent() {
   );
 
   // Helper component to format AI-generated postings with rich text rendering
-const AIPostingJobDescription = ({ text }: { text: string }) => {
-  const renderInline = (content: string) => {
-    // Parse [text](url), **bold** and *italic*
-    const parts = content.split(/(\[.*?\]\(.*?\)+|\*\*.*?\*\*|\*(?!\*).*?\*(?!\*))/g);
-    return parts.map((part, i) => {
-      if (part.startsWith('[') && part.includes('](') && part.endsWith(')')) {
-        const match = part.match(/\[(.*?)\]\((.*?)\)/);
-        if (match) {
+  const AIPostingJobDescription = ({ text }: { text: string }) => {
+    const renderInline = (content: string) => {
+      // Parse [text](url), **bold** and *italic*
+      const parts = content.split(/(\[.*?\]\(.*?\)+|\*\*.*?\*\*|\*(?!\*).*?\*(?!\*))/g);
+      return parts.map((part, i) => {
+        if (part.startsWith('[') && part.includes('](') && part.endsWith(')')) {
+          const match = part.match(/\[(.*?)\]\((.*?)\)/);
+          if (match) {
+            return (
+              <a key={i} href={match[2]} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                {match[1]}
+              </a>
+            );
+          }
+        } else if (part.startsWith('**') && part.endsWith('**')) {
+          return <strong key={i} className="font-semibold text-slate-900">{part.slice(2, -2)}</strong>;
+        } else if (part.startsWith('*') && part.endsWith('*')) {
+          return <em key={i} className="italic text-slate-800">{part.slice(1, -1)}</em>;
+        }
+        return <span key={i}>{part}</span>;
+      });
+    };
+
+    const formatLines = (rawText: string) => {
+      if (!rawText) return null;
+      return rawText.split('\n').map((line, index) => {
+        const trimmedLine = line.trim();
+        if (!trimmedLine) return <div key={index} className="h-2" />;
+
+        // Header check: starts with bold all caps or is just an all caps line
+        const isHeader = /^\*\*[A-Z\s]+\*\*$/.test(trimmedLine) || /^[A-Z\s]{3,25}$/.test(trimmedLine);
+        if (isHeader) {
+          const title = trimmedLine.replace(/\*\*/g, '').trim();
           return (
-            <a key={i} href={match[2]} target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
-              {match[1]}
-            </a>
+            <div key={index} className="text-[15px] font-semibold text-slate-900 mt-5 mb-2 first:mt-0 uppercase tracking-tight">
+              {title}
+            </div>
           );
         }
-      } else if (part.startsWith('**') && part.endsWith('**')) {
-        return <strong key={i} className="font-semibold text-slate-900">{part.slice(2, -2)}</strong>;
-      } else if (part.startsWith('*') && part.endsWith('*')) {
-        return <em key={i} className="italic text-slate-800">{part.slice(1, -1)}</em>;
-      }
-      return <span key={i}>{part}</span>;
-    });
-  };
 
-  const formatLines = (rawText: string) => {
-    if (!rawText) return null;
-    return rawText.split('\n').map((line, index) => {
-      const trimmedLine = line.trim();
-      if (!trimmedLine) return <div key={index} className="h-2" />;
+        // Bullet points
+        if (trimmedLine.startsWith('•') || trimmedLine.startsWith('-')) {
+          const content = trimmedLine.replace(/^[•-]\s*/, '').trim();
+          return (
+            <div key={index} className="flex gap-2.5 ml-1 my-1.5 items-start">
+              <span className="text-slate-400 mt-1">•</span>
+              <div className="flex-1">{renderInline(content)}</div>
+            </div>
+          );
+        }
 
-      // Header check: starts with bold all caps or is just an all caps line
-      const isHeader = /^\*\*[A-Z\s]+\*\*$/.test(trimmedLine) || /^[A-Z\s]{3,25}$/.test(trimmedLine);
-      if (isHeader) {
-        const title = trimmedLine.replace(/\*\*/g, '').trim();
         return (
-          <div key={index} className="text-[15px] font-semibold text-slate-900 mt-5 mb-2 first:mt-0 uppercase tracking-tight">
-            {title}
+          <div key={index} className="mb-2 text-slate-600 leading-relaxed">
+            {renderInline(trimmedLine)}
           </div>
         );
-      }
+      });
+    };
 
-      // Bullet points
-      if (trimmedLine.startsWith('•') || trimmedLine.startsWith('-')) {
-        const content = trimmedLine.replace(/^[•-]\s*/, '').trim();
-        return (
-          <div key={index} className="flex gap-2.5 ml-1 my-1.5 items-start">
-            <span className="text-slate-400 mt-1">•</span>
-            <div className="flex-1">{renderInline(content)}</div>
-          </div>
-        );
-      }
-
-      return (
-        <div key={index} className="mb-2 text-slate-600 leading-relaxed">
-          {renderInline(trimmedLine)}
-        </div>
-      );
-    });
+    return <div className="text-[13.5px] font-normal">{formatLines(text)}</div>;
   };
 
-  return <div className="text-[13.5px] font-normal">{formatLines(text)}</div>;
-};
-
-const intakeStep = (
+  const intakeStep = (
     <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
       {/* Card Header — reference style: no heavy background, very subtle gradient */}
       <div className="flex flex-row items-start gap-4 px-7 py-6 border-b border-slate-100"
@@ -690,17 +690,34 @@ const intakeStep = (
                 style={{ background: "#f8fafc", border: "1px solid #e2e8f0" }}
               >
                 {[
-                  { label: "Job Title", value: jobData.title },
-                  { label: "Customer", value: jobData.customer_name || jobData.customer },
+                  // Row 1 — Identity
+                  { label: "Job Title", value: jobData.title || "—" },
+                  { label: "Customer", value: jobData.customer_name || jobData.customer || "—" },
+                  { label: "Status", value: jobData.status || "—" },
+                  // Row 2 — Contract Terms
+                  { label: "Priority", value: (!jobData.priority || jobData.priority === "[null]") ? "—" : jobData.priority },
+                  { label: "Program Duration", value: (!jobData.program_duration && !jobData.duration) || jobData.program_duration === "[null]" || jobData.duration === "[null]" ? "—" : (jobData.program_duration || jobData.duration) },
+                  {
+                    label: "Max Allowed Submittals",
+                    value: (!jobData.max_allowed_submittals && !jobData.max_submittals) || jobData.max_allowed_submittals === "[null]" || jobData.max_submittals === "[null]" || Number.isNaN(Number.parseInt(jobData.max_allowed_submittals ?? jobData.max_submittals, 10))
+                      ? "—"
+                      : Number.parseInt(jobData.max_allowed_submittals ?? jobData.max_submittals, 10).toString()
+                  },
+                  // Row 3 — Compensation & Slots
+                  { label: "Employment Type", value: jobData.employment_type || "—" },
+                  { label: "Pay Rate", value: (!jobData.pay_rate || jobData.pay_rate === "[null]") ? "—" : jobData.pay_rate },
+                  { label: "Openings", value: jobData.openings || "—" },
+                  // Row 4 — Where & When
                   {
                     label: "Location",
-                    value: `${jobData.city || ""}, ${jobData.state || ""}`.trim() + (cleanLocationType(jobData.location_type) ? ` (${cleanLocationType(jobData.location_type)})` : "") || "Remote"
+                    value: [
+                      `${jobData.city || ""}, ${jobData.state || ""}`.trim(),
+                      jobData.zip_code || jobData.zip ? (jobData.zip_code || jobData.zip) : null,
+                      cleanLocationType(jobData.location_type) ? `(${cleanLocationType(jobData.location_type)})` : null
+                    ].filter(Boolean).join(" ") || "—"
                   },
-                  { label: "Openings", value: jobData.openings },
-                  { label: "Employment Type", value: jobData.employment_type },
-                  { label: "Pay Rate", value: jobData.pay_rate },
-                  { label: "Job Start Date", value: jobData.start_date },
-                  { label: "Job Posted Date", value: jobData.posted_date },
+                  { label: "Job Start Date", value: jobData.start_date || "—" },
+                  { label: "Job Posted Date", value: jobData.posted_date || "—" },
                 ].map(({ label, value }) => (
                   <div key={label} className="flex flex-col gap-1">
                     <span className="text-[11px] font-semibold uppercase tracking-[0.06em] text-slate-400">{label}</span>
@@ -753,8 +770,8 @@ const intakeStep = (
                       key={type}
                       onClick={() => toggleEmpType(type)}
                       className={`px-4 py-1.5 rounded-full border text-[13px] font-medium transition-all cursor-pointer ${selectedEmpTypes.includes(type)
-                          ? "bg-primary border-primary text-white"
-                          : "bg-white border-slate-300 text-slate-500 hover:border-primary hover:text-primary"
+                        ? "bg-primary border-primary text-white"
+                        : "bg-white border-slate-300 text-slate-500 hover:border-primary hover:text-primary"
                         }`}
                     >
                       {type}
@@ -960,83 +977,83 @@ const intakeStep = (
               </p>
             </div>
 
-          <div className="flex items-center justify-between mb-3 mt-8">
-            <div className="bg-[#eef2ff] text-[#4f46e5] flex items-center gap-1.5 px-3 py-1 rounded-full text-[11.5px] font-medium border border-[#e0e7ff]">
-              <Sparkles className="w-3.5 h-3.5" />
-              PAIR-Enhanced Job Posting
-            </div>
-            <Button 
-              variant="outline" 
-              size="sm" 
-              onClick={() => handleEnhanceJob()}
-              disabled={isGeneratingJD}
-              className="h-9 px-4 flex items-center gap-2 border-slate-200 bg-white text-slate-900 shadow-sm text-[13px] font-bold rounded-xl hover:bg-slate-50 transition-all disabled:opacity-50"
-            >
-              <RotateCcw className={`w-3.5 h-3.5 text-slate-900 ${isGeneratingJD ? 'animate-spin' : ''}`} />
-              {isGeneratingJD ? 'Regenerating...' : 'Regenerate'}
-            </Button>
-          </div>
-          
-          {isEditingJD ? (
-            <div className="relative group">
-              <textarea
-                autoFocus
-                value={jobPosting}
-                onChange={(e) => {
-                  setJobPosting(e.target.value);
-                }}
-                onBlur={() => {
-                  setIsEditingJD(false);
-                }}
-                className="w-full bg-white border-2 border-primary/40 rounded-lg p-7 h-[500px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 text-[13.5px] font-normal leading-relaxed text-slate-900 focus-visible:outline-none focus:ring-4 focus:ring-primary/10 transition-all resize-none"
-                placeholder="Edit Markdown here..."
-              />
-              <div className="absolute top-4 right-4 bg-primary text-white text-[11px] font-bold px-3 py-1.5 rounded-md shadow-md pointer-events-none animate-in fade-in duration-200">
-                Click outside to save & preview
+            <div className="flex items-center justify-between mb-3 mt-8">
+              <div className="bg-[#eef2ff] text-[#4f46e5] flex items-center gap-1.5 px-3 py-1 rounded-full text-[11.5px] font-medium border border-[#e0e7ff]">
+                <Sparkles className="w-3.5 h-3.5" />
+                PAIR-Enhanced Job Posting
               </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => handleEnhanceJob()}
+                disabled={isGeneratingJD}
+                className="h-9 px-4 flex items-center gap-2 border-slate-200 bg-white text-slate-900 shadow-sm text-[13px] font-bold rounded-xl hover:bg-slate-50 transition-all disabled:opacity-50"
+              >
+                <RotateCcw className={`w-3.5 h-3.5 text-slate-900 ${isGeneratingJD ? 'animate-spin' : ''}`} />
+                {isGeneratingJD ? 'Regenerating...' : 'Regenerate'}
+              </Button>
             </div>
-          ) : (
-            <div 
-              onClick={() => setIsEditingJD(true)}
-              title="Click to edit job description"
-              className="bg-slate-50/50 border border-slate-200 rounded-lg p-7 h-[500px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 text-[13.5px] font-normal leading-relaxed text-slate-900 cursor-text hover:border-primary/40 hover:bg-white transition-colors group relative flex items-center justify-center text-center"
-            >
-              {jobPosting ? (
-                <>
-                  <div className="absolute top-4 right-4 bg-slate-200 text-slate-600 text-[11px] font-bold px-3 py-1.5 rounded-md shadow-sm opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-                    Click anywhere to edit
-                  </div>
-                  <div className="w-full h-full text-left">
-                    <AIPostingJobDescription text={jobPosting} />
-                  </div>
-                </>
-              ) : (
-                <div className="flex flex-col items-center gap-4 max-w-sm px-6">
-                  <div className="w-16 h-16 bg-white rounded-full shadow-sm flex items-center justify-center border border-slate-100">
-                    <Sparkles className="w-8 h-8 text-primary/40" />
-                  </div>
-                  <div>
-                    <h4 className="text-[17px] font-bold text-slate-900">No AI Description Yet</h4>
-                    <p className="text-[14px] text-slate-500 mt-2 leading-relaxed">
-                      This job doesn't have an AI-enhanced description. Click the 
-                      <strong> "Regenerate"</strong> button above to generate one now.
-                    </p>
-                  </div>
-                  <Button 
-                    variant="outline" 
-                    className="mt-2 border-primary/20 hover:bg-white hover:text-primary hover:border-primary/40"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleEnhanceJob();
-                    }}
-                  >
-                    Generate AI JD
-                  </Button>
+
+            {isEditingJD ? (
+              <div className="relative group">
+                <textarea
+                  autoFocus
+                  value={jobPosting}
+                  onChange={(e) => {
+                    setJobPosting(e.target.value);
+                  }}
+                  onBlur={() => {
+                    setIsEditingJD(false);
+                  }}
+                  className="w-full bg-white border-2 border-primary/40 rounded-lg p-7 h-[500px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 text-[13.5px] font-normal leading-relaxed text-slate-900 focus-visible:outline-none focus:ring-4 focus:ring-primary/10 transition-all resize-none"
+                  placeholder="Edit Markdown here..."
+                />
+                <div className="absolute top-4 right-4 bg-primary text-white text-[11px] font-bold px-3 py-1.5 rounded-md shadow-md pointer-events-none animate-in fade-in duration-200">
+                  Click outside to save & preview
                 </div>
-              )}
-            </div>
-          )}
-        </div>
+              </div>
+            ) : (
+              <div
+                onClick={() => setIsEditingJD(true)}
+                title="Click to edit job description"
+                className="bg-slate-50/50 border border-slate-200 rounded-lg p-7 h-[500px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 text-[13.5px] font-normal leading-relaxed text-slate-900 cursor-text hover:border-primary/40 hover:bg-white transition-colors group relative flex items-center justify-center text-center"
+              >
+                {jobPosting ? (
+                  <>
+                    <div className="absolute top-4 right-4 bg-slate-200 text-slate-600 text-[11px] font-bold px-3 py-1.5 rounded-md shadow-sm opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                      Click anywhere to edit
+                    </div>
+                    <div className="w-full h-full text-left">
+                      <AIPostingJobDescription text={jobPosting} />
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex flex-col items-center gap-4 max-w-sm px-6">
+                    <div className="w-16 h-16 bg-white rounded-full shadow-sm flex items-center justify-center border border-slate-100">
+                      <Sparkles className="w-8 h-8 text-primary/40" />
+                    </div>
+                    <div>
+                      <h4 className="text-[17px] font-bold text-slate-900">No AI Description Yet</h4>
+                      <p className="text-[14px] text-slate-500 mt-2 leading-relaxed">
+                        This job doesn't have an AI-enhanced description. Click the
+                        <strong> "Regenerate"</strong> button above to generate one now.
+                      </p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      className="mt-2 border-primary/20 hover:bg-white hover:text-primary hover:border-primary/40"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleEnhanceJob();
+                      }}
+                    >
+                      Generate AI JD
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
           <div className="w-full lg:w-[240px] flex-shrink-0">
             <label className="block text-[15px] font-bold text-slate-900 mb-4 ml-1">Publish To</label>
@@ -1127,7 +1144,7 @@ const intakeStep = (
           <p className="text-slate-500 text-[15px] mt-1 leading-relaxed">PAIR-extracted rubric items from the job description. These become the rubric by which candidates are graded. Edit freely.</p>
         </div>
       </div>
-      
+
       {isGeneratingRubric ? (
         <div className="p-20 flex flex-col items-center justify-center gap-4">
           <div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
@@ -1135,7 +1152,7 @@ const intakeStep = (
         </div>
       ) : rubricData ? (
         <div className="p-7 space-y-7">
-          
+
           {/* Titles */}
           <section>
             <div className="flex items-center gap-2 mb-4">
@@ -1143,7 +1160,7 @@ const intakeStep = (
               <h3 className="text-[14px] font-bold text-slate-800">Titles</h3>
               <span className="text-[12px] font-normal text-slate-500">Job title for sourcing & resume matching · 1 max</span>
             </div>
-            
+
             {/* Column Headers */}
             <div className="flex items-center gap-2.5 text-[11px] font-bold uppercase tracking-wider text-slate-500 pb-2 border-b-2 border-slate-200 mb-1">
               <div className="flex-1 min-w-0">Job Title</div>
@@ -1162,12 +1179,12 @@ const intakeStep = (
               <div className="w-[70px] flex-shrink-0"></div>
               <div className="w-[36px] flex-shrink-0"></div>
             </div>
-            
+
             <div className="space-y-0">
               {rubricData.titles?.map((title: any, idx: number) => (
                 <div key={idx} className="flex items-center gap-2.5 py-2 border-b border-slate-200 last:border-b-0">
                   <div className="flex-1 min-w-0 flex items-center gap-2">
-                    <input 
+                    <input
                       type="text"
                       value={title.value}
                       onChange={(e) => updateRubricItem('titles', idx, 'value', e.target.value)}
@@ -1176,7 +1193,7 @@ const intakeStep = (
                     <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap">PAIR</span>
                   </div>
                   <div className="w-[110px] flex-shrink-0 flex items-center gap-1.5">
-                    <input 
+                    <input
                       type="number"
                       value={title.minYears}
                       onChange={(e) => updateRubricItem('titles', idx, 'minYears', parseInt(e.target.value) || 0)}
@@ -1188,26 +1205,26 @@ const intakeStep = (
                     <Checkbox checked={title.recent} onCheckedChange={(checked) => updateRubricItem('titles', idx, 'recent', !!checked)} className="border-slate-300 rounded-[4px] data-[state=checked]:bg-[#6d28d9] data-[state=checked]:border-[#6d28d9] text-white w-[16px] h-[16px] hover:border-[#6d28d9] transition-all" />
                   </div>
                   <div className="w-[170px] flex-shrink-0">
-                     <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[118px] bg-white cursor-pointer select-none">
-                        <button onClick={() => updateRubricItem('titles', idx, 'matchType', 'Exact')} className={`flex-1 py-[3px] rounded-full transition-all ${title.matchType === 'Exact' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}>Exact</button>
-                        <button onClick={() => updateRubricItem('titles', idx, 'matchType', 'Similar')} className={`flex-1 py-[3px] rounded-full transition-all ${title.matchType === 'Similar' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}>Similar</button>
-                     </div>
+                    <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[118px] bg-white cursor-pointer select-none">
+                      <button onClick={() => updateRubricItem('titles', idx, 'matchType', 'Exact')} className={`flex-1 py-[3px] rounded-full transition-all ${title.matchType === 'Exact' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}>Exact</button>
+                      <button onClick={() => updateRubricItem('titles', idx, 'matchType', 'Similar')} className={`flex-1 py-[3px] rounded-full transition-all ${title.matchType === 'Similar' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}>Similar</button>
+                    </div>
                   </div>
                   <div className="w-[190px] flex-shrink-0 flex items-center justify-center">
-                     <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[135px] bg-white cursor-pointer select-none">
-                        <button onClick={() => updateRubricItem('titles', idx, 'required', 'Required')} className={`flex-1 py-[3px] rounded-full transition-all ${title.required === 'Required' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}>Required</button>
-                        <button onClick={() => updateRubricItem('titles', idx, 'required', 'Preferred')} className={`flex-1 py-[3px] rounded-full transition-all ${title.required === 'Preferred' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}>Preferred</button>
-                     </div>
+                    <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[135px] bg-white cursor-pointer select-none">
+                      <button onClick={() => updateRubricItem('titles', idx, 'required', 'Required')} className={`flex-1 py-[3px] rounded-full transition-all ${title.required === 'Required' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}>Required</button>
+                      <button onClick={() => updateRubricItem('titles', idx, 'required', 'Preferred')} className={`flex-1 py-[3px] rounded-full transition-all ${title.required === 'Preferred' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}>Preferred</button>
+                    </div>
                   </div>
                   <div className="w-[70px] flex-shrink-0 flex flex-col gap-1 items-center">
-                    <button 
+                    <button
                       disabled={idx === 0}
                       onClick={() => moveRubricItem('titles', idx, idx - 1)}
                       className="w-[22px] h-[22px] flex items-center justify-center border border-slate-200 rounded-[4px] bg-white text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-20 disabled:pointer-events-none"
                     >
                       <ChevronUp className="w-3.5 h-3.5" />
                     </button>
-                    <button 
+                    <button
                       disabled={idx === (rubricData.titles?.length - 1)}
                       onClick={() => moveRubricItem('titles', idx, idx + 1)}
                       className="w-[22px] h-[22px] flex items-center justify-center border border-slate-200 rounded-[4px] bg-white text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-20 disabled:pointer-events-none"
@@ -1222,7 +1239,7 @@ const intakeStep = (
                   </div>
                 </div>
               ))}
-              
+
               <div className="mt-3">
                 <Button variant="outline" size="sm" className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all">
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
@@ -1242,9 +1259,9 @@ const intakeStep = (
                 <h3 className="text-[14px] font-bold text-slate-800">Skills</h3>
                 <span className="text-[12px] font-normal text-slate-500">Top 8 · ordered by importance</span>
               </div>
-              <Button 
-                variant="outline" 
-                size="sm" 
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={() => showToast("No new suggestions — list is full or already complete.", "info")}
                 className="border-slate-200 text-[#1e293b] bg-white hover:bg-slate-50 font-medium text-[13px] rounded-[7px] shadow-none h-[28px] px-2.5 border transition-all"
               >
@@ -1252,7 +1269,7 @@ const intakeStep = (
                 Suggest More
               </Button>
             </div>
-            
+
             {/* Column Headers */}
             <div className="flex items-center gap-2.5 text-[11px] font-bold uppercase tracking-wider text-slate-500 pb-2 border-b-2 border-slate-200 mb-1">
               <div className="flex-1 min-w-0">Hard Skill</div>
@@ -1271,12 +1288,12 @@ const intakeStep = (
               <div className="w-[106px] flex-shrink-0 flex items-center justify-center">
                 Actions
               </div>
-            </div>            
+            </div>
             <div className="space-y-0">
               {rubricData.skills?.map((skill: any, idx: number) => (
                 <div key={idx} className="flex items-center gap-2.5 py-2 border-b border-slate-200 last:border-b-0">
                   <div className="flex-1 min-w-0 flex items-center gap-2">
-                    <input 
+                    <input
                       type="text"
                       value={skill.value}
                       onChange={(e) => updateRubricItem('skills', idx, 'value', e.target.value)}
@@ -1285,7 +1302,7 @@ const intakeStep = (
                     <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap">PAIR</span>
                   </div>
                   <div className="w-[110px] flex-shrink-0 flex items-center gap-1.5">
-                    <input 
+                    <input
                       type="number"
                       value={skill.minYears}
                       onChange={(e) => updateRubricItem('skills', idx, 'minYears', parseInt(e.target.value) || 0)}
@@ -1297,26 +1314,26 @@ const intakeStep = (
                     <Checkbox checked={skill.recent} onCheckedChange={(checked) => updateRubricItem('skills', idx, 'recent', !!checked)} className="border-slate-300 rounded-[4px] data-[state=checked]:bg-[#6d28d9] data-[state=checked]:border-[#6d28d9] text-white w-[16px] h-[16px] hover:border-[#6d28d9] transition-all" />
                   </div>
                   <div className="w-[170px] flex-shrink-0">
-                     <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[118px] bg-white cursor-pointer select-none">
-                        <button onClick={() => updateRubricItem('skills', idx, 'matchType', 'Exact')} className={`flex-1 py-[3px] rounded-full transition-all ${skill.matchType === 'Exact' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}>Exact</button>
-                        <button onClick={() => updateRubricItem('skills', idx, 'matchType', 'Similar')} className={`flex-1 py-[3px] rounded-full transition-all ${skill.matchType === 'Similar' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}>Similar</button>
-                     </div>
+                    <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[118px] bg-white cursor-pointer select-none">
+                      <button onClick={() => updateRubricItem('skills', idx, 'matchType', 'Exact')} className={`flex-1 py-[3px] rounded-full transition-all ${skill.matchType === 'Exact' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}>Exact</button>
+                      <button onClick={() => updateRubricItem('skills', idx, 'matchType', 'Similar')} className={`flex-1 py-[3px] rounded-full transition-all ${skill.matchType === 'Similar' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}>Similar</button>
+                    </div>
                   </div>
                   <div className="w-[190px] flex-shrink-0 flex items-center justify-center">
-                     <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[135px] bg-white cursor-pointer select-none">
-                        <button onClick={() => updateRubricItem('skills', idx, 'required', 'Required')} className={`flex-1 py-[3px] rounded-full transition-all ${skill.required === 'Required' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}>Required</button>
-                        <button onClick={() => updateRubricItem('skills', idx, 'required', 'Preferred')} className={`flex-1 py-[3px] rounded-full transition-all ${skill.required === 'Preferred' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}>Preferred</button>
-                     </div>
+                    <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[135px] bg-white cursor-pointer select-none">
+                      <button onClick={() => updateRubricItem('skills', idx, 'required', 'Required')} className={`flex-1 py-[3px] rounded-full transition-all ${skill.required === 'Required' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}>Required</button>
+                      <button onClick={() => updateRubricItem('skills', idx, 'required', 'Preferred')} className={`flex-1 py-[3px] rounded-full transition-all ${skill.required === 'Preferred' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}>Preferred</button>
+                    </div>
                   </div>
                   <div className="w-[70px] flex-shrink-0 flex flex-col gap-1 items-center">
-                    <button 
+                    <button
                       disabled={idx === 0}
                       onClick={() => moveRubricItem('skills', idx, idx - 1)}
                       className="w-[22px] h-[22px] flex items-center justify-center border border-slate-200 rounded-[4px] bg-white text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-20 disabled:pointer-events-none"
                     >
                       <ChevronUp className="w-3.5 h-3.5" />
                     </button>
-                    <button 
+                    <button
                       disabled={idx === (rubricData.skills?.length - 1)}
                       onClick={() => moveRubricItem('skills', idx, idx + 1)}
                       className="w-[22px] h-[22px] flex items-center justify-center border border-slate-200 rounded-[4px] bg-white text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-20 disabled:pointer-events-none"
@@ -1331,11 +1348,11 @@ const intakeStep = (
                   </div>
                 </div>
               ))}
-              
-            <div className="ml-1 mt-3">
-                <Button 
-                  variant="outline" 
-                  size="sm" 
+
+              <div className="ml-1 mt-3">
+                <Button
+                  variant="outline"
+                  size="sm"
                   onClick={() => addRubricItem('skills', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
                 >
@@ -1346,9 +1363,9 @@ const intakeStep = (
               </div>
             </div>
           </section>
-          
+
           <div className="mb-7"></div>
-          
+
           {/* Education & Certificates */}
           <section>
             <div className="flex items-center gap-2 mb-4">
@@ -1357,15 +1374,15 @@ const intakeStep = (
                 <h3 className="text-[14px] font-bold text-slate-800">Education & Certificates</h3>
               </div>
               <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                <Sparkles className="w-3 h-3"/> PAIR detected
+                <Sparkles className="w-3 h-3" /> PAIR detected
               </span>
             </div>
-            
+
             <div className="space-y-0">
               {rubricData.education?.map((edu: any, idx: number) => (
                 <div key={idx} className="flex items-center gap-2.5 py-2 border-b border-slate-200 last:border-b-0">
                   <div className="flex-1 min-w-0 flex items-center gap-2">
-                    <select 
+                    <select
                       value={edu.degree}
                       onChange={(e) => updateRubricItem('education', idx, 'degree', e.target.value)}
                       className="h-[34px] w-[150px] bg-slate-50 border border-slate-200 rounded-lg text-slate-700 text-[13px] px-2 font-medium outline-none cursor-pointer flex-shrink-0 hover:border-slate-300 transition-all shadow-sm"
@@ -1379,7 +1396,7 @@ const intakeStep = (
                       <option value="Certification / License">Certification / License</option>
                     </select>
                     <span className="text-slate-400 font-medium text-[11.5px] whitespace-nowrap flex-shrink-0 px-1">in / as</span>
-                    <Input 
+                    <Input
                       value={edu.field}
                       onChange={(e) => updateRubricItem('education', idx, 'field', e.target.value)}
                       className="w-[260px] flex-shrink-0 h-[34px] text-[13px] font-medium text-slate-700 bg-white border-slate-200"
@@ -1405,9 +1422,9 @@ const intakeStep = (
                 </div>
               ))}
               <div className="mt-3">
-                <Button 
-                  variant="outline" 
-                  size="sm" 
+                <Button
+                  variant="outline"
+                  size="sm"
                   onClick={() => addRubricItem('education', { degree: "Bachelor's degree", field: '', required: 'Required' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
                 >
@@ -1417,28 +1434,28 @@ const intakeStep = (
               </div>
             </div>
           </section>
-          
+
           <div className="mb-7"></div>
-          
+
           {/* Domain */}
           <section>
             <div className="flex items-center gap-2 mb-4">
               <Building2 className="w-4 h-4 text-slate-900" />
               <h3 className="text-[14px] font-bold text-slate-800">Domain</h3>
               <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                <Sparkles className="w-3 h-3"/> Detected in JD
+                <Sparkles className="w-3 h-3" /> Detected in JD
               </span>
             </div>
-            
+
             <div className="space-y-0">
               {rubricData.domain?.map((dom: any, idx: number) => (
                 <div key={idx} className="flex items-center gap-2.5 py-2 border-b border-slate-200 last:border-b-0">
                   <div className="flex-1 min-w-0 flex items-center gap-2">
-                    <Input 
+                    <Input
                       value={dom.value}
                       onChange={(e) => updateRubricItem('domain', idx, 'value', e.target.value)}
                       className="flex-1 h-[34px] text-[13px] font-medium text-slate-700 bg-white border-slate-200"
-                      readOnly 
+                      readOnly
                     />
                     <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight whitespace-nowrap ml-2 uppercase">PAIR</span>
                   </div>
@@ -1460,9 +1477,9 @@ const intakeStep = (
                 </div>
               ))}
               <div className="mt-3">
-                <Button 
-                  variant="outline" 
-                  size="sm" 
+                <Button
+                  variant="outline"
+                  size="sm"
                   onClick={() => addRubricItem('domain', { value: '', required: 'Required' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
                 >
@@ -1481,16 +1498,16 @@ const intakeStep = (
               <UserCheck className="w-4 h-4 text-slate-900 flex-shrink-0" />
               <h3 className="text-[14px] font-bold text-slate-800">Customer Requirements</h3>
               <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                <Sparkles className="w-3 h-3"/> PAIR generated
+                <Sparkles className="w-3 h-3" /> PAIR generated
               </span>
             </div>
-            
+
             <div className="space-y-0">
               {rubricData.customer_requirements?.map((req: any, idx: number) => (
                 <div key={idx} className="flex items-center gap-2.5 py-2 border-b border-slate-200 last:border-b-0">
                   <div className="flex-1 min-w-0 flex items-center gap-2">
-                    <select 
-                      className="h-[34px] w-[190px] bg-slate-50 border border-slate-200 rounded-lg text-slate-700 text-[13px] px-2 font-medium outline-none cursor-pointer flex-shrink-0" 
+                    <select
+                      className="h-[34px] w-[190px] bg-slate-50 border border-slate-200 rounded-lg text-slate-700 text-[13px] px-2 font-medium outline-none cursor-pointer flex-shrink-0"
                       value={req.type}
                       onChange={(e) => updateRubricItem('customer_requirements', idx, 'type', e.target.value)}
                     >
@@ -1501,7 +1518,7 @@ const intakeStep = (
                       <option value="Citizenship requirement">Citizenship requirement</option>
                       <option value="Security clearance">Security clearance</option>
                     </select>
-                    <Input 
+                    <Input
                       value={req.value}
                       onChange={(e) => updateRubricItem('customer_requirements', idx, 'value', e.target.value)}
                       className="w-[350px] flex-shrink-0 h-[34px] text-[13px] font-medium text-slate-700 bg-white border-slate-200"
@@ -1520,11 +1537,11 @@ const intakeStep = (
                   </div>
                 </div>
               ))}
-              
+
               <div className="mt-3">
-                <Button 
-                  variant="outline" 
-                  size="sm" 
+                <Button
+                  variant="outline"
+                  size="sm"
                   onClick={() => addRubricItem('customer_requirements', { type: 'Must not be employed by', value: '' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
                 >
@@ -1544,12 +1561,12 @@ const intakeStep = (
               <h3 className="text-[14px] font-bold text-slate-800">Other Requirements</h3>
               <span className="text-[12px] text-slate-500 font-normal">Location constraints, shift requirements, work authorization, etc.</span>
             </div>
-            
+
             <div className="space-y-0">
               {rubricData.other_requirements?.map((req: any, idx: number) => (
                 <div key={idx} className="flex items-center gap-2.5 py-2 border-b border-slate-200 last:border-b-0">
                   <div className="flex-1 min-w-0 flex items-center gap-2">
-                    <input 
+                    <input
                       type="text"
                       value={req.value}
                       onChange={(e) => updateRubricItem('other_requirements', idx, 'value', e.target.value)}
@@ -1574,11 +1591,11 @@ const intakeStep = (
                   </div>
                 </div>
               ))}
-              
+
               <div className="mt-3">
-                <Button 
-                  variant="outline" 
-                  size="sm" 
+                <Button
+                  variant="outline"
+                  size="sm"
                   onClick={() => addRubricItem('other_requirements', { value: '', required: 'Required' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
                 >
@@ -1596,8 +1613,8 @@ const intakeStep = (
 
   // Filter management functions
   const toggleResumeFilter = (id: number, active: boolean) => {
-    setResumeMatchFilters(prev => 
-      prev.map(filter => 
+    setResumeMatchFilters(prev =>
+      prev.map(filter =>
         filter.id === id ? { ...filter, active } : filter
       )
     );
@@ -1618,9 +1635,9 @@ const intakeStep = (
   const addResumeFilter = () => {
     const category = prompt('Filter category (e.g. Skills, Location, Certification):');
     if (!category || !category.trim()) return;
-    const value = prompt(`Value for "${category.trim()}":`); 
+    const value = prompt(`Value for "${category.trim()}":`);
     if (!value || !value.trim()) return;
-    
+
     setResumeMatchFilters(prev => [
       ...prev,
       {
@@ -1669,7 +1686,7 @@ const intakeStep = (
       rubricData.skills.forEach((skill: any, index: number) => {
         filters.push({
           id: idCounter++,
-          category: skill.required === 'Required' ? 'Required Skill' : 'Preferred Skill', 
+          category: skill.required === 'Required' ? 'Required Skill' : 'Preferred Skill',
           value: `${skill.value} — ${skill.minYears}+ yrs, ${skill.matchType} match`,
           active: index < 4, // First 4 skills active, rest inactive
           ai: true,
@@ -1677,7 +1694,7 @@ const intakeStep = (
         });
       });
     }
-    
+
     // Add education filters (inactive by default)
     if (jobData && (jobData.title?.toLowerCase().includes('specialist') || jobData.title?.toLowerCase().includes('accountant'))) {
       filters.push({
@@ -1689,13 +1706,13 @@ const intakeStep = (
         fromRubric: true
       });
     }
-    
+
     // Add domain experience (inactive by default)
     if (jobData && jobData.customer_name) {
       filters.push({
         id: idCounter++,
         category: 'Domain',
-        value: "Healthcare, Finance / Accounting", 
+        value: "Healthcare, Finance / Accounting",
         active: false,
         ai: true,
         fromRubric: true
@@ -1735,14 +1752,14 @@ const intakeStep = (
   const setFiltersStep = (
     <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
       <div className="flex flex-row items-start gap-4 px-7 py-6 border-b border-slate-100"
-           style={{ background: "linear-gradient(135deg, #f8f7ff 0%, #ffffff 60%)" }}>
+        style={{ background: "linear-gradient(135deg, #f8f7ff 0%, #ffffff 60%)" }}>
         <Filter className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight">Set Filters</h2>
           <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Each rubric item from Establish Rubric is evaluated here. Toggle, edit, or add filters for resume matching and the PAIR phone screen.</p>
         </div>
       </div>
-      
+
       <div className="p-7 space-y-7">
         {/* Resume Match Section */}
         <section>
@@ -1940,126 +1957,126 @@ const intakeStep = (
 
       {/* Wizard Navigation — Back | Save & Exit … Next */}
       <div className="flex items-center justify-between pt-8 border-t border-slate-200 mt-8">
-          <div className="flex items-center gap-3">
-            {currentStep > 1 && (
-              <Button
-                variant="outline"
-                className="h-[38px] px-5 border-slate-200 text-slate-700 font-bold text-[14px] shadow-none hover:bg-slate-50 flex items-center gap-2 rounded-xl transition-all active:scale-95"
-                onClick={() => setCurrentStep((currentStep - 1) as Step)}
-              >
-                <ArrowLeft className="w-4 h-4" />
-                Back
-              </Button>
-            )}
+        <div className="flex items-center gap-3">
+          {currentStep > 1 && (
             <Button
               variant="outline"
               className="h-[38px] px-5 border-slate-200 text-slate-700 font-bold text-[14px] shadow-none hover:bg-slate-50 flex items-center gap-2 rounded-xl transition-all active:scale-95"
-              onClick={async () => {
-                if (currentStep > 1) {
-                  const saved = await saveJobDraft({ currentStep, saveType: "manual" });
-                  if (saved) window.location.href = "/";
-                } else {
-                  window.location.href = "/";
-                }
-              }}
+              onClick={() => setCurrentStep((currentStep - 1) as Step)}
             >
-              <Save className="w-4 h-4 text-slate-400" />
-              Save & Exit
+              <ArrowLeft className="w-4 h-4" />
+              Back
             </Button>
-          </div>
-          <div className="flex items-center gap-3">
-            <Button
-              className="h-[38px] px-7 bg-primary hover:bg-primary/90 flex items-center gap-2 shadow-sm text-[14px] font-bold text-white transition-all rounded-xl active:scale-95"
-              onClick={async () => {
-                 if (currentStep === 1) {
-                  if (!jobData) {
-                    showToast("Fetch a job first before saving.", "info");
-                    return;
-                  }
-                  if (recruiterEmails.length === 0) {
-                    setEmailError(true);
-                    showToast("Recruiter Email is required.", "info");
-                    return;
-                  }
-                  if (selectedEmpTypes.length === 0) {
-                    showToast("Employment Type is required.", "info");
-                    return;
-                  }
+          )}
+          <Button
+            variant="outline"
+            className="h-[38px] px-5 border-slate-200 text-slate-700 font-bold text-[14px] shadow-none hover:bg-slate-50 flex items-center gap-2 rounded-xl transition-all active:scale-95"
+            onClick={async () => {
+              if (currentStep > 1) {
+                const saved = await saveJobDraft({ currentStep, saveType: "manual" });
+                if (saved) window.location.href = "/";
+              } else {
+                window.location.href = "/";
+              }
+            }}
+          >
+            <Save className="w-4 h-4 text-slate-400" />
+            Save & Exit
+          </Button>
+        </div>
+        <div className="flex items-center gap-3">
+          <Button
+            className="h-[38px] px-7 bg-primary hover:bg-primary/90 flex items-center gap-2 shadow-sm text-[14px] font-bold text-white transition-all rounded-xl active:scale-95"
+            onClick={async () => {
+              if (currentStep === 1) {
+                if (!jobData) {
+                  showToast("Fetch a job first before saving.", "info");
+                  return;
+                }
+                if (recruiterEmails.length === 0) {
+                  setEmailError(true);
+                  showToast("Recruiter Email is required.", "info");
+                  return;
+                }
+                if (selectedEmpTypes.length === 0) {
+                  showToast("Employment Type is required.", "info");
+                  return;
+                }
 
-                  // Save Step 1 data to monitored jobs before moving to next step
-                  const saved = await saveJobDraft({ currentStep: 1, skipToast: true });
-                  if (!saved) {
-                    showToast("Failed to save Step 1 data. Please try again.", "info");
-                    return;
-                  }
-                  setCurrentStep(2);
-                  showToast("Step 1 data saved successfully!", "success");
+                // Save Step 1 data to monitored jobs before moving to next step
+                const saved = await saveJobDraft({ currentStep: 1, skipToast: true });
+                if (!saved) {
+                  showToast("Failed to save Step 1 data. Please try again.", "info");
+                  return;
                 }
-                
-                if (currentStep === 2) {
-                  // Save Step 2 data to monitored jobs before proceeding
-                  const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
-                  if (!saved) {
-                    showToast("Failed to save Step 2 data to monitored jobs. Please try again.", "info");
-                    return;
-                  }
-                  
-                  if (!rubricData) {
-                     setIsGeneratingRubric(true);
-                     setCurrentStep(3);
-                     try {
-                       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-                       const res = await fetch(`${apiUrl}/api/v1/gemini/jobs/generate-rubric`, {
-                         method: "POST",
-                         headers: { "Content-Type": "application/json" },
-                         body: JSON.stringify({
-                           jobId: numericJobId || jobdivaId, // Numeric PK for internal linking
-                           jobdivaId: jobdivaId, // Alphanumeric Ref Code for rubric tables
-                           jobTitle: jobTitle || jobData?.title,
-                           jobDescription: jobPosting,
-                           jobNotes: recruiterNotes,
-                           originalDescription: jobData?.description || "",
-                           customerName: jobData?.customer_name || jobData?.customer || "",
-                           requiredDegree: jobData?.required_degree || ""
-                         })
-                       });
-                       if (res.ok) {
-                         const data = await res.json();
-                         setRubricData(data);
-                         showToast("Step 2 saved and rubric generated!", "success");
-                       } else {
-                         throw new Error("API failed");
-                       }
-                     } catch(e) {
-                       console.error(e);
-                       // Show error to user instead of hardcoded fallback
-                       showToast("Failed to generate rubric. Please try again or contact support.", "info");
-                       setRubricData(null);
-                     } finally {
-                       setIsGeneratingRubric(false);
-                     }
-                     return;
-                  } else {
-                    showToast("Step 2 data saved to monitored jobs successfully!", "success");
-                  }
+                setCurrentStep(2);
+                showToast("Step 1 data saved successfully!", "success");
+              }
+
+              if (currentStep === 2) {
+                // Save Step 2 data to monitored jobs before proceeding
+                const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
+                if (!saved) {
+                  showToast("Failed to save Step 2 data to monitored jobs. Please try again.", "info");
+                  return;
                 }
-                if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
-              }}
-              disabled={(currentStep === 1 && !jobData) || isGeneratingJD}
-            >
-              {isGeneratingJD ? (
-                <>
-                  <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Enriching...
-                </>
-              ) : (
-                <>
-                  {currentStep === 5 ? "Complete Setup" : "Next"}
-                  <ArrowRight className="w-5 h-5 ml-1" />
-                </>
-              )}
-            </Button>
-          </div>
+
+                if (!rubricData) {
+                  setIsGeneratingRubric(true);
+                  setCurrentStep(3);
+                  try {
+                    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+                    const res = await fetch(`${apiUrl}/api/v1/gemini/jobs/generate-rubric`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        jobId: numericJobId || jobdivaId, // Numeric PK for internal linking
+                        jobdivaId: jobdivaId, // Alphanumeric Ref Code for rubric tables
+                        jobTitle: jobTitle || jobData?.title,
+                        jobDescription: jobPosting,
+                        jobNotes: recruiterNotes,
+                        originalDescription: jobData?.description || "",
+                        customerName: jobData?.customer_name || jobData?.customer || "",
+                        requiredDegree: jobData?.required_degree || ""
+                      })
+                    });
+                    if (res.ok) {
+                      const data = await res.json();
+                      setRubricData(data);
+                      showToast("Step 2 saved and rubric generated!", "success");
+                    } else {
+                      throw new Error("API failed");
+                    }
+                  } catch (e) {
+                    console.error(e);
+                    // Show error to user instead of hardcoded fallback
+                    showToast("Failed to generate rubric. Please try again or contact support.", "info");
+                    setRubricData(null);
+                  } finally {
+                    setIsGeneratingRubric(false);
+                  }
+                  return;
+                } else {
+                  showToast("Step 2 data saved to monitored jobs successfully!", "success");
+                }
+              }
+              if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
+            }}
+            disabled={(currentStep === 1 && !jobData) || isGeneratingJD}
+          >
+            {isGeneratingJD ? (
+              <>
+                <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                Enriching...
+              </>
+            ) : (
+              <>
+                {currentStep === 5 ? "Complete Setup" : "Next"}
+                <ArrowRight className="w-5 h-5 ml-1" />
+              </>
+            )}
+          </Button>
+        </div>
       </div>
 
       {/* Toast Notification */}
