@@ -2349,6 +2349,15 @@ function NewJobPageContent() {
                 }
               }
 
+              if (currentStep === 4) {
+                // Save Step 4 (Screening & Intro) data before moving to final step
+                const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
+                if (!saved) {
+                  showToast("Failed to save screening data. Please try again.", "info");
+                  return;
+                }
+              }
+
               if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
             }}
             disabled={(currentStep === 1 && !jobData) || isGeneratingJD}
