@@ -52,15 +52,16 @@ class JobRubricDB:
                     # 3. Save Titles / Experience
                     for t in rubric.get('titles', []):
                         cur.execute("""
-                            INSERT INTO job_titles (jobdiva_id, title, min_years, recent, match_type, is_required)
-                            VALUES (%s, %s, %s, %s, %s, %s)
+                            INSERT INTO job_titles (jobdiva_id, title, min_years, recent, match_type, is_required, source)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """, (
                             jobdiva_id,
                             t.get('value', ''),
                             t.get('minYears', 0),
                             bool(t.get('recent', False)),
                             t.get('matchType', 'Exact'),
-                            t.get('required', 'Required') == 'Required'
+                            t.get('required', 'Required') == 'Required',
+                            t.get('source', 'JobDiva')
                         ))
 
                     # 4. Save Education & Certs
@@ -151,7 +152,8 @@ class JobRubricDB:
                         "minYears": r['min_years'],
                         "recent": r['recent'],
                         "matchType": r['match_type'],
-                        "required": "Required" if r['is_required'] else "Preferred"
+                        "required": "Required" if r['is_required'] else "Preferred",
+                        "source": r.get('source', 'JobDiva')
                     } for r in cur.fetchall()]
 
                     cur.execute("SELECT * FROM job_education WHERE jobdiva_id = %s", (jobdiva_id,))

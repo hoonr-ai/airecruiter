@@ -289,6 +289,7 @@ class RubricGenerationRequest(BaseModel):
     jobId: str = ""      # Numeric PK for database linking
     jobdivaId: str = ""  # Alphanumeric Ref Code for rubric tables
     jobTitle: str
+    enhancedJobTitle: str = ""  # Set when recruiter clicked Enhance; may differ from jobTitle
     jobDescription: str
     jobNotes: str = ""
     originalDescription: str = ""
@@ -314,6 +315,7 @@ async def generate_rubric(req: RubricGenerationRequest):
         rubric_obj = extractor.extract_full_rubric(
             job_id=job_id,
             job_title=req.jobTitle,
+            enhanced_job_title=req.enhancedJobTitle,
             jobdiva_description=req.originalDescription,
             ai_description=req.jobDescription,
             recruiter_notes=req.jobNotes,

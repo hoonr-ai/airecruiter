@@ -215,10 +215,17 @@ class JobSkillsExtractor:
                 
         return None
 
+    def _normalize_title_key(self, title: str) -> str:
+        """Normalizes a title to a pure alphanumeric string for robust comparison."""
+        if not title:
+            return ""
+        return re.sub(r'[^a-z0-9]', '', title.lower())
+
     def extract_full_rubric(
         self,
         job_id: str,
         job_title: str,
+        enhanced_job_title: str = "",
         jobdiva_description: str = "",
         ai_description: str = "",
         recruiter_notes: str = "",
@@ -242,7 +249,7 @@ class JobSkillsExtractor:
         Extract the following components:
         
         1. TITLES:
-           - Extract the primary target job title and any acceptable alternatives mentioned.
+           - Extract any acceptable alternative job titles mentioned in the text.
            - For each, provide: value, minYears, recent (boolean), matchType ("Exact" or "Similar"), required ("Required" or "Preferred").
         
         2. SKILLS (Technical/Hard Skills):
@@ -276,7 +283,7 @@ class JobSkillsExtractor:
         
         Return ONLY a JSON object with this structure:
         {{
-            "titles": [{{ "value": "Primary Title", "minYears": 5, "recent": true, "matchType": "Exact", "required": "Required" }}],
+            "titles": [{{ "value": "Alternative Title", "minYears": 3, "recent": false, "matchType": "Similar", "required": "Preferred" }}],
             "skills": [{{ "value": "Python", "minYears": 3, "recent": false, "matchType": "Exact", "required": "Required" }}],
             "education": [{{ "degree": "Bachelor's degree", "field": "Computer Science", "required": "Required" }}],
             "domain": [{{ "value": "Healthcare", "required": "Preferred" }}],
@@ -299,28 +306,69 @@ class JobSkillsExtractor:
             
             rubric_data = json.loads(response.choices[0].message.content)
             
+            # 1. Start with the JobDiva title (Master)
+            final_titles = [{
+                "value": job_title,
+                "minYears": 0,
+                "recent": False,
+                "matchType": "Similar",
+                "required": "Required",
+                "source": "JobDiva"
+            }]
+            seen_keys = {self._normalize_title_key(job_title)}
+
+            # 2. Inject enhanced title ONLY if recruiter clicked Enhance
+            # and it is genuinely different from the original title
+            if enhanced_job_title and enhanced_job_title.strip():
+                enh_key = self._normalize_title_key(enhanced_job_title)
+                if enh_key not in seen_keys:
+                    final_titles.append({
+                        "value": enhanced_job_title.strip(),
+                        "minYears": 0,
+                        "recent": False,
+                        "matchType": "Similar",
+                        "required": "Preferred",
+                        "source": "PAIR"
+                    })
+                    seen_keys.add(enh_key)
+
+            # 3. Add AI-detected titles from the JSON output
+            for t in rubric_data.get('titles', []):
+                val = t.get('value', '').strip()
+                if val:
+                    key = self._normalize_title_key(val)
+                    if key and key not in seen_keys:
+                        t['source'] = 'AI'
+                        # Ensure default matchType is Similar if not provided
+                        if 'matchType' not in t:
+                            t['matchType'] = 'Similar'
+                        final_titles.append(t)
+                        seen_keys.add(key)
+            
+            # 4. Cap at 5 titles
+            rubric_data['titles'] = final_titles[:5]
+
             # Map skills to ontology for consistency
             if 'skills' in rubric_data:
                 raw_skills = []
                 for s in rubric_data['skills']:
-                     raw_skills.append({
+                    raw_skills.append({
                         'original_text': s.get('value', ''),
                         'normalized_name': s.get('value', ''),
                         'importance': s.get('required', 'preferred').lower(),
                         'min_years': s.get('minYears', 0),
                         'confidence': 1.0
                     })
-                
+
                 mapped = self._map_skills_to_ontology(raw_skills)
                 for i, s in enumerate(rubric_data['skills']):
                     for ms in mapped['mapped']:
                         if ms.original_text == s['value']:
                             rubric_data['skills'][i]['value'] = ms.normalized_name
                             break
-            
-            # Ensure at least one title row exists
-            if not rubric_data.get('titles') and job_title:
-                rubric_data['titles'] = [{"value": job_title, "minYears": 0, "recent": False, "matchType": "Exact", "required": "Required"}]
+
+            # titles is already set and deduplicated above
+            deduped_titles = rubric_data['titles']
 
             # Ensure education exists - if AI found nothing, provide a sensible default based on title
             # This ensures the section is reflected on the UI for the recruiter to edit
@@ -334,7 +382,7 @@ class JobSkillsExtractor:
                 }]
 
             return JobRubric(
-                titles=rubric_data.get('titles', []),
+                titles=deduped_titles,
                 skills=rubric_data.get('skills', []),
                 education=rubric_data.get('education', []),
                 domain=rubric_data.get('domain', []),
@@ -346,7 +394,7 @@ class JobSkillsExtractor:
             print(f"❌ Full rubric extraction failed: {e}")
             # Fallback to minimal info from title if everything fails
             return JobRubric(
-                titles=[{"value": job_title, "minYears": 0, "recent": False, "matchType": "Exact", "required": "Required"}],
+                titles=[{"value": job_title, "minYears": 0, "recent": False, "matchType": "Similar", "required": "Required"}],
                 skills=[],
                 education=[],
                 domain=[],

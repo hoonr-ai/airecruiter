@@ -501,6 +501,7 @@ function NewJobPageContent() {
           recruiter_emails: recruiterEmails,
           pair_level: screeningLevel,
           selected_job_boards: selectedJobBoards,
+          rubric: rubricData, // 🔥 SEND FULL RUBRIC DATA
           step1_completed: stepData.currentStep >= 1,
           step2_completed: stepData.currentStep >= 2,
           step3_completed: stepData.currentStep >= 3,
@@ -1117,11 +1118,13 @@ function NewJobPageContent() {
   };
 
   const removeRubricItem = (category: string, index: number) => {
+    console.log(`🗑️ Removing ${category} at index ${index}`);
     setRubricData((prev: any) => {
       if (!prev || !prev[category]) return prev;
-      const updated = { ...prev };
-      updated[category] = updated[category].filter((_: any, i: number) => i !== index);
-      return updated;
+      return {
+        ...prev,
+        [category]: prev[category].filter((_: any, i: number) => i !== index)
+      };
     });
   };
 
@@ -1158,7 +1161,7 @@ function NewJobPageContent() {
             <div className="flex items-center gap-2 mb-4">
               <Clipboard className="w-4 h-4 text-slate-900 flex-shrink-0" />
               <h3 className="text-[14px] font-bold text-slate-800">Titles</h3>
-              <span className="text-[12px] font-normal text-slate-500">Job title for sourcing & resume matching · 1 max</span>
+              <span className="text-[12px] font-normal text-slate-500">Job title for sourcing & resume matching · 5 max</span>
             </div>
 
             {/* Column Headers */}
@@ -1190,7 +1193,18 @@ function NewJobPageContent() {
                       onChange={(e) => updateRubricItem('titles', idx, 'value', e.target.value)}
                       className="flex-1 min-w-0 text-[13px] font-normal text-slate-700 bg-transparent border border-transparent rounded px-2 py-1.5 outline-none focus:border-slate-200 focus:bg-white transition-all"
                     />
-                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap">PAIR</span>
+                    {title.source === 'JobDiva' && (
+                      <span className="bg-slate-100 text-slate-600 text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap border border-slate-200">JOBDIVA</span>
+                    )}
+                    {title.source === 'PAIR' && (
+                      <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap border border-[#ddd6fe]">PAIR</span>
+                    )}
+                    {title.source === 'AI' && (
+                      <span className="bg-[#dcfce7] text-[#166534] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap border border-[#bbf7d0]">AI</span>
+                    )}
+                    {(!title.source || title.source === 'User') && (
+                      <span className="bg-blue-50 text-blue-600 text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap border border-blue-100">USER</span>
+                    )}
                   </div>
                   <div className="w-[110px] flex-shrink-0 flex items-center gap-1.5">
                     <input
@@ -1233,7 +1247,15 @@ function NewJobPageContent() {
                     </button>
                   </div>
                   <div className="w-[36px] flex-shrink-0 text-center">
-                    <button onClick={() => removeRubricItem('titles', idx)} className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-7 h-7 flex items-center justify-center rounded-md transition-all duration-200" title="Remove">
+                    <button 
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeRubricItem('titles', idx);
+                      }} 
+                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200" 
+                      title="Remove"
+                    >
                       <X className="w-4 h-4" />
                     </button>
                   </div>
@@ -1241,7 +1263,13 @@ function NewJobPageContent() {
               ))}
 
               <div className="mt-3">
-                <Button variant="outline" size="sm" className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all">
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  disabled={(rubricData.titles?.length || 0) >= 5}
+                  onClick={() => addRubricItem('titles', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'User' })}
+                  className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
                   Add Title
                 </Button>
@@ -1342,7 +1370,15 @@ function NewJobPageContent() {
                     </button>
                   </div>
                   <div className="w-[36px] flex-shrink-0 text-center">
-                    <button onClick={() => removeRubricItem('skills', idx)} className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-7 h-7 flex items-center justify-center rounded-md transition-all duration-200" title="Remove">
+                    <button 
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeRubricItem('skills', idx);
+                      }} 
+                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200" 
+                      title="Remove"
+                    >
                       <X className="w-4 h-4" />
                     </button>
                   </div>
@@ -1415,7 +1451,15 @@ function NewJobPageContent() {
                   </div>
                   <div className="w-[70px] flex-shrink-0"></div>
                   <div className="w-[36px] flex-shrink-0 text-center">
-                    <button onClick={() => removeRubricItem('education', idx)} className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-7 h-7 flex items-center justify-center rounded-md transition-all duration-200" title="Remove">
+                    <button 
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeRubricItem('education', idx);
+                      }} 
+                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200" 
+                      title="Remove"
+                    >
                       <X className="w-4 h-4" />
                     </button>
                   </div>
@@ -1470,7 +1514,15 @@ function NewJobPageContent() {
                   </div>
                   <div className="w-[70px] flex-shrink-0"></div>
                   <div className="w-[36px] flex-shrink-0 text-center">
-                    <button onClick={() => removeRubricItem('domain', idx)} className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-7 h-7 flex items-center justify-center rounded-md transition-all duration-200" title="Remove">
+                    <button 
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeRubricItem('domain', idx);
+                      }} 
+                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200" 
+                      title="Remove"
+                    >
                       <X className="w-4 h-4" />
                     </button>
                   </div>
@@ -1531,7 +1583,15 @@ function NewJobPageContent() {
                   <div className="w-[190px] flex-shrink-0 flex items-center justify-center"></div>
                   <div className="w-[70px] flex-shrink-0"></div>
                   <div className="w-[36px] flex-shrink-0 text-center">
-                    <button onClick={() => removeRubricItem('customer_requirements', idx)} className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-7 h-7 flex items-center justify-center rounded-md transition-all duration-200" title="Remove">
+                    <button 
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeRubricItem('customer_requirements', idx);
+                      }} 
+                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200" 
+                      title="Remove"
+                    >
                       <X className="w-4 h-4" />
                     </button>
                   </div>
@@ -1585,7 +1645,15 @@ function NewJobPageContent() {
                   </div>
                   <div className="w-[70px] flex-shrink-0"></div>
                   <div className="w-[36px] flex-shrink-0 text-center">
-                    <button onClick={() => removeRubricItem('other_requirements', idx)} className="text-slate-300 hover:text-red-500 hover:bg-red-50 w-7 h-7 flex items-center justify-center rounded-md transition-all duration-200" title="Remove">
+                    <button 
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeRubricItem('other_requirements', idx);
+                      }} 
+                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200" 
+                      title="Remove"
+                    >
                       <X className="w-4 h-4" />
                     </button>
                   </div>
@@ -2030,9 +2098,10 @@ function NewJobPageContent() {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({
-                        jobId: numericJobId || jobdivaId, // Numeric PK for internal linking
-                        jobdivaId: jobdivaId, // Alphanumeric Ref Code for rubric tables
-                        jobTitle: jobTitle || jobData?.title,
+                        jobId: numericJobId || jobdivaId,
+                        jobdivaId: jobdivaId,
+                        jobTitle: jobData?.title || jobTitle,           // Always the raw original
+                        enhancedJobTitle: enhancedTitle || "",          // Set only if enhance was clicked
                         jobDescription: jobPosting,
                         jobNotes: recruiterNotes,
                         originalDescription: jobData?.description || "",
@@ -2060,6 +2129,16 @@ function NewJobPageContent() {
                   showToast("Step 2 data saved to monitored jobs successfully!", "success");
                 }
               }
+
+              if (currentStep === 3) {
+                // Save Step 3 (Rubric) data before moving to filters
+                const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
+                if (!saved) {
+                  showToast("Failed to save rubric data. Please try again.", "info");
+                  return;
+                }
+              }
+
               if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
             }}
             disabled={(currentStep === 1 && !jobData) || isGeneratingJD}

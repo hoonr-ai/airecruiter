@@ -127,6 +127,7 @@ class JobDraftData(BaseModel):
     # Save metadata
     is_auto_saved: bool = False
     draft_notes: Optional[str] = None
+    rubric: Optional[Dict] = None
 
 class JobDraftRequirement(BaseModel):
     """Model for draft requirements"""

@@ -50,6 +50,7 @@ from services.jobdiva import jobdiva_service
 from services.unipile import unipile_service
 from services.chat_service import chat_service
 from services.monitored_jobs_storage import MonitoredJobsStorage
+from services.job_rubric_db import JobRubricDB
 
 # Legacy file-based tracking replaced by monitored_jobs SQL table
 
@@ -833,6 +834,20 @@ async def poll_all_jobs():
     
     return {"polled": len(job_ids), "changes": changes_detected}
 
+def persist_rubric_background_task(jobdiva_id: str, rubric: Any, recruiter_notes: Optional[str]):
+    """
+    Background task to persist the structured rubric.
+    This runs in a separate connection after the main save has committed.
+    """
+    try:
+        logger.info(f"⏳ [Background] Persisting rubric for Job {jobdiva_id}...")
+        rubric_db = JobRubricDB()
+        rubric_db.save_full_rubric(jobdiva_id, rubric, recruiter_notes)
+        logger.info(f"✅ [Background] Rubric persisted for Job {jobdiva_id}")
+    except Exception as e:
+        logger.error(f"❌ [Background] Failed to persist rubric for {jobdiva_id}: {e}")
+
+
 # =====================================================
 # JOB DRAFTS API ENDPOINTS
 # =====================================================
@@ -940,6 +955,17 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
         conn.commit()
         cursor.close()
         conn.close()
+        
+        # 2. Persist Structured Rubric (Titles, Skills, etc.) via Background Task
+        # to ensure the main record is UNLOCKED before the rubric update starts.
+        if draft_data.rubric:
+            logger.info(f"📋 Queuing rubric persistence for Job {db_job_id}...")
+            background_tasks.add_task(
+                persist_rubric_background_task, 
+                ref_code, 
+                draft_data.rubric, 
+                draft_data.recruiter_notes
+            )
         
         # 2. Synchronize with JobDiva UDFs in background (using Numeric PK)
         background_tasks.add_task(
