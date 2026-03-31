@@ -1804,7 +1804,7 @@ function NewJobPageContent() {
         filters.push({
           id: idCounter++,
           category: 'Requirement',
-          value: `Must be local to ${location} metro — no relocation`,
+          value: `Must be local to ${location} metro`,
           active: true,
           ai: false,
           fromRubric: true
@@ -2116,7 +2116,10 @@ function NewJobPageContent() {
                         jobNotes: recruiterNotes,
                         originalDescription: jobData?.description || "",
                         customerName: jobData?.customer_name || jobData?.customer || "",
-                        requiredDegree: jobData?.required_degree || ""
+                        requiredDegree: jobData?.required_degree || "",
+                        jobCity: jobData?.city || "",
+                        jobState: jobData?.state || "",
+                        locationType: jobData?.location_type || ""
                       })
                     });
                     if (res.ok) {

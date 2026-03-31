@@ -295,6 +295,9 @@ class RubricGenerationRequest(BaseModel):
     originalDescription: str = ""
     customerName: str = ""
     requiredDegree: str = ""
+    jobCity: str = ""
+    jobState: str = ""
+    locationType: str = ""
 
 @router.post("/jobs/generate-rubric")
 async def generate_rubric(req: RubricGenerationRequest):
@@ -319,7 +322,9 @@ async def generate_rubric(req: RubricGenerationRequest):
             jobdiva_description=req.originalDescription,
             ai_description=req.jobDescription,
             recruiter_notes=req.jobNotes,
-            customer_name=req.customerName
+            customer_name=req.customerName,
+            job_location=f"{req.jobCity}, {req.jobState}".strip(", "),
+            location_type=req.locationType
         )
         
         # If JobDiva has a structured degree, and AI found nothing, use it

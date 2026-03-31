@@ -229,7 +229,9 @@ class JobSkillsExtractor:
         jobdiva_description: str = "",
         ai_description: str = "",
         recruiter_notes: str = "",
-        customer_name: str = ""
+        customer_name: str = "",
+        job_location: str = "",
+        location_type: str = ""
     ) -> JobRubric:
         """
         Extracts a complete rubric (titles, skills, education, etc.) strictly from job text.
@@ -403,6 +405,20 @@ class JobSkillsExtractor:
                     rubric_data.setdefault('customer_requirements', []).insert(0, {
                         "type": "Must not be employed by",
                         "value": customer_name,
+                        "required": "Required"
+                    })
+
+            # 6. Inject default Location Requirement if job_location exists and NOT remote
+            if job_location and job_location.strip() and location_type.lower() != 'remote':
+                # Check for existing location requirement for this location
+                exists = any(
+                    'local' in str(req.get('value', '')).lower() and 
+                    job_location.split(',')[0].lower() in str(req.get('value', '')).lower()
+                    for req in rubric_data.get('other_requirements', [])
+                )
+                if not exists:
+                    rubric_data.setdefault('other_requirements', []).insert(0, {
+                        "value": f"Must be local to {job_location} metro",
                         "required": "Required"
                     })
 
