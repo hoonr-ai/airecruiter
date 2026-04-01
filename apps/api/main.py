@@ -355,6 +355,21 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
                 job["enhanced_title"] = local_data["enhanced_title"]
             if "screening_level" in local_data and local_data["screening_level"]:
                 job["screening_level"] = local_data["screening_level"]
+                
+            # Merge saved selection arrays to prevent DB wipe during save
+            if "selected_employment_types" in local_data and local_data["selected_employment_types"]:
+                val = local_data["selected_employment_types"]
+                try:
+                    job["selected_employment_types"] = json.loads(val) if isinstance(val, str) else val
+                except:
+                    pass
+                    
+            if "recruiter_emails" in local_data and local_data["recruiter_emails"]:
+                val = local_data["recruiter_emails"]
+                try:
+                    job["recruiter_emails"] = json.loads(val) if isinstance(val, str) else val
+                except:
+                    pass
             
             # Always continue to re-save from JobDiva to ensure all columns are fresh.
             # priority, pay_rate, max_allowed_submittals etc. are now standard schema columns.
@@ -393,21 +408,6 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
             if "ai_description" in local_data:
                 job["ai_description"] = local_data["ai_description"]
                 
-            # Merge saved selection fields (Draft Data)
-            if "selected_employment_types" in local_data and local_data["selected_employment_types"]:
-                val = local_data["selected_employment_types"]
-                try:
-                    job["selected_employment_types"] = json.loads(val) if isinstance(val, str) else val
-                except:
-                    job["selected_employment_types"] = []
-                    
-            if "recruiter_emails" in local_data and local_data["recruiter_emails"]:
-                val = local_data["recruiter_emails"]
-                try:
-                    job["recruiter_emails"] = json.loads(val) if isinstance(val, str) else val
-                except:
-                    job["recruiter_emails"] = []
-            
             # Merge stored supplemental fields back into the live response
             if local_data.get("priority") and not job.get("priority"):
                 job["priority"] = local_data["priority"]
