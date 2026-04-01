@@ -370,6 +370,13 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
                     job["recruiter_emails"] = json.loads(val) if isinstance(val, str) else val
                 except:
                     pass
+                    
+            if "selected_job_boards" in local_data and local_data["selected_job_boards"]:
+                val = local_data["selected_job_boards"]
+                try:
+                    job["selected_job_boards"] = json.loads(val) if isinstance(val, str) else val
+                except:
+                    pass
             
             # Always continue to re-save from JobDiva to ensure all columns are fresh.
             # priority, pay_rate, max_allowed_submittals etc. are now standard schema columns.

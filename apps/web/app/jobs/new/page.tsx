@@ -373,6 +373,12 @@ function NewJobPageContent() {
         setWorkAuthorization(data.work_authorization);
       }
 
+      // 7. Publish To (Job Boards) - auto-populate from local database
+      if (data.selected_job_boards && Array.isArray(data.selected_job_boards) && data.selected_job_boards.length > 0) {
+        setSelectedJobBoards(data.selected_job_boards);
+        showToast(`Restored ${data.selected_job_boards.length} job board selection(s)`, "info");
+      }
+
       setIsFetched(true);
 
       // FORCE: Always stay on step 1 for newly imported jobs to follow normal workflow
