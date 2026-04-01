@@ -365,8 +365,8 @@ function NewJobPageContent() {
         }
       }
 
-      // 5. Set default screening level to L1.5 (recommended)
-      setScreeningLevel("L1.5");
+      // 5. Set default screening level from database OR to L1.5 (recommended)
+      setScreeningLevel(data.screening_level || "L1.5");
 
       // 6. Set Work Authorization from JobDiva
       if (data.work_authorization) {

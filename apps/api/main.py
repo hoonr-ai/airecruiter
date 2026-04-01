@@ -353,6 +353,8 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
                 job["ai_description"] = local_data["ai_description"]
             if "enhanced_title" in local_data and local_data["enhanced_title"] is not None:
                 job["enhanced_title"] = local_data["enhanced_title"]
+            if "screening_level" in local_data and local_data["screening_level"]:
+                job["screening_level"] = local_data["screening_level"]
             
             # Always continue to re-save from JobDiva to ensure all columns are fresh.
             # priority, pay_rate, max_allowed_submittals etc. are now standard schema columns.
@@ -415,6 +417,10 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
                 job["max_allowed_submittals"] = local_data["max_allowed_submittals"]
             if local_data.get("program_duration") and not job.get("program_duration"):
                 job["program_duration"] = local_data["program_duration"]
+            
+            # Explicitly merge screening_level to preserve UI state on refetch
+            if "screening_level" in local_data and local_data["screening_level"]:
+                job["screening_level"] = local_data["screening_level"]
         
         return job
         
@@ -497,7 +503,7 @@ async def save_job_to_monitoring_enhanced(job_id: str, job_details: dict) -> boo
             
             # Application state
             "processing_status": "pending",
-            "screening_level": "L1.5"
+            "screening_level": job_details.get("screening_level") or "L1.5"
         }
         
         # Save using centralized service logic
