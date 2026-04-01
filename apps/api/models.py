@@ -116,7 +116,7 @@ class JobDraftData(BaseModel):
     ai_description: Optional[str] = None
     selected_employment_types: List[str] = []
     recruiter_emails: List[str] = []
-    pair_level: str = "L1.5"
+    screening_level: str = "L1.5"
     selected_job_boards: List[str] = []
     
     # Progress tracking

@@ -231,7 +231,7 @@ function NewJobPageContent() {
       if (draft.recruiter_notes !== undefined && draft.recruiter_notes !== null) setRecruiterNotes(draft.recruiter_notes || "");
       if (draft.selected_employment_types?.length) setSelectedEmpTypes(draft.selected_employment_types);
       if (draft.recruiter_emails?.length) setRecruiterEmails(draft.recruiter_emails);
-      if (draft.pair_level) setScreeningLevel(draft.pair_level);
+      if (draft.screening_level) setScreeningLevel(draft.screening_level);
       if (draft.selected_job_boards?.length) setSelectedJobBoards(draft.selected_job_boards);
       if (draft.work_authorization) setWorkAuthorization(draft.work_authorization);
       if (draft.bot_introduction) setBotIntroduction(draft.bot_introduction);
@@ -519,7 +519,7 @@ function NewJobPageContent() {
           work_authorization: workAuthorization || jobData?.work_authorization || "",
           selected_employment_types: selectedEmpTypes,
           recruiter_emails: recruiterEmails,
-          pair_level: screeningLevel,
+          screening_level: screeningLevel,
           selected_job_boards: selectedJobBoards,
           rubric: {
             ...rubricData,

@@ -908,6 +908,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                 selected_employment_types = %s,
                 work_authorization = %s,
                 bot_introduction = %s,
+                screening_level = %s,
                 processing_status = %s,
                 current_step = %s,
                 jobdiva_id = %s, -- This is the reference string
@@ -923,6 +924,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
             json.dumps(draft_data.selected_employment_types or []), # selected_employment_types
             draft_data.work_authorization,                       # work_authorization
             draft_data.bot_introduction,                        # bot_introduction
+            draft_data.screening_level,                         # screening_level
             f"step_{draft_data.current_step}_complete",         # processing_status
             draft_data.current_step,                            # current_step
             ref_code,                                           # 26-06182 (swapped)
@@ -936,8 +938,9 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                     job_id, title, enhanced_title, ai_description, 
                     selected_job_boards, recruiter_notes, recruiter_emails, 
                     selected_employment_types, work_authorization, bot_introduction,
+                    screening_level,
                     processing_status, current_step, jobdiva_id, created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
             """, (
                 db_job_id,                                           # 31920032 (Numeric PK)
                 draft_data.title,
@@ -949,6 +952,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                 json.dumps(draft_data.selected_employment_types or []),
                 draft_data.work_authorization,
                 draft_data.bot_introduction,
+                draft_data.screening_level,
                 f"step_{draft_data.current_step}_complete",
                 draft_data.current_step,
                 ref_code                                              # 26-06182 (Ref)
@@ -1058,7 +1062,7 @@ async def get_job_draft(job_id: str, user_session: str = "default"):
                 "recruiter_emails": parse_json(job_row.get("recruiter_emails")),
                 "selected_employment_types": parse_json(job_row.get("selected_employment_types")),
                 "current_step": job_row.get("current_step") or 1,
-                "pair_level": job_row.get("pair_level") or "L1.5",
+                "screening_level": job_row.get("screening_level") or "L1.5",
                 "bot_introduction": job_row.get("bot_introduction") or ""
             }
         }
@@ -1162,7 +1166,7 @@ async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData)
                 recruiter_emails = %s,
                 selected_employment_types = %s,
                 work_authorization = %s,
-                pair_level = %s,
+                screening_level = %s,
                 current_step = %s,
                 user_session = %s,
                 ai_enhanced = CASE WHEN %s IS NOT NULL AND %s != '' THEN TRUE ELSE ai_enhanced END,
@@ -1178,7 +1182,7 @@ async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData)
             json.dumps(draft_data.recruiter_emails or []),       # recruiter_emails
             json.dumps(draft_data.selected_employment_types or []), # selected_employment_types
             draft_data.work_authorization,                       # work_authorization
-            draft_data.pair_level,                              # pair_level  
+            draft_data.screening_level,                         # screening_level
             draft_data.current_step,                            # current_step
             draft_data.user_session or 'default',              # user_session
             draft_data.ai_description,                          # for ai_enhanced check
@@ -1197,7 +1201,7 @@ async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData)
                 INSERT INTO monitored_jobs (
                     job_id, title, enhanced_title, ai_description, selected_job_boards,
                     recruiter_notes, recruiter_emails, selected_employment_types, 
-                    work_authorization, pair_level, current_step, user_session, 
+                    work_authorization, screening_level, current_step, user_session, 
                     ai_enhanced, processing_status, created_at, updated_at, jobdiva_id
                 ) VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW(), %s
@@ -1211,7 +1215,7 @@ async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData)
                 json.dumps(draft_data.recruiter_emails or []),
                 json.dumps(draft_data.selected_employment_types or []),
                 draft_data.work_authorization,
-                draft_data.pair_level,
+                draft_data.screening_level,
                 draft_data.current_step,
                 draft_data.user_session or 'default',
                 bool(draft_data.ai_description),
@@ -1328,7 +1332,7 @@ async def get_monitored_job_data(job_id: str):
         cursor.execute("""
             SELECT job_id, title, enhanced_title, ai_description, selected_job_boards,
                    recruiter_notes, recruiter_emails, selected_employment_types,
-                   work_authorization, pair_level, current_step, processing_status,
+                   work_authorization, screening_level, current_step, processing_status,
                    job_requirements, ai_enhanced, created_at, updated_at
             FROM monitored_jobs 
             WHERE job_id = %s
@@ -1344,7 +1348,7 @@ async def get_monitored_job_data(job_id: str):
         # Column names for reference
         columns = ["job_id", "title", "enhanced_title", "ai_description", "selected_job_boards",
                    "recruiter_notes", "recruiter_emails", "selected_employment_types", 
-                   "work_authorization", "pair_level", "current_step", "processing_status",
+                   "work_authorization", "screening_level", "current_step", "processing_status",
                    "job_requirements", "ai_enhanced", "created_at", "updated_at"]
         
         data = dict(zip(columns, row))
