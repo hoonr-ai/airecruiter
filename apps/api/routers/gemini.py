@@ -229,7 +229,7 @@ async def generate_job_title(req: JobDescriptionRequest):
         f"Job Notes Context: {req.jobNotes}\n"
         f"Generated Job Description Content: {req.jobDescription}\n\n"
         "MANDATORY GUIDELINES:\n"
-        "- FOCUS ONLY ON THE TITLE: Enhancement should only include functional title, seniority (Senior/Junior), and employment type (Contract/W2/Full-Time).\n"
+        "- FOCUS ONLY ON THE TITLE: Enhancement should only include functional title and seniority (Senior/Junior). Do NOT include employment type (Contract/W2/Full-Time).\n"
         "- NO LOCATION DETAILS: Do NOT include city, state, or zip code in the title (e.g., avoid '— Atlanta, GA').\n"
         "- NO EXTRA DETAILS: Do NOT include internal codes, project names, or company names.\n"
         "- PRIORITY: Look for seniority and core specialized skills in the 'Generated Job Description Content'.\n"
