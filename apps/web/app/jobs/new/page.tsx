@@ -1240,8 +1240,9 @@ function NewJobPageContent() {
                   <div className="w-[110px] flex-shrink-0 flex items-center gap-1.5">
                     <input
                       type="number"
+                      min={0}
                       value={title.minYears}
-                      onChange={(e) => updateRubricItem('titles', idx, 'minYears', parseInt(e.target.value) || 0)}
+                      onChange={(e) => updateRubricItem('titles', idx, 'minYears', Math.max(0, parseInt(e.target.value) || 0))}
                       className="w-12 border border-slate-200 rounded px-1.5 py-1 text-[13px] text-center outline-none focus:border-[#818cf8]"
                     />
                     <span className="text-[12px] text-slate-500">{title.minYears === 0 ? '—' : 'yrs'}</span>
@@ -1366,8 +1367,9 @@ function NewJobPageContent() {
                   <div className="w-[110px] flex-shrink-0 flex items-center gap-1.5">
                     <input
                       type="number"
+                      min={0}
                       value={skill.minYears}
-                      onChange={(e) => updateRubricItem('skills', idx, 'minYears', parseInt(e.target.value) || 0)}
+                      onChange={(e) => updateRubricItem('skills', idx, 'minYears', Math.max(0, parseInt(e.target.value) || 0))}
                       className="w-12 border border-slate-200 rounded px-1.5 py-1 text-[13px] text-center outline-none focus:border-[#818cf8]"
                     />
                     <span className="text-[12px] text-slate-500">{skill.minYears === 0 ? '—' : 'yrs'}</span>
