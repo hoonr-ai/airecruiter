@@ -2223,7 +2223,7 @@ function NewJobPageContent() {
       {/* Page Header */}
       <div className="mb-7">
         <h1 className="text-[29px] font-bold text-slate-900 leading-none">New Job</h1>
-        {currentStep !== 2 && <p className="text-slate-500 text-[15px] mt-2">{pageSubtitle}</p>}
+        <p className="text-slate-500 text-[15px] mt-2">{pageSubtitle}</p>
       </div>
 
       {/* Step Indicator */}
