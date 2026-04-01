@@ -254,7 +254,7 @@ class JobSkillsExtractor:
         
         1. TITLES:
            - Extract any acceptable alternative job titles mentioned in the text.
-           - For each, provide: value, minYears, recent (boolean), matchType ("Similar" or "Exact" - default to "Similar"), required ("Required" or "Preferred").
+           - For each, provide: value, minYears, recent (boolean), matchType (ALWAYS return "Similar"), required ("Required" or "Preferred").
         
         2. SKILLS (Measurable Hard Skills Only):
            - Extract the **top 8 most critical** technical skills, tools, or methodologies.
@@ -347,9 +347,8 @@ class JobSkillsExtractor:
                     key = self._normalize_title_key(val)
                     if key and key not in seen_keys:
                         t['source'] = 'AI'
-                        # Ensure default matchType is Similar if not provided
-                        if 'matchType' not in t:
-                            t['matchType'] = 'Similar'
+                        # Per USER requirement: Force all AI-detected titles to 'Similar' by default
+                        t['matchType'] = 'Similar'
                         final_titles.append(t)
                         seen_keys.add(key)
             
