@@ -379,7 +379,7 @@ class JobSkillsExtractor:
                 "recent": False,
                 "matchType": "Similar",
                 "required": "Required",
-                "source": "JobDiva"
+                "source": "PAIR"
             }]
             seen_keys = {self._normalize_title_key(job_title)}
 
@@ -397,38 +397,13 @@ class JobSkillsExtractor:
                         "source": "PAIR"
                     })
                     seen_keys.add(enh_key)
-
-            # 3. Add taxonomy-grounded extra titles (preferred over raw LLM titles)
-            if grounded_extra_titles:
-                for t in grounded_extra_titles:
-                    val = t.get('value', '').strip()
-                    if val:
-                        key = self._normalize_title_key(val)
-                        if key and key not in seen_keys:
-                            t['source'] = 'Taxonomy'
-                            t['matchType'] = 'Similar'
-                            final_titles.append(t)
-                            seen_keys.add(key)
-            else:
-                # Fallback: use raw LLM titles if taxonomy returned nothing
-                for t in rubric_data.get('titles', []):
-                    val = t.get('value', '').strip()
-                    if val:
-                        key = self._normalize_title_key(val)
-                        if key and key not in seen_keys:
-                            t['source'] = 'AI'
-                            t['matchType'] = 'Similar'
-                            final_titles.append(t)
-                            seen_keys.add(key)
             
-            # 4. Cap at 5 titles
-            rubric_data['titles'] = final_titles[:5]
+            rubric_data['titles'] = final_titles
 
             # Enforce matchType=Similar on all skills (taxonomy grounding already normalized names)
             for s in rubric_data.get('skills', []):
                 s['matchType'] = 'Similar'
 
-            # titles is already set and deduplicated above
             deduped_titles = rubric_data['titles']
 
             # ── Route grounded certifications → education ──────────────────────

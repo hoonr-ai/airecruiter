@@ -1271,6 +1271,25 @@ async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData)
                     client=client
                 )
                 
+                # Only include Original JobDiva Title and Enhanced Title (both as PAIR)
+                titles_payload = [{
+                    "value": draft_data.title,
+                    "minYears": 0,
+                    "recent": False,
+                    "matchType": "Similar",
+                    "required": "Required",
+                    "source": "PAIR"
+                }]
+                if draft_data.enhanced_title and draft_data.enhanced_title != draft_data.title:
+                    titles_payload.append({
+                        "value": draft_data.enhanced_title,
+                        "minYears": 0,
+                        "recent": False,
+                        "matchType": "Similar",
+                        "required": "Preferred",
+                        "source": "PAIR"
+                    })
+                
                 # Format for JobRubricDB.save_full_rubric
                 rubric_payload = {
                     "skills": [
@@ -1284,7 +1303,7 @@ async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData)
                         } for s in grounded.get("hard_skills", [])
                     ],
                     "soft_skills": [{"value": s["value"]} for s in grounded.get("soft_skills", [])],
-                    "titles": grounded.get("extra_titles", [])
+                    "titles": titles_payload
                 }
                 
                 rubric_db = JobRubricDB()
