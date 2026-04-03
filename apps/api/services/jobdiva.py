@@ -917,18 +917,13 @@ class JobDivaService:
 
                                     
                             update_parts.append(f"{k} = :{k}")
-                            if k in ["selected_employment_types", "selected_job_boards", "enhancement_metadata"]:
+                            if k in ["selected_employment_types", "selected_job_boards", "recruiter_emails", "enhancement_metadata"]:
                                 if isinstance(v, (list, dict)):
                                     params[k] = json.dumps(v)
                                 else:
                                     params[k] = v
                             else:
                                 params[k] = v
-                    
-                    # Handle recruiter emails separately
-                    if recruiter_emails:
-                        update_parts.append("recruiter_emails = :recruiter_emails")
-                        params["recruiter_emails"] = json.dumps(recruiter_emails) if isinstance(recruiter_emails, list) else recruiter_emails
                     
                     # Always update the timestamp
                     update_parts.append("updated_at = :updated_at")  
