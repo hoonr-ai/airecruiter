@@ -116,27 +116,23 @@ async def parse_job_description(request: ParsedJobRequest):
     """
     try:
         data = await llm_extractor.extract_from_jd(request.text)
-        
-        # If job_id is provided, save the parsed data to the database
+        # Step 2 Parse: READ-ONLY (No DB population for discrete skills/roles)
+        # This allows the recruiter to edit the AI JD before grounding is triggered.
         if request.job_id:
             storage = MonitoredJobsStorage()
             processing_metadata = {
                 "model": GEMINI_MODEL,
-                "processing_time_ms": 0,  # Could track actual processing time
-                "tokens_used": 0,  # Could track actual token usage
-                "confidence": 0.8
+                "processing_time_ms": 0,
+                "tokens_used": 0,
+                "confidence": 0.95
             }
-            
-            success = storage.update_job_with_extracted_data(
+            # Still update the monitored_jobs master record with the initial enhanced text
+            storage.update_job_with_extracted_data(
                 job_id=request.job_id,
                 extracted_data=data,
                 processing_metadata=processing_metadata
             )
-            
-            if success:
-                logger.info(f"✅ Saved processed data for job {request.job_id}")
-            else:
-                logger.warning(f"⚠️ Failed to save processed data for job {request.job_id}")
+            logger.info(f"✅ Step 2: Generated initial AI JD for {request.job_id} (Discrete tables not yet populated)")
         
         return ParsedJobResponse(
             title=data.title,
@@ -541,6 +537,10 @@ async def sync_jobdiva_udf_task(job_id: str, ai_description: str, recruiter_note
     - Step 2 (Publish) -> Click Next sends Step 3: Push UDF 230 (AI JD)
     """
     try:
+        # TODO: UDF push temporarily disabled — re-enable when JobDiva field size is resolved
+        logger.info(f"⏭️  UDF push skipped (disabled) for job {job_id} on step {current_step}")
+        return
+
         # job_id here is the reference string (e.g., 26-06182) for logging
         # jobdiva_id here is the numeric ID (e.g., 31920032) for the actual API call
         target_id = jobdiva_id # Use the numeric ID for the JobDiva API call
@@ -1254,6 +1254,47 @@ async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData)
             except Exception as e:
                 logger.error(f"❌ Error pushing recruiter_notes to JobDiva: {e}")
         
+        # 3. IF STEP 2 COMPLETE: Perform Grounded Extraction & Populate Discrete Tables
+        if draft_data.current_step == 2 and draft_data.ai_description:
+            try:
+                from services.taxonomy_service import extract_grounded_rubric
+                from services.job_rubric_db import JobRubricDB
+                from core.config import OPENAI_API_KEY
+                from openai import AsyncOpenAI
+                
+                logger.info(f"⚡ Step 2 Next Click: Triggering Grounded Extraction for {numeric_id} (Ref: {ref_id})")
+                
+                client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+                grounded = await extract_grounded_rubric(
+                    job_text=draft_data.ai_description,
+                    job_title=draft_data.enhanced_title or draft_data.title,
+                    client=client
+                )
+                
+                # Format for JobRubricDB.save_full_rubric
+                rubric_payload = {
+                    "skills": [
+                        {
+                            "value": s["value"],
+                            "minYears": s.get("minYears", 3),
+                            "recent": s.get("recent", True),
+                            "matchType": s.get("matchType", "Similar"),
+                            "required": s.get("required", "Required"),
+                            "category": "hard"
+                        } for s in grounded.get("hard_skills", [])
+                    ],
+                    "soft_skills": [{"value": s["value"]} for s in grounded.get("soft_skills", [])],
+                    "titles": grounded.get("extra_titles", [])
+                }
+                
+                rubric_db = JobRubricDB()
+                # Use ref_id (the one with the hyphen) as it's the identifier for the discrete tables
+                rubric_db.save_full_rubric(jobdiva_id=ref_id, rubric_obj=rubric_payload)
+                logger.info(f"✅ Step 2 Next Click: Successfully persisted {len(rubric_payload['skills'])} grounded skills for {ref_id}")
+                
+            except Exception as grounding_err:
+                logger.error(f"⚠️ Step 2 Next Click Grounding Error: {grounding_err}")
+
         save_type = "Auto-saved" if draft_data.is_auto_saved else "Manually saved"
         logger.info(f"✅ {save_type} job {job_id} directly to monitored_jobs, step {draft_data.current_step}")
         

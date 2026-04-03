@@ -315,7 +315,7 @@ async def generate_rubric(req: RubricGenerationRequest):
         
         # Run full rubric extraction
         logger.info(f"🧠 Extracting full rubric strictly from job {job_id} text...")
-        rubric_obj = extractor.extract_full_rubric(
+        rubric_obj = await extractor.extract_full_rubric(
             job_id=job_id,
             job_title=req.jobTitle,
             enhanced_job_title=req.enhancedJobTitle,
@@ -363,6 +363,8 @@ async def generate_rubric(req: RubricGenerationRequest):
                 # Legacy compatibility: also save skills to old table if needed
                 # (Optional, but helps keep existing dashboards working)
                 extracted_skills = []
+                
+                # Hard skills
                 for s in rubric.get('skills', []):
                     extracted_skills.append(ExtractedSkill(
                         original_text=s.get('value', ''),
@@ -370,7 +372,20 @@ async def generate_rubric(req: RubricGenerationRequest):
                         skill_id=None,
                         importance=s.get('required', 'preferred').lower(),
                         min_years=s.get('minYears', 0),
-                        confidence=1.0
+                        confidence=1.0,
+                        category="hard"
+                    ))
+                
+                # Soft skills
+                for s in rubric.get('soft_skills', []):
+                    extracted_skills.append(ExtractedSkill(
+                        original_text=s.get('value', ''),
+                        normalized_name=s.get('value', ''),
+                        skill_id=None,
+                        importance=s.get('required', 'preferred').lower(),
+                        min_years=0,
+                        confidence=1.0,
+                        category="soft"
                     ))
                 
                 db_service = JobSkillsDB()

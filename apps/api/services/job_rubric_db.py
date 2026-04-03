@@ -35,18 +35,27 @@ class JobRubricDB:
                     cur.execute("DELETE FROM job_customer_requirements WHERE jobdiva_id = %s", (jobdiva_id,))
                     cur.execute("DELETE FROM job_other_requirements WHERE jobdiva_id = %s", (jobdiva_id,))
 
-                    # 2. Save Skills
+                    # 2. Save Skills (Hard and Soft)
+                    all_skills = []
                     for s in rubric.get('skills', []):
+                        s['category'] = s.get('category', 'hard')
+                        all_skills.append(s)
+                    for s in rubric.get('soft_skills', []):
+                        s['category'] = s.get('category', 'soft')
+                        all_skills.append(s)
+
+                    for s in all_skills:
                         cur.execute("""
-                            INSERT INTO job_skills (jobdiva_id, skill_name, min_years, recent, match_type, is_required)
-                            VALUES (%s, %s, %s, %s, %s, %s)
+                            INSERT INTO job_skills (jobdiva_id, skill_name, min_years, recent, match_type, is_required, category)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
                         """, (
                             jobdiva_id,
                             s.get('value', ''),
                             s.get('minYears', 0),
                             bool(s.get('recent', False)),
                             s.get('matchType', 'Exact'),
-                            s.get('required', 'Required') == 'Required'
+                            (s.get('required', 'Required') == 'Required'),
+                            s.get('category', 'hard')
                         ))
 
                     # 3. Save Titles / Experience
@@ -143,14 +152,25 @@ class JobRubricDB:
                     domain_objs = [{"value": d, "required": "Required"} for d in domains_list]
 
                     # Fetch all sections
+                    # Fetch all skills
                     cur.execute("SELECT * FROM job_skills WHERE jobdiva_id = %s", (jobdiva_id,))
-                    skills = [{
-                        "value": r['skill_name'],
-                        "minYears": r['min_years'],
-                        "recent": r['recent'],
-                        "matchType": r['match_type'],
-                        "required": "Required" if r['is_required'] else "Preferred"
-                    } for r in cur.fetchall()]
+                    all_rows = cur.fetchall()
+                    
+                    skills = []
+                    soft_skills = []
+                    
+                    for r in all_rows:
+                        skill_obj = {
+                            "value": r['skill_name'],
+                            "minYears": r['min_years'],
+                            "recent": r['recent'],
+                            "matchType": r['match_type'],
+                            "required": "Required" if r['is_required'] else "Preferred"
+                        }
+                        if r.get('category') == 'soft':
+                            soft_skills.append(skill_obj)
+                        else:
+                            skills.append(skill_obj)
 
                     cur.execute("SELECT * FROM job_titles WHERE jobdiva_id = %s", (jobdiva_id,))
                     titles = [{
@@ -183,6 +203,7 @@ class JobRubricDB:
                     return {
                         "titles": titles,
                         "skills": skills,
+                        "soft_skills": soft_skills,
                         "education": education,
                         "domain": domain_objs,
                         "customer_requirements": customer_reqs,

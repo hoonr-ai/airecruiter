@@ -2,10 +2,17 @@ from pydantic import BaseModel, Field
 from typing import List, Optional, Any, Dict
 
 class Skill(BaseModel):
-    name: str
+    value: str
     seniority: str = "Mid"      # Junior, Mid, Senior
     priority: str = "Must Have" # Must Have, Flexible
     years_experience: Optional[int] = None
+
+class GroundedTitle(BaseModel):
+    value: str
+    min_years: int = 0
+    recent: bool = False
+    match_type: str = "Similar"
+    required: str = "Preferred"
 
 class ExtractedData(BaseModel):
     title: str
@@ -14,6 +21,7 @@ class ExtractedData(BaseModel):
     soft_skills: List[str]
     experience_level: str
     location_type: str = "Onsite" # Remote, Hybrid, Onsite
+    grounded_titles: List[GroundedTitle] = []
 
 # Used for frontend response mainly
 class ParsedJobResponse(ExtractedData):

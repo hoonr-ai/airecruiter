@@ -7,10 +7,23 @@ Integrates with Ronak's Skills Ontology to extract and normalize job skills
 from typing import List, Dict, Optional, Tuple
 import re
 import json
+import logging
 from datetime import datetime
 from dataclasses import dataclass
 from core.graph import ontology  # Ronak's skills system
 import openai
+from rapidfuzz import fuzz
+
+logger = logging.getLogger(__name__)
+
+# Taxonomy-grounded extraction service
+try:
+    from services.taxonomy_service import extract_grounded_rubric
+    TAXONOMY_GROUNDING_AVAILABLE = True
+    print("✅ Taxonomy grounding service loaded successfully")
+except Exception as _tax_import_err:
+    TAXONOMY_GROUNDING_AVAILABLE = False
+    print(f"⚠️  Taxonomy grounding NOT available: {_tax_import_err}")
 
 @dataclass
 class ExtractedSkill:
@@ -23,6 +36,7 @@ class ExtractedSkill:
     proficiency: Optional[str] = None  # "junior", "senior", "expert"
     confidence: float = 0.0     # AI confidence score
     source_context: str = ""    # Where in job description this was found
+    category: str = "hard"      # "hard" or "soft"
 
 @dataclass
 class JobRubric:
@@ -33,6 +47,7 @@ class JobRubric:
     domain: List[Dict]
     customer_requirements: List[Dict]
     other_requirements: List[Dict]
+    soft_skills: List[Dict] = None
 
 @dataclass
 class JobSkillsAnalysis:
@@ -46,10 +61,10 @@ class JobSkillsExtractor:
     """Extracts skills from job descriptions and maps them to Ronak's ontology"""
     
     def __init__(self, openai_api_key: str):
-        self.openai_client = openai.OpenAI(api_key=openai_api_key)
+        self.openai_client = openai.AsyncOpenAI(api_key=openai_api_key)
         self.ontology = ontology  # Ronak's skills ontology
     
-    def analyze_job_skills(
+    async def analyze_job_skills(
         self, 
         job_id: str,
         jobdiva_description: str = "",
@@ -67,7 +82,7 @@ class JobSkillsExtractor:
         )
         
         # Extract skills using AI
-        raw_skills = self._extract_skills_with_ai(combined_text)
+        raw_skills = await self._extract_skills_with_ai(combined_text)
         
         # Map to Ronak's ontology  
         mapped_skills = self._map_skills_to_ontology(raw_skills)
@@ -102,7 +117,7 @@ class JobSkillsExtractor:
             
         return "\n\n---\n\n".join(sections)
     
-    def _extract_skills_with_ai(self, job_text: str) -> List[Dict]:
+    async def _extract_skills_with_ai(self, job_text: str) -> List[Dict]:
         """Uses OpenAI to extract skills from job text"""
         
         prompt = f"""
@@ -136,7 +151,7 @@ class JobSkillsExtractor:
         """
         
         try:
-            response = self.openai_client.chat.completions.create(
+            response = await self.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": "You are an expert at extracting technical skills from job descriptions."},
@@ -221,7 +236,7 @@ class JobSkillsExtractor:
             return ""
         return re.sub(r'[^a-z0-9]', '', title.lower())
 
-    def extract_full_rubric(
+    async def extract_full_rubric(
         self,
         job_id: str,
         job_title: str,
@@ -301,8 +316,40 @@ class JobSkillsExtractor:
         """
         
         try:
-            # Use gpt-4o-mini for better responsiveness and consistency with other services
-            response = self.openai_client.chat.completions.create(
+            # ── Two-pass taxonomy-grounded extraction for Skills & Titles ──────
+            grounded_skills         = []
+            grounded_soft_skills    = []
+            grounded_extra_titles   = []
+            grounded_certifications = []
+            grounded_domains        = []
+
+
+            # Use the cleaner AI-generated description (summary) for grounding if available
+            grounding_source = ai_description if ai_description and len(ai_description) > 100 else combined_text
+
+            if TAXONOMY_GROUNDING_AVAILABLE:
+                try:
+                    grounded = await extract_grounded_rubric(
+                        job_text=grounding_source,
+                        job_title=job_title,
+                        client=self.openai_client,
+                        max_skills=15,
+                        max_titles=4,
+                    )
+                    grounded_skills         = grounded.get("hard_skills", [])
+                    grounded_soft_skills    = grounded.get("soft_skills", [])
+                    grounded_extra_titles   = grounded.get("extra_titles", [])
+                    grounded_certifications = grounded.get("raw_certifications", [])
+                    grounded_domains        = grounded.get("raw_domains", [])
+
+                    logger.info(f"✅ Grounding: {len(grounded_skills)} hard, {len(grounded_soft_skills)} soft, "
+                                f"{len(grounded_extra_titles)} titles, {len(grounded_certifications)} certs, "
+                                f"{len(grounded_domains)} domains")
+                except Exception as tax_err:
+                    logger.warning(f"⚠️  Taxonomy grounding failed, falling back to base LLM: {tax_err}")
+
+            # ── Base LLM call — Education, Domain, Customer/Other requirements ─
+            response = await self.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": "You are a strict recruitment extraction engine. You only extract facts present in the text. You handle technical and medical roles with high precision."},
@@ -311,8 +358,19 @@ class JobSkillsExtractor:
                 temperature=0,
                 response_format={ "type": "json_object" }
             )
-            
+
             rubric_data = json.loads(response.choices[0].message.content)
+
+            # Inject grounded skills (overrides base LLM if taxonomy succeeded)
+            if grounded_skills or grounded_soft_skills:
+                # Keep strictly separate: UI only maps over `skills` (hard), 
+                # but JS state preserves `soft_skills` and automatically posts it to the DB.
+                rubric_data["skills"] = grounded_skills
+                rubric_data["soft_skills"] = grounded_soft_skills
+            else:
+                # Fallback path (Legacy LLM) - default to hard
+                for s in rubric_data.get("skills", []):
+                    s["category"] = "hard"
             
             # 1. Start with the JobDiva title (Master)
             final_titles = [{
@@ -340,57 +398,90 @@ class JobSkillsExtractor:
                     })
                     seen_keys.add(enh_key)
 
-            # 3. Add AI-detected titles from the JSON output
-            for t in rubric_data.get('titles', []):
-                val = t.get('value', '').strip()
-                if val:
-                    key = self._normalize_title_key(val)
-                    if key and key not in seen_keys:
-                        t['source'] = 'AI'
-                        # Per USER requirement: Force all AI-detected titles to 'Similar' by default
-                        t['matchType'] = 'Similar'
-                        final_titles.append(t)
-                        seen_keys.add(key)
+            # 3. Add taxonomy-grounded extra titles (preferred over raw LLM titles)
+            if grounded_extra_titles:
+                for t in grounded_extra_titles:
+                    val = t.get('value', '').strip()
+                    if val:
+                        key = self._normalize_title_key(val)
+                        if key and key not in seen_keys:
+                            t['source'] = 'Taxonomy'
+                            t['matchType'] = 'Similar'
+                            final_titles.append(t)
+                            seen_keys.add(key)
+            else:
+                # Fallback: use raw LLM titles if taxonomy returned nothing
+                for t in rubric_data.get('titles', []):
+                    val = t.get('value', '').strip()
+                    if val:
+                        key = self._normalize_title_key(val)
+                        if key and key not in seen_keys:
+                            t['source'] = 'AI'
+                            t['matchType'] = 'Similar'
+                            final_titles.append(t)
+                            seen_keys.add(key)
             
             # 4. Cap at 5 titles
             rubric_data['titles'] = final_titles[:5]
 
-            # Map skills to ontology for consistency
-            if 'skills' in rubric_data:
-                raw_skills = []
-                for s in rubric_data['skills']:
-                    raw_skills.append({
-                        'original_text': s.get('value', ''),
-                        'normalized_name': s.get('value', ''),
-                        'importance': s.get('required', 'preferred').lower(),
-                        'min_years': s.get('minYears', 0),
-                        'confidence': 1.0,
-                        'match_type': s.get('matchType', 'Similar')
-                    })
-
-                mapped = self._map_skills_to_ontology(raw_skills)
-                for i, s in enumerate(rubric_data['skills']):
-                    # Per USER requirement: Force all extracted skills to 'Similar' by default
-                    rubric_data['skills'][i]['matchType'] = 'Similar'
-
-                    for ms in mapped['mapped']:
-                        if ms.original_text == s['value']:
-                            rubric_data['skills'][i]['value'] = ms.normalized_name
-                            break
+            # Enforce matchType=Similar on all skills (taxonomy grounding already normalized names)
+            for s in rubric_data.get('skills', []):
+                s['matchType'] = 'Similar'
 
             # titles is already set and deduplicated above
             deduped_titles = rubric_data['titles']
 
-            # Ensure education exists - if AI found nothing, provide a sensible default based on title
-            # This ensures the section is reflected on the UI for the recruiter to edit
-            if not rubric_data.get('education') or len(rubric_data.get('education')) == 0:
-                is_medical = any(word in job_title.lower() for word in ['tech', 'technician', 'nurse', 'doctor', 'medical', 'health', 'radiologic'])
-                default_degree = "Certification / License" if is_medical else "Bachelor's degree"
+            # ── Route grounded certifications → education ──────────────────────
+            if grounded_certifications:
+                cert_entries = [
+                    {"degree": "Certification / License", "field": c, "required": "Required"}
+                    for c in grounded_certifications
+                ]
+                existing = rubric_data.get('education', [])
+                
+                # Smart merge: fuzzy deduplicate to avoid "BLS Certification" vs "Basic Life Support (BLS)"
+                for edu in existing:
+                    field_name = edu.get('field', '')
+                    degree_name = edu.get('degree', '')
+                    
+                    is_duplicate = False
+                    if degree_name == "Certification / License" and field_name:
+                        for existing_cert in cert_entries:
+                            score = fuzz.token_set_ratio(field_name.upper(), existing_cert['field'].upper())
+                            if score > 80:
+                                is_duplicate = True
+                                break
+                                
+                    if not is_duplicate:
+                        cert_entries.append(edu)
+                        
+                rubric_data['education'] = cert_entries
+                logger.info(f"   🎓 Certifications routed to education ({len(cert_entries)}):")
+                for c in cert_entries:
+                    # Log the actual cert name if available, else the degree type
+                    logger.info(f"      - {c.get('field') or c.get('degree')}")
+            elif not rubric_data.get('education'):
+                # Fallback default
+                is_medical = any(w in job_title.lower() for w in ['tech', 'technician', 'nurse', 'doctor', 'medical', 'health', 'radiologic'])
                 rubric_data['education'] = [{
-                    "degree": default_degree,
+                    "degree": "Certification / License" if is_medical else "Bachelor's degree",
                     "field": "Relevant field",
                     "required": "Preferred"
                 }]
+
+            # ── Route grounded domains → domain section ────────────────────────
+            if grounded_domains:
+                domain_entries = [{"value": d, "required": "Preferred"} for d in grounded_domains]
+                existing_domains = rubric_data.get('domain', [])
+                seen_domains = {d['value'].upper() for d in domain_entries}
+                for d in existing_domains:
+                    if d.get('value', '').upper() not in seen_domains:
+                        domain_entries.append(d)
+                rubric_data['domain'] = domain_entries
+                logger.info(f"   🌐 Domains routed to domain section ({len(domain_entries)}):")
+                for d in domain_entries:
+                    logger.info(f"      - {d['value']}")
+
 
             # 5. Inject default Customer Requirement if customer_name exists
             if customer_name and customer_name.strip():
@@ -421,9 +512,21 @@ class JobSkillsExtractor:
                         "required": "Required"
                     })
 
+            # Log final results for debugging
+            logger.info("─" * 60)
+            logger.info(f"✨ FINAL RUBRIC — Job {job_id}")
+            logger.info(f"   👔 Roles ({len(rubric_data.get('titles', []))}):")
+            for t in rubric_data.get('titles', []):
+                logger.info(f"      - {t['value']}")
+            logger.info(f"   🛠️  Skills ({len(rubric_data.get('skills', []))}):")
+            for s in rubric_data.get('skills', []):
+                logger.info(f"      - {s['value']}")
+            logger.info("─" * 60)
+
             return JobRubric(
                 titles=deduped_titles,
                 skills=rubric_data.get('skills', []),
+                soft_skills=rubric_data.get('soft_skills', []),
                 education=rubric_data.get('education', []),
                 domain=rubric_data.get('domain', []),
                 customer_requirements=rubric_data.get('customer_requirements', []),
@@ -436,6 +539,7 @@ class JobSkillsExtractor:
             return JobRubric(
                 titles=[{"value": job_title, "minYears": 0, "recent": False, "matchType": "Similar", "required": "Required"}],
                 skills=[],
+                soft_skills=[],
                 education=[],
                 domain=[],
                 customer_requirements=[],

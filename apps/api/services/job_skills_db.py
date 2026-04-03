@@ -32,46 +32,27 @@ class JobSkillsDB:
                     try:
                         cursor.execute("""
                             INSERT INTO job_skills (
-                                jobdiva_id, skill_id, skill_name, importance_level,
-                                min_years, proficiency_level, extracted_from,
-                                original_text, confidence_score, is_active
+                                jobdiva_id, skill_name, min_years, recent,
+                                match_type, is_required, category
                             ) VALUES (
-                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                                %s, %s, %s, %s, %s, %s, %s
                             )
                         """, (
                             jobdiva_id,
-                            skill.skill_id,
                             skill.normalized_name,
-                            skill.importance,
-                            skill.min_years,
-                            skill.proficiency,
-                            'ai_extraction',  # source
-                            skill.original_text,
-                            skill.confidence,
-                            True
+                            skill.min_years or 0,
+                            False,
+                            'Similar',
+                            skill.importance == 'required',
+                            getattr(skill, 'category', 'hard')
                         ))
                         skills_saved += 1
                     except Exception as e:
                         print(f"❌ Failed to save skill {skill.normalized_name}: {e}")
                 
-                # Log the extraction process
-                cursor.execute("""
-                    INSERT INTO job_extraction_logs (
-                        job_id, extraction_type, source_data, 
-                        skills_found, skills_mapped, status
-                    ) VALUES (%s, %s, %s, %s, %s, %s)
-                """, (
-                    jobdiva_id,
-                    'skills_extraction',
-                    psycopg2.extras.Json({'description': 'Combined job descriptions', 'analysis': analysis_metadata}),
-                    len(extracted_skills),
-                    skills_saved,
-                    'success'
-                ))
-                
                 conn.commit()
                 
-                print(f"✅ Saved {skills_saved} skills for job {job_id}")
+                print(f"✅ Saved {skills_saved} skills for job {jobdiva_id}")
                 
                 return {
                     'jobdiva_id': jobdiva_id,
@@ -85,27 +66,16 @@ class JobSkillsDB:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                 cursor.execute("""
                     SELECT 
-                        skill_id,
                         skill_name,
-                        importance_level,
                         min_years,
-                        proficiency_level,
-                        confidence_score,
-                        original_text,
-                        is_verified,
-                        display_order
+                        recent,
+                        match_type,
+                        is_required,
+                        category
                     FROM job_skills 
-                    WHERE jobdiva_id = %s AND is_active = true
-                    ORDER BY 
-                        CASE importance_level 
-                            WHEN 'required' THEN 1 
-                            WHEN 'preferred' THEN 2 
-                            ELSE 3 
-                        END,
-                        display_order,
-                        skill_name
+                    WHERE jobdiva_id = %s
+                    ORDER BY skill_name
                 """, (jobdiva_id,))
-                
                 return [dict(row) for row in cursor.fetchall()]
     
     def get_skills_summary(self, jobdiva_id: str) -> Dict:
