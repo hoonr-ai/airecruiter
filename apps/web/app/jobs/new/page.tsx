@@ -4,9 +4,15 @@ import { useState, useEffect, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  History,
   Plus,
   Search,
   Linkedin,
+  Filter,
+  Globe,
+  MapPin,
+  Rocket,
+  ShieldCheck,
   Zap,
   Star,
   Building2,
@@ -39,8 +45,15 @@ import {
   UserCheck,
   Lightbulb,
   X,
-  Filter
+  Box,
+  Ban
 } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -150,6 +163,40 @@ function NewJobPageContent() {
   const [botIntroduction, setBotIntroduction] = useState("");
   const [screenQuestions, setScreenQuestions] = useState<ScreenQuestion[]>([]);
   const [questionIdCounter, setQuestionIdCounter] = useState(1);
+
+  // Step 5 - Sourcing state
+  const [searchSources, setSearchSources] = useState({
+    jobdiva: true,
+    jobdiva_hotlist: true,
+    linkedin: true,
+    dice: true
+  });
+  const [sourceTitles, setSourceTitles] = useState<Array<{
+    id: number;
+    value: string;
+    matchType: 'must' | 'can' | 'exclude';
+    years: number;
+    recent: boolean;
+    similarCount: string;
+  }>>([]);
+  const [sourceSkills, setSourceSkills] = useState<Array<{
+    id: number;
+    value: string;
+    matchType: 'must' | 'can' | 'exclude';
+    years: number;
+    recent: boolean;
+    similarCount: string;
+  }>>([]);
+  const [sourceLocations, setSourceLocations] = useState<Array<{
+    id: number;
+    value: string;
+    radius: string;
+  }>>([]);
+  const [sourceCompanies, setSourceCompanies] = useState<string[]>([]);
+  const [sourceKeywords, setSourceKeywords] = useState<string[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
+  const [booleanStringOpen, setBooleanStringOpen] = useState(false);
 
   useEffect(() => {
     const jobIdFromUrl = searchParams.get("jobId");
@@ -1285,13 +1332,13 @@ function NewJobPageContent() {
                     </button>
                   </div>
                   <div className="w-[36px] flex-shrink-0 text-center">
-                    <button 
+                    <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
                         removeRubricItem('titles', idx);
-                      }} 
-                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200" 
+                      }}
+                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
                       title="Remove"
                     >
                       <X className="w-4 h-4" />
@@ -1301,9 +1348,9 @@ function NewJobPageContent() {
               ))}
 
               <div className="mt-3">
-                <Button 
-                  variant="outline" 
-                  size="sm" 
+                <Button
+                  variant="outline"
+                  size="sm"
                   disabled={(rubricData.titles?.length || 0) >= 5}
                   onClick={() => addRubricItem('titles', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'User' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1412,13 +1459,13 @@ function NewJobPageContent() {
                     </button>
                   </div>
                   <div className="w-[36px] flex-shrink-0 text-center">
-                    <button 
+                    <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
                         removeRubricItem('skills', idx);
-                      }} 
-                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200" 
+                      }}
+                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
                       title="Remove"
                     >
                       <X className="w-4 h-4" />
@@ -1496,13 +1543,13 @@ function NewJobPageContent() {
                   </div>
                   <div className="w-[70px] flex-shrink-0"></div>
                   <div className="w-[36px] flex-shrink-0 text-center">
-                    <button 
+                    <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
                         removeRubricItem('education', idx);
-                      }} 
-                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200" 
+                      }}
+                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
                       title="Remove"
                     >
                       <X className="w-4 h-4" />
@@ -1559,13 +1606,13 @@ function NewJobPageContent() {
                   </div>
                   <div className="w-[70px] flex-shrink-0"></div>
                   <div className="w-[36px] flex-shrink-0 text-center">
-                    <button 
+                    <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
                         removeRubricItem('domain', idx);
-                      }} 
-                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200" 
+                      }}
+                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
                       title="Remove"
                     >
                       <X className="w-4 h-4" />
@@ -1625,13 +1672,13 @@ function NewJobPageContent() {
                   <div className="w-[190px] flex-shrink-0 flex items-center justify-center"></div>
                   <div className="w-[70px] flex-shrink-0"></div>
                   <div className="w-[36px] flex-shrink-0 text-center">
-                    <button 
+                    <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
                         removeRubricItem('customer_requirements', idx);
-                      }} 
-                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200" 
+                      }}
+                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
                       title="Remove"
                     >
                       <X className="w-4 h-4" />
@@ -1683,13 +1730,13 @@ function NewJobPageContent() {
                     </div>
                   </div>
                   <div className="w-[36px] flex-shrink-0 text-center">
-                    <button 
+                    <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
                         removeRubricItem('other_requirements', idx);
-                      }} 
-                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200" 
+                      }}
+                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
                       title="Remove"
                     >
                       <X className="w-4 h-4" />
@@ -1864,7 +1911,7 @@ function NewJobPageContent() {
 
     const location = `${jobData.city || ""}, ${jobData.state || ""}`.trim().replace(/^, |, $/g, "");
     const isRemote = jobData.location_type?.toLowerCase() === "remote";
-    
+
     let idCounter = 1;
     const questions: ScreenQuestion[] = [];
 
@@ -1914,6 +1961,53 @@ function NewJobPageContent() {
 
     setScreenQuestions(questions);
     setQuestionIdCounter(idCounter);
+  };
+
+  const initializeSourceFromRubric = () => {
+    if (!rubricData) return;
+
+    let idCounter = 1;
+
+    // 1. Titles
+    if (rubricData.titles && sourceTitles.length === 0) {
+      setSourceTitles(rubricData.titles.map((t: any) => ({
+        id: idCounter++,
+        value: t.value || "",
+        matchType: t.required === "Required" ? 'must' : 'can',
+        years: t.minYears || 0,
+        recent: t.recent || false,
+        similarCount: "7/7 similar" // Mocking for now
+      })));
+    }
+
+    // 2. Skills
+    if (rubricData.skills && sourceSkills.length === 0) {
+      setSourceSkills(rubricData.skills.map((s: any) => ({
+        id: idCounter++,
+        value: s.value || "",
+        matchType: s.required === "Required" ? 'must' : 'can',
+        years: s.minYears || 0,
+        recent: s.recent || false,
+        similarCount: "4/4 similar" // Mocking for now
+      })));
+    }
+
+    // 3. Locations
+    if (jobData && sourceLocations.length === 0) {
+      const loc = `${jobData.city || ""}, ${jobData.state || ""}`.trim().replace(/^, |, $/g, "");
+      if (loc) {
+        setSourceLocations([{
+          id: idCounter++,
+          value: loc,
+          radius: "within 25 mi"
+        }]);
+      }
+    }
+
+    // 4. Keywords
+    if (sourceKeywords.length === 0) {
+      setSourceKeywords(["high-volume", "W2"]); // Mocking for now
+    }
   };
 
   const addScreenQuestion = () => {
@@ -2134,7 +2228,7 @@ function NewJobPageContent() {
               <div className="w-8 h-8 rounded-full bg-[#6366f1] text-white flex items-center justify-center text-[12px] font-bold flex-shrink-0 mt-0.5">
                 {index + 1}
               </div>
-              
+
               <div className="flex-1 min-w-0">
                 <textarea
                   value={q.question_text}
@@ -2186,12 +2280,429 @@ function NewJobPageContent() {
     </div>
   );
 
-  const PlaceholderStep = ({ stepNumber, title }: { stepNumber: number; title: string }) => (
-    <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
-      <div className="p-12 text-center">
-        <div className="text-4xl text-gray-300 mb-4">🚧</div>
-        <h3 className="text-lg font-semibold text-gray-800 mb-2">Step {stepNumber}: {title}</h3>
-        <p className="text-gray-500">This step is coming soon. Continue with the previous steps to set up your job.</p>
+  const sourceStep = (
+    <div className="space-y-6">
+      <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
+        {/* Step 5 Header - Aligned with Step 4 Style */}
+        <div className="flex flex-row items-start gap-5 px-8 py-6 border-b border-slate-100"
+          style={{ background: "linear-gradient(135deg, #f8f7ff 0%, #ffffff 60%)" }}>
+          <div className="w-11 h-11 flex items-center justify-center mt-0.5 flex-shrink-0">
+            <Search className="w-5 h-5 text-[#6366f1]" strokeWidth={3} />
+          </div>
+          <div className="flex-1 text-left">
+            <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight mb-1">Source</h2>
+            <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">
+              Build your candidate search using structured filters. PAIR generates the boolean string and searches across JobDiva, LinkedIn, and Dice.
+            </p>
+          </div>
+        </div>
+
+        <div className="p-8">
+          {/* Inner Content Box - Exact Screenshot Structure */}
+          <div className="border border-slate-200 rounded-2xl bg-white shadow-sm overflow-hidden p-7 space-y-8">
+            <div className="space-y-8">
+              {/* First line: PAIR Badge and Run Search */}
+            <div className="flex items-center justify-between mb-2">
+              <div className="bg-[#ede9fe] text-[#6366f1] text-[11px] font-bold px-3 py-1 rounded-lg border border-[#ddd6fe] flex items-center gap-2">
+                <Sparkles className="w-3.5 h-3.5" /> PAIR Pre-filled from Rubric
+              </div>
+              <Button
+                className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
+                onClick={() => {
+                  setIsSearching(true);
+                  setHasSearched(true);
+                  setTimeout(() => setIsSearching(false), 2000);
+                }}
+                disabled={isSearching}
+              >
+                {isSearching ? (
+                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <Rocket className="w-4 h-4 fill-white" />
+                )}
+                Run Search
+              </Button>
+            </div>
+
+            <section>
+              <div className="flex items-center gap-3 mb-5">
+                <Globe className="w-4 h-4 text-slate-400" />
+                <span className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Search Sources:</span>
+                <div className="flex items-center gap-5 ml-1">
+                  {[
+                    { id: 'jobdiva', label: 'JobDiva', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" /> },
+                    { id: 'jobdiva_hotlist', label: 'JobDiva Hotlist', icon: <Zap className="w-4 h-4 text-orange-500 fill-orange-500" /> },
+                    { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" /> },
+                    { id: 'dice', label: 'Dice', icon: <Box className="w-4 h-4 text-slate-700" /> }
+                  ].map(source => (
+                    <label key={source.id} className="flex items-center gap-2 cursor-pointer group">
+                      <Checkbox
+                        checked={(searchSources as any)[source.id]}
+                        onCheckedChange={(checked) => setSearchSources(prev => ({ ...prev, [source.id]: !!checked }))}
+                        className="w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-[#6366f1] data-[state=checked]:border-[#6366f1]"
+                      />
+                      <div className="flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition-opacity">
+                        {source.icon}
+                        <span className="text-[13px] font-bold text-slate-700">{source.label}</span>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            </section>
+
+            <section>
+              <div className="flex items-center gap-3 mb-4">
+                <Clipboard className="w-4 h-4 text-slate-400" />
+                <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Job Titles</h3>
+                <span className="bg-[#ede9fe] text-[#6366f1] text-[11px] font-bold px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">{sourceTitles.length} added</span>
+              </div>
+
+              <div className="space-y-3 mb-3">
+                {sourceTitles.map((title) => (
+                  <div key={title.id} className="flex items-center gap-3 p-1 pl-2.5 rounded-xl border border-[#e0e7ff] bg-white shadow-sm group">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <div className={`flex items-center justify-between px-2.5 h-8 min-w-[125px] rounded-xl text-[12px] font-bold cursor-pointer transition-all ${title.matchType === 'must' ? 'bg-[#f5f3ff] text-[#6366f1] border border-[#e0e7ff]' :
+                          title.matchType === 'exclude' ? 'bg-[#fef2f2] text-[#dc2626] border border-[#fee2e2]' :
+                            'bg-[#f0fdf4] text-[#16a34a] border border-[#dcfce7]'
+                          }`}>
+                          {title.matchType === 'must' ? 'Must have' : title.matchType === 'exclude' ? 'Must not have' : 'Can have'}
+                          <ChevronDown className="w-4 h-4 opacity-50 ml-1" />
+                        </div>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
+                        <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'must' } : t))}>
+                          Must have
+                        </DropdownMenuItem>
+                        <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'can' } : t))}>
+                          Can have
+                        </DropdownMenuItem>
+                        <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px] text-red-600" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'exclude' } : t))}>
+                          Must not have
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                    <span className="flex-1 text-[13px] font-bold text-slate-800 px-1">{title.value}</span>
+
+                    <div className="flex items-center h-8 bg-white border border-slate-200 rounded-lg overflow-hidden ml-auto shadow-sm">
+                      <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, years: Math.max(0, t.years - 1) } : t))}>-</button>
+                      <span className="px-2 h-full flex items-center justify-center text-[11px] font-bold text-slate-700 min-w-[58px] text-center border-x border-slate-100">{title.years === 0 ? 'Any exp' : `${title.years}+ yr${title.years > 1 ? 's' : ''}`}</span>
+                      <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, years: t.years + 1 } : t))}>+</button>
+                    </div>
+
+                    <button
+                      className={`flex items-center gap-1.5 px-2.5 h-8 rounded-xl text-[11px] font-bold transition-all border shadow-sm ${title.recent ? 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff]' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+                        }`}
+                      onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, recent: !t.recent } : t))}
+                    >
+                      <History className={`w-3.5 h-3.5 ${title.recent ? 'text-[#6366f1]' : 'text-slate-400'}`} />
+                      Recent
+                    </button>
+
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <div className="flex items-center gap-2 px-2.5 h-8 min-w-[90px] bg-[#f5f3ff] border border-[#e0e7ff] rounded-lg text-[#6366f1] text-[11px] font-bold cursor-pointer hover:bg-[#e0e7ff] transition-colors">
+                          {title.similarCount}
+                          <ChevronDown className="w-3.5 h-3.5 opacity-50" />
+                        </div>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-[200px] p-2 rounded-xl border-slate-200 shadow-lg">
+                        <div className="px-2 py-1.5 text-[11px] font-bold text-slate-400 uppercase tracking-widest">Similar Titles</div>
+                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer text-[13px] font-medium">Accounts Payable Clerk</DropdownMenuItem>
+                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer text-[13px] font-medium">AP Specialist</DropdownMenuItem>
+                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer text-[13px] font-medium">Accounting Assistant</DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+
+                    <button 
+                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
+                      onClick={() => setSourceTitles(prev => prev.filter(t => t.id !== title.id))}
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <div className="relative">
+                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <Input
+                  placeholder="Search job titles..."
+                  className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl font-medium text-slate-600 placeholder:text-slate-400"
+                />
+              </div>
+            </section>
+
+            <div className="border-t border-slate-100" />
+
+            <section>
+              <div className="flex items-center gap-3 mb-4">
+                <Zap className="w-4 h-4 text-slate-400" />
+                <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Skills & Experience</h3>
+                <span className="bg-[#ede9fe] text-[#6366f1] text-[11px] font-bold px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">{sourceSkills.length} added</span>
+              </div>
+
+              <div className="space-y-3 mb-3">
+                {sourceSkills.map((skill) => (
+                  <div key={skill.id} className="flex items-center gap-3 p-1 pl-2.5 rounded-xl border border-slate-200 bg-white group hover:border-[#6366f1]/30 transition-all shadow-sm">
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <div className={`flex items-center justify-between px-2.5 h-8 min-w-[125px] rounded-xl text-[12px] font-bold cursor-pointer transition-all ${skill.matchType === 'must' ? 'bg-[#f5f3ff] text-[#6366f1] border border-[#e0e7ff]' :
+                          skill.matchType === 'exclude' ? 'bg-[#fef2f2] text-[#dc2626] border border-[#fee2e2]' :
+                            'bg-[#f0fdf4] text-[#16a34a] border border-[#dcfce7]'
+                          }`}>
+                          {skill.matchType === 'must' ? 'Must have' : skill.matchType === 'exclude' ? 'Must not have' : 'Can have'}
+                          <ChevronDown className="w-4 h-4 opacity-50 ml-1" />
+                        </div>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="start" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
+                        <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'must' } : s))}>
+                          Must have
+                        </DropdownMenuItem>
+                        <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'can' } : s))}>
+                          Can have
+                        </DropdownMenuItem>
+                        <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px] text-red-600" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'exclude' } : s))}>
+                          Must not have
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                    <span className="flex-1 text-[13px] font-bold text-slate-800 px-1">{skill.value}</span>
+
+                    <div className="flex items-center h-8 bg-white border border-slate-200 rounded-lg overflow-hidden ml-auto shadow-sm">
+                      <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, years: Math.max(0, s.years - 1) } : s))}>-</button>
+                      <span className="px-2 h-full flex items-center justify-center text-[11px] font-bold text-slate-700 min-w-[58px] text-center border-x border-slate-100">{skill.years === 0 ? 'Any exp' : `${skill.years}+ yr${skill.years > 1 ? 's' : ''}`}</span>
+                      <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, years: s.years + 1 } : s))}>+</button>
+                    </div>
+
+                    <button
+                      className={`flex items-center gap-1.5 px-2.5 h-8 rounded-xl text-[11px] font-bold transition-all border shadow-sm ${skill.recent ? 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff]' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+                        }`}
+                      onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, recent: !s.recent } : s))}
+                    >
+                      <History className={`w-3.5 h-3.5 ${skill.recent ? 'text-[#6366f1]' : 'text-slate-400'}`} />
+                      Recent
+                    </button>
+
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <div className="flex items-center gap-2 px-2.5 h-8 min-w-[90px] bg-[#f5f3ff] border border-[#e0e7ff] rounded-lg text-[#6366f1] text-[11px] font-bold cursor-pointer hover:bg-[#e0e7ff] transition-colors">
+                          {skill.similarCount}
+                          <ChevronDown className="w-3.5 h-3.5 opacity-50" />
+                        </div>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-[200px] p-2 rounded-xl border-slate-200 shadow-lg">
+                        <div className="px-2 py-1.5 text-[11px] font-bold text-slate-400 uppercase tracking-widest">Similar Skills</div>
+                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer text-[13px] font-medium">Invoicing</DropdownMenuItem>
+                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer text-[13px] font-medium">Payments</DropdownMenuItem>
+                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer text-[13px] font-medium">Billing</DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+
+                    <button 
+                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
+                      onClick={() => setSourceSkills(prev => prev.filter(s => s.id !== skill.id))}
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <div className="relative">
+                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <Input
+                  placeholder="Search skills..."
+                  className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl font-medium text-slate-600 placeholder:text-slate-400"
+                />
+              </div>
+            </section>
+
+            <div className="border-t border-slate-100" />
+
+            <section>
+              <div className="flex items-center gap-3 mb-4">
+                <MapPin className="w-4 h-4 text-slate-400" />
+                <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Locations</h3>
+              </div>
+
+              <div className="space-y-4">
+                <div className="flex flex-col gap-3">
+                  {sourceLocations.map((loc) => (
+                    <div key={loc.id} className="flex items-center justify-between p-2.5 pl-3.5 rounded-xl border border-[#bae6fd] bg-[#f0f9ff]">
+                      <div className="flex items-center gap-3">
+                        <MapPin className="w-4.5 h-4.5 text-[#3b82f6]" />
+                        <span className="text-[13px] font-bold text-slate-800 tracking-tight">{loc.value}</span>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <div className="px-4 h-8 bg-white border border-[#bae6fd] rounded-lg text-[#0ea5e9] text-[11px] font-bold flex items-center justify-center min-w-[110px]">
+                          {loc.radius}
+                        </div>
+                        <button 
+                          className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
+                          onClick={() => setSourceLocations(prev => prev.filter(l => l.id !== loc.id))}
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex items-center gap-4">
+                  <div className="relative flex-1">
+                    <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-4.5 h-4.5 text-slate-300" />
+                    <Input
+                      placeholder="City, state, or zip code..."
+                      className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl font-medium"
+                    />
+                  </div>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <div className="flex items-center justify-between px-4 h-11 min-w-[120px] border border-slate-200 rounded-xl text-slate-800 text-[13px] font-bold cursor-pointer hover:bg-slate-50 transition-colors">
+                        Within 25 mi
+                        <ChevronDown className="w-4 h-4 text-slate-400" />
+                      </div>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
+                      <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px]">Within 10 mi</DropdownMenuItem>
+                      <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px] bg-slate-50 flex items-center justify-between">
+                        Within 25 mi
+                        <Check className="w-3.5 h-3.5 text-[#6366f1]" />
+                      </DropdownMenuItem>
+                      <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px]">Within 50 mi</DropdownMenuItem>
+                      <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px]">Within 100 mi</DropdownMenuItem>
+                      <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px]">Exact location</DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              </div>
+            </section>
+
+            <div className="border-t border-slate-100" />
+
+            <section>
+              <div className="flex items-center gap-3 mb-4">
+                <Clipboard className="w-4 h-4 text-slate-400" />
+                <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Companies</h3>
+              </div>
+              <div className="relative">
+                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
+                <Input
+                  placeholder="Search companies..."
+                  className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl font-medium"
+                />
+              </div>
+            </section>
+
+            <div className="border-t border-slate-100" />
+
+            <section>
+              <div className="flex items-center gap-3 mb-4">
+                <Type className="w-4 h-4 text-slate-400" />
+                <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Keywords</h3>
+              </div>
+
+              <div className="space-y-4">
+                <div className="flex flex-wrap gap-2.5">
+                  {sourceKeywords.map((tag) => (
+                    <div key={tag} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[12.5px] font-bold text-slate-700 shadow-sm">
+                      {tag}
+                      <button 
+                        className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-5 h-5 flex items-center justify-center rounded-md transition-all duration-200"
+                        onClick={() => setSourceKeywords(prev => prev.filter(t => t !== tag))}
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="relative">
+                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
+                  <Input
+                    placeholder="Profile keywords or phrases..."
+                    className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl placeholder:italic font-medium"
+                  />
+                </div>
+
+                <div className="bg-[#f8faff] border border-[#e0e7ff] rounded-xl overflow-hidden mt-3">
+                  <button
+                    className="w-full flex items-center gap-4 px-6 py-3.5 h-12 hover:bg-[#f1f5f9] transition-colors"
+                    onClick={() => setBooleanStringOpen(!booleanStringOpen)}
+                  >
+                    <FileText className="w-4.5 h-4.5 text-slate-400" />
+                    <span className="text-[13px] font-bold text-slate-500 flex-1 text-left flex items-center gap-2">
+                      <code className="text-[#6366f1] text-lg lg:text-base font-mono font-bold leading-none">&lt;/&gt;</code> View generated boolean string
+                    </span>
+                    <ChevronDown className={`w-4.5 h-4.5 text-slate-400 transition-transform duration-300 ${booleanStringOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                  {booleanStringOpen && (
+                    <div className="px-6 pb-6 pt-1 animate-in fade-in slide-in-from-top-1">
+                      <div className="p-4 bg-white border border-slate-200 rounded-xl overflow-x-auto shadow-inner">
+                        <code className="text-[13px] font-mono font-medium text-[#2563eb] whitespace-pre leading-relaxed tracking-tight">
+                          (TITLE("Accounts Payable Specialist") OR TITLE("AP Specialist")) AND ("Month-End Close" OR "Reconciliation") AND ("Atlanta" OR "Georgia")
+                        </code>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
+          </div>
+
+          {/* Sourced Candidates Section */}
+            <div className="border-t border-slate-200 pt-8 mt-10">
+              <div className="mb-8">
+                <h4 className="text-[13px] font-bold text-slate-800 mb-1">Sourced Candidates</h4>
+                <p className="text-slate-500 text-[13px] font-medium tracking-tight">
+                  Run a search to find candidates.
+                </p>
+              </div>
+
+              {hasSearched ? (
+                isSearching ? (
+                  <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-pulse">
+                    <div className="w-12 h-12 border-4 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-4" />
+                    <p className="text-slate-500 text-sm font-bold">Scanning databases...</p>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
+                    <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-6 shadow-inner">
+                      <ShieldCheck className="w-8 h-8 text-slate-300" />
+                    </div>
+                    <p className="text-slate-600 text-base font-bold">No candidates found with the current filters.</p>
+                    <p className="text-slate-400 text-[13px] mt-2 font-medium">Try broadening your criteria or adding more titles/skills.</p>
+                  </div>
+                )
+              ) : (
+                <div className="h-4 flex items-center justify-center opacity-0 mt-4">
+                </div>
+              )}
+            </div>
+
+            {/* Launch Footer */}
+            <div className="border-t border-slate-200 pt-6 mt-2 flex items-center justify-between">
+              <span className="text-[13px] font-medium text-slate-400">
+                {hasSearched && !isSearching ? '0 candidates selected' : ''}
+              </span>
+              <Button
+                className="h-[42px] px-5 bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98] group"
+                onClick={() => {
+                  showToast("Launching PAIR Sourcing Engine...", "success");
+                  setTimeout(() => {
+                    router.push(`/jobs/${numericJobId || jobdivaId}`);
+                  }, 1500);
+                }}
+                disabled={!hasSearched || isSearching}
+              >
+                <Rocket className="w-4 h-4 fill-white" />
+                Launch PAIR
+              </Button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -2211,7 +2722,13 @@ function NewJobPageContent() {
         }
         return setFiltersStep;
       }
-      case 5: return <PlaceholderStep stepNumber={5} title="Launch & Source" />;
+      case 5: {
+        // Initialize source filters when entering step 5
+        if (rubricData && sourceTitles.length === 0) {
+          initializeSourceFromRubric();
+        }
+        return sourceStep;
+      }
       default: return null;
     }
   };
@@ -2220,7 +2737,7 @@ function NewJobPageContent() {
     <div className="p-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
       {/* Breadcrumb */}
       <div className="mb-5">
-        <Link href="/jobs" className="text-slate-500 hover:text-slate-700 text-[15px] flex items-center gap-2 transition-colors">
+        <Link href="/jobs" className="text-slate-500 hover:text-slate-700 text-[15px] flex items-center gap-2 transition-colors font-medium">
           <ArrowLeft className="w-4 h-4" />
           Back to Jobs
         </Link>
@@ -2228,172 +2745,151 @@ function NewJobPageContent() {
 
       {/* Page Header */}
       <div className="mb-7">
-        <h1 className="text-[29px] font-bold text-slate-900 leading-none">New Job</h1>
-        <p className="text-slate-500 text-[15px] mt-2">{pageSubtitle}</p>
+        <h1 className="text-[32px] font-bold text-slate-900 leading-tight">New Job</h1>
+        <p className="text-slate-500 text-[16px] font-medium mt-1">{pageSubtitle}</p>
       </div>
 
       {/* Step Indicator */}
       <StepIndicator />
 
       {/* Step Content */}
-      {renderStepContent()}
+      <div className="mt-8">
+        {renderStepContent()}
+      </div>
 
       {/* Wizard Navigation — Back | Save & Exit … Next */}
-      <div className="flex items-center justify-between pt-8 border-t border-slate-200 mt-8">
-        <div className="flex items-center gap-3">
+      <div className="flex items-center justify-between pt-10 border-t border-slate-200 mt-12 mb-20 px-4">
+        <div className="flex items-center gap-4">
           {currentStep > 1 && (
-            <Button
-              variant="outline"
-              className="h-[38px] px-5 border-slate-200 text-slate-700 font-bold text-[14px] shadow-none hover:bg-slate-50 flex items-center gap-2 rounded-xl transition-all active:scale-95"
+            <button
               onClick={() => setCurrentStep((currentStep - 1) as Step)}
+              className="flex items-center gap-2.5 px-6 py-2.5 bg-white border border-slate-200 rounded-xl font-bold text-slate-700 hover:bg-slate-50 transition-all active:scale-95 shadow-sm"
             >
-              <ArrowLeft className="w-4 h-4" />
+              <ArrowLeft className="w-4.5 h-4.5" />
               Back
-            </Button>
+            </button>
           )}
+
           <Button
             variant="outline"
-            className="h-[38px] px-5 border-slate-200 text-slate-700 font-bold text-[14px] shadow-none hover:bg-slate-50 flex items-center gap-2 rounded-xl transition-all active:scale-95"
-            onClick={async () => {
-              if (currentStep > 1) {
-                const saved = await saveJobDraft({ currentStep, saveType: "manual" });
-                if (saved) window.location.href = "/";
-              } else {
-                window.location.href = "/";
-              }
-            }}
+            className="h-[44px] px-6 bg-white border-slate-200 flex items-center gap-2.5 shadow-sm text-[15px] font-bold text-slate-700 transition-all rounded-xl active:scale-95 hover:bg-slate-50"
+            onClick={() => saveJobDraft({ currentStep, saveType: "manual" })}
           >
-            <Save className="w-4 h-4 text-slate-400" />
+            <Save className="w-4.5 h-4.5 text-slate-400" />
             Save & Exit
           </Button>
         </div>
+
         <div className="flex items-center gap-3">
-          <Button
-            className="h-[38px] px-7 bg-primary hover:bg-primary/90 flex items-center gap-2 shadow-sm text-[14px] font-bold text-white transition-all rounded-xl active:scale-95"
-            onClick={async () => {
-              if (currentStep === 1) {
-                if (!jobData) {
-                  showToast("Fetch a job first before saving.", "info");
-                  return;
-                }
-                if (recruiterEmails.length === 0) {
-                  setEmailError(true);
-                  showToast("Recruiter Email is required.", "info");
-                  return;
-                }
-                if (selectedEmpTypes.length === 0) {
-                  showToast("Employment Type is required.", "info");
-                  return;
-                }
-
-                // Save Step 1 data to monitored jobs before moving to next step
-                const saved = await saveJobDraft({ currentStep: 1, skipToast: true });
-                if (!saved) {
-                  showToast("Failed to save Step 1 data. Please try again.", "info");
-                  return;
-                }
-                setCurrentStep(2);
-                showToast("Step 1 data saved successfully!", "success");
-              }
-
-              if (currentStep === 2) {
-                // Save Step 2 data to monitored jobs before proceeding
-                const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
-                if (!saved) {
-                  showToast("Failed to save Step 2 data to monitored jobs. Please try again.", "info");
-                  return;
-                }
-
-                if (!rubricData) {
-                  setIsGeneratingRubric(true);
-                  setCurrentStep(3);
-                  try {
-                    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-                    const res = await fetch(`${apiUrl}/api/v1/gemini/jobs/generate-rubric`, {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        jobId: numericJobId || jobdivaId,
-                        jobdivaId: jobdivaId,
-                        jobTitle: jobData?.title || jobTitle,           // Always the raw original
-                        enhancedJobTitle: enhancedTitle || "",          // Set only if enhance was clicked
-                        jobDescription: jobPosting,
-                        jobNotes: recruiterNotes,
-                        originalDescription: jobData?.description || "",
-                        customerName: jobData?.customer_name || jobData?.customer || "",
-                        requiredDegree: jobData?.required_degree || "",
-                        jobCity: jobData?.city || "",
-                        jobState: jobData?.state || "",
-                        locationType: jobData?.location_type || ""
-                      })
-                    });
-                    if (res.ok) {
-                      const data = await res.json();
-                      setRubricData(data);
-                      showToast("Step 2 saved and rubric generated!", "success");
-                    } else {
-                      throw new Error("API failed");
-                    }
-                  } catch (e) {
-                    console.error(e);
-                    // Show error to user instead of hardcoded fallback
-                    showToast("Failed to generate rubric. Please try again or contact support.", "info");
-                    setRubricData(null);
-                  } finally {
-                    setIsGeneratingRubric(false);
+          {currentStep < 5 && (
+            <Button
+              className="h-[44px] px-8 bg-[#6366f1] hover:bg-[#4f46e5] flex items-center gap-2 shadow-lg shadow-indigo-100 text-[15px] font-bold text-white transition-all rounded-xl active:scale-95"
+              onClick={async () => {
+                if (currentStep === 1) {
+                  if (!jobData) {
+                    showToast("Fetch a job first before saving.", "info");
+                    return;
                   }
-                  return;
-                } else {
-                  showToast("Step 2 data saved to monitored jobs successfully!", "success");
-                }
-              }
+                  if (recruiterEmails.length === 0) {
+                    setEmailError(true);
+                    showToast("Recruiter Email is required.", "info");
+                    return;
+                  }
+                  if (selectedEmpTypes.length === 0) {
+                    showToast("Employment Type is required.", "info");
+                    return;
+                  }
 
-              if (currentStep === 3) {
-                // Save Step 3 (Rubric) data before moving to filters
-                const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
-                if (!saved) {
-                  showToast("Failed to save rubric data. Please try again.", "info");
-                  return;
-                }
-              }
+                  const saved = await saveJobDraft({ currentStep: 1, skipToast: true });
+                  if (!saved) {
+                    showToast("Failed to save Step 1 data. Please try again.", "info");
+                    return;
+                  }
+                  setCurrentStep(2);
+                } else if (currentStep === 2) {
+                  const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
+                  if (!saved) {
+                    showToast("Failed to save Step 2 data. Please try again.", "info");
+                    return;
+                  }
 
-              if (currentStep === 4) {
-                // Save Step 4 (Screening & Intro) data before moving to final step
-                const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
-                if (!saved) {
-                  showToast("Failed to save screening data. Please try again.", "info");
-                  return;
+                  if (!rubricData) {
+                    setIsGeneratingRubric(true);
+                    setCurrentStep(3);
+                    try {
+                      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+                      const res = await fetch(`${apiUrl}/api/v1/gemini/jobs/generate-rubric`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          jobId: numericJobId || jobdivaId,
+                          jobdivaId: jobdivaId,
+                          jobTitle: jobData?.title || jobTitle,
+                          enhancedJobTitle: enhancedTitle || "",
+                          jobDescription: jobPosting,
+                          jobNotes: recruiterNotes,
+                          originalDescription: jobData?.description || "",
+                          customerName: jobData?.customer_name || jobData?.customer || "",
+                          requiredDegree: jobData?.required_degree || "",
+                          jobCity: jobData?.city || "",
+                          jobState: jobData?.state || "",
+                          locationType: jobData?.location_type || ""
+                        })
+                      });
+                      if (res.ok) {
+                        const data = await res.json();
+                        setRubricData(data);
+                        showToast("Step 2 saved and rubric generated!", "success");
+                      } else {
+                        throw new Error("API failed");
+                      }
+                    } catch (e) {
+                      console.error(e);
+                      showToast("Failed to generate rubric.", "info");
+                      setRubricData(null);
+                    } finally {
+                      setIsGeneratingRubric(false);
+                    }
+                    return;
+                  }
+                } else if (currentStep === 3) {
+                  const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
+                  if (!saved) return;
+                } else if (currentStep === 4) {
+                  const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
+                  if (!saved) return;
+                  initializeSourceFromRubric();
                 }
-              }
 
-              if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
-            }}
-            disabled={(currentStep === 1 && !jobData) || isGeneratingJD}
-          >
-            {isGeneratingJD ? (
-              <>
-                <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                Enriching...
-              </>
-            ) : (
-              <>
-                {currentStep === 5 ? "Complete Setup" : "Next"}
-                <ArrowRight className="w-5 h-5 ml-1" />
-              </>
-            )}
-          </Button>
+                if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
+              }}
+              disabled={(currentStep === 1 && !jobData) || isGeneratingJD || isSearching}
+            >
+              {isGeneratingJD ? (
+                <>
+                  <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
+                  Enriching...
+                </>
+              ) : (
+                <>
+                  Next
+                  <ArrowRight className="w-5 h-5 ml-1.5" />
+                </>
+              )}
+            </Button>
+          )}
         </div>
       </div>
 
       {/* Toast Notification */}
       {toast && (
         <div
-          className={`fixed bottom-8 right-8 flex items-center gap-2.5 px-5 py-3 rounded-lg text-[14px] font-medium text-white shadow-xl z-50 transition-all duration-300 ${toast.type === "success" ? "bg-[#166534]" : "bg-primary"}`}
+          className={`fixed bottom-8 right-8 flex items-center gap-2.5 px-5 py-3 rounded-lg text-[14px] font-medium text-white shadow-xl z-50 transition-all duration-300 transform translate-y-0 opacity-100 ${toast.type === "success" ? "bg-[#166534]" : "bg-primary"}`}
         >
           {toast.type === "success" ? (
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
           ) : (
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" /></svg>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" /></svg>
           )}
           {toast.message}
         </div>
