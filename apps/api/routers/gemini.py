@@ -213,7 +213,20 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         )
 
     if description and job_id and job_id != "new":
-        description = f"{description}\n\n**JobDiva ID**: {job_id}"
+        ref_code = job_id
+        try:
+            import psycopg2
+            from core.config import DATABASE_URL
+            with psycopg2.connect(DATABASE_URL) as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s", (job_id,))
+                    row = cursor.fetchone()
+                    if row and row[0]:
+                        ref_code = row[0]
+        except Exception as e:
+            print(f"DEBUG: Failed to fetch ref code: {e}")
+            
+        description = f"{description}\n\n**JobDiva ID**: {ref_code}"
         # Auto-persist to local DB so it sticks during regeneration
         jobdiva_service.monitor_job_locally(job_id, {"ai_description": description})
 
