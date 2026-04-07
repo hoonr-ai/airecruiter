@@ -23,6 +23,8 @@ import psycopg2
 import psycopg2.extras
 from rapidfuzz import fuzz, process as rfprocess
 
+from core.config import DATABASE_URL
+
 logger = logging.getLogger(__name__)
 
 # Expanded list of terms that are noise for a technical rubric
@@ -49,13 +51,12 @@ _SKILLS_LOOKUP_UPPER: Optional[Dict[str, str]] = None
 _ROLES_LOOKUP_UPPER: Optional[Dict[str, str]] = None
 
 def _get_conn():
-    return psycopg2.connect(
-        host=os.environ.get("POSTGRES_HOST", "localhost"),
-        port=int(os.environ.get("POSTGRES_PORT", 5433)),
-        dbname=os.environ.get("POSTGRES_DB", "ai_recruiter"),
-        user=os.environ.get("POSTGRES_USER", "postgres"),
-        password=os.environ.get("POSTGRES_PASSWORD", "root"),
-    )
+    if not DATABASE_URL:
+        logger.error("❌ DATABASE_URL not set in environment.")
+        raise RuntimeError("DATABASE_URL is missing")
+    
+    # psycopg2 can connect directly via the DATABASE_URL string (DSN)
+    return psycopg2.connect(DATABASE_URL)
 
 def _load_master_caches():
     """Initializes in-memory master taxonomies."""
