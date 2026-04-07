@@ -1,11 +1,14 @@
 .env
 .env.local
+.env.production
 node_modules/
 __pycache__/
 .venv/
 .test_venv/
 .debug_venv/
 venv_debug/
+venv/
+apps/api/venv/
 coverage/
 .DS_Store
 deploy_log_*.txt
@@ -15,4 +18,10 @@ apps/api/ontology_data.csv
 apps/api/monitored_jobs.json
 .vscode
 .github/
+
+# Backup and log files
+/var/backups/
+scripts/*.log
+*.sql
+*.sql.gz
 
