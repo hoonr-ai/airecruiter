@@ -14,6 +14,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from sqlalchemy import text
 from contextlib import asynccontextmanager
 
 from core import (
@@ -94,12 +95,13 @@ async def lifespan(app: FastAPI):
     logger.info("📋 Stopping scheduler...")
     scheduler.shutdown()
     
-from routers import engagement, ai_generation, voice_agent
+from routers import engagement, ai_generation, voice_agent, boolean_agent
 
 app = FastAPI(title="Hoonr.ai API", lifespan=lifespan)
 app.include_router(ai_generation.router, prefix="/api/v1/ai-generation")
 app.include_router(ai_generation.router, prefix="/api/v1/gemini")
 app.include_router(voice_agent.router, prefix="/api/v1/voice")
+app.include_router(boolean_agent.router, prefix="/api/v1/boolean")
 
 app.add_middleware(
     CORSMiddleware,
@@ -925,7 +927,9 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                 screening_level = %s,
                 processing_status = %s,
                 current_step = %s,
+                customer_name = COALESCE(%s, customer_name, 'Unknown'),
                 jobdiva_id = %s, -- This is the reference string
+                sourcing_filters = %s,
                 updated_at = NOW()
             WHERE job_id = %s -- This is the numeric ID
         """, (
@@ -941,7 +945,9 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
             draft_data.screening_level,                         # screening_level
             f"step_{draft_data.current_step}_complete",         # processing_status
             draft_data.current_step,                            # current_step
+            draft_data.customer_name,                            # customer_name
             ref_code,                                           # 26-06182 (swapped)
+            json.dumps(draft_data.sourcing_filters or {}),      # sourcing_filters
             db_job_id                                           # 31920032 (PK)
         ))
         

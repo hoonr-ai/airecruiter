@@ -153,6 +153,7 @@ class JobDraftData(BaseModel):
     rubric: Optional[Dict] = None
     bot_introduction: Optional[str] = None
     screen_questions: List[Dict[str, Any]] = []
+    sourcing_filters: Optional[Dict[str, Any]] = None
 
 class JobDraftRequirement(BaseModel):
     """Model for draft requirements"""

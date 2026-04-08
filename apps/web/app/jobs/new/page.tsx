@@ -577,6 +577,7 @@ function NewJobPageContent() {
           user_session: "default", // Add user session parameter required by API
           current_step: stepData.currentStep,
           title: jobTitle,
+          customer_name: jobData?.customer_name || jobData?.customer || "",
           enhanced_title: enhancedTitle,
           ai_description: jobPosting,
           recruiter_notes: recruiterNotes,
@@ -590,6 +591,14 @@ function NewJobPageContent() {
             screen_questions: screenQuestions
           }, // 🔥 SEND FULL RUBRIC DATA + Screen Questions
           bot_introduction: botIntroduction,
+          sourcing_filters: {
+            sources: searchSources,
+            titles: sourceTitles,
+            skills: sourceSkills,
+            locations: sourceLocations,
+            companies: sourceCompanies,
+            keywords: sourceKeywords
+          },
           step1_completed: stepData.currentStep >= 1,
           step2_completed: stepData.currentStep >= 2,
           step3_completed: stepData.currentStep >= 3,
@@ -2729,7 +2738,15 @@ function NewJobPageContent() {
                 <div className="bg-[#f8faff] border border-[#e0e7ff] rounded-xl overflow-hidden mt-3">
                   <button
                     className="w-full flex items-center gap-4 px-6 py-3.5 h-12 hover:bg-[#f1f5f9] transition-colors"
-                    onClick={() => setBooleanStringOpen(!booleanStringOpen)}
+                    onClick={async () => {
+                      const nextState = !booleanStringOpen;
+                      setBooleanStringOpen(nextState);
+                      
+                      // Auto-save when expanding the boolean string view
+                      if (nextState) {
+                        await saveJobDraft({ currentStep, saveType: "auto", skipToast: true });
+                      }
+                    }}
                   >
                     <FileText className="w-4.5 h-4.5 text-slate-400" />
                     <span className="text-[13px] font-bold text-slate-500 flex-1 text-left flex items-center gap-2">

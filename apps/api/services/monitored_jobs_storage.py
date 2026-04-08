@@ -70,7 +70,8 @@ class MonitoredJobsStorage:
                 ADD COLUMN IF NOT EXISTS soft_skills JSONB,
                 ADD COLUMN IF NOT EXISTS experience_level TEXT,
                 ADD COLUMN IF NOT EXISTS extraction_metadata JSONB,
-                ADD COLUMN IF NOT EXISTS bot_introduction TEXT
+                ADD COLUMN IF NOT EXISTS bot_introduction TEXT,
+                ADD COLUMN IF NOT EXISTS sourcing_filters JSONB
             """))
             
             # Update the monitored_jobs record with all processed data
@@ -82,6 +83,7 @@ class MonitoredJobsStorage:
                     experience_level = :experience_level,
                     extraction_metadata = :extraction_metadata,
                     bot_introduction = COALESCE(:bot_introduction, bot_introduction),
+                    sourcing_filters = COALESCE(:sourcing_filters, sourcing_filters),
                     updated_at = :updated_at
                 WHERE job_id = :job_id
             """), {
@@ -91,6 +93,7 @@ class MonitoredJobsStorage:
                 "experience_level": extracted_data.experience_level,
                 "extraction_metadata": json.dumps(extraction_meta),
                 "bot_introduction": bot_introduction,
+                "sourcing_filters": json.dumps(processing_metadata.get("sourcing_filters")) if processing_metadata and processing_metadata.get("sourcing_filters") else None,
                 "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "job_id": job_id
             })
