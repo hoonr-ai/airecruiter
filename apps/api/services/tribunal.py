@@ -3,7 +3,6 @@ from openai import AsyncOpenAI
 from core.intelligence import TribunalVerdict
 from core.models import CandidateProfile, JobDescription
 from core.toon import encode
-from services.usage_logger import usage_logger
 from core.config import OPENAI_API_KEY
 
 class TribunalService:
@@ -85,14 +84,6 @@ class TribunalService:
                 ],
                 response_format=TribunalVerdict,
                 temperature=0.2 # low temp for consistent tagging
-            )
-            
-            # Log Usage
-            usage_logger.log_usage(
-                service="match_tribunal",
-                model=model,
-                prompt_tokens=completion.usage.prompt_tokens,
-                completion_tokens=completion.usage.completion_tokens
             )
             
             return completion.choices[0].message.parsed

@@ -5,7 +5,6 @@ import httpx
 from openai import AsyncOpenAI
 from core.config import OPENAI_API_KEY
 from core.models import JobDescription, CandidateProfile
-from services.usage_logger import usage_logger
 
 logger = logging.getLogger(__name__)
 
@@ -48,14 +47,6 @@ class AIService:
                 temperature=0.0
             )
 
-            # Log Usage
-            usage_logger.log_usage(
-                service="jd_extraction",
-                model=model,
-                prompt_tokens=completion.usage.prompt_tokens,
-                completion_tokens=completion.usage.completion_tokens
-            )
-
             return completion.choices[0].message.parsed
         except Exception as e:
             logger.error(f"JD Extraction Failed: {e}")
@@ -90,14 +81,6 @@ class AIService:
                 ],
                 response_format=CandidateProfile,
                 temperature=0.0
-            )
-
-            # Log Usage
-            usage_logger.log_usage(
-                service="candidate_parsing",
-                model=model,
-                prompt_tokens=completion.usage.prompt_tokens,
-                completion_tokens=completion.usage.completion_tokens
             )
 
             profile = completion.choices[0].message.parsed
@@ -264,14 +247,6 @@ class AIService:
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.3
-            )
-
-            # Log Usage
-            usage_logger.log_usage(
-                service="resume_generation",
-                model=model,
-                prompt_tokens=completion.usage.prompt_tokens,
-                completion_tokens=completion.usage.completion_tokens
             )
 
             return completion.choices[0].message.content

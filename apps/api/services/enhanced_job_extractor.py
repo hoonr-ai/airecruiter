@@ -13,7 +13,6 @@ from core.models import (
     SenioritySignals
 )
 from services.job_storage import JobStorageService
-from services.usage_logger import usage_logger
 
 class EnhancedJobExtractor:
     """Enhanced job extractor that produces full JobDescription models."""
@@ -108,15 +107,6 @@ Return structured JSON following the JobDescription schema."""
                     {"role": "user", "content": f"Extract structured data from this job description:\n\n{raw_description}"}
                 ],
                 response_format=JobDescription,
-            )
-            
-            # Log usage
-            usage_logger.log_usage(
-                service="enhanced_job_extractor",
-                model=model,
-                prompt_tokens=response.usage.prompt_tokens,
-                completion_tokens=response.usage.completion_tokens,
-                total_tokens=response.usage.total_tokens
             )
             
             job_description = response.choices[0].message.parsed

@@ -1,7 +1,6 @@
 from typing import List
 from openai import AsyncOpenAI
 from core.config import OPENAI_API_KEY
-from services.usage_logger import usage_logger
 
 class ChatService:
     def __init__(self):
@@ -24,14 +23,6 @@ class ChatService:
             response = await self.client.chat.completions.create(
                 model=model,
                 messages=messages,
-            )
-            
-            # Log Usage
-            usage_logger.log_usage(
-                service="aria_chat",
-                model=model,
-                prompt_tokens=response.usage.prompt_tokens,
-                completion_tokens=response.usage.completion_tokens
             )
             
             return response.choices[0].message.content

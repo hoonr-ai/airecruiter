@@ -28,7 +28,6 @@ else:
     parse_jd = None
 
 from models import JobCriterion, JobCriteriaResponse
-from services.usage_logger import usage_logger
 from services.jobdiva import jobdiva_service
 
 client = OpenAI(api_key=OPENAI_API_KEY)

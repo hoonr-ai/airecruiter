@@ -1,7 +1,6 @@
 import json
 from openai import AsyncOpenAI
 from pydantic import BaseModel
-from services.usage_logger import usage_logger
 from core.config import OPENAI_API_KEY
 
 class LocationVerdict(BaseModel):
@@ -49,14 +48,6 @@ class LocationService:
                 ],
                 response_format=LocationVerdict,
                 temperature=0.0
-            )
-
-            # Log Usage
-            usage_logger.log_usage(
-                service="location_check",
-                model=model,
-                prompt_tokens=completion.usage.prompt_tokens,
-                completion_tokens=completion.usage.completion_tokens
             )
 
             return completion.choices[0].message.parsed

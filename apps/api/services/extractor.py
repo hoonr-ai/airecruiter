@@ -2,7 +2,6 @@ import json
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-from services.usage_logger import usage_logger
 from core.config import OPENAI_API_KEY
 from services.taxonomy_service import extract_grounded_rubric
 
@@ -33,14 +32,6 @@ class LLMExtractor:
                     {"role": "user", "content": text}
                 ],
                 response_format=ExtractedData,
-            )
-
-            # Log usage
-            usage_logger.log_usage(
-                service="jd_extractor",
-                model="gpt-4o-mini",
-                prompt_tokens=response.usage.prompt_tokens,
-                completion_tokens=response.usage.completion_tokens
             )
 
             extracted = response.choices[0].message.parsed
