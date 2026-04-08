@@ -927,7 +927,10 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                 screening_level = %s,
                 processing_status = %s,
                 current_step = %s,
-                customer_name = COALESCE(%s, customer_name, 'Unknown'),
+                customer_name = CASE 
+                    WHEN %s IS NOT NULL AND %s != 'Unknown' AND %s != '' THEN %s 
+                    ELSE customer_name 
+                END,
                 jobdiva_id = %s, -- This is the reference string
                 sourcing_filters = %s,
                 updated_at = NOW()
@@ -945,7 +948,8 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
             draft_data.screening_level,                         # screening_level
             f"step_{draft_data.current_step}_complete",         # processing_status
             draft_data.current_step,                            # current_step
-            draft_data.customer_name,                            # customer_name
+            draft_data.customer_name, draft_data.customer_name,  # for CASE customer_name
+            draft_data.customer_name, draft_data.customer_name,  # for CASE customer_name
             ref_code,                                           # 26-06182 (swapped)
             json.dumps(draft_data.sourcing_filters or {}),      # sourcing_filters
             db_job_id                                           # 31920032 (PK)
@@ -959,8 +963,8 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                     selected_job_boards, recruiter_notes, recruiter_emails, 
                     selected_employment_types, work_authorization, bot_introduction,
                     screening_level,
-                    processing_status, current_step, jobdiva_id, created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                    processing_status, current_step, customer_name, jobdiva_id, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
             """, (
                 db_job_id,                                           # 31920032 (Numeric PK)
                 draft_data.title,
@@ -975,6 +979,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                 draft_data.screening_level,
                 f"step_{draft_data.current_step}_complete",
                 draft_data.current_step,
+                draft_data.customer_name,                            # NEW: customer_name
                 ref_code                                              # 26-06182 (Ref)
             ))
             logger.info(f"✅ Created new monitored_jobs record for job {db_job_id}")
