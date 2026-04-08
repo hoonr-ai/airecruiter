@@ -608,8 +608,8 @@ class JobDivaService:
                 issued_date_udf = None
                 for k, v in u_fields.items():
                     k_low = k.lower()
-                    if "ai job description" in k_low: ai_description = v
-                    if "job notes" in k_low or k == "231": job_notes = v
+                    # if "ai job description" in k_low: ai_description = v
+                    # if "job notes" in k_low or k == "231": job_notes = v
                     if "salary range" in k_low or "pay range" in k_low or "pay rate" in k_low: salary_range_udf = v
                     if "issued date" in k_low or "posted date" in k_low or "date issued" in k_low or k_low == "issued" or k_low == "posted": issued_date_udf = v
 
@@ -858,8 +858,8 @@ class JobDivaService:
                 # Extract recruiter emails for job_configuration
                 recruiter_emails = data.get("recruiter_emails", [])
                 
-                # Check if job exists in monitored_jobs
-                res = conn.execute(text("SELECT 1 FROM monitored_jobs WHERE job_id = :job_id"), {"job_id": job_id})
+                # Check if job exists in monitored_jobs by job_id OR jobdiva_id
+                res = conn.execute(text("SELECT 1 FROM monitored_jobs WHERE job_id = :job_id OR jobdiva_id = :job_id"), {"job_id": job_id})
                 exists = res.fetchone()
                 
                 if exists:
@@ -930,7 +930,7 @@ class JobDivaService:
                     params["updated_at"] = readable_ist_now()
                     
                     if update_parts:
-                        query = f"UPDATE monitored_jobs SET {', '.join(update_parts)} WHERE job_id = :job_id"
+                        query = f"UPDATE monitored_jobs SET {', '.join(update_parts)} WHERE job_id = :job_id OR jobdiva_id = :job_id"
                         debug_log(f"Updating job {job_id} with fields: {list(params.keys())}")
                         conn.execute(text(query), params)
                     

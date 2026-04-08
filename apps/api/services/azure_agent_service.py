@@ -175,11 +175,14 @@ class AzureAgentService:
 
     def convert_to_rubric_roles(self, job_roles: List[Dict], target_job_title: str = "") -> List[Dict]:
         """
-        Extracts ROLE_K17000 as primary and K10000-K10 as similar_titles hierarchy.
+        Extracts ROLE_K17000 as primary and K10000-K10 hierarchy as similar_titles.
+        Groups multiple JD-extracted titles that map to the same canonical taxonomy role.
+        Excludes the raw JD-extracted title from the similar list per user requirement.
         """
         logger.info(f"🔍 DEBUG: Raw Grounded Roles from Agent: {job_roles}")
-        result = []
-        seen   = set()
+        
+        # Grouping by canonical role (K17000)
+        grouping = {} # canonical_name_upper -> { canonical_val, similar_titles_set }
 
         for item in job_roles:
             canonical = item.get("ROLE_K17000") or next((item.get(c) for c in ROLE_COLUMNS if item.get(c)), None)
@@ -188,69 +191,85 @@ class AzureAgentService:
                 continue
                 
             key = str(canonical).upper()
-            if key in seen:
-                continue
-            seen.add(key)
-
-            # Capture hierarchy (K10000 down to K10)
-            hierarchy = []
+            if key not in grouping:
+                grouping[key] = {
+                    "value": canonical,
+                    "similar_titles": []
+                }
+            
+            # 1. REMOVED: Do NOT add the specific title extracted from the JD to the similar list
+            # We only want verified taxonomy hierarchy to show up
+            
+            # 2. Add the hierarchy levels in Specific to Broad order (K10000 down to K10)
             for col in ROLE_COLUMNS:
                 if col == "ROLE_K17000": continue # skip primary
                 val = item.get(col)
                 if val and str(val).upper() not in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY"]:
-                    hierarchy.append(str(val))
+                    val_str = str(val)
+                    if val_str != canonical and val_str not in grouping[key]["similar_titles"]:
+                        grouping[key]["similar_titles"].append(val_str)
 
+        # Convert grouping back to list
+        result = []
+        for key, data in grouping.items():
             result.append({
-                "value":          canonical,
+                "value":          data["value"],
                 "minYears":       0,
                 "recent":         False,
                 "matchType":      "Similar",
                 "required":       "Required",
                 "source":         "PAIR",
-                "similar_titles": hierarchy 
+                "similar_titles": list(data["similar_titles"])
             })
 
         return result
 
     def convert_to_rubric_skills(self, job_skills: List[Dict]) -> List[Dict]:
         """
-        Extracts skill_mapped as primary and skill_k15000-k15 as hierarchy.
-        STRICT: If skill_mapped is None/Null, the item is dropped.
-        Categorization will be handled by the LLM in the second pass.
+        Extracts skill_mapped as primary and skill_k15000-k15 hierarchy as similar_skills.
+        Groups multiple JD-extracted skills that map to the same canonical taxonomy skill.
+        Excludes the raw JD-extracted skill from the similar list per user requirement.
         """
-        result = []
-        seen   = set()
+        # Grouping by canonical skill (skill_mapped)
+        grouping = {} # canonical_name_upper -> { canonical_val, similar_skills_set }
         
         for item in job_skills:
-            # Step 1: Strict Check for skill_mapped
             canonical = item.get("skill_mapped")
             
-            # If taxonomy mapped to NONE/NULL/BOARD CERTIFIED, we drop it (no salvaging)
             if not canonical or str(canonical).upper() in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY", "BOARD CERTIFIED", "NONEVALUE"]:
                 continue
             
             key = str(canonical).upper()
-            if key in seen:
-                continue
-            seen.add(key)
+            if key not in grouping:
+                grouping[key] = {
+                    "value": canonical,
+                    "similar_skills": [],
+                    "required": item.get("required", "Required")
+                }
 
-            # Capture hierarchy (K15000 down to K15)
-            hierarchy = []
+            # 1. REMOVED: Do NOT add the specific skill extracted from the JD to the similar list
+            
+            # 2. Add the hierarchy levels in Specific to Broad order (K15000 down to K15)
             for col in SKILL_COLUMNS:
                 if col == "skill_mapped": continue # skip primary
                 val = item.get(col)
                 if val and str(val).upper() not in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY", "NONEVALUE"]:
-                    hierarchy.append(str(val))
+                    val_str = str(val)
+                    if val_str != canonical and val_str not in grouping[key]["similar_skills"]:
+                        grouping[key]["similar_skills"].append(val_str)
 
+        # Convert grouping back to list
+        result = []
+        for key, data in grouping.items():
             result.append({
-                "value":          canonical,
+                "value":          data["value"],
                 "minYears":       0,
                 "recent":         False,
                 "matchType":      "Similar",
-                "required":       item.get("required", "Required"),
+                "required":       data["required"],
                 "category":       "grounded", # Placeholder to be categorized by LLM
                 "source":         "PAIR",
-                "similar_skills": hierarchy
+                "similar_skills": list(data["similar_skills"])
             })
 
         return result

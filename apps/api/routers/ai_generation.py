@@ -170,21 +170,33 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
 
     if description and job_id and job_id != "new":
         ref_code = job_id
+        numeric_job_id = job_id  # Default to whatever was passed in
         try:
             import psycopg2
             from core.config import DATABASE_URL
             with psycopg2.connect(DATABASE_URL) as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s", (job_id,))
-                    row = cursor.fetchone()
-                    if row and row[0]:
-                        ref_code = row[0]
+                    if "-" in str(job_id):
+                        # job_id is a ref code (e.g. "26-06182") — look up the numeric ID
+                        cursor.execute("SELECT job_id, jobdiva_id FROM monitored_jobs WHERE jobdiva_id = %s", (job_id,))
+                        row = cursor.fetchone()
+                        if row:
+                            numeric_job_id = row[0]  # Use the real numeric job_id as PK
+                            ref_code = row[1] or job_id
+                        else:
+                            ref_code = job_id
+                    else:
+                        # job_id is already numeric — look up the ref code for display
+                        cursor.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s", (job_id,))
+                        row = cursor.fetchone()
+                        if row and row[0]:
+                            ref_code = row[0]
         except Exception as e:
             print(f"DEBUG: Failed to fetch ref code: {e}")
             
         description = f"{description}\n\n**JobDiva ID**: {ref_code}"
-        # Auto-persist to local DB so it sticks during regeneration
-        jobdiva_service.monitor_job_locally(job_id, {"ai_description": description})
+        # Auto-persist using the NUMERIC job_id to avoid creating a duplicate row
+        jobdiva_service.monitor_job_locally(numeric_job_id, {"ai_description": description})
 
     return {"description": description}
 

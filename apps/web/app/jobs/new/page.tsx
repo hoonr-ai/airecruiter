@@ -178,6 +178,9 @@ function NewJobPageContent() {
     years: number;
     recent: boolean;
     similarCount: string;
+    similarTitles: string[];
+    selectedSimilarTitles?: string[];
+    similarExpanded?: boolean;
   }>>([]);
   const [sourceSkills, setSourceSkills] = useState<Array<{
     id: number;
@@ -186,6 +189,9 @@ function NewJobPageContent() {
     years: number;
     recent: boolean;
     similarCount: string;
+    similarSkills: string[];
+    selectedSimilarSkills?: string[];
+    similarExpanded?: boolean;
   }>>([]);
   const [sourceLocations, setSourceLocations] = useState<Array<{
     id: number;
@@ -251,13 +257,16 @@ function NewJobPageContent() {
         }
       }
 
-      // 3. If we are on or past step 3, try to fetch existing rubric data
-      if (draft.current_step >= 3) {
-        try {
-          const rubricRes = await fetch(`${apiUrl}/api/v1/gemini/jobs/${jobIdToLoad}/rubric`);
-          if (rubricRes.ok) {
-            const rData = await rubricRes.json();
+      // 2. Restore specialized data for later steps (Rubric, Filters, etc.)
+      // Always check for existing rubric regardless of current step to prevent redundant AI generation
+      try {
+        const rubricRes = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobIdToLoad}/rubric`);
+        if (rubricRes.ok) {
+          const rData = await rubricRes.json();
+          // Only pre-load if it's an actual populated rubric, not an empty shell
+          if (rData.titles?.length > 0 || rData.skills?.length > 0) {
             setRubricData(rData);
+            // Restore screen questions if they exist in the rubric
             if (rData.screen_questions?.length) {
               setScreenQuestions(rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1 })));
               setQuestionIdCounter(rData.screen_questions.length + 1);
@@ -265,10 +274,13 @@ function NewJobPageContent() {
             if (rData.bot_introduction) {
               setBotIntroduction(rData.bot_introduction);
             }
+            console.log("✅ Existing rubric detected and pre-loaded from database.");
+          } else {
+            console.log("⚠️ Rubric endpoint returned empty lists, ignoring.");
           }
-        } catch (e) {
-          console.error("Failed to load existing rubric:", e);
         }
+      } catch (e) {
+        console.error("No existing rubric found or failed to load:", e);
       }
 
       // 4. Restore form state (Draft values overlay JobDiva values)
@@ -371,16 +383,15 @@ function NewJobPageContent() {
       setJobTitle(data.title || "");
       setEnhancedTitle(data.enhanced_title || data.title || "");
 
-      // Strict Check for AI Description (UDF 230)
+      // Strict Check for AI Description
       // If JobDiva result has "" or null for ai_description, then setJobPosting to ""
       // We no longer fall back to data.description to respect clearing intentionality
       if (data.ai_description !== undefined && data.ai_description !== null) {
         setJobPosting(data.ai_description);
       } else {
-        // Only use description if we have ABSOLUTELY no AI description UDF info at all
-        setJobPosting(data.description || "");
+        setJobPosting("");
       }
-      setPageSubtitle(`${displayData.title} · ${displayData.customer_name}`);
+
 
       // 2. Employment Type - auto-select from JobDiva OR restore previously selected types
       if (data.selected_employment_types && Array.isArray(data.selected_employment_types) && data.selected_employment_types.length > 0) {
@@ -444,7 +455,7 @@ function NewJobPageContent() {
     setIsGeneratingJD(true);
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-      const response = await fetch(`${apiUrl}/api/v1/gemini/jobs/${numericJobId || jobdivaId || 'new'}/generate-description`, {
+      const response = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/${numericJobId || jobdivaId || 'new'}/generate-description`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -478,7 +489,7 @@ function NewJobPageContent() {
     setIsEnhancingTitle(true);
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-      const res = await fetch(`${apiUrl}/api/v1/gemini/jobs/generate-title`, {
+      const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-title`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1976,7 +1987,10 @@ function NewJobPageContent() {
         matchType: t.required === "Required" ? 'must' : 'can',
         years: t.minYears || 0,
         recent: t.recent || false,
-        similarCount: "7/7 similar" // Mocking for now
+        similarCount: `${(t.similar_titles || []).length}/${(t.similar_titles || []).length} similar`,
+        similarTitles: t.similar_titles || [],
+        selectedSimilarTitles: t.similar_titles || [],
+        similarExpanded: false
       })));
     }
 
@@ -1988,7 +2002,10 @@ function NewJobPageContent() {
         matchType: s.required === "Required" ? 'must' : 'can',
         years: s.minYears || 0,
         recent: s.recent || false,
-        similarCount: "4/4 similar" // Mocking for now
+        similarCount: `${(s.similar_skills || []).length}/${(s.similar_skills || []).length} similar`,
+        similarSkills: s.similar_skills || [],
+        selectedSimilarSkills: s.similar_skills || [],
+        similarExpanded: false
       })));
     }
 
@@ -2360,7 +2377,8 @@ function NewJobPageContent() {
 
               <div className="space-y-3 mb-3">
                 {sourceTitles.map((title) => (
-                  <div key={title.id} className="flex items-center gap-3 p-1 pl-2.5 rounded-xl border border-[#e0e7ff] bg-white shadow-sm group">
+                  <div key={title.id} className="flex flex-col gap-1">
+                    <div className="flex items-center gap-3 p-1 pl-2.5 rounded-xl border border-[#e0e7ff] bg-white shadow-sm group">
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <div className={`flex items-center justify-between px-2.5 h-8 min-w-[125px] rounded-xl text-[12px] font-bold cursor-pointer transition-all ${title.matchType === 'must' ? 'bg-[#f5f3ff] text-[#6366f1] border border-[#e0e7ff]' :
@@ -2400,27 +2418,67 @@ function NewJobPageContent() {
                       Recent
                     </button>
 
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <div className="flex items-center gap-2 px-2.5 h-8 min-w-[90px] bg-[#f5f3ff] border border-[#e0e7ff] rounded-lg text-[#6366f1] text-[11px] font-bold cursor-pointer hover:bg-[#e0e7ff] transition-colors">
-                          {title.similarCount}
-                          <ChevronDown className="w-3.5 h-3.5 opacity-50" />
-                        </div>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="w-[200px] p-2 rounded-xl border-slate-200 shadow-lg">
-                        <div className="px-2 py-1.5 text-[11px] font-bold text-slate-400 uppercase tracking-widest">Similar Titles</div>
-                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer text-[13px] font-medium">Accounts Payable Clerk</DropdownMenuItem>
-                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer text-[13px] font-medium">AP Specialist</DropdownMenuItem>
-                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer text-[13px] font-medium">Accounting Assistant</DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    {/* Similar button */}
+                    {(title.similarTitles || []).length > 0 && (
+                      <button
+                        className={`flex items-center gap-1.5 px-2.5 h-8 rounded-lg text-[11px] font-bold transition-all border ${
+                          title.similarExpanded ? 'bg-[#ede9fe] text-[#6366f1] border-[#ddd6fe]' : 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff] hover:bg-[#ede9fe]'
+                        }`}
+                        onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, similarExpanded: !t.similarExpanded } : t))}
+                      >
+                        {title.selectedSimilarTitles?.length || 0}/{title.similarTitles.length} similar
+                        <ChevronDown className={`w-3.5 h-3.5 opacity-60 transition-transform ${title.similarExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+                    )}
 
-                    <button 
+                    <button
                       className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
                       onClick={() => setSourceTitles(prev => prev.filter(t => t.id !== title.id))}
                     >
                       <X className="w-4 h-4" />
                     </button>
+                  </div>
+
+                  {/* Inline similar titles panel */}
+                  {title.similarExpanded && (title.similarTitles || []).length > 0 && (
+                    <div className="mx-1 mb-1 rounded-xl border border-[#e0e7ff] bg-[#f5f3ff] px-4 py-3">
+                      <div className="flex items-center justify-between mb-3">
+                        <span className="text-[12px] font-bold text-[#6366f1]">
+                          {title.selectedSimilarTitles?.length || 0}/{title.similarTitles.length} similar titles also included
+                        </span>
+                        <button
+                          className="text-[11px] font-bold text-slate-500 hover:text-[#6366f1] transition-colors"
+                          onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, selectedSimilarTitles: t.selectedSimilarTitles?.length === t.similarTitles.length ? [] : t.similarTitles } : t))}
+                        >
+                          {(title.selectedSimilarTitles?.length || 0) === title.similarTitles.length ? 'Deselect all' : 'Select all'}
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+                        {title.similarTitles.map((st, i) => (
+                          <label key={i} className="flex items-center gap-2 cursor-pointer group">
+                            <div
+                              className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 border transition-all ${
+                                (title.selectedSimilarTitles || []).includes(st)
+                                  ? 'bg-[#6366f1] border-[#6366f1]'
+                                  : 'bg-white border-slate-300 group-hover:border-[#6366f1]'
+                              }`}
+                              onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? {
+                                ...t,
+                                selectedSimilarTitles: (t.selectedSimilarTitles || []).includes(st)
+                                  ? (t.selectedSimilarTitles || []).filter(x => x !== st)
+                                  : [...(t.selectedSimilarTitles || []), st]
+                              } : t))}
+                            >
+                              {(title.selectedSimilarTitles || []).includes(st) && (
+                                <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 12 12"><path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                              )}
+                            </div>
+                            <span className="text-[12px] font-medium text-slate-700">{st}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   </div>
                 ))}
               </div>
@@ -2445,7 +2503,8 @@ function NewJobPageContent() {
 
               <div className="space-y-3 mb-3">
                 {sourceSkills.map((skill) => (
-                  <div key={skill.id} className="flex items-center gap-3 p-1 pl-2.5 rounded-xl border border-slate-200 bg-white group hover:border-[#6366f1]/30 transition-all shadow-sm">
+                  <div key={skill.id} className="flex flex-col gap-1">
+                    <div className="flex items-center gap-3 p-1 pl-2.5 rounded-xl border border-slate-200 bg-white group hover:border-[#6366f1]/30 transition-all shadow-sm">
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <div className={`flex items-center justify-between px-2.5 h-8 min-w-[125px] rounded-xl text-[12px] font-bold cursor-pointer transition-all ${skill.matchType === 'must' ? 'bg-[#f5f3ff] text-[#6366f1] border border-[#e0e7ff]' :
@@ -2485,27 +2544,67 @@ function NewJobPageContent() {
                       Recent
                     </button>
 
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <div className="flex items-center gap-2 px-2.5 h-8 min-w-[90px] bg-[#f5f3ff] border border-[#e0e7ff] rounded-lg text-[#6366f1] text-[11px] font-bold cursor-pointer hover:bg-[#e0e7ff] transition-colors">
-                          {skill.similarCount}
-                          <ChevronDown className="w-3.5 h-3.5 opacity-50" />
-                        </div>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="w-[200px] p-2 rounded-xl border-slate-200 shadow-lg">
-                        <div className="px-2 py-1.5 text-[11px] font-bold text-slate-400 uppercase tracking-widest">Similar Skills</div>
-                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer text-[13px] font-medium">Invoicing</DropdownMenuItem>
-                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer text-[13px] font-medium">Payments</DropdownMenuItem>
-                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer text-[13px] font-medium">Billing</DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    {/* Similar button */}
+                    {(skill.similarSkills || []).length > 0 && (
+                      <button
+                        className={`flex items-center gap-1.5 px-2.5 h-8 rounded-lg text-[11px] font-bold transition-all border ${
+                          skill.similarExpanded ? 'bg-[#ede9fe] text-[#6366f1] border-[#ddd6fe]' : 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff] hover:bg-[#ede9fe]'
+                        }`}
+                        onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, similarExpanded: !s.similarExpanded } : s))}
+                      >
+                        {skill.selectedSimilarSkills?.length || 0}/{skill.similarSkills.length} similar
+                        <ChevronDown className={`w-3.5 h-3.5 opacity-60 transition-transform ${skill.similarExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+                    )}
 
-                    <button 
+                    <button
                       className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
                       onClick={() => setSourceSkills(prev => prev.filter(s => s.id !== skill.id))}
                     >
                       <X className="w-4 h-4" />
                     </button>
+                  </div>
+
+                  {/* Inline similar skills panel */}
+                  {skill.similarExpanded && (skill.similarSkills || []).length > 0 && (
+                    <div className="mx-1 mb-1 rounded-xl border border-[#e0e7ff] bg-[#f5f3ff] px-4 py-3">
+                      <div className="flex items-center justify-between mb-3">
+                        <span className="text-[12px] font-bold text-[#6366f1]">
+                          {skill.selectedSimilarSkills?.length || 0}/{skill.similarSkills.length} similar skills also included
+                        </span>
+                        <button
+                          className="text-[11px] font-bold text-slate-500 hover:text-[#6366f1] transition-colors"
+                          onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, selectedSimilarSkills: s.selectedSimilarSkills?.length === s.similarSkills.length ? [] : s.similarSkills } : s))}
+                        >
+                          {(skill.selectedSimilarSkills?.length || 0) === skill.similarSkills.length ? 'Deselect all' : 'Select all'}
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+                        {skill.similarSkills.map((ss, i) => (
+                          <label key={i} className="flex items-center gap-2 cursor-pointer group">
+                            <div
+                              className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 border transition-all ${
+                                (skill.selectedSimilarSkills || []).includes(ss)
+                                  ? 'bg-[#6366f1] border-[#6366f1]'
+                                  : 'bg-white border-slate-300 group-hover:border-[#6366f1]'
+                              }`}
+                              onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? {
+                                ...s,
+                                selectedSimilarSkills: (s.selectedSimilarSkills || []).includes(ss)
+                                  ? (s.selectedSimilarSkills || []).filter(x => x !== ss)
+                                  : [...(s.selectedSimilarSkills || []), ss]
+                              } : s))}
+                            >
+                              {(skill.selectedSimilarSkills || []).includes(ss) && (
+                                <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 12 12"><path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
+                              )}
+                            </div>
+                            <span className="text-[12px] font-medium text-slate-700">{ss}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   </div>
                 ))}
               </div>
@@ -2530,13 +2629,13 @@ function NewJobPageContent() {
               <div className="space-y-4">
                 <div className="flex flex-col gap-3">
                   {sourceLocations.map((loc) => (
-                    <div key={loc.id} className="flex items-center justify-between p-2.5 pl-3.5 rounded-xl border border-[#bae6fd] bg-[#f0f9ff]">
+                    <div key={loc.id} className="flex items-center justify-between p-2.5 pl-3.5 rounded-xl border border-[#ddd6fe] bg-[#f5f3ff]">
                       <div className="flex items-center gap-3">
-                        <MapPin className="w-4.5 h-4.5 text-[#3b82f6]" />
+                        <MapPin className="w-4.5 h-4.5 text-[#6366f1]" />
                         <span className="text-[13px] font-bold text-slate-800 tracking-tight">{loc.value}</span>
                       </div>
                       <div className="flex items-center gap-3">
-                        <div className="px-4 h-8 bg-white border border-[#bae6fd] rounded-lg text-[#0ea5e9] text-[11px] font-bold flex items-center justify-center min-w-[110px]">
+                        <div className="px-4 h-8 bg-white border border-[#ddd6fe] rounded-lg text-[#6366f1] text-[11px] font-bold flex items-center justify-center min-w-[110px]">
                           {loc.radius}
                         </div>
                         <button 
@@ -2746,7 +2845,11 @@ function NewJobPageContent() {
       {/* Page Header */}
       <div className="mb-7">
         <h1 className="text-[32px] font-bold text-slate-900 leading-tight">New Job</h1>
-        <p className="text-slate-500 text-[16px] font-medium mt-1">{pageSubtitle}</p>
+        <p className="text-slate-500 text-[16px] font-medium mt-1">
+          {jobData
+            ? `${jobData.title || jobTitle} · ${jobData.customer_name || jobData.customer || "Unknown Customer"}`
+            : "Enter a JobDiva Job ID to get started."}
+        </p>
       </div>
 
       {/* Step Indicator */}
@@ -2773,7 +2876,12 @@ function NewJobPageContent() {
           <Button
             variant="outline"
             className="h-[44px] px-6 bg-white border-slate-200 flex items-center gap-2.5 shadow-sm text-[15px] font-bold text-slate-700 transition-all rounded-xl active:scale-95 hover:bg-slate-50"
-            onClick={() => saveJobDraft({ currentStep, saveType: "manual" })}
+            onClick={async () => {
+              const saved = await saveJobDraft({ currentStep, saveType: "manual" });
+              if (saved) {
+                router.push("/");
+              }
+            }}
           >
             <Save className="w-4.5 h-4.5 text-slate-400" />
             Save & Exit
@@ -2813,7 +2921,7 @@ function NewJobPageContent() {
                     return;
                   }
 
-                  if (!rubricData) {
+                  if (!rubricData || (rubricData.titles?.length === 0 && rubricData.skills?.length === 0)) {
                     setIsGeneratingRubric(true);
                     setCurrentStep(3);
                     try {

@@ -207,7 +207,8 @@ Return JSON:
         # Merge results - Categorized Skills
         grounded_hard_skills = []
         grounded_soft_skills = []
-        
+        other_requirements = []
+        customer_requirements = []
         min_years = int(phase2_result.get("min_years_experience", 0))
         
         cat_map = {item['name'].upper(): item['category'].lower() 
@@ -350,7 +351,6 @@ Return JSON:
             })
 
         # Other Requirements
-        other_requirements = []
         raw_other = phase2_result.get("other_requirements", [])
         for r in raw_other:
             val = r.get("value", "") if isinstance(r, dict) else str(r)
@@ -361,6 +361,17 @@ Return JSON:
             
             if isinstance(r, dict): other_requirements.append(r)
             elif isinstance(r, str): other_requirements.append({"value": val, "required": "Required"})
+
+        # Deduplicate other_requirements by normalized value (case-insensitive)
+        seen_other = set()
+        unique_other = []
+        for req in other_requirements:
+            val = req.get("value", "") if isinstance(req, dict) else str(req)
+            key = val.strip().lower()
+            if key not in seen_other:
+                seen_other.add(key)
+                unique_other.append(req)
+        other_requirements = unique_other
 
         # Final Location logic with cleanup
         if job_location:
