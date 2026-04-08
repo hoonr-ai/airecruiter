@@ -9,7 +9,9 @@ class JobRubricDB:
     """Handles structured persistent storage for all components of a job rubric."""
     
     def __init__(self, db_url: str = None):
+        import logging
         self.db_url = db_url or DATABASE_URL
+        self.logger = logging.getLogger(__name__)
 
     def save_full_rubric(self, jobdiva_id: str, rubric_obj: any, recruiter_notes: str = None, bot_introduction: str = None) -> bool:
         """
@@ -37,17 +39,30 @@ class JobRubricDB:
 
                     # 2. Save Skills (Hard and Soft)
                     all_skills = []
-                    for s in rubric.get('skills', []):
+                    # We merge lists but FILTER OUT anything that was re-routed to education
+                    raw_skills = (rubric.get('skills', []) or []) + (rubric.get('hard_skills', []) or [])
+                    seen_skills = set()
+                    
+                    for s in raw_skills:
+                        if s.get('category') == 'certification':
+                            continue
+                        val = s.get('value', '').upper()
+                        if val in seen_skills: continue
+                        seen_skills.add(val)
                         s['category'] = s.get('category', 'hard')
                         all_skills.append(s)
+
                     for s in rubric.get('soft_skills', []):
-                        s['category'] = s.get('category', 'soft')
+                        val = s.get('value', '').upper()
+                        if val in seen_skills: continue
+                        seen_skills.add(val)
+                        s['category'] = 'soft'
                         all_skills.append(s)
 
                     for s in all_skills:
                         cur.execute("""
-                            INSERT INTO job_skills (jobdiva_id, skill_name, min_years, recent, match_type, is_required, category)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            INSERT INTO job_skills (jobdiva_id, skill_name, min_years, recent, match_type, is_required, category, similar_skills)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::text[])
                         """, (
                             jobdiva_id,
                             s.get('value', ''),
@@ -55,21 +70,24 @@ class JobRubricDB:
                             bool(s.get('recent', False)),
                             s.get('matchType', 'Exact'),
                             (s.get('required', 'Required') == 'Required'),
-                            s.get('category', 'hard')
+                            s.get('category', 'hard'),
+                            s.get('similar_skills', []) # psycopg2 handles list as postgres ARRAY
                         ))
 
                     # 3. Save Titles / Experience
                     for t in rubric.get('titles', []):
                         cur.execute("""
-                            INSERT INTO job_titles (jobdiva_id, title, min_years, recent, match_type, is_required)
-                            VALUES (%s, %s, %s, %s, %s, %s)
+                            INSERT INTO job_titles (jobdiva_id, title, min_years, recent, match_type, is_required, similar_titles, source)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s::text[], %s)
                         """, (
                             jobdiva_id,
                             t.get('value', ''),
                             t.get('minYears', 0),
                             bool(t.get('recent', False)),
                             t.get('matchType', 'Exact'),
-                            t.get('required', 'Required') == 'Required'
+                            (t.get('required', 'Required') == 'Required'),
+                            t.get('similar_titles', []), # postgres ARRAY
+                            t.get('source', 'PAIR')
                         ))
 
                     # 4. Save Education & Certs

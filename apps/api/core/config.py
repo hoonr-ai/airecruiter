@@ -66,3 +66,8 @@ JOBDIVA_JOB_NOTES_UDF_ID = int(get_env_with_default("JOBDIVA_JOB_NOTES_UDF_ID", 
 # ---- Encryption ----
 ENCRYPTION_KEY = get_env_or_fail("ENCRYPTION_KEY")
 ENCRYPTION_SALT = os.getenv("ENCRYPTION_SALT")
+
+# ---- Azure AI Agent (skill-role-extractor) ----
+AZURE_AI_PROJECT_ENDPOINT = os.getenv("AZURE_AI_PROJECT_ENDPOINT", "")
+AZURE_OPENAI_API_KEY      = os.getenv("AZURE_OPENAI_API_KEY", "")
+AZURE_AI_AGENT_NAME       = os.getenv("AZURE_AI_AGENT_NAME", "skill-role-extractor")

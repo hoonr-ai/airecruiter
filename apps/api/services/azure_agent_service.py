@@ -1,0 +1,256 @@
+#!/usr/bin/env python3
+"""
+azure_agent_service.py
+----------------------
+Calls the Azure AI Foundry Agent 'skill-role-extractor'.
+
+Flow:
+  1. Send the full AI JD text directly to the agent.
+  2. Agent reads the JD against its indexed taxonomy files
+     (job-role-taxonomy.xlsx + skills-taxonomy-revelio-33k.xlsx).
+  3. Returns strict JSON with grounded roles and skills.
+  4. We cascade through the hierarchy columns to pick the most-specific name.
+  5. NO fallback — if the agent finds no taxonomy match, the item is dropped.
+"""
+
+import json
+import asyncio
+import logging
+import re
+from typing import List, Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+# ── Role hierarchy (most specific → broadest) ─────────────────────────────────
+ROLE_COLUMNS = [
+    "ROLE_K17000", "ROLE_K10000", "ROLE_K5000",
+    "ROLE_K1500",  "ROLE_K1000",  "ROLE_K500",
+    "ROLE_K150",   "ROLE_K50",    "ROLE_K10",
+]
+
+# ── Skill hierarchy (most specific → broadest) ────────────────────────────────
+SKILL_COLUMNS = [
+    "skill_mapped", "skill_k15000", "skill_k5000",
+    "skill_k1500",  "skill_k500",   "skill_k150",
+    "skill_k50",    "skill_k15",
+]
+
+
+class AzureAgentService:
+    """
+    Wraps the Azure AI Foundry 'skill-role-extractor' agent.
+    Uses AIProjectClient + openai_client.responses.create() pattern.
+    """
+
+    def __init__(
+        self,
+        project_endpoint: str,
+        api_key: str,
+        agent_name: str = "skill-role-extractor",
+    ):
+        self.project_endpoint = project_endpoint
+        self.api_key = api_key
+        self.agent_name = agent_name
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Public async entry-point
+    # ─────────────────────────────────────────────────────────────────────────
+
+    async def extract_roles_and_skills(self, ai_jd: str) -> Dict:
+        """
+        Sends the full AI JD to the Azure agent and returns raw parsed JSON.
+        Raises on failure — NO silent fallback.
+
+        Returns dict with keys: job_roles (list), job_skills (list)
+        """
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, lambda: self._call_agent_sync(ai_jd))
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Sync SDK call (runs in thread pool)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _call_agent_sync(self, ai_jd: str) -> Dict:
+        """
+        Step 1: Sending the raw AI JD to the Azure Agent.
+        """
+        import openai
+
+        # Build the base URL: project_endpoint + /openai/v1
+        base_url = self.project_endpoint.rstrip("/") + "/openai/v1"
+
+        client = openai.OpenAI(
+            api_key=self.api_key,
+            base_url=base_url,
+        )
+
+        logger.info("=" * 80)
+        logger.info("🚀 Step 1: Send the full AI JD text to the Azure Agent.")
+        logger.info("-" * 40)
+        logger.info(f"📄 FULL AI JD TEXT:\n{ai_jd}")
+        logger.info("=" * 80)
+
+        response = client.responses.create(
+            input=ai_jd,
+            extra_body={
+                "agent_reference": {
+                    "name": self.agent_name,
+                    "type": "agent_reference",
+                }
+            },
+        )
+
+        raw_text = response.output_text or ""
+        return self._parse_agent_response(raw_text)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Response parsing
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _parse_agent_response(self, raw_text: str) -> Dict:
+        """
+        Step 2: Receiving response.
+        Step 3: Extracting taxonomy mappings. 
+        """
+        logger.info("=" * 80)
+        logger.info("🚀 Step 2: Receive the complete response payload from the Azure Agent.")
+        logger.info("-" * 40)
+
+        # Parse and log the raw response nicely
+        try:
+            temp_parsed = json.loads(raw_text)
+            pretty_json = json.dumps(temp_parsed, indent=2)
+            logger.info(f"📦 FULL AGENT RESPONSE:\n{pretty_json}")
+        except:
+             logger.info(f"📁 RAW AGENT RESPONSE:\n{raw_text}")
+
+        logger.info("-" * 40)
+
+        # Strip markdown code fences if present
+        text = raw_text.strip()
+        match = re.search(r"```(?:json)?\s*([\s\S]+?)```", text)
+        if match:
+            text = match.group(1).strip()
+
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            # Try extracting first {...} block
+            brace_match = re.search(r"\{[\s\S]+\}", text)
+            if brace_match:
+                parsed = json.loads(brace_match.group(0))
+            else:
+                logger.error("❌ AzureAgentService: Could not parse JSON from agent response.")
+                raise ValueError(f"Could not parse JSON from agent response")
+
+        roles  = parsed.get("job_roles",  [])
+        # Handle both "job_skills" and "skills" as keys
+        skills = parsed.get("job_skills") or parsed.get("skills") or []
+        
+        logger.info("🎯 Step 3: Perform taxonomy mapping for exact Role and Skill values.")
+        logger.info("-" * 40)
+        
+        # Log Role Mapping
+        for r in roles:
+            raw_val = r.get("extracted_title") or r.get("raw_label") or "Unknown"
+            k17000 = r.get("ROLE_K17000", "None")
+            logger.info(f"   👔 Role Mapping  : '{raw_val}' ────▶ '{k17000}'")
+            
+        # Log Skill Mapping
+        for s in skills:
+            raw_val = s.get("extracted_skill") or s.get("raw_label") or "Unknown"
+            mapped = s.get("skill_mapped", "None")
+            logger.info(f"   🛠️  Skill Mapping : '{raw_val}' ────▶ '{mapped}'")
+
+        logger.info("=" * 80)
+
+        # Ensure the downstream code sees a consistent key
+        parsed["job_roles"] = roles
+        parsed["job_skills"] = skills
+        return parsed
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Conversion helpers (agent JSON → rubric dicts)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def convert_to_rubric_roles(self, job_roles: List[Dict], target_job_title: str = "") -> List[Dict]:
+        """
+        Extracts ROLE_K17000 as primary and K10000-K10 as similar_titles hierarchy.
+        """
+        logger.info(f"🔍 DEBUG: Raw Grounded Roles from Agent: {job_roles}")
+        result = []
+        seen   = set()
+
+        for item in job_roles:
+            canonical = item.get("ROLE_K17000") or next((item.get(c) for c in ROLE_COLUMNS if item.get(c)), None)
+            
+            if not canonical or str(canonical).upper() in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY"]:
+                continue
+                
+            key = str(canonical).upper()
+            if key in seen:
+                continue
+            seen.add(key)
+
+            # Capture hierarchy (K10000 down to K10)
+            hierarchy = []
+            for col in ROLE_COLUMNS:
+                if col == "ROLE_K17000": continue # skip primary
+                val = item.get(col)
+                if val and str(val).upper() not in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY"]:
+                    hierarchy.append(str(val))
+
+            result.append({
+                "value":          canonical,
+                "minYears":       0,
+                "recent":         False,
+                "matchType":      "Similar",
+                "required":       "Required",
+                "source":         "PAIR",
+                "similar_titles": hierarchy 
+            })
+
+        return result
+
+    def convert_to_rubric_skills(self, job_skills: List[Dict]) -> List[Dict]:
+        """
+        Extracts skill_mapped as primary and skill_k15000-k15 as hierarchy.
+        STRICT: If skill_mapped is None/Null, the item is dropped.
+        Categorization will be handled by the LLM in the second pass.
+        """
+        result = []
+        seen   = set()
+        
+        for item in job_skills:
+            # Step 1: Strict Check for skill_mapped
+            canonical = item.get("skill_mapped")
+            
+            # If taxonomy mapped to NONE/NULL/BOARD CERTIFIED, we drop it (no salvaging)
+            if not canonical or str(canonical).upper() in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY", "BOARD CERTIFIED", "NONEVALUE"]:
+                continue
+            
+            key = str(canonical).upper()
+            if key in seen:
+                continue
+            seen.add(key)
+
+            # Capture hierarchy (K15000 down to K15)
+            hierarchy = []
+            for col in SKILL_COLUMNS:
+                if col == "skill_mapped": continue # skip primary
+                val = item.get(col)
+                if val and str(val).upper() not in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY", "NONEVALUE"]:
+                    hierarchy.append(str(val))
+
+            result.append({
+                "value":          canonical,
+                "minYears":       0,
+                "recent":         False,
+                "matchType":      "Similar",
+                "required":       item.get("required", "Required"),
+                "category":       "grounded", # Placeholder to be categorized by LLM
+                "source":         "PAIR",
+                "similar_skills": hierarchy
+            })
+
+        return result
