@@ -196,20 +196,8 @@ def extract_posted_date_from_text(description: str) -> str:
             return match.group(1)
     
     return ""
-  
-    desc = unescape(raw_desc)
-    desc = re.sub(r'<br\s*/?>', '\n', desc)
-    desc = re.sub(r'<p>', '\n', desc)
-    desc = re.sub(r'</p>', '\n', desc)
-    desc = re.sub(r'<div[^>]*>', '\n', desc)
-    desc = re.sub(r'</div>', '\n', desc)
-    desc = re.sub(r'<[^>]*>', '', desc)
-  
-    desc = re.sub(r'\n\s*\n\s*\n+', '\n\n', desc)
-    desc = re.sub(r'[ \t]+', ' ', desc)
-    desc = desc.strip()
-  
-    return desc
+    return ""
+
 
 def calculate_date_duration(start_date_str: str, end_date_str: str) -> str:
     """Calculate human-readable duration between two date strings of format '%b %d, %Y'."""
@@ -593,6 +581,12 @@ class JobDivaService:
                             if max_sub:
                                 j["maxAllowedSubmittals"] = max_sub
                             
+                            # Add robust BI Customer/Company name extraction
+                            for ckey in ["CUSTOMERNAME", "COMPANYNAME", "CUSTOMER", "COMPANY", "CLIENTNAME"]:
+                                if d.get(ckey):
+                                    j["customer_bi"] = d.get(ckey)
+                                    break
+
                             # Add robust BI Date Extraction
                             if d.get("DATEISSUED"):
                                 j["DATEISSUED_BI"] = d.get("DATEISSUED")
@@ -613,7 +607,7 @@ class JobDivaService:
                     if "salary range" in k_low or "pay range" in k_low or "pay rate" in k_low: salary_range_udf = v
                     if "issued date" in k_low or "posted date" in k_low or "date issued" in k_low or k_low == "issued" or k_low == "posted": issued_date_udf = v
 
-                customer_name = str(get_field(j, ["customer", "company"]) or "").title() or "Unknown Customer"
+                customer_name = str(j.get("customer_bi") or get_field(j, ["customer", "company", "client", "customerName", "companyName", "clientName"]) or "").title() or "Unknown Customer"
                 description = format_job_description(get_field(j, ["job description", "description"]) or "")
 
                 # ONLY restore full-length UDFs from local DB if JobDiva version looks truncated
@@ -630,6 +624,12 @@ class JobDivaService:
                     if local_notes and job_notes and len(str(job_notes)) > 1000 and len(str(local_notes)) > len(str(job_notes)):
                         job_notes = local_notes
                         logger.info(f"Restored full recruiter_notes from local DB for {job_id}")
+                    
+                    # NEW: Restore customer_name from local DB if currently Unknown
+                    local_customer = local_data.get("customer_name")
+                    if local_customer and local_customer != "Unknown" and ("Unknown" in customer_name or not customer_name):
+                        customer_name = local_customer
+                        logger.info(f"Restored customer_name '{customer_name}' from local DB for {job_id}")
 
                 # Advanced pay_rate logic: try to combine min and max if available for a range
                 p_min = get_field(j, ["minpayrate", "min_pay_rate", "minimum_pay", "payRateMin", "minimum rate"])
