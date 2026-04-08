@@ -113,6 +113,7 @@ class JobDraftData(BaseModel):
     jobdiva_id: Optional[str] = None
     current_step: int = 1
     user_session: str = "default"
+    customer_name: Optional[str] = None
     
     # Step 1 fields
     title: Optional[str] = None
@@ -126,6 +127,20 @@ class JobDraftData(BaseModel):
     recruiter_emails: List[str] = []
     screening_level: str = "L1.5"
     selected_job_boards: List[str] = []
+    
+    # Metadata (persisted for Step 1 UI consistency)
+    city: Optional[str] = None
+    state: Optional[str] = None
+    priority: Optional[str] = None
+    program_duration: Optional[str] = None
+    max_allowed_submittals: Optional[int] = None
+    pay_rate: Optional[str] = None
+    openings: Optional[int] = None
+    start_date: Optional[str] = None
+    posted_date: Optional[str] = None
+    status: Optional[str] = None
+    bot_introduction: Optional[str] = None
+    rubric: Optional[Dict[str, Any]] = None
     
     # Progress tracking
     step1_completed: bool = False

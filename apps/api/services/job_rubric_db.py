@@ -182,7 +182,8 @@ class JobRubricDB:
                             "minYears": r['min_years'],
                             "recent": r['recent'],
                             "matchType": r['match_type'],
-                            "required": "Required" if r['is_required'] else "Preferred"
+                            "required": "Required" if r['is_required'] else "Preferred",
+                            "similar_skills": list(r['similar_skills']) if r.get('similar_skills') else []
                         }
                         if r.get('category') == 'soft':
                             soft_skills.append(skill_obj)
@@ -196,7 +197,8 @@ class JobRubricDB:
                         "recent": r['recent'],
                         "matchType": r['match_type'],
                         "required": "Required" if r['is_required'] else "Preferred",
-                        "source": "PAIR"
+                        "source": "PAIR",
+                        "similar_titles": list(r['similar_titles']) if r.get('similar_titles') else []
                     } for r in cur.fetchall()]
 
                     cur.execute("SELECT * FROM job_education WHERE jobdiva_id = %s", (jobdiva_id,))

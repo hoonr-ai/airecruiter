@@ -297,13 +297,13 @@ export default function DashboardPage() {
                       <DropdownMenuContent align="end" className="rounded-xl border-slate-200 font-medium text-[13px] shadow-lg">
                         {job.pairStatus === 'Unpublished' ? (
                           <DropdownMenuItem className="cursor-pointer bg-primary/5 text-primary font-bold">
-                            <Link href={`/jobs/new?jobId=${job.id}`} className="w-full">
+                            <Link href={`/jobs/new?jobId=${job.jobdiva_id || job.id}`} className="w-full">
                               Resume Setup
                             </Link>
                           </DropdownMenuItem>
                         ) : (
                           <DropdownMenuItem className="cursor-pointer">
-                            <Link href={`/jobs/${job.id}`} className="w-full">
+                            <Link href={`/jobs/${job.jobdiva_id || job.id}`} className="w-full">
                               View Details
                             </Link>
                           </DropdownMenuItem>
