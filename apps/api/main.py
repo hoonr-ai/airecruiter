@@ -98,6 +98,7 @@ from routers import engagement, ai_generation, voice_agent
 
 app = FastAPI(title="Hoonr.ai API", lifespan=lifespan)
 app.include_router(ai_generation.router, prefix="/api/v1/ai-generation")
+app.include_router(ai_generation.router, prefix="/api/v1/gemini")
 app.include_router(voice_agent.router, prefix="/api/v1/voice")
 
 app.add_middleware(
