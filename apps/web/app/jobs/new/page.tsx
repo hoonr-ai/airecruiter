@@ -2818,7 +2818,7 @@ function NewJobPageContent() {
                     setCurrentStep(3);
                     try {
                       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-                      const res = await fetch(`${apiUrl}/api/v1/gemini/jobs/generate-rubric`, {
+                      const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({

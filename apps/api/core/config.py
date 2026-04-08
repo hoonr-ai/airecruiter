@@ -19,19 +19,11 @@ def get_env_with_default(var_name: str, default: str) -> str:
 ALLOWED_ORIGINS = get_env_with_default("ALLOWED_ORIGINS", "*").split(",")
 
 # AI Models (Configurable for deployment flexibility)
-GEMINI_MODEL = get_env_with_default("GEMINI_MODEL", "gemini-1.5-flash")
 OPENAI_MODEL = get_env_with_default("OPENAI_MODEL", "gpt-4-turbo-preview")
-
-# Gemini specific configuration
-GEMINI_API_URL = get_env_with_default(
-    "GEMINI_API_URL", 
-    "https://generativelanguage.googleapis.com/v1beta/models"
-)
 
 # Debugging
 DEBUG_LOG_PATH = os.getenv("DEBUG_LOG_PATH")
 OPENAI_API_KEY = get_env_or_fail("OPENAI_API_KEY")
-GEMINI_API_KEY = get_env_or_fail("GEMINI_API_KEY")
 
 # JobDiva Configuration
 JOBDIVA_API_URL = get_env_with_default("JOBDIVA_API_URL", "https://api.jobdiva.com")

@@ -2,8 +2,6 @@ import os
 import time
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 from pydantic import BaseModel
-import requests
-from time import sleep
 import hashlib
 from dataclasses import asdict
 from datetime import datetime
@@ -12,17 +10,19 @@ from services.jobdiva import jobdiva_service
 from services.job_skills_extractor import JobSkillsExtractor, ExtractedSkill
 from services.job_skills_db import JobSkillsDB
 from services.job_rubric_db import JobRubricDB
+from openai import AsyncOpenAI
 from core import (
-    GEMINI_API_KEY, OPENAI_API_KEY, 
+    OPENAI_API_KEY, 
     JOBDIVA_AI_JD_UDF_ID, JOBDIVA_JOB_NOTES_UDF_ID,
-    GEMINI_API_URL, GEMINI_MODEL
+    OPENAI_MODEL
 )
 
 router = APIRouter()
 
-# GEMINI_API_KEY and GEMINI_API_URL are now managed by core.config
+# Initialize OpenAI client
+client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-print(f"DEBUG: GEMINI_API_KEY loaded: {'Set' if GEMINI_API_KEY else 'NOT SET'}")
+print(f"DEBUG: OPENAI_API_KEY loaded: {'Set' if OPENAI_API_KEY else 'NOT SET'}")
 
 class JobDescriptionRequest(BaseModel):
     jobTitle: str = ""
@@ -69,8 +69,8 @@ async def sync_to_jobdiva(req: JobDivaSyncRequest):
                    ("Local OK, JobDiva failed (check credentials)" if local_ok else "Both failed"),
     }
 
-# Rate limiting variables
-RATE_LIMIT = 5  # Maximum requests per minute
+# Rate limiting variables (Less strict for OpenAI)
+RATE_LIMIT = 20  # Maximum requests per minute
 REQUEST_INTERVAL = 60 / RATE_LIMIT  # Time interval between requests in seconds
 last_request_time = 0
 
@@ -81,9 +81,9 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
     time_since_last_request = current_time - last_request_time
 
     if time_since_last_request < REQUEST_INTERVAL:
-        sleep(REQUEST_INTERVAL - time_since_last_request)
+        time.sleep(max(0, REQUEST_INTERVAL - time_since_last_request))
 
-    last_request_time = current_time
+    last_request_time = time.time()
 
     print(f"DEBUG PAYLOAD: Job Notes Length = {len(req.jobNotes)}, JD Length = {len(req.jobDescription)}")
 
@@ -123,70 +123,46 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         "- Ensure the final output is a unified, cohesive narrative that feels like it was written by a human expert.\n\n"
         "Return ONLY the final formatted job description text. No preamble or meta-commentary."
     )
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
-    if not GEMINI_API_KEY:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not set in environment variables.")
-    # Dynamically build model URLs using the base URL from config
-    MODELS = [
-        f"{GEMINI_API_URL}/{GEMINI_MODEL}:generateContent",
-        f"{GEMINI_API_URL}/gemini-2.5-flash:generateContent",
-        f"{GEMINI_API_URL}/gemini-2.0-flash:generateContent"
-    ]
+
+    if not OPENAI_API_KEY:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not set in environment variables.")
 
     description = None
-    last_error = ""
-
-    for model_url in MODELS:
-        try:
-            print(f"DEBUG: Attempting Gemini with model: {model_url.split('/')[-1].split(':')[0]}")
-            response = requests.post(
-                f"{model_url}?key={GEMINI_API_KEY}",
-                json=payload,
-                timeout=30
-            )
-            print(f"DEBUG: Gemini API Response Status: {response.status_code}")
-            
-            if response.status_code == 200:
-                data = response.json()
-                description = (
-                    data.get("candidates", [{}])[0]
-                    .get("content", {})
-                    .get("parts", [{}])[0]
-                    .get("text", "")
-                )
-                if description:
-                    break
-            else:
-                last_error = response.text
-                print(f"DEBUG: Model failed: {last_error}")
-                if "RESOURCE_EXHAUSTED" not in last_error:
-                    # If it's not a rate limit, maybe don't bother trying the next one? 
-                    # Actually, let's just try all models.
-                    pass
-        except Exception as e:
-            last_error = str(e)
-            print(f"DEBUG: Exception during model request: {e}")
+    try:
+        print(f"DEBUG: Attempting JD generation with OpenAI: {OPENAI_MODEL}")
+        completion = await client.chat.completions.create(
+            model=OPENAI_MODEL if OPENAI_MODEL else "gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are an expert recruitment copywriter."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            timeout=45
+        )
+        description = completion.choices[0].message.content
+        print("DEBUG: OpenAI JD generation successful.")
+    except Exception as e:
+        print(f"DEBUG: OpenAI JD generation failed: {e}")
+        # No fallback to Gemini as requested
 
     if not description:
         # ULTIMATE FALLBACK: Expert Template
         print("DEBUG: Using Expert Template Fallback due to API issues.")
         description = (
             f"{req.jobTitle.upper()}\n\n"
-            "THE ROLE\n"
+            "**The Role**\n"
             f"We are looking for a talented {req.jobTitle} to join our growing team. "
             "In this role, you will be a key contributor to our mission, leveraging your expertise to solve complex challenges and drive innovation.\n\n"
-            "WHAT YOU'LL DO\n"
+            "**What You'll Do**\n"
             "• Collaborate with cross-functional teams to design and implement high-quality solutions.\n"
             "• Take ownership of key components and drive them from concept to production.\n"
             "• Mentor junior team members and contribute to a culture of technical excellence.\n"
             "• Stay ahead of industry trends and incorporate best practices into our development lifecycle.\n\n"
-            "WHAT YOU BRING\n"
+            "**What You Bring**\n"
             "• Proven experience in the relevant field with a strong track record of success.\n"
             "• Excellent analytical, problem-solving, and communication skills.\n"
             "• Ability to work collaboratively in a fast-paced environment.\n\n"
-            "WHY WORK WITH US\n"
+            "**Why Work With Us**\n"
             "• Impact: Your work will directly influence our product and millions of users.\n"
             "• Growth: We offer continuous learning opportunities and a clear career path.\n"
             "• Culture: Join a diverse, inclusive, and collaborative environment where your voice matters.\n\n"
@@ -211,6 +187,7 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         jobdiva_service.monitor_job_locally(job_id, {"ai_description": description})
 
     return {"description": description}
+
 @router.post("/jobs/generate-title")
 async def generate_job_title(req: JobDescriptionRequest):
     """
@@ -231,52 +208,39 @@ async def generate_job_title(req: JobDescriptionRequest):
         "Return ONLY the final polished job title. No preamble or meta-commentary."
     )
     
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    
-    if not GEMINI_API_KEY:
-        print("DEBUG TITLE: No API Key found.")
+    if not OPENAI_API_KEY:
+        print("DEBUG TITLE: No OpenAI API Key found.")
         return {"title": f"ERROR: No API Key"}
 
-    # Dynamically build model URLs using the base URL from config
-    MODELS = [
-        f"{GEMINI_API_URL}/{GEMINI_MODEL}:generateContent",
-        f"{GEMINI_API_URL}/gemini-2.5-flash:generateContent",
-        f"{GEMINI_API_URL}/gemini-2.0-flash:generateContent",
-        f"{GEMINI_API_URL}/gemini-1.5-flash:generateContent"
-    ]
+    try:
+        print(f"DEBUG TITLE: Attempting title enhancement with OpenAI: {OPENAI_MODEL}")
+        completion = await client.chat.completions.create(
+            model=OPENAI_MODEL if OPENAI_MODEL else "gpt-4o",
+            messages=[
+                {"role": "system", "content": "You are an expert recruitment copywriter."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            timeout=20
+        )
+        new_title = completion.choices[0].message.content.strip()
+        
+        # Strip accidental surrounding quotes
+        import re
+        new_title = re.sub(r'^[\"\']|[\"\']$', '', new_title).strip()
+        new_title = new_title.replace("**", "")
+        
+        print(f"DEBUG TITLE: Original: '{req.jobTitle}' -> New: '{new_title}'")
+        
+        if new_title:
+            return {"title": new_title}
+            
+    except Exception as e:
+        print(f"DEBUG TITLE: OpenAI title enhancement failed: {e}")
+        # No fallback to Gemini as requested
 
-    last_error = ""
-    for model_url in MODELS:
-        try:
-            print(f"DEBUG TITLE: Attempting model {model_url.split('/')[-1]}...")
-            response = requests.post(f"{model_url}?key={GEMINI_API_KEY}", json=payload, timeout=20)
-            print(f"DEBUG TITLE: Gemini Status Code: {response.status_code}")
-            
-            if response.status_code == 200:
-                data = response.json()
-                new_title = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "").strip()
-                # Strip accidental surrounding quotes
-                import re
-                new_title = re.sub(r'^[\"\']|[\"\']$', '', new_title).strip()
-                new_title = new_title.replace("**", "")
-                
-                print(f"DEBUG TITLE: Original: '{req.jobTitle}' -> New: '{new_title}'")
-                
-                if new_title:
-                    return {"title": new_title}
-            else:
-                last_error = f"{response.status_code} - {response.text}"
-                print(f"DEBUG TITLE: Error from AI: {last_error}")
-                if response.status_code != 429:
-                    # If it's a hard error (not rate limit), we could break, but let's just try the next model.
-                    pass
-        except Exception as e:
-            last_error = str(e)
-            print(f"DEBUG TITLE: Title enhancement failed: {e}")
-            
-    # If all models failed
-    error_str = str(last_error)
-    return {"title": "ERROR 429: Rate Limit Exceeded" if "429" in error_str else f"ERROR: {error_str[:20]}"}
+    return {"title": f"ERROR: AI enhancement failed"}
+
 
 class RubricGenerationRequest(BaseModel):
     jobId: str = ""      # Numeric PK for database linking

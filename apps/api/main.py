@@ -17,8 +17,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from contextlib import asynccontextmanager
 
 from core import (
-    OPENAI_API_KEY, GEMINI_API_KEY, DATABASE_URL, 
-    JOBDIVA_JOB_NOTES_UDF_ID, ALLOWED_ORIGINS, GEMINI_MODEL
+    OPENAI_API_KEY, DATABASE_URL, 
+    JOBDIVA_JOB_NOTES_UDF_ID, ALLOWED_ORIGINS
 )
 
 # Load environment variables (core handles .env, but keeping load_dotenv for compatibility)
@@ -94,10 +94,10 @@ async def lifespan(app: FastAPI):
     logger.info("📋 Stopping scheduler...")
     scheduler.shutdown()
     
-from routers import engagement, gemini, voice_agent
+from routers import engagement, ai_generation, voice_agent
 
 app = FastAPI(title="Hoonr.ai API", lifespan=lifespan)
-app.include_router(gemini.router, prefix="/api/v1/gemini")
+app.include_router(ai_generation.router, prefix="/api/v1/ai-generation")
 app.include_router(voice_agent.router, prefix="/api/v1/voice")
 
 app.add_middleware(
@@ -121,7 +121,7 @@ async def parse_job_description(request: ParsedJobRequest):
         if request.job_id:
             storage = MonitoredJobsStorage()
             processing_metadata = {
-                "model": GEMINI_MODEL,
+                "model": "gpt-4o-mini",  # LLM extractor now strictly uses OpenAI
                 "processing_time_ms": 0,
                 "tokens_used": 0,
                 "confidence": 0.95
