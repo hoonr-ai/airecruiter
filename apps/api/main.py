@@ -42,7 +42,7 @@ from models import (
     CandidateAnalysisRequest, CandidateAnalysisResponse, JobCriterion, JobCriteriaResponse,
     JobCriteriaUpdate, JobDraftData, JobDraftRequirement, JobDraftRequirements, 
     JobDraftResponse, JobPublishRequest, JobBasicInfoUpdate, SkillsExtractionRequest, SkillsExtractionResponse,
-    JobSkillsSummaryResponse
+    JobSkillsSummaryResponse, SourcedCandidate, SaveCandidatesRequest
 )
 from services.criteria import criteria_service
 from matcher import mock_match_candidates
@@ -52,6 +52,7 @@ from services.unipile import unipile_service
 from services.chat_service import chat_service
 from services.monitored_jobs_storage import MonitoredJobsStorage
 from services.job_rubric_db import JobRubricDB
+from services.sourced_candidates_storage import sourced_candidates_storage
 
 # Legacy file-based tracking replaced by monitored_jobs SQL table
 
@@ -289,12 +290,54 @@ async def analyze_candidates(request: CandidateAnalysisRequest):
                 pass
         candidates_to_process.append(c)
 
-    results = await ai_service.analyze_candidates_batch(
+    all_results = await ai_service.analyze_candidates_batch(
         candidates_to_process, 
         request.job_description,
         structured_jd=request.structured_jd
     )
-    return {"results": results, "name": "", "email": "", "skills": [], "experience_years": 0} # Dummy fields to satisfy model if strict
+    return {"results": all_results, "count": len(all_results)}
+
+@app.post("/candidates/save")
+async def save_candidates(request: SaveCandidatesRequest):
+    """Save sourced candidates to database."""
+    try:
+        count = sourced_candidates_storage.save_candidates(request.job_id, request.candidates)
+        return {
+            "status": "success",
+            "message": f"Successfully saved {count} candidates",
+            "count": count
+        }
+    except Exception as e:
+        logger.error(f"Error saving candidates: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/jobs/{job_id}/candidates")
+async def get_job_candidates(job_id: str):
+    """Retrieve sourced candidates for a job."""
+    try:
+        candidates = sourced_candidates_storage.get_candidates_for_job(job_id)
+        return {
+            "status": "success",
+            "candidates": candidates,
+            "count": len(candidates)
+        }
+    except Exception as e:
+        logger.error(f"Error retrieving candidates for job {job_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/candidates")
+async def get_all_candidates(limit: int = 100):
+    """Retrieve all sourced candidates across all jobs."""
+    try:
+        candidates = sourced_candidates_storage.get_all_candidates(limit)
+        return {
+            "status": "success",
+            "candidates": candidates,
+            "count": len(candidates)
+        }
+    except Exception as e:
+        logger.error(f"Error retrieving all candidates: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/jobs/fetch")
 async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: BackgroundTasks):

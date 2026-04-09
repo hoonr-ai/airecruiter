@@ -25,7 +25,7 @@ export function Sidebar() {
             <nav>
                 <ul className="space-y-2 list-none">
                     {navItems.map((item) => {
-                        const isActive = pathname === item.href || (item.label !== "Dashboard" && pathname.startsWith(item.href));
+                        const isActive = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
                         const Icon = item.icon;
 
                         return (

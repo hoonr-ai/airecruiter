@@ -11,6 +11,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { JobCandidatesDialog } from "@/components/JobCandidatesDialog";
+import { Users } from "lucide-react";
 
 interface Job {
   id: string;
@@ -42,6 +44,10 @@ export default function DashboardPage() {
   const [allJobs, setAllJobs] = useState<Job[]>([]);
   const [filteredJobs, setFilteredJobs] = useState<Job[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  
+  // Candidates Dialog State
+  const [isCandidatesDialogOpen, setIsCandidatesDialogOpen] = useState(false);
+  const [selectedJobForCandidates, setSelectedJobForCandidates] = useState<{id: string, title: string} | null>(null);
 
   useEffect(() => {
     fetchJobs();
@@ -188,6 +194,12 @@ export default function DashboardPage() {
             <FileText className="h-4 w-4" />
             Export to Excel
           </Button>
+          <Button asChild variant="outline" className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-700 font-semibold text-[13px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all">
+            <Link href="/candidates">
+              <Users className="h-4 w-4" />
+              All Candidates
+            </Link>
+          </Button>
           <Button asChild className="flex items-center gap-2 h-10 px-5 bg-[#4f46e5] hover:bg-[#4338ca] text-white font-semibold text-[13px] rounded-lg shadow-sm transition-all active:scale-95 border-none">
             <Link href="/jobs/new">
               <Plus className="h-4 w-4" />
@@ -309,7 +321,15 @@ export default function DashboardPage() {
                           </DropdownMenuItem>
                         )}
                         <DropdownMenuItem className="cursor-pointer">Edit Job</DropdownMenuItem>
-                        <DropdownMenuItem className="cursor-pointer">View Candidates</DropdownMenuItem>
+                        <DropdownMenuItem 
+                          className="cursor-pointer"
+                          onClick={() => {
+                            setSelectedJobForCandidates({ id: job.jobdiva_id || job.id, title: job.title });
+                            setIsCandidatesDialogOpen(true);
+                          }}
+                        >
+                          View Candidates
+                        </DropdownMenuItem>
                         <DropdownMenuItem className="text-red-600 focus:text-red-700 cursor-pointer">
                           Archive Job
                         </DropdownMenuItem>
@@ -328,6 +348,13 @@ export default function DashboardPage() {
           </table>
         </div>
       </div>
+      
+      <JobCandidatesDialog
+        isOpen={isCandidatesDialogOpen}
+        onClose={() => setIsCandidatesDialogOpen(false)}
+        jobId={selectedJobForCandidates?.id || null}
+        jobTitle={selectedJobForCandidates?.title || ""}
+      />
     </div>
   );
 }

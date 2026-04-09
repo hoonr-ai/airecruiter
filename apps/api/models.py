@@ -34,11 +34,12 @@ class CandidateAnalysisRequest(BaseModel):
 
 class CandidateAnalysisResponse(BaseModel):
     results: List[Dict[str, Any]] # List of { candidate_id, score, reasoning }
-    name: str
-    email: str
-    skills: List[str]
-    experience_years: int
+    name: Optional[str] = ""
+    email: Optional[str] = ""
+    skills: Optional[List[str]] = []
+    experience_years: Optional[int] = 0
     resume_text: str = ""
+    count: Optional[int] = 0
 
 class ParsedJobRequest(BaseModel):
     text: str
@@ -237,3 +238,21 @@ class JobSkillsSummaryResponse(BaseModel):
     total_skills: int
     by_importance: Dict[str, int]  # {"required": 5, "preferred": 3}
     analysis_metadata: Dict[str, Any]
+
+class SourcedCandidate(BaseModel):
+    id: Optional[int] = None
+    job_id: str
+    candidate_id: str  # External ID from Unipile or JobDiva
+    source: str        # 'LinkedIn', 'JobDiva', etc.
+    name: Optional[str] = "Unknown"
+    headline: Optional[str] = None
+    location: Optional[str] = None
+    profile_url: Optional[str] = None
+    image_url: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None  # Full candidate JSON
+    created_at: Optional[str] = None
+    status: str = "sourced"
+    
+class SaveCandidatesRequest(BaseModel):
+    job_id: str
+    candidates: List[SourcedCandidate]

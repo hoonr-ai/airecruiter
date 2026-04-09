@@ -493,6 +493,10 @@ class JobDivaService:
             if "must" in s_prio.lower(): must_haves.append(term)
             else: flexible.append(term)
 
+        # Limit to top 6 terms to prevent extreme search complexity and timeouts
+        must_haves = must_haves[:5]
+        flexible = flexible[:3]
+        
         criteria_parts = []
         if must_haves: criteria_parts.append(f"(" + " AND ".join(must_haves) + ")")
         elif flexible: criteria_parts.append(f"(" + " OR ".join(flexible) + ")")
@@ -504,7 +508,7 @@ class JobDivaService:
         payload = {"skills": [search_value], "pageNumber": page, "pageSize": limit}
         
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(url, json=payload, headers=headers)
                 if response.status_code == 200:
                     data = response.json()
@@ -1000,7 +1004,10 @@ class JobDivaService:
                     debug_log(f"Inserting new job {job_id} with {len(columns)} fields")
                     conn.execute(text(query), params)
 
-                conn.commit()
+                try:
+                    conn.commit()
+                except AttributeError:
+                    pass
                 debug_log(f"Successfully saved job {job_id} to monitored_jobs")
                 return True
                 
@@ -1104,7 +1111,10 @@ class JobDivaService:
                 logger.info(f"Parameters: {params}")
                 
                 result = conn.execute(text(query), params)
-                conn.commit()
+                try:
+                    conn.commit()
+                except AttributeError:
+                    pass
                 
                 # Check if any rows were updated
                 if result.rowcount > 0:

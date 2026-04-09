@@ -202,6 +202,7 @@ function NewJobPageContent() {
   const [sourceKeywords, setSourceKeywords] = useState<string[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
+  const [sourcedCandidates, setSourcedCandidates] = useState<any[]>([]);
   const [booleanStringOpen, setBooleanStringOpen] = useState(false);
 
   useEffect(() => {
@@ -2057,6 +2058,106 @@ function NewJobPageContent() {
     setScreenQuestions(prev => prev.filter(q => q.id !== id));
   };
 
+  const handleRunSearch = async () => {
+    if (isSearching) return;
+    
+    setIsSearching(true);
+    setHasSearched(true);
+    setSourcedCandidates([]);
+
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      
+      // Determine which sources to search
+      const activeSources = [];
+      if (searchSources.jobdiva) activeSources.push("JobDiva");
+      if (searchSources.jobdiva_hotlist) activeSources.push("JobDivaHotlist");
+      if (searchSources.linkedin) activeSources.push("LinkedIn");
+      if (searchSources.dice) activeSources.push("Dice");
+
+      // Format skills for the API
+      const skills = sourceSkills.map(s => ({
+        value: s.value,
+        years_experience: s.years,
+        priority: s.matchType === 'must' ? 'Must Have' : 'Flexible'
+      }));
+
+      // Add keywords as skills if present
+      sourceKeywords.forEach(keyword => {
+        skills.push({
+          value: keyword,
+          years_experience: 0,
+          priority: 'Flexible'
+        });
+      });
+
+      const response = await fetch(`${apiUrl}/candidates/search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          skills: skills,
+          location: sourceLocations.length > 0 ? sourceLocations[0].value : "",
+          location_type: jobData?.location_type || "Onsite",
+          sources: activeSources,
+          open_to_work: true,
+          page: 1,
+          limit: 25
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Search failed: ${response.statusText}`);
+      }
+
+      const results = await response.json();
+      console.log("Search results:", results);
+      
+      const candidates = Array.isArray(results) ? results : (results.items || []);
+      setSourcedCandidates(candidates);
+      
+      // Auto-save sourced candidates to database
+      if (candidates.length > 0 && (numericJobId || jobdivaId)) {
+        try {
+          fetch(`${apiUrl}/candidates/save`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              job_id: numericJobId || jobdivaId,
+              candidates: candidates.map((c: any) => ({
+                job_id: numericJobId || jobdivaId,
+                candidate_id: c.id || c.candidate_id || c.recruiter_candidate_id,
+                source: c.source || (c.type === 'PEOPLE' ? 'LinkedIn' : 'JobDiva'),
+                name: c.name || `${c.firstName || ''} ${c.lastName || ''}`.trim() || 'Unknown',
+                headline: c.headline || c.title || '',
+                location: c.location || `${c.city || ''}${c.city && c.state ? ', ' : ''}${c.state || ''}` || '',
+                profile_url: c.profile_url || c.public_profile_url || '',
+                image_url: c.image_url || c.profile_picture_url || c.img || '',
+                data: c,
+                status: 'sourced'
+              }))
+            })
+          }).then(res => res.json())
+            .then(data => console.log(`Saved ${data.count} candidates to DB`))
+            .catch(err => console.error("Error saving candidates to DB:", err));
+        } catch (saveErr) {
+          console.error("Failed to initiate candidate save:", saveErr);
+        }
+      }
+      
+      if (Array.isArray(results) && results.length > 0) {
+        showToast(`Found ${results.length} candidates`, "success");
+      } else {
+        showToast("No candidates found with current filters", "info");
+      }
+    } catch (error) {
+      console.error("Error in candidate search:", error);
+      showToast("Candidate search failed", "info");
+      setSourcedCandidates([]);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
   const setFiltersStep = (
     <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
       <div className="flex flex-row items-start gap-4 px-7 py-6 border-b border-slate-100"
@@ -2334,11 +2435,7 @@ function NewJobPageContent() {
               </div>
               <Button
                 className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
-                onClick={() => {
-                  setIsSearching(true);
-                  setHasSearched(true);
-                  setTimeout(() => setIsSearching(false), 2000);
-                }}
+                onClick={handleRunSearch}
                 disabled={isSearching}
               >
                 {isSearching ? (
@@ -2783,6 +2880,46 @@ function NewJobPageContent() {
                     <div className="w-12 h-12 border-4 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-4" />
                     <p className="text-slate-500 text-sm font-bold">Scanning databases...</p>
                   </div>
+                ) : sourcedCandidates.length > 0 ? (
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {sourcedCandidates.map((candidate) => (
+                      <div key={candidate.id} className="border border-slate-200 rounded-2xl p-5 bg-white hover:border-[#6366f1] hover:shadow-xl hover:shadow-[#6366f1]/5 transition-all duration-300 cursor-pointer group relative overflow-hidden">
+                        <div className="absolute top-0 right-0 p-3">
+                          <div className={`w-2 h-2 rounded-full ${candidate.source === 'LinkedIn' ? 'bg-[#0A66C2]' : 'bg-slate-300'}`} />
+                        </div>
+                        <div className="flex items-start gap-4">
+                           <div className="relative">
+                            {candidate.image_url ? (
+                              <img src={candidate.image_url} className="w-14 h-14 rounded-full border-2 border-slate-100 object-cover" alt={`${candidate.firstName} ${candidate.lastName}`} />
+                            ) : (
+                              <div className="w-14 h-14 rounded-full bg-gradient-to-br from-slate-50 to-slate-100 border-2 border-slate-100 flex items-center justify-center text-slate-400 font-bold text-xl">
+                                {candidate.firstName?.[0]}{candidate.lastName?.[0]}
+                              </div>
+                            )}
+                            <div className="absolute -bottom-1 -right-1 bg-white rounded-full p-1 shadow-sm border border-slate-100">
+                               {candidate.source === 'LinkedIn' ? <Linkedin className="w-3.5 h-3.5 text-[#0A66C2]" /> : <ShieldCheck className="w-3.5 h-3.5 text-slate-400" />}
+                            </div>
+                           </div>
+                           <div className="flex-1 min-w-0">
+                             <h5 className="text-[15px] font-bold text-slate-900 group-hover:text-[#6366f1] transition-colors truncate mb-1">
+                               {candidate.firstName} {candidate.lastName}
+                             </h5>
+                             <p className="text-[12px] text-slate-500 font-medium leading-tight line-clamp-2 min-h-[32px]">{candidate.title}</p>
+                             <div className="flex items-center gap-3 mt-3">
+                               {candidate.city && (
+                                 <span className="text-[11px] text-slate-400 font-bold flex items-center gap-1">
+                                   <MapPin className="w-3.5 h-3.5" /> {candidate.city.split(',')[0]}
+                                 </span>
+                               )}
+                               <span className="text-[10px] bg-slate-50 border border-slate-100 px-2 py-0.5 rounded-md text-slate-500 font-extrabold uppercase tracking-widest ml-auto">
+                                 {candidate.source}
+                               </span>
+                             </div>
+                           </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 ) : (
                   <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
                     <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-6 shadow-inner">
@@ -2801,7 +2938,7 @@ function NewJobPageContent() {
             {/* Launch Footer */}
             <div className="border-t border-slate-200 pt-6 mt-2 flex items-center justify-between">
               <span className="text-[13px] font-medium text-slate-400">
-                {hasSearched && !isSearching ? '0 candidates selected' : ''}
+                {hasSearched && !isSearching ? `${sourcedCandidates.length} potential candidates identified` : ''}
               </span>
               <Button
                 className="h-[42px] px-5 bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98] group"
