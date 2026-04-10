@@ -185,7 +185,12 @@ class AzureAgentService:
         grouping = {} # canonical_name_upper -> { canonical_val, similar_titles_set }
 
         for item in job_roles:
-            canonical = item.get("ROLE_K17000") or next((item.get(c) for c in ROLE_COLUMNS if item.get(c)), None)
+            # Safely get canonical role, handling missing fields
+            try:
+                canonical = item.get("ROLE_K17000") or next((item.get(c) for c in ROLE_COLUMNS if item.get(c)), None)
+            except Exception as e:
+                logger.warning(f"⚠️ Error processing role item {item}: {e}")
+                continue
             
             if not canonical or str(canonical).upper() in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY"]:
                 continue
@@ -203,11 +208,15 @@ class AzureAgentService:
             # 2. Add the hierarchy levels in Specific to Broad order (K10000 down to K10)
             for col in ROLE_COLUMNS:
                 if col == "ROLE_K17000": continue # skip primary
-                val = item.get(col)
-                if val and str(val).upper() not in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY"]:
-                    val_str = str(val)
-                    if val_str != canonical and val_str not in grouping[key]["similar_titles"]:
-                        grouping[key]["similar_titles"].append(val_str)
+                try:
+                    val = item.get(col)
+                    if val and str(val).upper() not in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY"]:
+                        val_str = str(val)
+                        if val_str != canonical and val_str not in grouping[key]["similar_titles"]:
+                            grouping[key]["similar_titles"].append(val_str)
+                except Exception as e:
+                    logger.warning(f"⚠️ Error processing role column {col}: {e}")
+                    continue
 
         # Convert grouping back to list
         result = []
@@ -234,29 +243,37 @@ class AzureAgentService:
         grouping = {} # canonical_name_upper -> { canonical_val, similar_skills_set }
         
         for item in job_skills:
-            canonical = item.get("skill_mapped")
-            
-            if not canonical or str(canonical).upper() in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY", "BOARD CERTIFIED", "NONEVALUE"]:
-                continue
-            
-            key = str(canonical).upper()
-            if key not in grouping:
-                grouping[key] = {
-                    "value": canonical,
-                    "similar_skills": [],
-                    "required": item.get("required", "Required")
-                }
+            try:
+                canonical = item.get("skill_mapped")
+                
+                if not canonical or str(canonical).upper() in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY", "BOARD CERTIFIED", "NONEVALUE"]:
+                    continue
+                
+                key = str(canonical).upper()
+                if key not in grouping:
+                    grouping[key] = {
+                        "value": canonical,
+                        "similar_skills": [],
+                        "required": item.get("required", "Required")
+                    }
 
-            # 1. REMOVED: Do NOT add the specific skill extracted from the JD to the similar list
-            
-            # 2. Add the hierarchy levels in Specific to Broad order (K15000 down to K15)
-            for col in SKILL_COLUMNS:
-                if col == "skill_mapped": continue # skip primary
-                val = item.get(col)
-                if val and str(val).upper() not in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY", "NONEVALUE"]:
-                    val_str = str(val)
-                    if val_str != canonical and val_str not in grouping[key]["similar_titles"]:
-                        grouping[key]["similar_skills"].append(val_str)
+                # 1. REMOVED: Do NOT add the specific skill extracted from the JD to the similar list
+                
+                # 2. Add the hierarchy levels in Specific to Broad order (K15000 down to K15)
+                for col in SKILL_COLUMNS:
+                    if col == "skill_mapped": continue # skip primary
+                    try:
+                        val = item.get(col)
+                        if val and str(val).upper() not in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY", "NONEVALUE"]:
+                            val_str = str(val)
+                            if val_str != canonical and val_str not in grouping[key]["similar_skills"]:
+                                grouping[key]["similar_skills"].append(val_str)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Error processing skill column {col}: {e}")
+                        continue
+            except Exception as e:
+                logger.warning(f"⚠️ Error processing skill item {item}: {e}")
+                continue
 
         # Convert grouping back to list
         result = []
