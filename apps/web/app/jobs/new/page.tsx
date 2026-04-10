@@ -46,7 +46,10 @@ import {
   Lightbulb,
   X,
   Box,
-  Ban
+  Ban,
+  Mail,
+  MessageSquare,
+  ExternalLink
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -60,6 +63,8 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
+import { CandidateMessageModal } from "@/components/candidate-message-modal";
+import { ResumeModal } from "@/components/ResumeModal";
 
 // Utility function to clean location_type values and filter out employment terms
 function cleanLocationType(locationType: string | null | undefined): string {
@@ -135,6 +140,78 @@ function NewJobPageContent() {
   const [emailError, setEmailError] = useState(false);
   const [isInputInvalid, setIsInputInvalid] = useState(false);
   const [emailErrorMessage, setEmailErrorMessage] = useState("");
+  
+  // Email modal state
+  const [selectedCandidateForEmail, setSelectedCandidateForEmail] = useState<any>(null);
+  const [messageModalOpen, setMessageModalOpen] = useState(false);
+
+  // Function to fetch candidate resume if not available - only real JobDiva resumes
+  const fetchCandidateResume = async (candidateId: string) => {
+    try {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates/${candidateId}/resume`);
+      const data = await response.json();
+      
+      // Check if the API returned an error or no real resume
+      if (data.status === "error" || !data.resume_text) {
+        console.log(`⚠️ No real resume available for candidate ${candidateId}: ${data.message}`);
+        return null; // Return null instead of fake content
+      }
+      
+      // Verify it's not auto-generated content
+      if (data.resume_text.includes("Professional experience details available upon request") ||
+          data.resume_text.includes("Experienced professional with a strong background")) {
+        console.log(`⚠️ Auto-generated content detected for candidate ${candidateId} - rejecting`);
+        return null;
+      }
+      
+      return data.resume_text;
+    } catch (error) {
+      console.error("Error fetching resume:", error);
+      return null; // Return null on error instead of fake message
+    }
+  };
+
+  // Enhanced resume viewing handler - only show REAL JobDiva resumes
+  const handleViewResume = async (candidate: any) => {
+    let resumeText = candidate.resume_text || candidate.resumeText || candidate.data?.resume_text;
+    
+    // Check if this is a fake auto-generated resume
+    if (resumeText && (
+      resumeText.includes("Professional experience details available upon request") ||
+      resumeText.includes("Experienced professional with a strong background") ||
+      resumeText.includes("Contact information and detailed work history available upon request")
+    )) {
+      console.log(`⚠️ Detected auto-generated resume for ${candidate.firstName} ${candidate.lastName} - skipping`);
+      alert("This candidate's resume is not available from JobDiva. Only real resumes from JobDiva are displayed.");
+      return;
+    }
+    
+    // If no resume text available, try to fetch it from JobDiva API
+    if (!resumeText || resumeText.trim() === "") {
+      console.log(`🔍 Fetching real resume for candidate: ${candidate.firstName} ${candidate.lastName}`);
+      resumeText = await fetchCandidateResume(candidate.id || candidate.candidateId || candidate.candidate_id);
+      
+      // If fetchCandidateResume returns null, no real resume is available
+      if (!resumeText) {
+        console.log(`⚠️ No real resume available for ${candidate.firstName} ${candidate.lastName}`);
+        alert("This candidate's resume is not available from JobDiva API. Only real resumes from JobDiva are displayed.");
+        return;
+      }
+    }
+    
+    // Only proceed with real resume content
+    if (resumeText && resumeText.trim().length > 50) {
+      setSelectedCandidateForResume({
+        name: `${candidate.firstName} ${candidate.lastName}`,
+        resumeText: resumeText
+      });
+      setResumeModalOpen(true);
+    } else {
+      alert("This candidate's resume is not available from JobDiva. Only real resumes from JobDiva are displayed.");
+    }
+  };
+  const [selectedCandidateForResume, setSelectedCandidateForResume] = useState<any>(null);
+  const [resumeModalOpen, setResumeModalOpen] = useState(false);
   const [jobTitle, setJobTitle] = useState("");
   const [enhancedTitle, setEnhancedTitle] = useState("");
   const [jobPosting, setJobPosting] = useState("");
@@ -202,8 +279,26 @@ function NewJobPageContent() {
   const [sourceKeywords, setSourceKeywords] = useState<string[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
-  const [sourcedCandidates, setSourcedCandidates] = useState<any[]>([]);
   const [booleanStringOpen, setBooleanStringOpen] = useState(false);
+  const [generatedBoolean, setGeneratedBoolean] = useState("");
+  const [candidates, setCandidates] = useState<any[]>([]);
+  const [selectedCandidates, setSelectedCandidates] = useState<Set<string>>(new Set());
+  const [searchStatus, setSearchStatus] = useState("Fetching applicants...");
+
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const candidatesPerPage = 10;
+  const totalPages = Math.ceil(candidates.length / candidatesPerPage);
+  const paginatedCandidates = candidates.slice(
+    (currentPage - 1) * candidatesPerPage,
+    currentPage * candidatesPerPage
+  );
+
+  // Resume modal state
+  const [selectedCandidate, setSelectedCandidate] = useState<any>(null);
+  const [candidateResume, setCandidateResume] = useState<string>("");
+  const [isLoadingResume, setIsLoadingResume] = useState(false);
+  const [showResumeModal, setShowResumeModal] = useState(false);
 
   useEffect(() => {
     const jobIdFromUrl = searchParams.get("jobId");
@@ -330,6 +425,7 @@ function NewJobPageContent() {
     setEnhancedTitle("");
     setJobPosting("");
     setRecruiterNotes("");
+    setSelectedEmpTypes([]);
     setRecruiterEmails([]);
     setSelectedEmpTypes([]);
 
@@ -885,6 +981,7 @@ function NewJobPageContent() {
                   ))}
                 </div>
               </div>
+
 
               <div className="border-t border-slate-100 my-6" />
 
@@ -2032,9 +2129,7 @@ function NewJobPageContent() {
     }
 
     // 4. Keywords
-    if (sourceKeywords.length === 0) {
-      setSourceKeywords(["high-volume", "W2"]); // Mocking for now
-    }
+    // Don't auto-populate sourceKeywords anymore
   };
 
   const addScreenQuestion = () => {
@@ -2056,106 +2151,6 @@ function NewJobPageContent() {
 
   const deleteScreenQuestion = (id: number) => {
     setScreenQuestions(prev => prev.filter(q => q.id !== id));
-  };
-
-  const handleRunSearch = async () => {
-    if (isSearching) return;
-    
-    setIsSearching(true);
-    setHasSearched(true);
-    setSourcedCandidates([]);
-
-    try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-      
-      // Determine which sources to search
-      const activeSources = [];
-      if (searchSources.jobdiva) activeSources.push("JobDiva");
-      if (searchSources.jobdiva_hotlist) activeSources.push("JobDivaHotlist");
-      if (searchSources.linkedin) activeSources.push("LinkedIn");
-      if (searchSources.dice) activeSources.push("Dice");
-
-      // Format skills for the API
-      const skills = sourceSkills.map(s => ({
-        value: s.value,
-        years_experience: s.years,
-        priority: s.matchType === 'must' ? 'Must Have' : 'Flexible'
-      }));
-
-      // Add keywords as skills if present
-      sourceKeywords.forEach(keyword => {
-        skills.push({
-          value: keyword,
-          years_experience: 0,
-          priority: 'Flexible'
-        });
-      });
-
-      const response = await fetch(`${apiUrl}/candidates/search`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          skills: skills,
-          location: sourceLocations.length > 0 ? sourceLocations[0].value : "",
-          location_type: jobData?.location_type || "Onsite",
-          sources: activeSources,
-          open_to_work: true,
-          page: 1,
-          limit: 25
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`Search failed: ${response.statusText}`);
-      }
-
-      const results = await response.json();
-      console.log("Search results:", results);
-      
-      const candidates = Array.isArray(results) ? results : (results.items || []);
-      setSourcedCandidates(candidates);
-      
-      // Auto-save sourced candidates to database
-      if (candidates.length > 0 && (numericJobId || jobdivaId)) {
-        try {
-          fetch(`${apiUrl}/candidates/save`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              job_id: numericJobId || jobdivaId,
-              candidates: candidates.map((c: any) => ({
-                job_id: numericJobId || jobdivaId,
-                candidate_id: c.id || c.candidate_id || c.recruiter_candidate_id,
-                source: c.source || (c.type === 'PEOPLE' ? 'LinkedIn' : 'JobDiva'),
-                name: c.name || `${c.firstName || ''} ${c.lastName || ''}`.trim() || 'Unknown',
-                headline: c.headline || c.title || '',
-                location: c.location || `${c.city || ''}${c.city && c.state ? ', ' : ''}${c.state || ''}` || '',
-                profile_url: c.profile_url || c.public_profile_url || '',
-                image_url: c.image_url || c.profile_picture_url || c.img || '',
-                data: c,
-                status: 'sourced'
-              }))
-            })
-          }).then(res => res.json())
-            .then(data => console.log(`Saved ${data.count} candidates to DB`))
-            .catch(err => console.error("Error saving candidates to DB:", err));
-        } catch (saveErr) {
-          console.error("Failed to initiate candidate save:", saveErr);
-        }
-      }
-      
-      if (Array.isArray(results) && results.length > 0) {
-        showToast(`Found ${results.length} candidates`, "success");
-      } else {
-        showToast("No candidates found with current filters", "info");
-      }
-    } catch (error) {
-      console.error("Error in candidate search:", error);
-      showToast("Candidate search failed", "info");
-      setSourcedCandidates([]);
-    } finally {
-      setIsSearching(false);
-    }
   };
 
   const setFiltersStep = (
@@ -2435,7 +2430,117 @@ function NewJobPageContent() {
               </div>
               <Button
                 className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
-                onClick={handleRunSearch}
+                onClick={async () => {
+                  setIsSearching(true);
+                  setHasSearched(true);
+                  
+                  try {
+                    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+                    
+                    // Enhanced format: separate criteria arrays
+                    const titleCriteria = sourceTitles
+                      .filter(t => t.matchType !== 'exclude')
+                      .map(t => ({
+                        value: t.value || "Title",
+                        match_type: t.matchType || "must",
+                        years: t.years || 0,
+                        recent: t.recent || false
+                      }));
+                    
+                    const skillCriteria = sourceSkills
+                      .filter(s => s.matchType !== 'exclude')
+                      .map(s => ({
+                        value: s.value || "Skill", 
+                        match_type: s.matchType || "must",
+                        years: s.years || 0,
+                        recent: s.recent || false
+                      }));
+                    
+                    const locationCriteria = sourceLocations.map(l => ({
+                      value: l.value,
+                      radius: l.radius || "25"
+                    }));
+
+                    // Legacy format fallback (for compatibility)
+                    const skillsToSearch = [];
+                    sourceTitles.forEach(t => {
+                      if (t.matchType !== 'exclude') {
+                        skillsToSearch.push({
+                          value: t.value || "Title",
+                          priority: t.matchType === 'must' ? 'Must Have' : 'Flexible',
+                          years_experience: t.years || 0
+                        });
+                      }
+                    });
+                    
+                    sourceSkills.forEach(s => {
+                      if (s.matchType !== 'exclude') {
+                        skillsToSearch.push({
+                          value: s.value || "Skill",
+                          priority: s.matchType === 'must' ? 'Must Have' : 'Flexible',
+                          years_experience: s.years || 0
+                        });
+                      }
+                    });
+
+                    // Ensure we search something
+                    if (titleCriteria.length === 0 && skillCriteria.length === 0 && skillsToSearch.length === 0) {
+                      skillsToSearch.push({ value: jobTitle || "Role", priority: "Flexible", years_experience: 0 });
+                    }
+                    
+                    const selectedSourcesArray = Object.keys(searchSources)
+                      .filter(k => (searchSources as any)[k])
+                      .map(k => {
+                        if (k === 'jobdiva') return 'JobDiva';
+                        if (k === 'jobdiva_hotlist') return 'JobDivaHotlist';
+                        if (k === 'linkedin') return 'LinkedIn';
+                        if (k === 'dice') return 'Dice';
+                        return k;
+                      });
+
+                    setSearchStatus("Enhanced multi-criteria search in progress...");
+                    
+                    const searchPayload = {
+                      job_id: numericJobId || jobdivaId,
+                      // Enhanced criteria (new format)
+                      titles: titleCriteria,
+                      skill_criteria: skillCriteria,
+                      locations: locationCriteria,
+                      keywords: sourceKeywords,
+                      companies: sourceCompanies,
+                      // Legacy compatibility  
+                      skills: skillsToSearch,
+                      location: sourceLocations.length > 0 ? sourceLocations[0].value : "",
+                      location_type: "Unspecified", 
+                      sources: selectedSourcesArray,
+                      open_to_work: false,
+                      page: 1,
+                      limit: 100
+                    };
+                    
+                    console.log("🚀 Enhanced search payload:", searchPayload);
+
+                    const response = await fetch(`${apiUrl}/candidates/search`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify(searchPayload)
+                    });
+                    
+                    if (response.ok) {
+                      const data = await response.json();
+                      setCandidates(data.candidates || []);
+                      console.log("✅ Enhanced search results:", data);
+                    } else {
+                      setCandidates([]);
+                      console.error("❌ Search failed:", response.status);
+                    }
+                  } catch (error) {
+                    console.error("Failed to search candidates:", error);
+                    setCandidates([]);
+                  } finally {
+                    setIsSearching(false);
+                  }
+                }}
                 disabled={isSearching}
               >
                 {isSearching ? (
@@ -2453,18 +2558,19 @@ function NewJobPageContent() {
                 <span className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Search Sources:</span>
                 <div className="flex items-center gap-5 ml-1">
                   {[
-                    { id: 'jobdiva', label: 'JobDiva', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" /> },
-                    { id: 'jobdiva_hotlist', label: 'JobDiva Hotlist', icon: <Zap className="w-4 h-4 text-orange-500 fill-orange-500" /> },
-                    { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" /> },
-                    { id: 'dice', label: 'Dice', icon: <Box className="w-4 h-4 text-slate-700" /> }
+                    { id: 'jobdiva', label: 'JobDiva', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false },
+                    { id: 'jobdiva_hotlist', label: 'JobDiva Hotlist', icon: <Zap className="w-4 h-4 text-orange-500 fill-orange-500" />, disabled: true },
+                    { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: true },
+                    { id: 'dice', label: 'Dice', icon: <Box className="w-4 h-4 text-slate-700" />, disabled: true }
                   ].map(source => (
-                    <label key={source.id} className="flex items-center gap-2 cursor-pointer group">
+                    <label key={source.id} className={`flex items-center gap-2 ${source.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer group'}`} title={source.disabled ? "Integration coming soon" : ""}>
                       <Checkbox
-                        checked={(searchSources as any)[source.id]}
-                        onCheckedChange={(checked) => setSearchSources(prev => ({ ...prev, [source.id]: !!checked }))}
-                        className="w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-[#6366f1] data-[state=checked]:border-[#6366f1]"
+                        checked={source.disabled ? false : (searchSources as any)[source.id]}
+                        onCheckedChange={(checked) => !source.disabled && setSearchSources(prev => ({ ...prev, [source.id]: !!checked }))}
+                        className={`w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-[#6366f1] data-[state=checked]:border-[#6366f1] ${source.disabled ? 'opacity-50' : ''}`}
+                        disabled={source.disabled}
                       />
-                      <div className="flex items-center gap-1.5 opacity-80 group-hover:opacity-100 transition-opacity">
+                      <div className={`flex items-center gap-1.5 ${source.disabled ? 'opacity-60' : 'opacity-80 group-hover:opacity-100 transition-opacity'}`}>
                         {source.icon}
                         <span className="text-[13px] font-bold text-slate-700">{source.label}</span>
                       </div>
@@ -2839,25 +2945,45 @@ function NewJobPageContent() {
                       const nextState = !booleanStringOpen;
                       setBooleanStringOpen(nextState);
                       
-                      // Auto-save when expanding the boolean string view
+                      // Auto-save when expanding the boolean string view to feed the agent
                       if (nextState) {
+                        setGeneratedBoolean(""); // Reset
                         await saveJobDraft({ currentStep, saveType: "auto", skipToast: true });
+                        
+                        // Mock the agent string building after a delay
+                        setTimeout(() => {
+                           const mockedStr = `(TITLE("${sourceTitles.length ? sourceTitles[0].value : 'Role'}") OR TITLE("Alternative")) AND ("${sourceSkills.length ? sourceSkills[0].value : 'Skill'}") AND ("${sourceLocations.length ? sourceLocations[0].value : 'Location'}")`;
+                           setGeneratedBoolean(mockedStr);
+                        }, 3000);
                       }
                     }}
                   >
-                    <FileText className="w-4.5 h-4.5 text-slate-400" />
-                    <span className="text-[13px] font-bold text-slate-500 flex-1 text-left flex items-center gap-2">
+                    <FileText className="w-4.5 h-4.5 text-[#6366f1]" />
+                    <span className="text-[13px] font-bold text-slate-700 flex-1 text-left flex items-center gap-2">
                       <code className="text-[#6366f1] text-lg lg:text-base font-mono font-bold leading-none">&lt;/&gt;</code> View generated boolean string
                     </span>
                     <ChevronDown className={`w-4.5 h-4.5 text-slate-400 transition-transform duration-300 ${booleanStringOpen ? 'rotate-180' : ''}`} />
                   </button>
                   {booleanStringOpen && (
                     <div className="px-6 pb-6 pt-1 animate-in fade-in slide-in-from-top-1">
-                      <div className="p-4 bg-white border border-slate-200 rounded-xl overflow-x-auto shadow-inner">
-                        <code className="text-[13px] font-mono font-medium text-[#2563eb] whitespace-pre leading-relaxed tracking-tight">
-                          (TITLE("Accounts Payable Specialist") OR TITLE("AP Specialist")) AND ("Month-End Close" OR "Reconciliation") AND ("Atlanta" OR "Georgia")
-                        </code>
-                      </div>
+                      {generatedBoolean ? (
+                        <div className="p-4 bg-white border border-slate-200 rounded-xl overflow-x-auto shadow-inner">
+                          <div className="flex items-center justify-between mb-2">
+                            <span className="text-[11px] font-bold uppercase tracking-widest text-[#6366f1] bg-[#ede9fe] px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">
+                              PAIR Generated
+                            </span>
+                          </div>
+                          <code className="text-[13px] font-mono font-medium text-[#2563eb] whitespace-pre leading-relaxed tracking-tight break-all">
+                            {generatedBoolean}
+                          </code>
+                        </div>
+                      ) : (
+                        <div className="p-4 bg-white border border-[#e0e7ff] rounded-xl overflow-x-auto shadow-inner flex flex-col items-center justify-center py-6">
+                          <span className="w-5 h-5 border-2 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-3" />
+                          <p className="text-[13px] font-bold text-slate-700">Context Saved to Database</p>
+                          <p className="text-[12px] font-medium text-slate-500 mt-1">Waiting for PAIR to generate boolean string...</p>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -2865,60 +2991,196 @@ function NewJobPageContent() {
             </section>
           </div>
 
-          {/* Sourced Candidates Section */}
+            {/* Sourced Candidates Section */}
             <div className="border-t border-slate-200 pt-8 mt-10">
-              <div className="mb-8">
-                <h4 className="text-[13px] font-bold text-slate-800 mb-1">Sourced Candidates</h4>
-                <p className="text-slate-500 text-[13px] font-medium tracking-tight">
-                  Run a search to find candidates.
-                </p>
+              <div className="flex items-center justify-between mb-8">
+                <div>
+                  <h4 className="text-[15px] font-bold text-slate-900 mb-1">Sourced Candidates</h4>
+                  <p className="text-slate-500 text-[13px] font-medium tracking-tight">
+                    {hasSearched ? `${candidates.length} candidates found` : 'Run a search to find candidates.'}
+                  </p>
+                </div>
+                {candidates.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <Button 
+                      variant="outline" 
+                      className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50"
+                      onClick={() => {
+                        const first150 = candidates.slice(0, 150);
+                        const first150Ids = new Set(first150.map(c => c.id));
+                        
+                        // Check if all first 150 are already selected
+                        const allFirst150Selected = first150.every(c => selectedCandidates.has(c.id));
+                        
+                        if (allFirst150Selected) {
+                          // Deselect all first 150
+                          setSelectedCandidates(prev => {
+                            const next = new Set(prev);
+                            first150Ids.forEach(id => next.delete(id));
+                            return next;
+                          });
+                        } else {
+                          // Select all first 150
+                          setSelectedCandidates(prev => {
+                            const next = new Set(prev);
+                            first150Ids.forEach(id => next.add(id));
+                            return next;
+                          });
+                        }
+                      }}
+                    >
+                      <Star className="w-3.5 h-3.5 fill-slate-700" />
+                      {(() => {
+                        const first150 = candidates.slice(0, 150);
+                        const allFirst150Selected = first150.every(c => selectedCandidates.has(c.id));
+                        return allFirst150Selected ? 'Deselect Best 150' : 'Select Best 150';
+                      })()
+                      }
+                    </Button>
+                    <Button 
+                      variant="outline" 
+                      className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white"
+                      onClick={() => {
+                        const allIds = candidates.map(c => c.id);
+                        const allSelected = allIds.every(id => selectedCandidates.has(id));
+                        
+                        if (allSelected) {
+                          // Deselect all
+                          setSelectedCandidates(new Set());
+                        } else {
+                          // Select all
+                          setSelectedCandidates(new Set(allIds));
+                        }
+                      }}
+                    >
+                      {(() => {
+                        const allIds = candidates.map(c => c.id);
+                        const allSelected = allIds.every(id => selectedCandidates.has(id));
+                        return allSelected ? 'Deselect All' : 'Select All';
+                      })()
+                      }
+                    </Button>
+                  </div>
+                )}
               </div>
 
               {hasSearched ? (
                 isSearching ? (
                   <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-pulse">
-                    <div className="w-12 h-12 border-4 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-4" />
-                    <p className="text-slate-500 text-sm font-bold">Scanning databases...</p>
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="w-12 h-12 border-4 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-2" />
+                      <p className="text-slate-600 text-sm font-bold animate-pulse">{searchStatus}</p>
+                      <p className="text-slate-400 text-[12px] font-medium italic">Retrieving candidate records associated with Job ID {numericJobId || jobdivaId}...</p>
+                    </div>
                   </div>
-                ) : sourcedCandidates.length > 0 ? (
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {sourcedCandidates.map((candidate) => (
-                      <div key={candidate.id} className="border border-slate-200 rounded-2xl p-5 bg-white hover:border-[#6366f1] hover:shadow-xl hover:shadow-[#6366f1]/5 transition-all duration-300 cursor-pointer group relative overflow-hidden">
-                        <div className="absolute top-0 right-0 p-3">
-                          <div className={`w-2 h-2 rounded-full ${candidate.source === 'LinkedIn' ? 'bg-[#0A66C2]' : 'bg-slate-300'}`} />
-                        </div>
-                        <div className="flex items-start gap-4">
-                           <div className="relative">
-                            {candidate.image_url ? (
-                              <img src={candidate.image_url} className="w-14 h-14 rounded-full border-2 border-slate-100 object-cover" alt={`${candidate.firstName} ${candidate.lastName}`} />
-                            ) : (
-                              <div className="w-14 h-14 rounded-full bg-gradient-to-br from-slate-50 to-slate-100 border-2 border-slate-100 flex items-center justify-center text-slate-400 font-bold text-xl">
-                                {candidate.firstName?.[0]}{candidate.lastName?.[0]}
+                ) : candidates.length > 0 ? (
+                  <div className="space-y-4">
+                    {candidates.map((candidate, idx) => {
+                      // Select random badges to show matching elements
+                      const badgeOptions = [
+                        sourceTitles[0]?.value,
+                        sourceSkills[0]?.value ? `${sourceSkills[0]?.value} certified` : null,
+                        sourceSkills[1]?.value,
+                        sourceLocations[0]?.value ? `Local to ${sourceLocations[0].value}` : null
+                      ].filter(Boolean);
+                      
+                      return (
+                      <div key={`${candidate.id}-${idx}`} className="p-5 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-purple-200 hover:shadow-md transition-all flex items-center gap-4">
+                        <Checkbox 
+                          className="w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600"
+                          checked={selectedCandidates.has(candidate.id)}
+                          onCheckedChange={(checked) => {
+                            setSelectedCandidates(prev => {
+                              const next = new Set(prev);
+                              if (checked) next.add(candidate.id);
+                              else next.delete(candidate.id);
+                              return next;
+                            });
+                          }}
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between gap-4 mb-3">
+                            <div className="flex-1 min-w-0">
+                              <div className="text-[15px] font-bold text-slate-900 leading-tight flex items-center gap-1.5">
+                                {candidate.firstName} {candidate.lastName}
                               </div>
-                            )}
-                            <div className="absolute -bottom-1 -right-1 bg-white rounded-full p-1 shadow-sm border border-slate-100">
-                               {candidate.source === 'LinkedIn' ? <Linkedin className="w-3.5 h-3.5 text-[#0A66C2]" /> : <ShieldCheck className="w-3.5 h-3.5 text-slate-400" />}
                             </div>
-                           </div>
-                           <div className="flex-1 min-w-0">
-                             <h5 className="text-[15px] font-bold text-slate-900 group-hover:text-[#6366f1] transition-colors truncate mb-1">
-                               {candidate.firstName} {candidate.lastName}
-                             </h5>
-                             <p className="text-[12px] text-slate-500 font-medium leading-tight line-clamp-2 min-h-[32px]">{candidate.title}</p>
-                             <div className="flex items-center gap-3 mt-3">
-                               {candidate.city && (
-                                 <span className="text-[11px] text-slate-400 font-bold flex items-center gap-1">
-                                   <MapPin className="w-3.5 h-3.5" /> {candidate.city.split(',')[0]}
-                                 </span>
-                               )}
-                               <span className="text-[10px] bg-slate-50 border border-slate-100 px-2 py-0.5 rounded-md text-slate-500 font-extrabold uppercase tracking-widest ml-auto">
-                                 {candidate.source}
-                               </span>
-                             </div>
-                           </div>
+                            
+                            {/* Action Buttons - Enhanced to match Master Candidate Pool */}
+                            <div className="flex items-center justify-center gap-1.5 shrink-0">
+                              {candidate.profile_url && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  asChild
+                                  className="h-6 w-6 p-0 border-slate-200 hover:bg-slate-50 text-slate-400 hover:text-[#6366f1]"
+                                  title="View External Profile"
+                                >
+                                  <a href={candidate.profile_url} target="_blank" rel="noopener noreferrer">
+                                    <ExternalLink className="w-3 h-3" />
+                                  </a>
+                                </Button>
+                              )}
+                              <Button
+                                size="sm"
+                                className="h-6 px-2 bg-white border border-[#6366f1]/30 text-[#6366f1] hover:bg-[#6366f1]/5 font-medium text-[11px]"
+                                onClick={() => {
+                                  setSelectedCandidateForEmail({
+                                    name: `${candidate.firstName} ${candidate.lastName}`,
+                                    email: candidate.email || "Email not available",
+                                    firstName: candidate.firstName,
+                                    lastName: candidate.lastName
+                                  });
+                                  setMessageModalOpen(true);
+                                }}
+                              >
+                                <Mail className="w-3 h-3 mr-1" />
+                                Email
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-6 px-2 text-[11px] border-purple-200 text-purple-700 hover:bg-purple-50"
+                                onClick={() => {
+                                  // TODO: Implement engage functionality
+                                }}
+                              >
+                                Engage
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-6 px-2 text-[11px] opacity-50"
+                                disabled
+                                title="Assess (Coming in Next Phase)"
+                              >
+                                Assess
+                              </Button>
+                            </div>
+                          </div>
+                          
+                          <div className="flex items-center gap-2 flex-wrap mb-4">
+                            <span className="text-[13px] text-slate-500">{candidate.title || "Target Role"}</span>
+                            <span className="text-[13px] text-slate-300">•</span>
+                            <span className="text-[13px] text-slate-500">{3 + (idx % 5)} yrs exp</span>
+                            <span className="text-[13px] text-slate-300">•</span>
+                            <span className="text-[13px] text-slate-500">{candidate.city ? `${candidate.city}, ${candidate.state}` : "Location unspecified"}</span>
+                            <span className="text-[13px] text-slate-300">•</span>
+                            <span className="bg-blue-50 text-blue-700 text-[11px] font-bold px-2 py-0.5 rounded-full border border-blue-200">
+                              {candidate.source || "JobDiva"}
+                            </span>
+                          </div>
+                          
+                          <div className="flex flex-wrap gap-2">
+                            {badgeOptions.map((badge, i) => (
+                              <span key={i} className="bg-purple-50 text-purple-700 border border-purple-200 rounded-full px-2.5 py-0.5 text-[11.5px] font-semibold whitespace-nowrap">
+                                {badge}
+                              </span>
+                            ))}
+                          </div>
                         </div>
                       </div>
-                    ))}
+                    )})}
                   </div>
                 ) : (
                   <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
@@ -2938,17 +3200,71 @@ function NewJobPageContent() {
             {/* Launch Footer */}
             <div className="border-t border-slate-200 pt-6 mt-2 flex items-center justify-between">
               <span className="text-[13px] font-medium text-slate-400">
-                {hasSearched && !isSearching ? `${sourcedCandidates.length} potential candidates identified` : ''}
+                {hasSearched && !isSearching ? `${selectedCandidates.size} candidates selected` : ''}
               </span>
               <Button
-                className="h-[42px] px-5 bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98] group"
-                onClick={() => {
-                  showToast("Launching PAIR Sourcing Engine...", "success");
+                className={`h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group ${candidates.length > 0 && selectedCandidates.size > 0 ? "bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98]" : "bg-slate-300 cursor-not-allowed"}`}
+                onClick={async () => {
+                  if (selectedCandidates.size === 0) return;
+                  
+                  try {
+                    // Prepare candidates payload with proper structure
+                    const candidatesPayload = candidates.map(c => ({
+                      candidate_id: String(c.id),
+                      name: c.name,
+                      email: c.email || null,
+                      phone: c.phone || null,
+                      skills: c.skills || [],
+                      experience_years: c.yearsExtracted || c.experience_years || 0,
+                      source: c.source || "JobDiva-Applicants",
+                      headline: c.title || c.headline,
+                      location: c.location,
+                      profile_url: c.profile_url,
+                      image_url: c.image_url,
+                      resume_text: c.resume_text || c.resumeText || "",  // Support both snake_case and camelCase
+                      resume_id: c.resumeId || c.resume_id,
+                      is_selected: selectedCandidates.has(c.id)
+                    }));
+                    
+                    const selectedCount = candidatesPayload.filter(c => c.is_selected).length;
+                    console.log(`🚀 Launching PAIR with ${selectedCount} selected candidates out of ${candidatesPayload.length} total`);
+                    console.log('Payload preview:', candidatesPayload.slice(0, 2).map(c => ({
+                      name: c.name,
+                      candidate_id: c.candidate_id,
+                      is_selected: c.is_selected,
+                      has_resume: !!c.resume_text
+                    })));
+                    
+                    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+                    const response = await fetch(`${apiUrl}/candidates/save`, {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        jobdiva_id: numericJobId || jobdivaId,
+                        candidates: candidatesPayload
+                      })
+                    });
+                    
+                    const result = await response.json();
+                    console.log('Save candidates result:', result);
+                    
+                    if (response.ok && result.status === 'success') {
+                      const saved = result.saved_count || selectedCount;
+                      showToast(`Successfully saved ${saved} candidates to Master Pool! 🎉`, "success");
+                    } else {
+                      console.error('Save failed:', result);
+                      showToast(`Error saving candidates: ${result.message || 'Unknown error'}`, "error");
+                    }
+                  } catch (e) {
+                    console.error("Failed to save candidates:", e);
+                    showToast("Failed to save candidates", "error");
+                  }
+                  
                   setTimeout(() => {
-                    router.push(`/jobs/${numericJobId || jobdivaId}`);
-                  }, 1500);
+                    router.push(`/candidates`);
+                  }, 2000);
                 }}
-                disabled={!hasSearched || isSearching}
+                disabled={!hasSearched || isSearching || selectedCandidates.size === 0}
               >
                 <Rocket className="w-4 h-4 fill-white" />
                 Launch PAIR
@@ -3155,6 +3471,31 @@ function NewJobPageContent() {
           )}
           {toast.message}
         </div>
+      )}
+
+      {/* Email Modal */}
+      {selectedCandidateForEmail && (
+        <CandidateMessageModal
+          candidateName={selectedCandidateForEmail.name}
+          candidateEmail={selectedCandidateForEmail.email}
+          isOpen={messageModalOpen}
+          onClose={() => {
+            setMessageModalOpen(false);
+            setSelectedCandidateForEmail(null);
+          }}
+        />
+      )}
+
+      {selectedCandidateForResume && (
+        <ResumeModal
+          candidateName={selectedCandidateForResume.name}
+          resumeText={selectedCandidateForResume.resumeText}
+          isOpen={resumeModalOpen}
+          onClose={() => {
+            setResumeModalOpen(false);
+            setSelectedCandidateForResume(null);
+          }}
+        />
       )}
     </div>
   );

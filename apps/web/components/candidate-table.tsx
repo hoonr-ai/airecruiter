@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { decryptField } from "@/lib/crypto";
 import { useState, useEffect } from "react";
-import { MessageCircle, Mail } from "lucide-react";
+import { MessageCircle, Mail, ChevronRight, User, MapPin } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
     Dialog,
@@ -35,7 +35,6 @@ interface Candidate {
     city: string;
     state: string;
     source?: string;
-    match_score?: number;
     open_to_work?: boolean;
     profile_url?: string;
 }
@@ -312,13 +311,6 @@ function CandidateRow({
                     )}
                 </div>
             </TableCell>
-            <TableCell>
-                {candidate.match_score ? (
-                    <span className={`font-bold ${candidate.match_score > 90 ? 'text-green-600' : 'text-blue-600'}`}>
-                        {candidate.match_score}%
-                    </span>
-                ) : "-"}
-            </TableCell>
             <TableCell>{candidate.city}, {candidate.state}</TableCell>
             <TableCell className="text-right">
                 <div className="flex justify-end gap-2">
@@ -327,7 +319,7 @@ function CandidateRow({
                         variant="outline"
                         className={isMessaged ? "bg-emerald-50 text-emerald-600 border-emerald-200" :
                             candidate.source === "LinkedIn" ? "hover:bg-sky-50 hover:text-sky-600 hover:border-sky-200 shadow-sm" :
-                                "hover:bg-primary/5 hover:text-primary hover:border-primary/20 shadow-sm"}
+                                "hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-200 shadow-sm"}
                         onClick={(e) => { e.stopPropagation(); onMessageClick(); }}
                         disabled={isMessaged}
                     >
@@ -338,29 +330,32 @@ function CandidateRow({
                         )}
                         {isMessaged ? "Sent" : (candidate.source === "LinkedIn" ? "Message" : "Email")}
                     </Button>
-                    {candidate.source !== "LinkedIn" && (
-                        <>
-                            <Button
-                                size="sm"
-                                variant="outline"
-                                className={engaged ? "bg-green-50 text-green-600 border-green-200" : ""}
-                                onClick={handleEngage}
-                                disabled={engaging || engaged}
-                            >
-                                {engaging ? "..." : engaged ? "Sent" : "Engage"}
-                            </Button>
-                            <Button
-                                size="sm"
-                                variant="outline"
-                                className={assessed ? "bg-primary/5 text-primary border-primary/20" : ""}
-                                onClick={handleAssess}
-                                disabled={assessing || assessed}
-                            >
-                                {assessing ? "..." : assessed ? "Sent" : "Assess"}
-                            </Button>
-                        </>
-                    )}
-                    <Button variant="ghost" size="sm" onClick={() => onView && onView(candidate)}>View</Button>
+                    <Button
+                        size="sm"
+                        variant="outline"
+                        className={engaged ? "bg-amber-50 text-amber-600 border-amber-200" : "hover:bg-amber-50 hover:text-amber-600 hover:border-amber-200 transition-colors"}
+                        onClick={handleEngage}
+                        disabled={engaging || engaged}
+                    >
+                        {engaging ? "..." : engaged ? "Engaged" : "Engage"}
+                    </Button>
+                    <Button
+                        size="sm"
+                        variant="outline"
+                        className={assessed ? "bg-violet-50 text-violet-600 border-violet-200" : "hover:bg-violet-50 hover:text-violet-600 hover:border-violet-200 transition-colors"}
+                        onClick={handleAssess}
+                        disabled={assessing || assessed}
+                    >
+                        {assessing ? "..." : assessed ? "Assessed" : "Assess"}
+                    </Button>
+                    <Button 
+                        variant="ghost" 
+                        size="icon" 
+                        className="h-8 w-8 hover:bg-slate-100 text-slate-400 hover:text-slate-900 transition-all"
+                        onClick={() => onView && onView(candidate)}
+                    >
+                        <ChevronRight className="h-5 w-5" />
+                    </Button>
                 </div>
             </TableCell>
         </TableRow>

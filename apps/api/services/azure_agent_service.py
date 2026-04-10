@@ -85,9 +85,9 @@ class AzureAgentService:
         )
 
         logger.info("=" * 80)
-        logger.info("🚀 Step 1: Send the full AI JD text to the Azure Agent.")
+        logger.info("🚀 Step 1: Send text to the Azure Agent.")
         logger.info("-" * 40)
-        logger.info(f"📄 FULL AI JD TEXT:\n{ai_jd}")
+        logger.info(f"📄 INPUT TEXT SNIPPET:\n{ai_jd[:500]}...")
         logger.info("=" * 80)
 
         response = client.responses.create(
@@ -213,13 +213,13 @@ class AzureAgentService:
         result = []
         for key, data in grouping.items():
             result.append({
-                "value":          data["value"],
+                "value":          data.get("value", ""),
                 "minYears":       0,
                 "recent":         False,
-                "matchType":      "Similar",
+                "matchType":      "Similar", 
                 "required":       "Required",
                 "source":         "PAIR",
-                "similar_titles": list(data["similar_titles"])
+                "similar_titles": data.get("similar_titles", []) or []
             })
 
         return result
@@ -255,7 +255,7 @@ class AzureAgentService:
                 val = item.get(col)
                 if val and str(val).upper() not in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY", "NONEVALUE"]:
                     val_str = str(val)
-                    if val_str != canonical and val_str not in grouping[key]["similar_skills"]:
+                    if val_str != canonical and val_str not in grouping[key]["similar_titles"]:
                         grouping[key]["similar_skills"].append(val_str)
 
         # Convert grouping back to list
@@ -273,3 +273,32 @@ class AzureAgentService:
             })
 
         return result
+
+    def convert_to_profile_skills(self, agent_skills: List[Dict]) -> List[Dict]:
+        """
+        Maps Azure Agent response skills to standard CandidateProfile SkillProfileEntry.
+        """
+        from core.models import SkillProfileEntry
+        
+        grounded = []
+        seen = set()
+        
+        for item in agent_skills:
+            # We prioritize 'skill_mapped' as the canonical taxonomy name
+            canonical = item.get("skill_mapped") or item.get("skill_k15000") or item.get("extracted_skill")
+            
+            if not canonical or str(canonical).upper() in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY", "NONEVALUE"]:
+                continue
+                
+            key = str(canonical).lower().strip()
+            if key not in seen:
+                seen.add(key)
+                grounded.append({
+                    "skill_slug": canonical,
+                    "total_months": 0, # To be filled by matching logic or LLM later if needed
+                    "last_used": "recent",
+                    "competency_level": "grounded",
+                    "sources": ["Azure AI Agent Grounding"]
+                })
+        
+        return grounded

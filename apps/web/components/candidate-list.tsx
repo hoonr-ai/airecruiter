@@ -10,7 +10,6 @@ import { MessageSquare, ClipboardCheck, CheckCircle2, Loader2 } from "lucide-rea
 interface Candidate {
     id: string;
     name: string;
-    matchScore: number;
     skills: string[];
     missing: string[];
 }
@@ -20,10 +19,10 @@ interface CandidateListProps {
 }
 
 export function CandidateList({ candidates }: CandidateListProps) {
-    // Mock logic to categorize candidates
-    const perfectFit = candidates.filter((c) => c.matchScore >= 90);
-    const stretch = candidates.filter((c) => c.matchScore >= 70 && c.matchScore < 90);
-    const pastApplicants = candidates.filter((c) => c.matchScore < 70); // Just for demo logic
+    // Categorize candidates by skills match
+    const perfectFit = candidates.filter((c) => c.missing.length === 0);
+    const stretch = candidates.filter((c) => c.missing.length > 0 && c.missing.length <= 2);
+    const pastApplicants = candidates.filter((c) => c.missing.length > 2);
 
     const CandidateCard = ({ candidate }: { candidate: Candidate }) => {
         const [engaging, setEngaging] = useState(false);
@@ -69,10 +68,10 @@ export function CandidateList({ candidates }: CandidateListProps) {
                     <div className="flex justify-between items-start">
                         <div>
                             <CardTitle>{candidate.name}</CardTitle>
-                            <CardDescription>Match Score: {candidate.matchScore}%</CardDescription>
+                            <CardDescription>{candidate.missing.length === 0 ? 'Perfect Match' : `${candidate.missing.length} skills missing`}</CardDescription>
                         </div>
-                        <Badge variant={candidate.matchScore >= 90 ? "default" : "secondary"}>
-                            {candidate.matchScore}% Match
+                        <Badge variant={candidate.missing.length === 0 ? "default" : "secondary"}>
+                            {candidate.missing.length === 0 ? 'Perfect Fit' : candidate.missing.length <= 2 ? 'Good Match' : 'Stretch'}
                         </Badge>
                     </div>
                 </CardHeader>

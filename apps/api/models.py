@@ -7,6 +7,22 @@ class Skill(BaseModel):
     priority: str = "Must Have" # Must Have, Flexible
     years_experience: Optional[int] = None
 
+class TitleCriterion(BaseModel):
+    value: str
+    match_type: str = "must"  # must, can, exclude
+    years: int = 0
+    recent: bool = False
+
+class SkillCriterion(BaseModel):
+    value: str
+    match_type: str = "must"  # must, can, exclude
+    years: int = 0
+    recent: bool = False
+
+class LocationCriterion(BaseModel):
+    value: str
+    radius: str = "25"  # miles radius
+
 class GroundedTitle(BaseModel):
     value: str
     min_years: int = 0
@@ -34,16 +50,32 @@ class CandidateAnalysisRequest(BaseModel):
 
 class CandidateAnalysisResponse(BaseModel):
     results: List[Dict[str, Any]] # List of { candidate_id, score, reasoning }
-    name: Optional[str] = ""
-    email: Optional[str] = ""
-    skills: Optional[List[str]] = []
-    experience_years: Optional[int] = 0
+    name: str
+    email: str
+    skills: List[str]
+    experience_years: int
     resume_text: str = ""
-    count: Optional[int] = 0
 
 class ParsedJobRequest(BaseModel):
     text: str
     job_id: Optional[str] = None  # Optional job_id for saving to database
+
+class SourcedCandidate(BaseModel):
+    candidate_id: str
+    source: str = "JobDiva"  # JobDiva, LinkedIn, VettedDB, etc.
+    name: Optional[str] = None
+    headline: Optional[str] = None
+    location: Optional[str] = None
+    profile_url: Optional[str] = None
+    image_url: Optional[str] = None
+    data: Optional[Dict[str, Any]] = None  # Additional metadata
+    status: str = "sourced"  # sourced, contacted, responded, etc.
+    
+    # Enhanced JobDiva integration fields
+    jobdiva_candidate_id: Optional[str] = None
+    jobdiva_resume_id: Optional[str] = None
+    resume_text: Optional[str] = None
+    candidate_type: str = "talent_search"  # job_applicant or talent_search
 
 class CandidateProfile(BaseModel):
     id: str
@@ -73,10 +105,18 @@ class ChatResponse(BaseModel):
     response: str
     
 class CandidateSearchRequest(BaseModel):
-    skills: List[Skill]
+    job_id: Optional[str] = None
+    # Legacy fields for backward compatibility
+    skills: List[Skill] = []
     location: Optional[str] = None
+    # Enhanced filtering criteria
+    titles: List[TitleCriterion] = []
+    skill_criteria: List[SkillCriterion] = []
+    locations: List[LocationCriterion] = []
+    keywords: List[str] = []  # General keywords (UI only for now)
+    companies: List[str] = []  # Target companies (UI only for now)
     location_type: str = "Unspecified"
-    sources: List[str] = ["VettedDB", "JobDiva"]  # Filter by source: VettedDB, JobDiva, LinkedIn
+    sources: List[str] = ["VettedDB", "JobDiva", "LinkedIn"]  # Enable JobDiva and LinkedIn by default
     open_to_work: bool = False
     page: int = 1
     limit: int = 100
@@ -88,6 +128,27 @@ class CandidateMessageRequest(BaseModel):
     candidate_provider_id: str
     message: str
     source: str = "LinkedIn"
+
+class CandidateSaveRecord(BaseModel):
+    candidate_id: str
+    name: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    headline: Optional[str] = None
+    location: Optional[str] = None
+    profile_url: Optional[str] = None
+    image_url: Optional[str] = None
+    resume_id: Optional[str] = None
+    resume_text: Optional[str] = None
+    skills: List[str] = []
+    experience_years: int = 0
+    source: str = "JobDiva"
+    match_score: float = 0.0
+    is_selected: bool = False
+
+class CandidatesSaveRequest(BaseModel):
+    jobdiva_id: str
+    candidates: List[CandidateSaveRecord]
 
 # Job Criteria Models (Iterative Step 1)
 class JobCriterion(BaseModel):
@@ -238,21 +299,3 @@ class JobSkillsSummaryResponse(BaseModel):
     total_skills: int
     by_importance: Dict[str, int]  # {"required": 5, "preferred": 3}
     analysis_metadata: Dict[str, Any]
-
-class SourcedCandidate(BaseModel):
-    id: Optional[int] = None
-    job_id: str
-    candidate_id: str  # External ID from Unipile or JobDiva
-    source: str        # 'LinkedIn', 'JobDiva', etc.
-    name: Optional[str] = "Unknown"
-    headline: Optional[str] = None
-    location: Optional[str] = None
-    profile_url: Optional[str] = None
-    image_url: Optional[str] = None
-    data: Optional[Dict[str, Any]] = None  # Full candidate JSON
-    created_at: Optional[str] = None
-    status: str = "sourced"
-    
-class SaveCandidatesRequest(BaseModel):
-    job_id: str
-    candidates: List[SourcedCandidate]

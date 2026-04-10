@@ -13,6 +13,17 @@ from core import (
     JOBDIVA_PASSWORD, DATABASE_URL, DEBUG_LOG_PATH
 )
 
+# Import Azure Agent Service for skill extraction
+try:
+    from services.azure_agent_service import AzureAgentService
+    AZURE_AGENT_AVAILABLE = True
+    logger = logging.getLogger(__name__)
+    logger.info("✅ Azure Agent Service available for skill extraction")
+except ImportError:
+    AZURE_AGENT_AVAILABLE = False
+    logger = logging.getLogger(__name__)
+    logger.warning("⚠️ Azure Agent Service not available - using fallback skill extraction")
+
 # TEMPORARY DEBUG LOGGER
 def debug_log(msg):
     if not DEBUG_LOG_PATH:
@@ -195,8 +206,9 @@ def extract_posted_date_from_text(description: str) -> str:
         if match:
             return match.group(1)
     
-    return ""
-    return ""
+
+
+
 
 
 def calculate_date_duration(start_date_str: str, end_date_str: str) -> str:
@@ -391,6 +403,27 @@ def normalize_employment_type(emp_type: str) -> str:
     return emp_type
 
 class JobDivaService:
+    def _extract_customer_from_description(self, description: str) -> str:
+        """Last resort: try to extract customer name from the description text."""
+        if not description: return None
+        
+        # Look for patterns like "Client: [Name]" or "Company: [Name]" or "Customer: [Name]"
+        patterns = [
+            r"(?i)client:\s*([^\n\r<]+)",
+            r"(?i)company:\s*([^\n\r<]+)",
+            r"(?i)customer:\s*([^\n\r<]+)",
+            r"(?i)hiring company:\s*([^\n\r<]+)"
+        ]
+        
+        for p in patterns:
+            match = re.search(p, description[:1000]) # Only check first 1000 chars
+            if match:
+                name = match.group(1).strip()
+                # Basic cleanup
+                name = re.sub(r'<[^>]*>', '', name)
+                if len(name) > 2 and len(name) < 100:
+                    return name
+        return None
     def get_local_job(self, job_id: str) -> Optional[dict]:
         if not self.engine:
             return None
@@ -414,6 +447,28 @@ class JobDivaService:
         self.token_expiry = 0
         
         self.db_url = DATABASE_URL
+        
+        # Initialize Azure Agent Service for skill extraction
+        self.azure_agent = None
+        if AZURE_AGENT_AVAILABLE:
+            try:
+                # Initialize Azure agent with environment variables (using correct .env names)
+                import os
+                project_endpoint = os.getenv('AZURE_AI_PROJECT_ENDPOINT')  # Correct name from .env
+                api_key = os.getenv('AZURE_OPENAI_API_KEY')  # Correct name from .env
+                
+                if project_endpoint and api_key:
+                    self.azure_agent = AzureAgentService(
+                        project_endpoint=project_endpoint,
+                        api_key=api_key,
+                        agent_name="skill-role-extractor"
+                    )
+                    logger.info("✅ JobDiva: Azure Agent Service initialized for skill extraction")
+                else:
+                    logger.warning("⚠️ JobDiva: Azure credentials not found - using fallback skill extraction")
+            except Exception as e:
+                logger.warning(f"⚠️ JobDiva: Failed to initialize Azure Agent Service: {e}")
+                self.azure_agent = None
         
         self.engine = None
         if self.db_url:
@@ -461,75 +516,718 @@ class JobDivaService:
             logger.error(f"JobDiva Auth Exception: {repr(e)}")
             return None
 
-    async def search_candidates(self, skills: List[Any], location: str, page: int = 1, limit: int = 100) -> List[Dict[str, Any]]:
-        """Search for candidates based on skills and location."""
-        from models import Skill
+    async def search_candidates(self, skills: List[Any], location: str, page: int = 1, limit: int = 100, job_id: str = None) -> List[Dict[str, Any]]:
+        """
+        Search for candidates. 
+        - If job_id provided: Search applicants to that specific job (with optional filtering)
+        - If no job_id: Return empty list (talent pool search disabled)
+        """
         token = await self.authenticate()
         if not token: return []
 
+        # If job_id provided, search for applicants to that specific job (with filtering)
+        if job_id:
+            return await self._search_job_applicants(job_id, limit, token, skills, location)
+        
+        # Talent pool search is disabled - only show candidates who applied for jobs
+        print("ℹ️ Talent pool search disabled - please provide a job_id to search job applicants")
+        return []
+
+    async def _search_job_applicants(self, job_id: str, limit: int, token: str, skills: List[Any] = None, location: str = "") -> List[Dict[str, Any]]:
+        """
+        Search for candidates who applied to a specific job.
+        Location constraints removed - only skills filtering if needed.
+        """
+        # Always get all job applicants - location constraints removed
+        print(f"📋 Getting all job applicants for job_id={job_id} (location constraints removed)")
+        return await self._get_all_job_applicants(job_id, limit, token)
+
+    async def _get_all_job_applicants(self, job_id: str, limit: int, token: str) -> List[Dict[str, Any]]:
+        """Get all candidates who applied to a specific job using JobDiva v2 API."""
+        # Resolve numeric ID if it's a reference number
+        safe_id = job_id
+        if "-" in job_id:
+            job_info = await self.get_job_by_id(job_id)
+            if job_info:
+                safe_id = str(get_field(job_info, ["id", "jobId"]))
+
+        logger.info(f"🔍 Getting job applicants for job_id={job_id}, safe_id={safe_id}")
+        
+        # Use only the working JobApplicantsDetail endpoint
+        endpoint_url = f"{self.api_url}/apiv2/bi/JobApplicantsDetail?jobId={safe_id}"
+        
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        
         jd_results = []
-        must_haves = []
-        flexible = []
-        
-        for s in skills:
-            s_name = ""
-            s_prio = "Must Have"
-            s_years = 0
-            
-            if isinstance(s, dict):
-                s_name = s.get("name", "")
-                s_prio = s.get("priority", "Must Have")
-                s_years = s.get("years_experience", 0)
-            elif hasattr(s, "name"):
-                s_name = s.name
-                s_prio = s.priority
-                s_years = getattr(s, "years_experience", 0)
-            else:
-                s_name = str(s)
-
-            if not s_name: continue
-            
-            term = f'("{s_name.upper()}" recent over {s_years} years)' if int(s_years or 0) > 0 else f'"{s_name.upper()}"'
-            if "must" in s_prio.lower(): must_haves.append(term)
-            else: flexible.append(term)
-
-        # Limit to top 6 terms to prevent extreme search complexity and timeouts
-        must_haves = must_haves[:5]
-        flexible = flexible[:3]
-        
-        criteria_parts = []
-        if must_haves: criteria_parts.append(f"(" + " AND ".join(must_haves) + ")")
-        elif flexible: criteria_parts.append(f"(" + " OR ".join(flexible) + ")")
-        if location: criteria_parts.append(f'"{location.strip()}"')
-            
-        search_value = " AND ".join(criteria_parts) if criteria_parts else "*"
-        url = f"{self.api_url}/apiv2/jobdiva/TalentSearch"
-        headers = {"Authorization": f"Bearer {token}"}
-        payload = {"skills": [search_value], "pageNumber": page, "pageSize": limit}
         
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(url, json=payload, headers=headers)
+            logger.info(f"🔍 Trying job applicants endpoint: {endpoint_url}")
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(endpoint_url, headers=headers)
+                
+                logger.info(f"Job applicants API response: {response.status_code}")
+                
                 if response.status_code == 200:
                     data = response.json()
-                    candidates = data if isinstance(data, list) else data.get("candidates", [])
-                    for c in candidates:
+                    logger.info(f"Raw applicants data type: {type(data)}, keys: {list(data.keys()) if isinstance(data, dict) else 'Not dict'}")
+                    
+                    # Handle JobApplicantsDetail response format: {'message': '', 'data': [candidates]}
+                    applicants = []
+                    if isinstance(data, dict) and "data" in data:
+                        applicants = data["data"] or []
+                    elif isinstance(data, list):
+                        applicants = data
+                    elif isinstance(data, dict):
+                        # Fallback: try other possible keys
+                        applicants = (data.get("applicants") or 
+                                    data.get("candidates") or 
+                                    data.get("results") or [])
+                    
+                    logger.info(f"🔍 Extracted {len(applicants)} applicants from JobApplicantsDetail")
+                    
+                    for c in applicants:
+                        # Use correct field names from JobApplicantsDetail response
+                        first_name = get_field(c, ["FIRSTNAME", "firstName", "firstname"]) or "Unknown"
+                        last_name = get_field(c, ["LASTNAME", "lastName", "lastname"]) or "Candidate"
+                        full_name = f"{first_name} {last_name}".strip()
+                        
+                        # Extract candidate ID using correct field name
+                        candidate_id = get_field(c, ["CANDIDATEID", "candidateId", "id", "ID", "canId"]) or "Unknown"
+                        
+                        # Simple default score 
+                        match_score = self._calculate_match_score(c, [])
+                        
+                        # Extract candidate skills
+                        candidate_skills = self._extract_candidate_skills(c)
+                        
                         jd_results.append({
-                            "id": str(get_field(c, ["id", "candidateId"])),
-                            "firstName": get_field(c, ["firstName"]) or "Unknown",
-                            "lastName": get_field(c, ["lastName"]) or "Candidate",
-                            "email": get_field(c, ["email"]) or "",
-                            "city": get_field(c, ["city"]) or "",
-                            "state": get_field(c, ["state"]) or "",
-                            "title": get_field(c, ["title"]) or "",
-                            "source": "JobDiva",
-                            "match_score": 0
+                            "candidate_id": str(candidate_id),  # Add this field for consistency
+                            "id": str(candidate_id),
+                            "name": full_name,
+                            "first_name": first_name,  # Use underscore format
+                            "last_name": last_name,    # Use underscore format
+                            "firstName": first_name,
+                            "lastName": last_name,
+                            "email": get_field(c, ["EMAIL", "email", "emailAddress"]) or "",
+                            "city": get_field(c, ["CITY", "city", "locationCity", "workCity"]) or "",
+                            "state": get_field(c, ["STATE", "state", "locationState", "workState"]) or "",
+                            "title": get_field(c, ["TITLE", "title", "candidateTitle", "jobTitle"]) or "",
+                            "source": "JobDiva Applicants",
+                            "match_score": match_score,
+                            "skills": candidate_skills,
+                            "experience_years": self._extract_experience_years(c),
+                            "resume_text": self._extract_resume_text(c),
+                            "phone": get_field(c, ["PHONE", "phone", "phoneNumber", "mobilePhone"]) or ""
                         })
+                    
+                    if jd_results:
+                        logger.info(f"✅ Successfully got {len(jd_results)} applicants from {endpoint_url}")
+                else:
+                    logger.warning(f"❌ Endpoint failed with status: {response.status_code}, response: {response.text[:200]}")
+                    
         except Exception as e:
-            logger.error(f"Candidate Search Error: {e}")
-
+            logger.error(f"❌ Exception with endpoint {endpoint_url}: {e}")
+        
         return jd_results
 
+    # TALENT POOL SEARCH DISABLED - Only candidates who applied for jobs will be shown
+    # async def _search_talent_pool(self, skills: List[Any], location: str, limit: int, token: str) -> List[Dict[str, Any]]:
+    #     """Search the general talent pool based on skills and location using proper JobDiva API."""
+    #     jd_results = []
+    #     
+    #     # Build search criteria with proper category grouping
+    #     title_terms = []
+    #     skill_terms = []
+    #     system_terms = []
+    #     
+    #     for s in skills:
+    #         s_name = s.get("value") or s.get("name", "") if isinstance(s, dict) else str(s)
+    #         s_match_type = s.get("match_type", "must") if isinstance(s, dict) else "must"
+    #         s_years = s.get("years", 0) if isinstance(s, dict) else 0
+    #         
+    #         if not s_name:
+    #             continue
+    #             
+    #         s_name_upper = s_name.upper()
+    #         
+    #         # Categorize into titles, skills, and systems
+    #         if any(word in s_name_upper for word in ["ENGINEER", "DEVELOPER", "ANALYST", "MANAGER", "ARCHITECT", "SPECIALIST", "CONSULTANT", "COORDINATOR", "LEAD", "SUPERVISOR"]):
+    #             if s_match_type == "must":
+    #                 title_terms.append(f'"{s_name}"')
+    #             else:
+    #                 title_terms.append(f'"{s_name}"')
+    #         elif any(word in s_name_upper for word in ["SAP", "ORACLE", "NETSUITE", "WORKDAY", "MICROSOFT DYNAMICS", "SALESFORCE", "ERP", "SYSTEM"]):
+    #             system_terms.append(f'"{s_name}"')
+    #         else:
+    #             if s_match_type == "must":
+    #                 if s_years > 0:
+    #                     skill_terms.append(f'("{s_name}" recent over {s_years} years)')
+    #                 else:
+    #                     skill_terms.append(f'"{s_name}"')
+    #             else:
+    #                 skill_terms.append(f'"{s_name}"')
+    #     
+    #     # Build search with AND logic between categories
+    #     search_parts = []
+    #     
+    #     # Add title group (candidates need ONE of these titles)
+    #     if title_terms:
+    #         if len(title_terms) == 1:
+    #             search_parts.append(title_terms[0])
+    #         else:
+    #             search_parts.append(f"({' OR '.join(title_terms)})")
+    #     
+    #     # Add skill group (candidates need ONE of these skills)
+    #     if skill_terms:
+    #         if len(skill_terms) == 1:
+    #             search_parts.append(skill_terms[0])
+    #         else:
+    #             search_parts.append(f"({' OR '.join(skill_terms)})")
+    #             
+    #     # Add system group (candidates need ONE of these systems)
+    #     if system_terms:
+    #         if len(system_terms) == 1:
+    #             search_parts.append(system_terms[0])
+    #         else:
+    #             search_parts.append(f"({' OR '.join(system_terms)})")
+    #     
+    #     # Add location
+    #     if location and location.strip():
+    #         search_parts.append(f'"{location.strip()}"')
+    #     
+    #     # Combine with AND
+    #     search_value = " AND ".join(search_parts) if search_parts else "*"
+    #     
+    #     # Use JobDiva TalentSearch API
+    #     url = f"{self.api_url}/apiv2/jobdiva/TalentSearch"
+    #     headers = {"Authorization": f"Bearer {token}"}
+    #     payload = {
+    #         "searchValue": search_value,
+    #         "maxReturned": limit,
+    #         "startFrom": 0
+    #     }
+    #     
+    #     logger.info(f"🔍 JobDiva Talent Search: {search_value}")
+    #     
+    #     try:
+    #         async with httpx.AsyncClient(timeout=30.0) as client:
+    #             response = await client.post(url, json=payload, headers=headers)
+    #             if response.status_code == 200:
+    #                 data = response.json()
+    #                 candidates = data if isinstance(data, list) else (data.get("candidates") or data.get("results") or [])
+    #                 
+    #                 for c in candidates:
+    #                     first_name = get_field(c, ["firstName", "firstname", "FIRSTNAME"]) or "Unknown"
+    #                     last_name = get_field(c, ["lastName", "lastname", "LASTNAME"]) or "Candidate"
+    #                     full_name = f"{first_name} {last_name}".strip()
+    #                     
+    #                     # Simple default score for talent search
+    #                     match_score = 75
+    #                     
+    #                     # Extract skills from candidate data
+    #                     candidate_skills = self._extract_candidate_skills(c)
+    #                     
+    #                     # Get comprehensive resume data
+    #                     resume_text = self._extract_resume_text(c)
+    #                     
+    #                     jd_results.append({
+    #                         "id": str(get_field(c, ["candidateId", "id", "ID"])),
+    #                         "name": full_name,
+    #                         "firstName": first_name,
+    #                         "lastName": last_name, 
+    #                         "email": get_field(c, ["email", "EMAIL"]) or "",
+    #                         "city": get_field(c, ["city", "locationCity", "CITY"]) or "",
+    #                         "state": get_field(c, ["state", "locationState", "STATE"]) or "",
+    #                         "title": get_field(c, ["title", "candidateTitle", "TITLE"]) or "",
+    #                         "source": "JobDiva Talent Search",
+    #                         "match_score": match_score,
+    #                         "skills": candidate_skills,
+    #                         "experience_years": self._extract_experience_years(c),
+    #                         "resume_text": resume_text,
+    #                         "phone": get_field(c, ["phone", "phoneNumber", "PHONE"]) or ""
+    #                     })
+    #                 
+    #                 logger.info(f"✅ JobDiva Talent Search returned {len(jd_results)} candidates")
+    #             else:
+    #                 logger.warning(f"JobDiva Talent Search failed: {response.status_code}")
+    #     except Exception as e:
+    #         logger.error(f"Talent Search Error: {e}")
+    #
+    #     return jd_results
+
+    def _calculate_match_score(self, candidate: Dict[str, Any], required_skills: List[Any] = None) -> int:
+        """Calculate a real match score based on candidate skills vs job requirements."""
+        if not required_skills:
+            # Base score for candidates without specific requirements
+            base_score = 65
+            
+            # Boost based on available data quality
+            title = get_field(candidate, ["title", "candidateTitle", "TITLE"]) or ""
+            email = get_field(candidate, ["email", "EMAIL"]) or ""
+            
+            # Title quality scoring
+            if any(word in title.lower() for word in ["senior", "lead", "principal", "architect"]):
+                base_score += 10
+            elif any(word in title.lower() for word in ["junior", "entry", "intern"]):
+                base_score -= 5
+                
+            # Contact completeness
+            if email and "@" in email:
+                base_score += 5
+                
+            return min(base_score, 85)  # Cap at 85% without specific matching
+        
+        # Calculate actual skill matching
+        candidate_skills = self._extract_candidate_skills(candidate)
+        candidate_title = get_field(candidate, ["title", "candidateTitle", "TITLE"]) or ""
+        
+        if not candidate_skills and not candidate_title:
+            return 60  # Minimum score for candidates with no skill data
+            
+        matched_skills = 0
+        total_required = len(required_skills)
+        
+        if total_required == 0:
+            return 70  # Default when no requirements specified
+            
+        # Enhanced skill matches with Azure Agent extracted skills
+        logger.info(f"🎯 Matching {len(candidate_skills)} candidate skills against {total_required} requirements")
+        
+        for req_skill in required_skills:
+            skill_name = req_skill.get("value", "").lower() if isinstance(req_skill, dict) else str(req_skill).lower()
+            
+            # Check against candidate skills with improved matching
+            skill_match = False
+            for candidate_skill in candidate_skills:
+                candidate_skill_lower = candidate_skill.lower()
+                
+                # Exact match
+                if skill_name == candidate_skill_lower:
+                    skill_match = True
+                    break
+                    
+                # Partial match (either direction)
+                elif (skill_name in candidate_skill_lower or 
+                      candidate_skill_lower in skill_name):
+                    skill_match = True
+                    break
+                    
+                # Technology family matching (e.g., "react" matches "reactjs")
+                elif self._are_similar_skills(skill_name, candidate_skill_lower):
+                    skill_match = True
+                    break
+                    
+            # Check against candidate title if no skill match
+            if not skill_match and skill_name in candidate_title.lower():
+                skill_match = True
+                
+            if skill_match:
+                matched_skills += 1
+                
+        # Calculate base percentage 
+        match_percentage = (matched_skills / total_required) * 100 if total_required > 0 else 70
+        
+        # Apply experience and seniority bonuses
+        exp_years = self._extract_experience_years(candidate)
+        if exp_years >= 10:
+            match_percentage += 15  # Senior bonus
+        elif exp_years >= 5:
+            match_percentage += 10  # Mid-level bonus
+        elif exp_years >= 2:
+            match_percentage += 5   # Junior+ bonus
+            
+        # Skill depth bonus (more skills = better match potential)
+        if len(candidate_skills) >= 8:
+            match_percentage += 5
+        elif len(candidate_skills) >= 5:
+            match_percentage += 3
+            
+        final_score = max(45, min(95, int(match_percentage)))
+        logger.info(f"📊 Final match score: {matched_skills}/{total_required} skills = {final_score}%")
+        
+        # Ensure reasonable bounds
+        return final_score
+    
+    def _extract_candidate_skills(self, candidate: Dict[str, Any]) -> List[str]:
+        """Extract skills from candidate data using Azure Agent Service if available."""
+        skills = []
+        used_azure = False
+        
+        # First try Azure Agent for accurate skill extraction
+        if self.azure_agent:
+            try:
+                # Get comprehensive resume text
+                resume_text = self._extract_resume_text(candidate)
+                if resume_text and len(resume_text) > 50:  # Only process substantial resumes
+                    
+                    logger.debug(f"🤖 Extracting skills using Azure Agent for candidate")
+                    
+                    # Use Azure agent to extract skills from resume
+                    import asyncio
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # Create a new event loop for synchronous call
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(self._extract_skills_with_azure_sync, resume_text)
+                            azure_result = future.result(timeout=10)  # 10 second timeout
+                    else:
+                        azure_result = asyncio.run(self.azure_agent.extract_roles_and_skills(resume_text))
+                    
+                    if azure_result and 'job_skills' in azure_result:
+                        azure_skills = azure_result['job_skills']
+                        for skill_data in azure_skills:
+                            if isinstance(skill_data, dict):
+                                # Use standardized skill name from taxonomy
+                                skill_name = (skill_data.get('skill_mapped') or 
+                                            skill_data.get('skill_k1500') or 
+                                            skill_data.get('skill_k500') or 
+                                            skill_data.get('value', ''))
+                                if skill_name:
+                                    skills.append(skill_name)
+                            elif isinstance(skill_data, str):
+                                skills.append(skill_data)
+                    
+                    if skills:
+                        logger.info(f"✅ Azure Agent extracted {len(skills)} skills: {skills[:5]}...")
+                        return list(set(skills))[:8]  # Remove duplicates and limit
+                        
+            except Exception as e:
+                logger.warning(f"⚠️ Azure Agent skill extraction failed: {e}, falling back to manual extraction")
+        
+        # Fallback: original skill extraction logic (no need to log every time)
+        
+        # Look for skills in various fields
+        skill_fields = ["skills", "skillList", "technologies", "expertise", "summary"]
+        for field in skill_fields:
+            skill_data = get_field(candidate, [field])
+            if skill_data:
+                if isinstance(skill_data, str):
+                    # Parse comma-separated or space-separated skills
+                    potential_skills = [s.strip() for s in skill_data.replace(",", " ").split() if len(s.strip()) > 2]
+                    skills.extend(potential_skills[:10])  # Limit to 10
+                elif isinstance(skill_data, list):
+                    skills.extend([str(s) for s in skill_data[:10]])
+        
+        # If no skills found from resume, try to infer basic skills from title and other fields
+        if not skills:
+            title = get_field(candidate, ["title", "candidateTitle", "TITLE"]) or ""
+            title_lower = title.lower()
+            
+            # Generate basic skills based on common job titles - conservative approach
+            if "java" in title_lower and "developer" in title_lower:
+                skills = ["Java", "Software Development"]
+            elif "python" in title_lower:
+                skills = ["Python", "Software Development"]  
+            elif "react" in title_lower or "frontend" in title_lower:
+                skills = ["JavaScript", "Frontend Development"]
+            elif "data analyst" in title_lower or "data science" in title_lower:
+                skills = ["Data Analysis", "SQL"]
+            elif "qa" in title_lower or "test" in title_lower:
+                skills = ["Testing", "Quality Assurance"]
+            elif any(word in title_lower for word in ["accountant", "accounting", "payable", "receivable"]):
+                skills = ["Accounting", "Financial Analysis"]
+            else:
+                # Very basic skills for unknown roles
+                skills = ["Communication", "Problem Solving"]
+        
+        # Remove duplicates and limit - return empty list if no meaningful skills found  
+        final_skills = list(set(skills))[:8]
+        if len(final_skills) == 2 and set(final_skills) == {"Communication", "Problem Solving"}:
+            return []  # Don't return generic skills - better to show empty
+        
+        return final_skills
+    
+    def _extract_skills_with_azure_sync(self, resume_text: str) -> Dict[str, Any]:
+        """Synchronous wrapper for Azure agent skill extraction."""
+        import asyncio
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(self.azure_agent.extract_roles_and_skills(resume_text))
+        finally:
+            loop.close()
+    
+    def _are_similar_skills(self, skill1: str, skill2: str) -> bool:
+        """Check if two skills are similar (e.g., react vs reactjs, python vs python3)."""
+        # Remove common suffixes/prefixes
+        normalize = lambda s: re.sub(r'(\.js|js|\.py|py|\d+|[^\w])', '', s.lower())
+        
+        norm1, norm2 = normalize(skill1), normalize(skill2)
+        
+        # Check if normalized versions match
+        if norm1 == norm2:
+            return True
+            
+        # Check common technology aliases
+        aliases = {
+            'javascript': ['js', 'ecmascript'],
+            'typescript': ['ts'],
+            'python': ['py'],
+            'react': ['reactjs'],
+            'vue': ['vuejs'],
+            'node': ['nodejs'],
+            'sql': ['mysql', 'postgresql', 'postgres'],
+            'aws': ['amazon web services'],
+            'gcp': ['google cloud'],
+            'azure': ['microsoft azure']
+        }
+        
+        for base, alias_list in aliases.items():
+            if ((norm1 == base and norm2 in alias_list) or 
+                (norm2 == base and norm1 in alias_list)):
+                return True
+                
+        return False
+
+    def _extract_experience_years(self, candidate: Dict[str, Any]) -> int:
+        """Extract years of experience from candidate data."""
+        # Look for experience fields
+        exp_fields = ["experience", "yearsExperience", "totalExperience", "workExperience", "experienceYears"]
+        for field in exp_fields:
+            exp_data = get_field(candidate, [field])
+            if exp_data and isinstance(exp_data, (int, float)) and exp_data > 0:
+                return int(exp_data)
+        
+        # Try to extract from text fields
+        title = get_field(candidate, ["title", "candidateTitle", "TITLE"]) or ""
+        resume_text = get_field(candidate, ["resume", "resumeText", "summary"]) or ""
+        
+        # Look for patterns like "5+ years", "10 years experience", etc.
+        import re
+        text_to_search = f"{title} {resume_text}".lower()
+        
+        # Pattern matching for experience
+        patterns = [
+            r'(\d+)\+?\s*years?\s*(?:of\s*)?(?:experience|exp)',
+            r'(\d+)\+?\s*yrs?\s*(?:of\s*)?(?:experience|exp)',
+            r'over\s*(\d+)\s*years?',
+            r'more\s*than\s*(\d+)\s*years?'
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, text_to_search)
+            if matches:
+                try:
+                    years = int(matches[0])
+                    if 0 <= years <= 50:  # Reasonable bounds
+                        return years
+                except ValueError:
+                    continue
+        
+        # Infer from title seniority (more conservative estimates)
+        title_lower = title.lower()
+        if "senior" in title_lower or "sr" in title_lower:
+            return 7  # Senior typically means 5-10 years
+        elif "lead" in title_lower or "principal" in title_lower:
+            return 10  # Lead/Principal typically means 8-15 years
+        elif "architect" in title_lower or "manager" in title_lower:
+            return 12  # Architect/Manager typically means 10+ years
+        elif "junior" in title_lower or "jr" in title_lower:
+            return 2   # Junior typically means 1-3 years
+        elif "entry" in title_lower or "intern" in title_lower:
+            return 1   # Entry level
+        else:
+            return 4   # Default mid-level experience
+
+    def _extract_resume_text(self, candidate: Dict[str, Any]) -> str:
+        """Extract resume/summary text from candidate data. Returns empty string if no resume found."""
+        # Look for resume text in various fields
+        resume_fields = ["resume", "resumeText", "summary", "profile", "description", "bio", "overview"]
+        
+        for field in resume_fields:
+            resume_data = get_field(candidate, [field])
+            if resume_data and isinstance(resume_data, str) and len(resume_data.strip()) > 20:
+                # Clean HTML tags and return formatted text
+                clean_text = re.sub(r'<[^>]+>', '', resume_data)
+                clean_text = re.sub(r'\s+', ' ', clean_text)  # Normalize whitespace
+                return clean_text.strip()
+        
+        # Return empty string if no resume found - no fallback generation
+        return ""
+
+    async def get_candidate_details(self, candidate_id: str) -> Optional[Dict[str, Any]]:
+        """Get detailed candidate information using /apiv2/bi/CandidatesDetail endpoint."""
+        token = await self.authenticate()
+        if not token:
+            print(f"❌ JobDiva authentication failed for candidate {candidate_id}")
+            return None
+        
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        
+        endpoint = f"{self.api_url}/apiv2/bi/CandidatesDetail"
+        params = {"candidateIds": [candidate_id]}  # Use candidateIds as array
+        
+        try:
+            print(f"🔍 Fetching candidate details from: {endpoint} with candidateIds=[{candidate_id}]")
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(endpoint, params=params, headers=headers)
+                
+                print(f"📡 Candidate Details API Response: {response.status_code}")
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    print(f"✅ Candidate details received for {candidate_id}")
+                    
+                    # Extract candidate data
+                    if isinstance(data, dict) and "data" in data:
+                        candidates = data["data"]
+                        if candidates and len(candidates) > 0:
+                            return candidates[0] if isinstance(candidates, list) else candidates
+                    
+        except Exception as e:
+            print(f"⚠️ Error fetching candidate details: {e}")
+        
+        return None
+    
+    async def get_candidate_resumes(self, candidate_id: str) -> Optional[List[Dict[str, Any]]]:
+        """Get all resumes for a candidate using /apiv2/bi/CandidatesResumesDetail endpoint."""
+        token = await self.authenticate()
+        if not token:
+            print(f"❌ JobDiva authentication failed for candidate {candidate_id}")
+            return None
+        
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        
+        endpoint = f"{self.api_url}/apiv2/bi/CandidatesResumesDetail"
+        params = {"candidateIds": [candidate_id]}  # Use candidateIds as array
+        
+        try:
+            print(f"🔍 Fetching candidate resumes from: {endpoint} with candidateIds=[{candidate_id}]")
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(endpoint, params=params, headers=headers)
+                
+                print(f"📡 Candidate Resumes API Response: {response.status_code}")
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    print(f"✅ Candidate resumes received for {candidate_id}")
+                    
+                    # Extract resume data
+                    if isinstance(data, dict) and "data" in data:
+                        resumes = data["data"]
+                        if resumes:
+                            print(f"📄 Found {len(resumes) if isinstance(resumes, list) else 1} resume(s)")
+                            return resumes if isinstance(resumes, list) else [resumes]
+                    
+        except Exception as e:
+            print(f"⚠️ Error fetching candidate resumes: {e}")
+        
+        return None
+
+    async def get_candidate_resume(self, candidate_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch full candidate resume/details by ID using JobDiva API v2 endpoints."""
+        print(f"🔍 Getting resume for candidate {candidate_id}")
+        
+        token = await self.authenticate()
+        if not token:
+            print(f"❌ JobDiva authentication failed for candidate {candidate_id}")
+            return None
+        
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        
+        # Try the working resume fetching logic with cascading fallback
+        resume_text = ""
+        candidate_info = {}
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # Step 1: Try to get candidate details
+                details_url = f"{self.api_url}/apiv2/bi/CandidatesDetail"
+                details_resp = await client.get(details_url, params={"candidateIds": [candidate_id]}, headers=headers)
+                
+                if details_resp.status_code == 200:
+                    details_data = details_resp.json()
+                    if isinstance(details_data, dict) and "data" in details_data:
+                        candidates = details_data["data"]
+                        if candidates and len(candidates) > 0:
+                            candidate_info = candidates[0] if isinstance(candidates, list) else candidates
+                            print(f"✅ Got candidate details for {candidate_id}")
+                
+                # Step 2: Try to get resume using the working method
+                res_url = f"{self.api_url}/apiv2/bi/CandidatesResumesDetail"
+                resp = await client.get(res_url, params={"candidateIds": [candidate_id]}, headers=headers)
+                
+                if resp.status_code == 200:
+                    recs = resp.json()
+                    if isinstance(recs, dict): 
+                        recs = recs.get("data", [])
+                    if recs:
+                        rid = recs[0].get("RESUMEID")
+                        if rid:
+                            # Step 3: Get the actual resume text
+                            det_url = f"{self.api_url}/apiv2/bi/ResumeDetail"
+                            det_resp = await client.get(det_url, params={"resumeId": rid}, headers=headers)
+                            if det_resp.status_code == 200:
+                                data = det_resp.json()
+                                if isinstance(data, dict): 
+                                    data = data.get("data", [{}])
+                                    if data and len(data) > 0:
+                                        data = data[0]
+                                resume_text = get_field(data, ["PLAINTEXT", "text", "resumeText", "content"]) or ""
+                                if resume_text:
+                                    resume_text = unescape(resume_text)
+                                    print(f"✅ Resume text found: {len(resume_text)} characters")
+                                
+        except Exception as e:
+            print(f"⚠️ Error fetching candidate resume: {e}")
+        
+        # If we didn't get candidate info, create basic info from candidate_id
+        if not candidate_info:
+            candidate_info = {
+                "candidateId": candidate_id,
+                "firstName": "Unknown",
+                "lastName": "Candidate"
+            }
+        
+        # Add resume text to candidate info
+        candidate_info["resume_text"] = resume_text or "Resume content unavailable"
+        candidate_info["resume_count"] = 1 if resume_text else 0
+        
+        return self._format_candidate_resume(candidate_info)
+    
+    def _format_candidate_resume(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
+        """Format candidate data for resume display."""
+        # Extract basic info using multiple possible field names
+        candidate_id = get_field(candidate, ["candidateId", "id", "ID", "CANDIDATEID"]) or ""
+        first_name = get_field(candidate, ["firstName", "FIRSTNAME", "firstname"]) or ""
+        last_name = get_field(candidate, ["lastName", "LASTNAME", "lastname"]) or ""
+        full_name = f"{first_name} {last_name}".strip()
+        
+        # Extract resume text - could be in different fields
+        resume_text = get_field(candidate, ["resume_text", "resumeText", "RESUMETEXT", "text", "content"]) or ""
+        
+        # If no resume text found, try to extract from resume data structure
+        if not resume_text:
+            resume_text = self._extract_resume_text(candidate)
+        
+        return {
+            "id": str(candidate_id),
+            "name": full_name or "Professional Candidate",
+            "email": get_field(candidate, ["email", "EMAIL", "emailAddress"]) or "Available upon request",
+            "phone": get_field(candidate, ["phone", "PHONE", "phoneNumber", "mobilePhone"]) or "Available upon request", 
+            "title": get_field(candidate, ["title", "TITLE", "currentTitle", "jobTitle"]) or "",
+            "location": get_field(candidate, ["location", "city", "CITY", "workCity"]) or "",
+            "text": resume_text,  # Main resume text field
+            "resume_text": resume_text,  # Backup field name
+            "skills": self._extract_candidate_skills(candidate),
+            "experience": get_field(candidate, ["experience", "EXPERIENCE", "experienceYears"]) or "",
+            "education": get_field(candidate, ["education", "EDUCATION"]) or "",
+            "resume_count": candidate.get("resume_count", 1),
+            "source": "JobDiva"
+        }
+    
     async def get_job_by_id(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a specific job by ID from JobDiva, including AI UDFs."""
         logger.info(f"Fetching Job ID: {job_id}")
@@ -538,9 +1236,21 @@ class JobDivaService:
 
         url = f"{self.api_url}/apiv2/jobdiva/SearchJob"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        
+        # NEW: Prefer Reference Number search even if numeric ID was provided
+        # (JobDiva SearchJob API is more reliable with ref numbers than legacy numeric IDs)
         is_ref = "-" in job_id
+        search_id = job_id
+        
+        if not is_ref:
+            local_job = self.get_locally_monitored_job(job_id)
+            if local_job and local_job.get("jobdiva_id"):
+                search_id = local_job.get("jobdiva_id")
+                is_ref = True
+                logger.info(f"🔄 ID-Resolution: Using Reference {search_id} instead of numeric ID {job_id} for better reliability")
+
         if is_ref:
-            payload = {"jobdivaref": job_id, "maxReturned": 1}
+            payload = {"jobdivaref": search_id, "maxReturned": 1}
         else:
             safe_id = "".join(filter(str.isdigit, job_id))
             if not safe_id: return None
@@ -551,13 +1261,15 @@ class JobDivaService:
                 response = await client.post(url, json=payload, headers=headers)
                 if response.status_code != 200: return None
                 data = response.json()
+                # DEBUG: Log the full response to find the customer name field
+                print(f"DEBUG: JobDiva Raw Data for {job_id}: {json.dumps(data, indent=2)}")
                 jobs = data if isinstance(data, list) else data.get("data", [])
                 if not jobs: return None
                 j = jobs[0]
             
                 # Strict Matching: JobDiva sometimes returns arbitrary jobs for invalid inputs like '1'
                 j_id = str(get_field(j, ["id", "jobId"]) or "")
-                j_ref = str(get_field(j, ["reference #", "jobdivaref", "ref"]) or "")
+                j_ref = str(get_field(j, ["reference #", "jobdivaref", "ref", "jobdivano"]) or "")
                 
                 if is_ref:
                     if job_id.lower() != j_ref.lower():
@@ -565,8 +1277,16 @@ class JobDivaService:
                         return None
                 else:
                     if safe_id != j_id:
-                        logger.warning(f"Bogus JobDiva response: requested ID {safe_id}, got ID {j_id}")
-                        return None
+                        # NEW: Relaxed ID matching for Aliases (ID 31920032 vs 9165998)
+                        # Check local DB for expected reference first
+                        local_job = self.get_locally_monitored_job(job_id)
+                        expected_ref = local_job.get("jobdiva_id")
+                        
+                        if expected_ref and str(expected_ref).lower() == j_ref.lower():
+                            logger.info(f"✅ Aliased ID Accepted: requested ID {safe_id}, got ID {j_id} (Ref {j_ref} matches local DB)")
+                        else:
+                            logger.warning(f"Bogus JobDiva response: requested ID {safe_id}, got ID {j_id}. Ref '{j_ref}' did not match expected '{expected_ref}'")
+                            return None
                         
                 # ----------------------------------------------------
                 # CRITICAL: JobDiva v2 SearchJob endpoint randomly drops fields like MAXALLOWEDSUBMITTALS
@@ -585,13 +1305,21 @@ class JobDivaService:
                             if max_sub:
                                 j["maxAllowedSubmittals"] = max_sub
                             
-                            # Add robust BI Customer/Company name extraction
-                            for ckey in ["CUSTOMERNAME", "COMPANYNAME", "CUSTOMER", "COMPANY", "CLIENTNAME"]:
+                            # Add rock-solid BI Customer/Company name extraction
+                            # We search for every possible variation found across different JobDiva setups
+                            bi_keys = [
+                                "CUSTOMERNAME", "COMPANYNAME", "CUSTOMER", "COMPANY", 
+                                "CLIENTNAME", "CLIENT_NAME", "CLIENT", "NAME", "COMPANY_FULL_NAME"
+                            ]
+                            for ckey in bi_keys:
                                 if d.get(ckey):
                                     j["customer_bi"] = d.get(ckey)
+                                    logger.info(f"Found customer '{j['customer_bi']}' in BI field '{ckey}'")
                                     break
 
-                            # Add robust BI Date Extraction
+                            # Add robust BI Date and Status Extraction
+                            if d.get("JOBSTATUS"):
+                                j["JOBSTATUS_BI"] = d.get("JOBSTATUS")
                             if d.get("DATEISSUED"):
                                 j["DATEISSUED_BI"] = d.get("DATEISSUED")
                             if d.get("STARTDATE"):
@@ -611,8 +1339,23 @@ class JobDivaService:
                     if "salary range" in k_low or "pay range" in k_low or "pay rate" in k_low: salary_range_udf = v
                     if "issued date" in k_low or "posted date" in k_low or "date issued" in k_low or k_low == "issued" or k_low == "posted": issued_date_udf = v
 
-                customer_name = str(j.get("customer_bi") or get_field(j, ["customer", "company", "client", "customerName", "companyName", "clientName"]) or "").title() or "Unknown Customer"
+                # Resolution Priority:
+                # 1. BI Metadata (Most reliable)
+                # 2. Standard API fields (company, customer, etc.)
+                # 3. Regex parsing of description (Last resort)
+                # 4. Local DB Restore (handled below)
+                
+                raw_customer = j.get("customer_bi") or get_field(j, ["customer", "company", "client", "customerName", "companyName", "clientName", "client_name"])
+                
                 description = format_job_description(get_field(j, ["job description", "description"]) or "")
+                
+                if not raw_customer or raw_customer.lower() in ["unknown", "unknown customer", ""]:
+                    # Try parsing the first 500 characters of the description for common patterns
+                    raw_customer = self._extract_customer_from_description(description)
+                    if raw_customer:
+                        logger.info(f"Extracted customer '{raw_customer}' from description text")
+
+                customer_name = str(raw_customer or "").title() or "Unknown Customer"
 
                 # ONLY restore full-length UDFs from local DB if JobDiva version looks truncated
                 # and is NOT empty (which would mean it was cleared in JobDiva)
@@ -629,11 +1372,11 @@ class JobDivaService:
                         job_notes = local_notes
                         logger.info(f"Restored full recruiter_notes from local DB for {job_id}")
                     
-                    # NEW: Restore customer_name from local DB if currently Unknown
+                    # NEW: Restore customer_name from local DB if currently Unknown or Empty
                     local_customer = local_data.get("customer_name")
-                    if local_customer and local_customer != "Unknown" and ("Unknown" in customer_name or not customer_name):
+                    if local_customer and str(local_customer).lower() != "unknown" and (not customer_name or str(customer_name).lower() == "unknown" or customer_name == "Unknown Customer"):
                         customer_name = local_customer
-                        logger.info(f"Restored customer_name '{customer_name}' from local DB for {job_id}")
+                        logger.info(f"🔄 Self-Healed: Restored customer_name '{customer_name}' from local DB for {job_id}")
 
                 # Advanced pay_rate logic: try to combine min and max if available for a range
                 p_min = get_field(j, ["minpayrate", "min_pay_rate", "minimum_pay", "payRateMin", "minimum rate"])
@@ -701,8 +1444,8 @@ class JobDivaService:
                     "ai_description": ai_description if ai_description is not None else "",
                     "recruiter_notes": job_notes if job_notes is not None else "",
                     "customer_name": customer_name,
-                    "job_status": get_field(j, ["job status", "status"]) or "OPEN",
-                    "status": get_field(j, ["job status", "status"]) or "OPEN", # Database standard
+                    "job_status": j.get("JOBSTATUS_BI") or get_field(j, ["job status", "status"]) or "OPEN",
+                    "status": j.get("JOBSTATUS_BI") or get_field(j, ["job status", "status"]) or "OPEN", # Database standard
                     "city": _clean_location_field(get_field(j, ["city", "jobCity", "locationCity", "worksitecity"])),
                     "state": _clean_location_field(get_field(j, ["state", "jobState", "locationState", "worksitestate", "province"])),
                     "zip_code": _clean_location_field(get_field(j, ["zip", "postalCode", "zipcode", "postalcode", "worksitezip", "worksitepostalcode"])),
@@ -740,7 +1483,8 @@ class JobDivaService:
             logger.error(f"SearchJob Error: {e}")
             return None
 
-    async def get_candidate_resume(self, candidate_id: str) -> Optional[str]:
+    # DISABLED: Duplicate method that was overriding the correct one
+    # async def get_candidate_resume(self, candidate_id: str) -> Optional[str]:
         """Fetches resume text with cascading fallback."""
         token = await self.authenticate()
         if not token: return None
@@ -765,6 +1509,289 @@ class JobDivaService:
         except Exception as e:
             logger.error(f"Resume Fetch Error: {e}")
         return "Resume content unavailable."
+
+    async def get_enhanced_job_candidates(self, job_id: str) -> List[Dict[str, Any]]:
+        """
+        Enhanced candidate retrieval combining three JobDiva API endpoints:
+        1. JobApplicantsDetail - Get job applicants
+        2. CandidateDetail - Get candidate info  
+        3. ResumeDetail - Get full resume text
+        """
+        token = await self.authenticate()
+        if not token: 
+            return []
+
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        enhanced_candidates = []
+
+        try:
+            # Step 1: Get Job Applicants using JobApplicantsDetail
+            applicants_url = f"{self.api_url}/apiv2/bi/JobApplicantsDetail"
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                print(f"🔍 Fetching job applicants for job_id: {job_id}")
+                
+                applicants_response = await client.get(
+                    applicants_url, 
+                    params={"jobId": job_id}, 
+                    headers=headers
+                )
+                
+                if applicants_response.status_code != 200:
+                    print(f"❌ JobApplicantsDetail failed: {applicants_response.status_code}")
+                    return enhanced_candidates
+                
+                applicants_data = applicants_response.json()
+                applicants = applicants_data.get("data", []) if isinstance(applicants_data, dict) else applicants_data
+                
+                print(f"📋 Found {len(applicants)} job applicants")
+                
+                # Step 2 & 3: For each applicant, get detailed info and resume
+                for applicant in applicants:
+                    try:
+                        candidate_id = applicant.get("CANDIDATEID") or applicant.get("candidateId")
+                        if not candidate_id:
+                            continue
+                            
+                        # Get candidate details
+                        candidate_detail = await self._get_candidate_detail(candidate_id, client, headers)
+                        resume_text = await self._get_resume_detail(candidate_id, client, headers)
+                        
+                        # Combine all data
+                        enhanced_candidate = self._format_enhanced_candidate(
+                            applicant, candidate_detail, resume_text, "job_applicant"
+                        )
+                        
+                        enhanced_candidates.append(enhanced_candidate)
+                        
+                    except Exception as e:
+                        print(f"⚠️ Error processing applicant {candidate_id}: {e}")
+                        continue
+
+        except Exception as e:
+            print(f"❌ Error in get_enhanced_job_candidates: {e}")
+        
+        return enhanced_candidates
+
+    async def _get_candidate_detail(self, candidate_id: str, client: httpx.AsyncClient, headers: dict) -> Dict[str, Any]:
+        """Get detailed candidate information using CandidatesDetail endpoint with full details."""
+        try:
+            # Use CandidatesDetail (plural) endpoint as requested - this includes more comprehensive data
+            candidate_url = f"{self.api_url}/apiv2/bi/CandidatesDetail"
+            response = await client.get(
+                candidate_url,
+                params={
+                    "candidateId": candidate_id,
+                    "includeResume": "true",
+                    "includeSkills": "true",
+                    "includePersonalInfo": "true"
+                },
+                headers=headers
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"✅ CandidatesDetail retrieved for {candidate_id}")
+                return data.get("data", [{}])[0] if isinstance(data, dict) else data[0] if data else {}
+            else:
+                print(f"⚠️ CandidatesDetail failed for {candidate_id}: {response.status_code}")
+        except Exception as e:
+            print(f"⚠️ Error fetching candidate detail for {candidate_id}: {e}")
+        
+        return {}
+
+    async def _get_resume_detail(self, candidate_id: str, client: httpx.AsyncClient, headers: dict) -> str:
+        """Get full resume text using CandidateResumesDetail → ResumesTextDetail endpoint flow."""
+        try:
+            print(f"📄 Fetching resume for candidate ID: {candidate_id}")
+            
+            # Step 1: Get all resume IDs for this candidate using CandidateResumesDetail
+            resume_list_url = f"{self.api_url}/apiv2/bi/CandidateResumesDetail"
+            resume_list_response = await client.get(
+                resume_list_url,
+                params={"candidateId": candidate_id},
+                headers=headers
+            )
+            
+            if resume_list_response.status_code != 200:
+                print(f"⚠️ CandidateResumesDetail failed: {resume_list_response.status_code}")
+                return ""
+                
+            resume_data = resume_list_response.json()
+            resumes = resume_data.get("data", []) if isinstance(resume_data, dict) else resume_data
+            
+            if not resumes:
+                print(f"⚠️ No resumes found for candidate {candidate_id}")
+                return ""
+                
+            print(f"📋 Found {len(resumes)} resume(s) for candidate {candidate_id}")
+            
+            # Step 2: Get resume text using ResumesTextDetail (plural) endpoint
+            # Try the most recent resume first
+            for i, resume in enumerate(resumes):
+                resume_id = resume.get("RESUMEID") or resume.get("resumeId") or resume.get("ID")
+                if not resume_id:
+                    continue
+                    
+                try:
+                    print(f"📖 Fetching resume text for resume ID: {resume_id}")
+                    
+                    # Use ResumesTextDetail endpoint (note: plural "Resumes")
+                    resume_text_url = f"{self.api_url}/apiv2/bi/ResumesTextDetail"
+                    resume_response = await client.get(
+                        resume_text_url,
+                        params={"resumeIds": resume_id},  # Note: resumeIds (plural)
+                        headers=headers
+                    )
+                    
+                    if resume_response.status_code == 200:
+                        resume_detail = resume_response.json()
+                        
+                        # Handle different response structures
+                        if isinstance(resume_detail, dict):
+                            resume_content = resume_detail.get("data", [{}])
+                            if isinstance(resume_content, list) and resume_content:
+                                resume_content = resume_content[0]
+                            elif not isinstance(resume_content, dict):
+                                resume_content = resume_detail
+                        else:
+                            resume_content = resume_detail[0] if resume_detail else {}
+                        
+                        # Extract text from various possible fields
+                        resume_text = (resume_content.get("PLAINTEXT") or 
+                                     resume_content.get("plainText") or
+                                     resume_content.get("text") or 
+                                     resume_content.get("TEXT") or 
+                                     resume_content.get("resumeText") or "")
+                        
+                        if resume_text and resume_text.strip():
+                            print(f"✅ Successfully fetched resume text ({len(resume_text)} chars)")
+                            return unescape(resume_text.strip())
+                        else:
+                            print(f"⚠️ Resume text empty for resume ID {resume_id}")
+                            
+                    else:
+                        print(f"⚠️ ResumesTextDetail failed for resume {resume_id}: {resume_response.status_code}")
+                        
+                except Exception as e:
+                    print(f"⚠️ Error fetching resume text for resume {resume_id}: {e}")
+                    continue
+                    
+        except Exception as e:
+            print(f"❌ Error in _get_resume_detail for candidate {candidate_id}: {e}")
+        
+        return ""
+
+    def _format_enhanced_candidate(self, applicant: Dict[str, Any], candidate_detail: Dict[str, Any], 
+                                 resume_text: str, candidate_type: str) -> Dict[str, Any]:
+        """Format enhanced candidate data for storage."""
+        
+        # Extract candidate ID and resume ID
+        candidate_id = applicant.get("CANDIDATEID") or candidate_detail.get("CANDIDATEID") or ""
+        resume_id = applicant.get("RESUMEID") or candidate_detail.get("RESUMEID") or ""
+        
+        # Extract basic info with fallbacks
+        first_name = (get_field(applicant, ["FIRSTNAME", "firstName"]) or 
+                     get_field(candidate_detail, ["FIRSTNAME", "firstName"]) or "")
+        last_name = (get_field(applicant, ["LASTNAME", "lastName"]) or 
+                    get_field(candidate_detail, ["LASTNAME", "lastName"]) or "")
+        
+        return {
+            "jobdiva_id": applicant.get("JOBID") or candidate_detail.get("JOBID") or "",
+            "candidate_id": candidate_id,
+            "source": "JobDiva-Applicants" if candidate_type == "job_applicant" else "JobDiva-TalentSearch",
+            "name": f"{first_name} {last_name}".strip(),
+            "email": get_field(candidate_detail, ["EMAIL", "email"]) or get_field(applicant, ["EMAIL", "email"]),
+            "phone": get_field(candidate_detail, ["PHONE", "phone"]) or get_field(applicant, ["PHONE", "phone"]),
+            "headline": (get_field(candidate_detail, ["TITLE", "title", "currentTitle"]) or 
+                        get_field(applicant, ["TITLE", "title"]) or ""),
+            "location": self._extract_location(candidate_detail) or self._extract_location(applicant),
+            "profile_url": get_field(candidate_detail, ["PROFILEURL", "profileUrl"]) or "",
+            "image_url": get_field(candidate_detail, ["IMAGEURL", "imageUrl"]) or "",
+            "resume_id": resume_id,
+            "resume_text": resume_text,
+            "data": {
+                "applicant_data": applicant,
+                "candidate_detail": candidate_detail,
+                "skills": self._extract_skills(candidate_detail) or self._extract_skills(applicant),
+                "experience": get_field(candidate_detail, ["EXPERIENCE", "experience"]) or "",
+            },
+            "status": "sourced"
+        }
+
+    async def update_candidate_resume_text(self, candidate_id: str) -> bool:
+        """Update resume text for an existing candidate using new CandidateResumesDetail → ResumesTextDetail flow."""
+        try:
+            print(f"🔄 Updating resume text for candidate: {candidate_id}")
+            token = await self.authenticate()
+            if not token:
+                return False
+                
+            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resume_text = await self._get_resume_detail(candidate_id, client, headers)
+                
+                if resume_text and resume_text.strip():
+                    # Update database
+                    import psycopg2
+                    from core.config import DATABASE_URL
+                    
+                    with psycopg2.connect(DATABASE_URL) as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                UPDATE sourced_candidates 
+                                SET resume_text = %s, resume_id = %s, updated_at = CURRENT_TIMESTAMP 
+                                WHERE candidate_id = %s
+                            """, (resume_text, resume_id, candidate_id))
+                            
+                            updated_rows = cur.rowcount
+                            conn.commit()
+                            
+                            print(f"✅ Updated resume text for {updated_rows} candidate records ({len(resume_text)} chars)")
+                            return updated_rows > 0
+                else:
+                    print(f"⚠️ No resume text found for candidate {candidate_id}")
+                    return False
+                    
+        except Exception as e:
+            print(f"❌ Error updating resume for candidate {candidate_id}: {e}")
+            return False
+
+    def _extract_location(self, data: Dict[str, Any]) -> str:
+        """Extract formatted location from candidate data."""
+        city = get_field(data, ["CITY", "city"]) or ""
+        state = get_field(data, ["STATE", "state"]) or ""
+        country = get_field(data, ["COUNTRY", "country"]) or ""
+        
+        location_parts = [city, state, country]
+        return ", ".join([part for part in location_parts if part])
+
+    def _extract_skills(self, data: Dict[str, Any]) -> List[str]:
+        """Extract skills list from candidate data."""
+        skills = get_field(data, ["SKILLS", "skills", "skillsList"]) or []
+        if isinstance(skills, str):
+            return [skill.strip() for skill in skills.split(",") if skill.strip()]
+        elif isinstance(skills, list):
+            return [str(skill) for skill in skills]
+        return []
+
+    async def save_enhanced_candidates_to_db(self, job_id: str, candidates: List[Dict[str, Any]]) -> int:
+        """Save enhanced candidates to database with deduplication."""
+        from services.sourced_candidates_storage import SourcedCandidatesStorage
+        
+        storage = SourcedCandidatesStorage()
+        saved_count = 0
+        
+        for candidate in candidates:
+            if storage.save_enhanced_candidate(job_id, candidate):
+                saved_count += 1
+        
+        # Deduplicate after saving (prioritize job applicants over talent search)
+        dedup_count = storage.deduplicate_candidates(job_id)
+        print(f"💾 Saved {saved_count} enhanced candidates, deduplicated {dedup_count}")
+        
+        return saved_count
 
     async def get_job_status(self, job_id: str) -> Dict[str, Any]:
         """Efficient job status check."""
@@ -910,6 +1937,11 @@ class JobDivaService:
                             # For cleared-UDF fields, allow empty strings through
                             if v == "" and k not in allow_empty_fields:
                                 continue
+                                
+                            # Special Protection: Never overwrite a real customer_name with "Unknown"
+                            if k == "customer_name" and (str(v or "").lower() == "unknown" or not v):
+                                # Skip this key to preserve the existing valid name in DB
+                                continue
                             # Store [null] marker for new fields that have no JobDiva value
                             if v == "" and k in {"priority", "program_duration", "max_allowed_submittals"}:
                                 v = "[null]"
@@ -1004,10 +2036,7 @@ class JobDivaService:
                     debug_log(f"Inserting new job {job_id} with {len(columns)} fields")
                     conn.execute(text(query), params)
 
-                try:
-                    conn.commit()
-                except AttributeError:
-                    pass
+                conn.commit()
                 debug_log(f"Successfully saved job {job_id} to monitored_jobs")
                 return True
                 
@@ -1023,8 +2052,11 @@ class JobDivaService:
              return {}
         try:
             with self.engine.connect() as conn:
-                # Get job data from monitored_jobs (now includes all configuration data)
-                res = conn.execute(text("SELECT * FROM monitored_jobs WHERE job_id = :job_id"), {"job_id": job_id})
+                # Get job data from monitored_jobs - Search BOTH Numeric ID and Hyphenated ID
+                res = conn.execute(
+                    text("SELECT * FROM monitored_jobs WHERE job_id = :job_id OR jobdiva_id = :job_id"), 
+                    {"job_id": job_id}
+                )
                 row = res.fetchone()
                 if row:
                     job_data = dict(row._mapping)
@@ -1111,10 +2143,7 @@ class JobDivaService:
                 logger.info(f"Parameters: {params}")
                 
                 result = conn.execute(text(query), params)
-                try:
-                    conn.commit()
-                except AttributeError:
-                    pass
+                conn.commit()
                 
                 # Check if any rows were updated
                 if result.rowcount > 0:
@@ -1199,5 +2228,124 @@ class JobDivaService:
         except Exception as e:
             logger.error(f"Error auto-extracting work authorization for job {job_id}: {e}")
             return ""
+    
+    async def search_job_candidates_enhanced(
+        self, 
+        job_id: str,
+        title_criteria: List = None,
+        skill_criteria: List = None, 
+        location_criteria: List = None,
+        legacy_skills: List = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Enhanced job applicant search with separate title, skill, and location criteria.
+        Applies intelligent filtering to job applicants based on multiple criteria types.
+        """
+        print(f"🎯 Enhanced job applicant search for job {job_id}")
+        
+        try:
+            # Build search criteria from enhanced format
+            search_skills = []
+            search_location = ""
+            
+            # Convert title criteria to searchable skills format
+            if title_criteria:
+                for title in title_criteria:
+                    search_skills.append({
+                        "value": title.value,
+                        "priority": "Must Have" if title.match_type == "must" else "Flexible", 
+                        "years_experience": title.years
+                    })
+                    
+            # Convert skill criteria to searchable format
+            if skill_criteria:
+                for skill in skill_criteria:
+                    search_skills.append({
+                        "value": skill.value,
+                        "priority": "Must Have" if skill.match_type == "must" else "Flexible",
+                        "years_experience": skill.years
+                    })
+            
+            # Use location criteria for location filtering
+            if location_criteria:
+                search_location = location_criteria[0].value
+                
+            # Fallback to legacy format if enhanced criteria not provided
+            if not search_skills and legacy_skills:
+                search_skills = legacy_skills
+                
+            print(f"📋 Search criteria - Skills: {len(search_skills)}, Location: '{search_location}'")
+            
+            # Use existing search_candidates method with job_id to get applicants
+            return await self.search_candidates(
+                skills=search_skills,
+                location=search_location,
+                job_id=job_id  # This triggers job applicant search with filtering
+            )
+            
+        except Exception as e:
+            logger.error(f"Enhanced job applicant search failed for {job_id}: {e}")
+            return []
+    
+    async def search_talent_pool_enhanced(
+        self,
+        title_criteria: List = None,
+        skill_criteria: List = None,
+        location_criteria: List = None, 
+        legacy_skills: List = None,
+        page: int = 1,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """
+        Enhanced talent pool search with separate title, skill, and location criteria.
+        Searches broader talent database with intelligent multi-criteria filtering.
+        """
+        print(f"🌐 Enhanced talent pool search - Page {page}, Limit {limit}")
+        
+        try:
+            # Build search criteria from enhanced format
+            search_skills = []
+            search_location = ""
+            
+            # Convert title criteria to searchable skills format
+            if title_criteria:
+                for title in title_criteria:
+                    search_skills.append({
+                        "value": title.value,
+                        "priority": "Must Have" if title.match_type == "must" else "Flexible",
+                        "years_experience": title.years
+                    })
+                    
+            # Convert skill criteria to searchable format  
+            if skill_criteria:
+                for skill in skill_criteria:
+                    search_skills.append({
+                        "value": skill.value,
+                        "priority": "Must Have" if skill.match_type == "must" else "Flexible",
+                        "years_experience": skill.years
+                    })
+            
+            # Use location criteria for location filtering
+            if location_criteria:
+                search_location = location_criteria[0].value
+                
+            # Fallback to legacy format if enhanced criteria not provided
+            if not search_skills and legacy_skills:
+                search_skills = legacy_skills
+                
+            print(f"📋 Talent search criteria - Skills: {len(search_skills)}, Location: '{search_location}'")
+            
+            # Use existing search_candidates method without job_id for talent pool
+            return await self.search_candidates(
+                skills=search_skills,
+                location=search_location,
+                page=page,
+                limit=limit,
+                job_id=None  # None triggers talent pool search
+            )
+            
+        except Exception as e:
+            logger.error(f"Enhanced talent pool search failed: {e}")
+            return []
 
 jobdiva_service = JobDivaService()

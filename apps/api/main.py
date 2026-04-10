@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Body
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, Query
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
 import asyncio
@@ -38,11 +38,11 @@ logger = logging.getLogger(__name__)
 from services.ai_service import ai_service
 from models import (
     JobDescription, MatchResult, ParsedJobRequest, ParsedJobResponse,
-    ChatRequest, ChatResponse, CandidateSearchRequest, CandidateMessageRequest, JobFetchRequest,
+    ChatRequest, ChatResponse, CandidateSearchRequest, CandidateMessageRequest, CandidatesSaveRequest, JobFetchRequest,
     CandidateAnalysisRequest, CandidateAnalysisResponse, JobCriterion, JobCriteriaResponse,
     JobCriteriaUpdate, JobDraftData, JobDraftRequirement, JobDraftRequirements, 
     JobDraftResponse, JobPublishRequest, JobBasicInfoUpdate, SkillsExtractionRequest, SkillsExtractionResponse,
-    JobSkillsSummaryResponse, SourcedCandidate, SaveCandidatesRequest
+    JobSkillsSummaryResponse
 )
 from services.criteria import criteria_service
 from matcher import mock_match_candidates
@@ -52,7 +52,6 @@ from services.unipile import unipile_service
 from services.chat_service import chat_service
 from services.monitored_jobs_storage import MonitoredJobsStorage
 from services.job_rubric_db import JobRubricDB
-from services.sourced_candidates_storage import sourced_candidates_storage
 
 # Legacy file-based tracking replaced by monitored_jobs SQL table
 
@@ -96,13 +95,14 @@ async def lifespan(app: FastAPI):
     logger.info("📋 Stopping scheduler...")
     scheduler.shutdown()
     
-from routers import engagement, ai_generation, voice_agent, boolean_agent
+from routers import engagement, ai_generation, voice_agent, boolean_agent, candidate_processing
 
 app = FastAPI(title="Hoonr.ai API", lifespan=lifespan)
 app.include_router(ai_generation.router, prefix="/api/v1/ai-generation")
 app.include_router(ai_generation.router, prefix="/api/v1/gemini")
 app.include_router(voice_agent.router, prefix="/api/v1/voice")
 app.include_router(boolean_agent.router, prefix="/api/v1/boolean")
+app.include_router(candidate_processing.router, prefix="/api/v1/candidates")
 
 app.add_middleware(
     CORSMiddleware,
@@ -152,90 +152,218 @@ async def parse_job_description(request: ParsedJobRequest):
 @app.post("/candidates/search")
 async def search_jobdiva_candidates(request: CandidateSearchRequest):
     """
-    Searches JobDiva, Vetted Database, AND LinkedIn (via Unipile) for candidates.
+    Enhanced multi-criteria candidate search with separate title, skill, and location filtering.
+    
+    TIER 1: JobDiva Job Applicants filtered by titles, skills, and locations
+    TIER 2: TalentSearch Pool filtered by same criteria
+    
+    Supports both legacy format (combined skills array) and enhanced format (separate criteria).
     """
-    # Determine effective location based on location_type
-    effective_location = None if request.location_type.lower() == "remote" else request.location
+    print(f"🔍 Enhanced multi-criteria search for job_id: {request.job_id}")
     
-    print(f"🔥 DEBUG: SEARCH REQUEST: {request.model_dump_json()}")
-    print(f"🔥 DEBUG: SEARCH: location_type={request.location_type}, effective_location={effective_location}, sources={request.sources}, open_to_work={request.open_to_work}")
+    if not request.job_id:
+        return {"candidates": [], "message": "jobdiva_id required for candidate search"}
     
-    # 1. Define Helper Wrapper
-    async def safe_search(coro, name):
+    try:
+        combined_results = []
+        applicant_count = 0
+        talent_pool_count = 0
+        
+        # Parse filtering criteria - support both legacy and enhanced formats
+        title_filters = []
+        skill_filters = []
+        location_filters = []
+        
+        # Enhanced format: separate title, skill, location criteria
+        if request.titles:
+            title_filters = [t for t in request.titles if t.match_type != 'exclude']
+        if request.skill_criteria:
+            skill_filters = [s for s in request.skill_criteria if s.match_type != 'exclude']  
+        if request.locations:
+            location_filters = [l for l in request.locations]
+            
+        # Legacy format: extract from skills array (for backward compatibility)
+        legacy_skills = []
+        if request.skills:
+            for skill in request.skills:
+                legacy_skills.append({
+                    "value": skill.value,
+                    "priority": skill.priority,
+                    "years_experience": skill.years_experience or 0
+                })
+        
+        # Use location from either enhanced or legacy format
+        primary_location = ""
+        if location_filters:
+            primary_location = location_filters[0].value
+        elif request.location:
+            primary_location = request.location
+            
+        print(f"📋 Search criteria - Titles: {len(title_filters)}, Skills: {len(skill_filters)}, Locations: {len(location_filters)}")
+        
+        # TIER 1: JobDiva Job Applicants with enhanced filtering
+        print("🎯 TIER 1: Searching job applicants with enhanced resume fetching...")
         try:
-            print(f"🔍 Starting {name} search...")
-            result = await asyncio.wait_for(coro, timeout=30.0)
-            print(f"✅ {name} returned {len(result)} results")
-            return result
-        except asyncio.TimeoutError:
-            print(f"⚠️ {name} Search Timed Out (>30s). Skipping.")
-            return []
+            # For job applicant search, use enhanced method to get full resume text
+            if not title_filters and not skill_filters and not legacy_skills:
+                # Simple applicant search - use enhanced method for complete data
+                print("📝 Using enhanced job applicants method (no complex filters)")
+                applicants = await jobdiva_service.get_enhanced_job_candidates(request.job_id)
+                
+                # Filter by location if provided
+                if location_filters or primary_location:
+                    filtered_applicants = []
+                    search_location = location_filters[0].value if location_filters else primary_location
+                    for candidate in applicants:
+                        candidate_location = candidate.get("location", "").lower()
+                        if search_location.lower() in candidate_location or candidate_location in search_location.lower():
+                            filtered_applicants.append(candidate)
+                    applicants = filtered_applicants
+                    
+            else:
+                # Complex criteria search - use existing enhanced filtering
+                applicants = await jobdiva_service.search_job_candidates_enhanced(
+                    job_id=request.job_id,
+                    title_criteria=title_filters,
+                    skill_criteria=skill_filters, 
+                    location_criteria=location_filters,
+                    legacy_skills=legacy_skills  # Fallback to legacy format
+                )
+                
+            applicant_count = len(applicants)
+            print(f"✅ Found {applicant_count} job applicants matching criteria")
+            
+            # Mark applicants as priority source
+            for candidate in applicants:
+                candidate["source"] = "JobDiva-Applicants"
+                candidate["priority"] = True
+            combined_results.extend(applicants)
+            
         except Exception as e:
-            print(f"❌ {name} Search Failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
-
-    # 2. Prepare Tasks
-    tasks = []
-    
-    # Task A: JobDiva
-    if "JobDiva" in request.sources:
-        tasks.append(safe_search(
-            jobdiva_service.search_candidates(request.skills, effective_location, request.page, request.limit), 
-            "JobDiva"
-        ))
-    else:
-        tasks.append(asyncio.sleep(0, result=[]))
-
-    # Task B: Vetted DB
-    if "VettedDB" in request.sources:
-        skill_names = []
-        for s in request.skills:
-             if isinstance(s, dict): skill_names.append(s.get("name"))
-             elif hasattr(s, "name"): skill_names.append(s.name)
-             else: skill_names.append(str(s))
+            print(f"⚠️ Job applicants search failed: {e}")
+            # Fallback to legacy search if enhanced search fails
+            try:
+                applicants = await jobdiva_service.search_candidates(
+                    skills=request.skills or legacy_skills,
+                    location=primary_location,
+                    job_id=request.job_id
+                )
+                applicant_count = len(applicants)
+                for candidate in applicants:
+                    candidate["source"] = "JobDiva-Applicants"
+                    candidate["priority"] = True
+                combined_results.extend(applicants)
+                print(f"✅ Fallback search found {applicant_count} applicants")
+            except Exception as fallback_e:
+                print(f"❌ Fallback search also failed: {fallback_e}")
+                applicant_count = 0
         
-        from services.vetted import vetted_service
-        tasks.append(safe_search(
-            vetted_service.search_candidates(skill_names, effective_location, request.page, request.limit),
-            "VettedDB"
-        ))
-    else:
-        tasks.append(asyncio.sleep(0, result=[]))
-
-    # Task C: LinkedIn (Unipile)
-    if "LinkedIn" in request.sources:
-        tasks.append(safe_search(
-            unipile_service.search_candidates(
-                request.skills, 
-                effective_location, 
-                request.open_to_work, 
-                25 if request.limit > 25 else request.limit # Cap at 25 as requested
-            ),
-            "LinkedIn"
-        ))
-    else:
-        tasks.append(asyncio.sleep(0, result=[]))
-
-    # 3. Execute in Parallel
-    results = await asyncio.gather(*tasks)
-    
-    jd_results = results[0] if isinstance(results[0], list) else []
-    vet_results = results[1] if isinstance(results[1], list) else []
-    li_results = results[2] if isinstance(results[2], list) else []
-    
-    print(f"✅ SEARCH COMPLETE: JobDiva={len(jd_results)}, Vetted={len(vet_results)}, LinkedIn={len(li_results)}")
-    
-    # 4. Combine
-    if request.page == 1:
-        # Prioritize Vetted, then LinkedIn, then JobDiva? Or Mix?
-        # User implies LinkedIn is "extra".
-        combined = vet_results + li_results + jd_results
-    else:
-        combined = jd_results # Pagination logic weak, assume others fit in page 1
+        # TIER 2: TalentSearch Pool with enhanced filtering
+        # Only search if we need more candidates and have search criteria
+        if (title_filters or skill_filters or legacy_skills) and (applicant_count < request.limit):
+            print("🌐 TIER 2: Searching talent pool with multi-criteria filters...")
+            try:
+                remaining_limit = max(0, request.limit - applicant_count)
+                
+                talent_pool = await jobdiva_service.search_talent_pool_enhanced(
+                    title_criteria=title_filters,
+                    skill_criteria=skill_filters,
+                    location_criteria=location_filters,
+                    legacy_skills=legacy_skills,
+                    page=request.page,
+                    limit=remaining_limit if remaining_limit > 0 else request.limit
+                )
+                talent_pool_count = len(talent_pool)
+                print(f"✅ Found {talent_pool_count} additional candidates from talent pool")
+                
+                # Mark talent pool as secondary source  
+                for candidate in talent_pool:
+                    candidate["source"] = "JobDiva-TalentSearch"
+                    candidate["priority"] = False
+                combined_results.extend(talent_pool)
+                
+            except Exception as e:
+                print(f"⚠️ Enhanced talent pool search failed: {e}")
+                # Fallback to legacy talent search
+                try:
+                    talent_pool = await jobdiva_service.search_candidates(
+                        skills=request.skills or legacy_skills,
+                        location=primary_location,
+                        page=request.page,
+                        limit=remaining_limit if remaining_limit > 0 else request.limit,
+                        job_id=None
+                    )
+                    talent_pool_count = len(talent_pool)
+                    for candidate in talent_pool:
+                        candidate["source"] = "JobDiva-TalentSearch"
+                        candidate["priority"] = False
+                    combined_results.extend(talent_pool)
+                    print(f"✅ Fallback talent search found {talent_pool_count} candidates")
+                except Exception as fallback_e:
+                    print(f"❌ Fallback talent search also failed: {fallback_e}")
+                    talent_pool_count = 0
         
-    return combined
+        # Summary
+        total_found = len(combined_results)
+        criteria_summary = []
+        if title_filters: criteria_summary.append(f"{len(title_filters)} title criteria")
+        if skill_filters: criteria_summary.append(f"{len(skill_filters)} skill criteria")  
+        if location_filters: criteria_summary.append(f"{len(location_filters)} location criteria")
+        
+        message = f"Found {total_found} candidates"
+        if criteria_summary:
+            message += f" matching {', '.join(criteria_summary)}"
+        if applicant_count > 0 and talent_pool_count > 0:
+            message += f" ({applicant_count} job applicants + {talent_pool_count} from talent pool)"
+        elif applicant_count > 0:
+            message += f" ({applicant_count} job applicants)"
+        elif talent_pool_count > 0:
+            message += f" ({talent_pool_count} from talent pool)"
+        
+        # Deduplicate candidates by email or name+location
+        print("🔄 Deduplicating candidates...")
+        seen_candidates = {}
+        deduplicated_results = []
+        
+        for candidate in combined_results:
+            # Create unique key based on email (preferred) or name+location
+            email_key = candidate.get("email", "").lower().strip()
+            name_location_key = f"{candidate.get('firstName', '').lower()}_{candidate.get('lastName', '').lower()}_{candidate.get('location', '').lower()}"
+            
+            # Use email as primary key, fallback to name+location
+            unique_key = email_key if email_key else name_location_key
+            
+            if unique_key and unique_key not in seen_candidates:
+                # First time seeing this candidate
+                seen_candidates[unique_key] = candidate
+                deduplicated_results.append(candidate)
+            elif unique_key in seen_candidates:
+                # Duplicate found - prefer JobDiva-Applicants over TalentSearch
+                existing = seen_candidates[unique_key]
+                current_source = candidate.get("source", "")
+                existing_source = existing.get("source", "")
+                
+                if current_source == "JobDiva-Applicants" and existing_source != "JobDiva-Applicants":
+                    # Replace with job applicant version (higher priority)
+                    seen_candidates[unique_key] = candidate
+                    # Replace in results list
+                    for i, result in enumerate(deduplicated_results):
+                        if result == existing:
+                            deduplicated_results[i] = candidate
+                            break
+        
+        dedup_count = len(combined_results) - len(deduplicated_results)
+        if dedup_count > 0:
+            print(f"🔄 Removed {dedup_count} duplicate candidates")
+            message += f" (removed {dedup_count} duplicates)"
+        
+        print(f"🎯 SEARCH COMPLETE: {message}")
+        
+        return {"candidates": deduplicated_results, "message": message}
+        
+    except Exception as e:
+        print(f"❌ Enhanced candidate search failed: {e}")
+        return {"candidates": [], "message": f"Search failed: {str(e)}"}
 
 @app.post("/candidates/message")
 async def message_candidate(request: CandidateMessageRequest):
@@ -259,6 +387,263 @@ async def message_candidate(request: CandidateMessageRequest):
         
     else:
         raise HTTPException(status_code=400, detail=f"Messaging not supported for source: {request.source}")
+
+@app.get("/jobs/{jobdiva_id}/candidates")
+async def get_job_candidates(jobdiva_id: str):
+    """
+    Fetches all sourced candidates tied to a specific job.
+    """
+    try:
+        from core.config import DATABASE_URL
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        
+        # Convert job_id to jobdiva_id
+        jobdiva_id = None
+        with psycopg2.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s", (job_id,))
+                result = cur.fetchone()
+                if result:
+                    jobdiva_id = result[0]
+        
+        if not jobdiva_id:
+            return {"candidates": [], "message": f"No JobDiva ID found for job {jobdiva_id}"}
+        
+        with psycopg2.connect(DATABASE_URL) as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT id, jobdiva_id, candidate_id, name, email, skills, 
+                           experience_years, source, match_score, is_selected, created_at
+                    FROM sourced_candidates
+                    WHERE jobdiva_id = %s
+                    ORDER BY created_at DESC;
+                """, (jobdiva_id,))
+                candidates = cur.fetchall()
+                
+        return {"status": "success", "candidates": candidates}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/candidates/save")
+async def save_candidates(request: CandidatesSaveRequest):
+    """
+    Saves a batch of candidates to the sourced_candidates table.
+    """
+    try:
+        print(f"🔄 Saving {len(request.candidates)} candidates for job: {request.jobdiva_id}")
+        
+        # Filter only selected candidates for saving
+        selected_candidates = [c for c in request.candidates if c.is_selected]
+        print(f"📝 Saving {len(selected_candidates)} selected candidates out of {len(request.candidates)} total")
+        
+        for idx, c in enumerate(selected_candidates):
+            print(f"   Selected Candidate {idx+1}: {c.name} (ID: {c.candidate_id}, Source: {c.source})")
+        
+        import psycopg2
+        import json
+        from core.config import DATABASE_URL
+        
+        saved_count = 0
+        
+        with psycopg2.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                for c in selected_candidates:
+                    try:
+                        # Prepare candidate data with clean schema
+                        candidate_data = {
+                            "jobdiva_id": request.jobdiva_id,
+                            "candidate_id": c.candidate_id,
+                            "source": c.source,
+                            "name": c.name,
+                            "email": getattr(c, 'email', None),
+                            "phone": getattr(c, 'phone', None),
+                            "headline": getattr(c, 'headline', None) or getattr(c, 'title', None),
+                            "location": getattr(c, 'location', None),
+                            "profile_url": getattr(c, 'profile_url', None),
+                            "image_url": getattr(c, 'image_url', None),
+                            "resume_id": getattr(c, 'resume_id', None),
+                            "resume_text": getattr(c, 'resume_text', None),
+                            "data": json.dumps({
+                                "skills": c.skills,
+                                "experience_years": c.experience_years,
+                                "is_selected": True,
+                                "match_score": getattr(c, 'match_score', 0)
+                            }),
+                            "status": "sourced"
+                        }
+                        
+                        cur.execute("""
+                            INSERT INTO sourced_candidates (
+                                jobdiva_id, candidate_id, source, name, email, phone, headline, location, 
+                                profile_url, image_url, resume_id, resume_text, data, status, updated_at
+                            ) VALUES (
+                                %(jobdiva_id)s, %(candidate_id)s, %(source)s, %(name)s, %(email)s, %(phone)s, %(headline)s, %(location)s,
+                                %(profile_url)s, %(image_url)s, %(resume_id)s, %(resume_text)s, %(data)s, %(status)s, CURRENT_TIMESTAMP
+                            )
+                            ON CONFLICT (jobdiva_id, candidate_id, source) DO UPDATE SET
+                                name = EXCLUDED.name,
+                                email = EXCLUDED.email,
+                                phone = EXCLUDED.phone,
+                                headline = EXCLUDED.headline,
+                                location = EXCLUDED.location,
+                                profile_url = EXCLUDED.profile_url,
+                                image_url = EXCLUDED.image_url,
+                                resume_id = EXCLUDED.resume_id,
+                                resume_text = EXCLUDED.resume_text,
+                                data = EXCLUDED.data,
+                                status = EXCLUDED.status,
+                                updated_at = CURRENT_TIMESTAMP
+                        """, candidate_data)
+                        
+                        saved_count += 1
+                        
+                    except Exception as e:
+                        print(f"❌ Error saving candidate {c.candidate_id}: {e}")
+                        continue
+                        
+            conn.commit()
+            
+        print(f"✅ Successfully saved {saved_count} sourced candidates to database")
+        return {"status": "success", "detail": f"Saved {saved_count} sourced candidates", "saved_count": saved_count}
+        
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error saving candidates: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/candidates")
+async def get_all_candidates(limit: int = Query(100, ge=1, le=1000)):
+    """Get all sourced candidates across all jobs."""
+    try:
+        import services.sourced_candidates_storage as scs
+        storage = scs.SourcedCandidatesStorage()
+        candidates = storage.get_all_candidates(limit=limit)
+        
+        # Map jobdiva_id to job_id in the response for backwards compatibility
+        for candidate in candidates:
+            if 'jobdiva_id' in candidate:
+                candidate['job_id'] = candidate['jobdiva_id']  # Backend compatibility
+                # Keep jobdiva_id for frontend
+        
+        return {
+            "status": "success", 
+            "candidates": candidates,
+            "total": len(candidates)
+        }
+    except Exception as e:
+        logger.error(f"Error fetching all candidates: {e}")
+        return {"status": "error", "candidates": [], "message": str(e)}
+
+@app.post("/candidates/enhanced-fetch")
+async def fetch_enhanced_candidates(request: Dict[str, str]):
+    """
+    Enhanced candidate fetching using combined JobDiva API calls:
+    - JobApplicantsDetail: Get job applicants
+    - CandidateDetail: Get candidate info  
+    - ResumeDetail: Get full resume text
+    """
+    try:
+        job_id = request.get("job_id") or request.get("jobdiva_id")
+        if not job_id:
+            return {"status": "error", "candidates": [], "message": "job_id required"}
+            
+        print(f"🚀 Enhanced candidate fetch for job: {job_id}")
+        
+        # Use the new enhanced method
+        enhanced_candidates = await jobdiva_service.get_enhanced_job_candidates(job_id)
+        
+        # Save to database with deduplication
+        saved_count = await jobdiva_service.save_enhanced_candidates_to_db(job_id, enhanced_candidates)
+        
+        return {
+            "status": "success",
+            "candidates": enhanced_candidates,
+            "total_found": len(enhanced_candidates),
+            "total_saved": saved_count,
+            "message": f"Found {len(enhanced_candidates)} enhanced candidates with full resume text"
+        }
+        
+    except Exception as e:
+        print(f"❌ Enhanced fetch error: {e}")
+        return {"status": "error", "candidates": [], "message": str(e)}
+
+@app.post("/candidates/{candidate_id}/update-resume")
+async def update_candidate_resume(candidate_id: str):
+    """Update resume text for an existing candidate using enhanced JobDiva integration."""
+    try:
+        print(f"🔄 Updating resume for candidate: {candidate_id}")
+        
+        success = await jobdiva_service.update_candidate_resume_text(candidate_id)
+        
+        if success:
+            return {
+                "status": "success",
+                "message": f"Successfully updated resume text for candidate {candidate_id}"
+            }
+        else:
+            return {
+                "status": "error", 
+                "message": f"Failed to update resume text for candidate {candidate_id}"
+            }
+            
+    except Exception as e:
+        logger.error(f"Error updating resume for candidate {candidate_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/candidates/{candidate_id}/resume")
+async def get_candidate_resume(candidate_id: str):
+    """
+    Fetch individual candidate resume by candidate ID from JobDiva.
+    Only returns real resumes - no auto-generated content.
+    """
+    try:
+        print(f"📄 Fetching resume for candidate: {candidate_id}")
+        resume_data = await jobdiva_service.get_candidate_resume(candidate_id)
+        
+        if not resume_data or resume_data is None:
+            return {
+                "status": "error",
+                "resume_text": "Resume content is not available for this candidate.",
+                "message": "No real resume found in JobDiva - auto-generated content disabled"
+            }
+        
+        # Extract resume text from the response
+        resume_text = resume_data.get("resume_text", "")
+        
+        # Check for auto-generated content patterns and reject them
+        if (resume_text and (
+            "Professional experience details available upon request" in resume_text or
+            "Experienced professional with a strong background" in resume_text or
+            "Contact information and detailed work history available upon request" in resume_text
+        )):
+            print(f"⚠️ Detected auto-generated content for {candidate_id} - rejecting")
+            return {
+                "status": "error", 
+                "resume_text": "Resume content is not available for this candidate.",
+                "message": "Only real JobDiva resumes are displayed - auto-generated content filtered out"
+            }
+        
+        if not resume_text or resume_text.strip() == "":
+            return {
+                "status": "error",
+                "resume_text": "Resume content is not available for this candidate.",
+                "message": "No resume text found in JobDiva response"
+            }
+        
+        return {
+            "status": "success",
+            "resume_text": resume_text,
+            "candidate_id": candidate_id
+        }
+        
+    except Exception as e:
+        print(f"❌ Resume fetch error for {candidate_id}: {e}")
+        return {
+            "status": "error",
+            "resume_text": "Resume content is not available for this candidate.",
+            "message": f"Error fetching resume: {str(e)}"
+        }
 
 @app.post("/candidates/analyze", response_model=CandidateAnalysisResponse)
 async def analyze_candidates(request: CandidateAnalysisRequest):
@@ -290,54 +675,12 @@ async def analyze_candidates(request: CandidateAnalysisRequest):
                 pass
         candidates_to_process.append(c)
 
-    all_results = await ai_service.analyze_candidates_batch(
+    results = await ai_service.analyze_candidates_batch(
         candidates_to_process, 
         request.job_description,
         structured_jd=request.structured_jd
     )
-    return {"results": all_results, "count": len(all_results)}
-
-@app.post("/candidates/save")
-async def save_candidates(request: SaveCandidatesRequest):
-    """Save sourced candidates to database."""
-    try:
-        count = sourced_candidates_storage.save_candidates(request.job_id, request.candidates)
-        return {
-            "status": "success",
-            "message": f"Successfully saved {count} candidates",
-            "count": count
-        }
-    except Exception as e:
-        logger.error(f"Error saving candidates: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/jobs/{job_id}/candidates")
-async def get_job_candidates(job_id: str):
-    """Retrieve sourced candidates for a job."""
-    try:
-        candidates = sourced_candidates_storage.get_candidates_for_job(job_id)
-        return {
-            "status": "success",
-            "candidates": candidates,
-            "count": len(candidates)
-        }
-    except Exception as e:
-        logger.error(f"Error retrieving candidates for job {job_id}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/candidates")
-async def get_all_candidates(limit: int = 100):
-    """Retrieve all sourced candidates across all jobs."""
-    try:
-        candidates = sourced_candidates_storage.get_all_candidates(limit)
-        return {
-            "status": "success",
-            "candidates": candidates,
-            "count": len(candidates)
-        }
-    except Exception as e:
-        logger.error(f"Error retrieving all candidates: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"results": results, "name": "", "email": "", "skills": [], "experience_years": 0} # Dummy fields to satisfy model if strict
 
 @app.post("/jobs/fetch")
 async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: BackgroundTasks):
@@ -782,44 +1125,6 @@ def auto_extract_job_skills(job_id: str, job_details: dict):
         logger.error(f"Auto skills extraction failed for job {job_id}: {e}")
         # Don't raise exception - job import should still succeed even if skills extraction fails
 
-@app.get("/candidates/{candidate_id}/resume")
-async def get_candidate_resume(candidate_id: str):
-    """
-    Fetches the resume text for a candidate.
-    Waterfall: LinkedIn (via Unipile + AI), JobDiva, then Vetted API.
-    """
-    # 1. LinkedIn (Unipile)
-    if candidate_id.startswith("unipile_"):
-        real_id = candidate_id.replace("unipile_", "")
-        print(f"🔍 Fetching LinkedIn Profile for {real_id}...")
-        profile = await unipile_service.get_candidate_profile(real_id)
-        
-        if profile:
-            print(f"✅ Profile found. Generating Resume with AI...")
-            resume_text = await ai_service.generate_resume_from_profile(profile)
-            return {"resume_text": resume_text}
-        else:
-            raise HTTPException(status_code=404, detail="LinkedIn Profile not found or accessible")
-
-    try:
-        resume_text = await jobdiva_service.get_candidate_resume(candidate_id)
-        
-        # Check if JobDiva returned error string (it doesn't raise Exception)
-        if not resume_text or "Resume content unavailable" in resume_text:
-             raise Exception("JobDiva Resume Not Found")
-             
-        return {"resume_text": resume_text}
-    except Exception:
-        # If JobDiva fails (404), try Vetted DB
-        try:
-            from services.vetted import vetted_service
-            resume_text = await vetted_service.get_candidate_resume(candidate_id)
-            if resume_text:
-                return {"resume_text": resume_text}
-            raise HTTPException(status_code=404, detail="Resume not found in any source")
-        except Exception:
-            raise HTTPException(status_code=404, detail="Resume not found")
-
 # Job monitoring utility functions
 def load_monitored_jobs() -> Dict[str, Any]:
     """Load the list of jobs being monitored from PostgreSQL via JobDivaService"""
@@ -872,12 +1177,25 @@ async def poll_all_jobs():
                 "title": status.get("title", "")
             })
         
-        # UPDATE in-place. This preserves ai_description, job_notes, etc.
+        # Safety Check: Do not overwrite with NOT_FOUND if we already have data
+        if current_status == "NOT_FOUND":
+            logger.warning(f"⚠️ Polling returned NOT_FOUND for {job_id}. Preserving status '{old_status}'.")
+            continue
+
+        # UPDATE in-place for legacy file compatibility
         old_data.update({
             "status":       current_status,
             "customer_name": status.get("customer_name", "Unknown"),
             "title":        status.get("title", ""),
         })
+        
+        # NEW: Update the Database (PostgreSQL) as well
+        db_data = {
+            "status": current_status,
+            "customer_name": status.get("customer_name"),
+            "title": status.get("title")
+        }
+        jobdiva_service.monitor_job_locally(job_id, db_data)
     
     # Save updated data
     jobs_data["last_sync"] = readable_ist_now()
@@ -971,7 +1289,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                 processing_status = %s,
                 current_step = %s,
                 customer_name = CASE 
-                    WHEN %s IS NOT NULL AND %s != 'Unknown' AND %s != '' THEN %s 
+                    WHEN %s IS NOT NULL AND %s NOT ILIKE 'Unknown%%' AND %s != '' THEN %s 
                     ELSE customer_name 
                 END,
                 jobdiva_id = %s, -- This is the reference string
@@ -1237,6 +1555,10 @@ async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData)
                 screening_level = %s,
                 current_step = %s,
                 user_session = %s,
+                customer_name = CASE 
+                    WHEN %s IS NOT NULL AND %s NOT ILIKE 'Unknown%%' AND %s != '' THEN %s 
+                    ELSE customer_name 
+                END,
                 ai_enhanced = CASE WHEN %s IS NOT NULL AND %s != '' THEN TRUE ELSE ai_enhanced END,
                 processing_status = CONCAT('step_', %s, '_complete'),
                 updated_at = NOW()
@@ -1253,6 +1575,8 @@ async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData)
             draft_data.screening_level,                         # screening_level
             draft_data.current_step,                            # current_step
             draft_data.user_session or 'default',              # user_session
+            draft_data.customer_name, draft_data.customer_name, # for customer_name CASE
+            draft_data.customer_name, draft_data.customer_name, # for customer_name CASE
             draft_data.ai_description,                          # for ai_enhanced check
             draft_data.ai_description,                          # for ai_enhanced check
             draft_data.current_step,                            # for processing_status
@@ -1269,10 +1593,10 @@ async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData)
                 INSERT INTO monitored_jobs (
                     job_id, title, enhanced_title, ai_description, selected_job_boards,
                     recruiter_notes, recruiter_emails, selected_employment_types, 
-                    work_authorization, screening_level, current_step, user_session, 
+                    work_authorization, screening_level, current_step, user_session, customer_name,
                     ai_enhanced, processing_status, created_at, updated_at, jobdiva_id
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW(), %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW(), %s
                 )""", (
                 numeric_id,
                 draft_data.title,
@@ -1286,6 +1610,7 @@ async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData)
                 draft_data.screening_level,
                 draft_data.current_step,
                 draft_data.user_session or 'default',
+                draft_data.customer_name,                            # NEW: customer_name
                 bool(draft_data.ai_description),
                 f'step_{draft_data.current_step}_complete',
                 ref_id
@@ -1782,14 +2107,42 @@ async def remove_job_from_monitoring(job_id: str):
 @app.get("/jobs/monitored")
 async def get_monitored_jobs():
     """
-    Get all jobs currently being monitored and their latest statuses.
+    Get all jobs currently being monitored from the database.
     """
-    jobs_data = load_monitored_jobs()
-    return {
-        "jobs": jobs_data.get("jobs", {}),
-        "total_count": len(jobs_data.get("jobs", {})),
-        "last_sync": jobs_data.get("last_sync")
-    }
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Fetch all columns from monitored_jobs
+        cursor.execute("SELECT * FROM monitored_jobs ORDER BY created_at DESC")
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+        
+        jobs = {}
+        for row in rows:
+            job_data = dict(zip(columns, row))
+            # Format Job ID for JSON compatibility if needed
+            jid = str(job_data.get("jobdiva_id") or job_data.get("job_id"))
+            
+            # Convert Timestamps to ISO strings
+            if job_data.get("created_at"): job_data["created_at"] = job_data["created_at"].isoformat()
+            if job_data.get("updated_at"): job_data["updated_at"] = job_data["updated_at"].isoformat()
+            
+            jobs[jid] = job_data
+            
+        cursor.close()
+        conn.close()
+        
+        return {
+            "jobs": jobs,
+            "total_count": len(jobs),
+            "source": "database"
+        }
+    except Exception as e:
+        logger.error(f"Error fetching monitored jobs from DB: {e}")
+        # Fallback to legacy file only on catastrophic DB failure
+        jobs_data = load_monitored_jobs()
+        return jobs_data
 
 @app.post("/jobs/poll-now")
 async def trigger_manual_poll(background_tasks: BackgroundTasks):
@@ -1809,24 +2162,42 @@ async def sync_job_status(job_id: str):
     logger.info(f"Syncing status for Job {job_id}")
     try:
         status_info = await jobdiva_service.get_job_status(job_id)
-        logger.info(f"Sync result: {status_info}")
+        logger.info(f"Sync result for {job_id}: {status_info}")
         
-        # Update monitored jobs file with latest data
-        jobs_data = load_monitored_jobs()
-        if job_id in jobs_data.get("jobs", {}):
-            old_data = jobs_data["jobs"][job_id]
-            jobs_data["jobs"][job_id] = {
-                "status": status_info["status"],
-                "customer_name": status_info.get("customer_name", "Unknown"),
-                "title": status_info.get("title", ""),
-                "work_authorization": status_info.get("work_authorization") or old_data.get("work_authorization", ""),
-            }
-            jobs_data["last_sync"] = readable_ist_now()
-            save_monitored_jobs(jobs_data)
-            logger.info(f"Updated monitoring data for job {job_id}")
-            
-            # Reset 5-minute timer since user manually reloaded
-            schedule_next_poll()
+        # Safety Check: Do not overwrite with NOT_FOUND if we already have valid data
+        if status_info.get("status") == "NOT_FOUND":
+            logger.warning(f"⚠️ Sync returned NOT_FOUND for {job_id}. Database remains unchanged.")
+            return {"job_id": job_id, "status": "NOT_FOUND_SKIPPED", "message": "Preserved existing status"}
+
+        # 1. Update the Database (Primary Storage)
+        # Prepare update payload
+        update_data = {
+            "status": status_info.get("status"),
+            "customer_name": status_info.get("customer_name"),
+            "title": status_info.get("title"),
+            "updated_at": readable_ist_now()
+        }
+        
+        # Use our safe monitor_job_locally which has the "Unknown" shield
+        db_ok = jobdiva_service.monitor_job_locally(job_id, update_data)
+        if db_ok:
+            logger.info(f"✅ Synced status for {job_id} to database")
+        
+        # 2. Update legacy monitored jobs file for compatibility
+        try:
+            jobs_data = load_monitored_jobs()
+            if job_id in jobs_data.get("jobs", {}):
+                old_data = jobs_data["jobs"][job_id]
+                jobs_data["jobs"][job_id].update({
+                    "status": status_info["status"],
+                    # Only update name if it's not Unknown
+                    "customer_name": status_info.get("customer_name") or old_data.get("customer_name", "Unknown"),
+                    "title": status_info.get("title") or old_data.get("title", ""),
+                })
+                jobs_data["last_sync"] = readable_ist_now()
+                save_monitored_jobs(jobs_data)
+                logger.info(f"📁 Updated legacy monitoring file for {job_id}")
+        except: pass # Don't fail if legacy file sync errors
         
         return status_info
     except Exception as e:
@@ -1858,13 +2229,6 @@ async def update_job_criteria(job_id: str, update: JobCriteriaUpdate):
         return {"status": "SUCCESS"}
     return {"status": "ERROR"}
 
-@app.put("/api/jobs/{job_id}/criteria")
-async def update_job_criteria(job_id: str, update: JobCriteriaUpdate):
-    """Manually update criteria for a job."""
-    success = criteria_service.save_criteria(job_id, [c.dict() for c in update.criteria])
-    if success:
-        return {"status": "SUCCESS"}
-    return {"status": "ERROR"}
 
 # =====================================================  
 # RONAK SKILLS INTEGRATION ENDPOINTS

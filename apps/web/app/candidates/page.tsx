@@ -5,6 +5,9 @@ import Link from "next/link";
 import { Search, ExternalLink, User, MapPin, Briefcase, Linkedin, ShieldCheck, Mail, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { CandidateMessageModal } from "@/components/candidate-message-modal";
+import { ResumeModal } from "@/components/ResumeModal";
 import {
   Table,
   TableBody,
@@ -18,7 +21,7 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 
 interface Candidate {
   id: number;
-  job_id: string;
+  jobdiva_id: string;
   job_title?: string;
   candidate_id: string;
   source: string;
@@ -29,6 +32,8 @@ interface Candidate {
   image_url: string;
   status: string;
   created_at: string;
+  resume_text?: string;
+  data?: any;
 }
 
 export default function CandidatesPage() {
@@ -36,6 +41,10 @@ export default function CandidatesPage() {
   const [filteredCandidates, setFilteredCandidates] = useState<Candidate[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [messageModalOpen, setMessageModalOpen] = useState(false);
+  const [selectedCandidateForEmail, setSelectedCandidateForEmail] = useState<any>(null);
+  const [resumeModalOpen, setResumeModalOpen] = useState(false);
+  const [selectedCandidateForResume, setSelectedCandidateForResume] = useState<any>(null);
 
   useEffect(() => {
     fetchCandidates();
@@ -46,7 +55,9 @@ export default function CandidatesPage() {
     try {
       const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates`);
       const data = await response.json();
+      console.log("📊 Fetched candidates data:", data);
       if (data.status === "success") {
+        console.log(`✅ Found ${data.candidates.length} candidates in master pool`);
         setCandidates(data.candidates);
         setFilteredCandidates(data.candidates);
       }
@@ -74,6 +85,38 @@ export default function CandidatesPage() {
     if (s.includes('linkedin')) return <Linkedin className="w-3.5 h-3.5 text-[#0A66C2]" />;
     if (s.includes('jobdiva')) return <ShieldCheck className="w-3.5 h-3.5 text-[#6366f1]" />;
     return <User className="w-3.5 h-3.5 text-slate-400" />;
+  };
+
+  const handleEmailCandidate = (candidate: any) => {
+    setSelectedCandidateForEmail(candidate);
+    setMessageModalOpen(true);
+  };
+
+  const fetchCandidateResume = async (candidateId: string) => {
+    try {
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates/${candidateId}/resume`);
+      const data = await response.json();
+      return data.resume_text || "Resume content is not available for this candidate.";
+    } catch (error) {
+      console.error("Error fetching resume:", error);
+      return "Resume content is not available for this candidate.";
+    }
+  };
+
+  const handleViewResume = async (candidate: Candidate) => {
+    let resumeText = candidate.resume_text || candidate.data?.resume_text;
+    
+    // If no resume text available, try to fetch it
+    if (!resumeText || resumeText.trim() === "") {
+      console.log(`📄 Fetching resume for candidate: ${candidate.name}`);
+      resumeText = await fetchCandidateResume(candidate.candidate_id);
+    }
+    
+    setSelectedCandidateForResume({
+      name: candidate.name,
+      resumeText: resumeText || "Resume content is not available for this candidate."
+    });
+    setResumeModalOpen(true);
   };
 
   return (
@@ -156,7 +199,14 @@ export default function CandidatesPage() {
                     </TableCell>
                     <TableCell className="py-6 max-w-[200px]">
                       <div className="space-y-1">
-                        <p className="text-[15px] font-bold text-slate-900 leading-tight truncate">{candidate.name}</p>
+                        <p 
+                          className="text-[15px] font-bold text-slate-900 leading-tight truncate hover:text-purple-600 cursor-pointer transition-colors"
+                          onClick={() => {
+                            handleViewResume(candidate);
+                          }}
+                        >
+                          {candidate.name}
+                        </p>
                         <div className="flex items-center gap-1.5 opacity-70">
                           <Briefcase className="w-3.5 h-3.5 text-slate-500 shrink-0" />
                           <p className="text-[13px] text-slate-600 font-medium line-clamp-1">{candidate.headline}</p>
@@ -168,7 +218,7 @@ export default function CandidatesPage() {
                         <p className="text-[13.5px] font-bold text-[#4f46e5] hover:underline cursor-pointer">
                           {candidate.job_title || "Unknown Job"}
                         </p>
-                        <p className="text-[11.5px] text-slate-400 font-medium">Ref: {candidate.job_id}</p>
+                        <p className="text-[11.5px] text-slate-400 font-medium">Ref: {candidate.jobdiva_id}</p>
                       </div>
                     </TableCell>
                     <TableCell className="py-6">
@@ -191,21 +241,42 @@ export default function CandidatesPage() {
                        </p>
                     </TableCell>
                     <TableCell className="text-right pr-8 py-6">
-                       <div className="flex items-center justify-end gap-3">
+                       <div className="flex items-center justify-end gap-2">
                          {candidate.profile_url && (
                            <Button
                              variant="outline"
-                             size="icon"
+                             size="sm"
                              asChild
-                             className="h-9 w-9 border-slate-200 hover:bg-slate-50 text-slate-400 hover:text-[#6366f1] rounded-xl shadow-none"
+                             className="h-8 w-8 p-0 border-slate-200 hover:bg-slate-50 text-slate-400 hover:text-[#6366f1]"
                            >
                              <a href={candidate.profile_url} target="_blank" rel="noopener noreferrer">
-                               <ExternalLink className="h-4 w-4" />
+                               <ExternalLink className="h-3.5 w-3.5" />
                              </a>
                            </Button>
                          )}
-                         <Button className="h-9 px-5 bg-white border border-[#6366f1]/30 text-[#6366f1] hover:bg-[#6366f1]/5 font-bold text-[13px] rounded-xl shadow-none">
-                            Reach Out
+                         <Button 
+                            size="sm"
+                            className="h-8 px-3 bg-white border border-[#6366f1]/30 text-[#6366f1] hover:bg-[#6366f1]/5 font-medium text-[12px]"
+                            onClick={() => handleEmailCandidate(candidate)}
+                         >
+                            <Mail className="h-3.5 w-3.5 mr-1" />
+                            Email
+                         </Button>
+                         <Button 
+                            size="sm"
+                            variant="outline"
+                            className="h-8 px-3 opacity-50"
+                            disabled
+                         >
+                            Engage
+                         </Button>
+                         <Button 
+                            size="sm"
+                            variant="outline" 
+                            className="h-8 px-3 opacity-50"
+                            disabled
+                         >
+                            Assess
                          </Button>
                        </div>
                     </TableCell>
@@ -216,6 +287,32 @@ export default function CandidatesPage() {
           </div>
         )}
       </div>
+      
+      {/* Email Modal */}
+      {selectedCandidateForEmail && (
+        <CandidateMessageModal
+          candidateName={selectedCandidateForEmail.name || `${selectedCandidateForEmail.firstName} ${selectedCandidateForEmail.lastName}`}
+          candidateEmail={selectedCandidateForEmail.email}
+          isOpen={messageModalOpen}
+          onClose={() => {
+            setMessageModalOpen(false);
+            setSelectedCandidateForEmail(null);
+          }}
+        />
+      )}
+
+      {/* Resume Modal */}
+      {selectedCandidateForResume && (
+        <ResumeModal
+          candidateName={selectedCandidateForResume.name}
+          resumeText={selectedCandidateForResume.resumeText}
+          isOpen={resumeModalOpen}
+          onClose={() => {
+            setResumeModalOpen(false);
+            setSelectedCandidateForResume(null);
+          }}
+        />
+      )}
     </div>
   );
 }

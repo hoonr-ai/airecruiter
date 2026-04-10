@@ -4,7 +4,8 @@ from typing import List, Dict, Any
 import httpx
 from openai import AsyncOpenAI
 from core.config import OPENAI_API_KEY
-from core.models import JobDescription, CandidateProfile
+from core.models import JobDescription, CandidateProfile, SkillProfileEntry
+from services.job_skills_extractor import _azure_agent, AZURE_AGENT_AVAILABLE
 
 logger = logging.getLogger(__name__)
 
@@ -67,24 +68,56 @@ class AIService:
         """
         Extracts structured Candidate from resume text.
         """
+        import asyncio
         if not self.client:
              raise Exception("OpenAI Client not initialized")
              
-        system_prompt = "You are a Resume Parser. Extract structured data including skills, timeline, and education."
+        system_prompt = (
+            "You are a professional Resume Parser and Taxonomy Expert. "
+            "Extract structured data from the resume text including Name, Location (City, State), "
+            "LinkedIn Profile URL (add to 'links' array), timeline (all jobs with dates and titles), and education. "
+            "You MUST also calculate the total years of professional experience (total_yoe) as a float. "
+            "Be precise with company names and job titles."
+        )
         try:
             model = "gpt-4o-mini"
-            completion = await self.client.beta.chat.completions.parse(
+            # 1. Base Extraction (GPT)
+            gpt_task = self.client.beta.chat.completions.parse(
                 model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text[:30000]} # Increased Limit
+                    {"role": "user", "content": text[:30000]}
                 ],
                 response_format=CandidateProfile,
                 temperature=0.0
             )
+            
+            # 2. Grounded Skill Extraction (Azure Agent) - Parallel
+            agent_task = None
+            if AZURE_AGENT_AVAILABLE and _azure_agent:
+                agent_task = _azure_agent.extract_roles_and_skills(text[:25000]) # Cap for speed/reliability
+                
+            # Wait for both
+            if agent_task:
+                gpt_resp, agent_resp = await asyncio.gather(gpt_task, agent_task)
+            else:
+                gpt_resp = await gpt_task
+                agent_resp = None
 
-            profile = completion.choices[0].message.parsed
-            profile.id = cid # Ensure ID matches
+            profile = gpt_resp.choices[0].message.parsed
+            profile.id = cid 
+            profile.resume_text = text # Store the original content
+            
+            # 3. Merge Grounded Skills
+            if agent_resp:
+                grounded_skills = _azure_agent.convert_to_profile_skills(agent_resp.get("job_skills", []) or agent_resp.get("skills", []))
+                
+                # Check for existing skills to avoid duplicates
+                existing_slugs = {s.skill_slug.lower().strip() for s in profile.skill_profile}
+                for gs in grounded_skills:
+                    if gs["skill_slug"].lower().strip() not in existing_slugs:
+                        profile.skill_profile.append(SkillProfileEntry(**gs))
+            
             return profile
             
         except Exception as e:
@@ -201,6 +234,11 @@ class AIService:
             res_dict = result.model_dump()
             res_dict['candidate_id'] = cid
             res_dict['candidate_name'] = c_dict.get('firstName', '') + ' ' + c_dict.get('lastName', '')
+            
+            # Include extracted metadata for sync back to sourcing table
+            res_dict['extracted_location'] = cand_obj.candidate_metadata.location
+            res_dict['extracted_links'] = cand_obj.candidate_metadata.links
+            res_dict['resume_text'] = cand_obj.resume_text
             
             # Map colors for UI if needed or handle in frontend
             # Frontend expects: "score", "candidate_id"
