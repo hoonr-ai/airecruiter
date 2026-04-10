@@ -3101,9 +3101,17 @@ function NewJobPageContent() {
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center justify-between gap-4 mb-3">
                             <div className="flex-1 min-w-0">
-                              <div className="text-[15px] font-bold text-slate-900 leading-tight flex items-center gap-1.5">
-                                {candidate.firstName} {candidate.lastName}
-                              </div>
+                              <a 
+                                href="#" 
+                                className="text-[15px] font-bold text-slate-900 leading-tight hover:text-purple-600 flex items-center gap-1.5 transition-colors"
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  handleViewResume(candidate);
+                                }}
+                                title="Click to view resume"
+                              >
+                                {candidate.firstName} {candidate.lastName} <ArrowRight className="w-3.5 h-3.5 -rotate-45 opacity-60" />
+                              </a>
                             </div>
                             
                             {/* Action Buttons - Enhanced to match Master Candidate Pool */}
@@ -3140,10 +3148,9 @@ function NewJobPageContent() {
                               <Button
                                 size="sm"
                                 variant="outline"
-                                className="h-6 px-2 text-[11px] border-purple-200 text-purple-700 hover:bg-purple-50"
-                                onClick={() => {
-                                  // TODO: Implement engage functionality
-                                }}
+                                className="h-6 px-2 text-[11px] opacity-50"
+                                disabled
+                                title="Engage (Coming in Next Phase)"
                               >
                                 Engage
                               </Button>

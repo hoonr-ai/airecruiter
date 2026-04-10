@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -94,19 +93,10 @@ export function ResumeModal({ isOpen, onClose, candidateName, resumeText }: Resu
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden">
-        <DialogHeader className="border-b border-slate-200 pb-4 mb-4 relative">
-          <DialogTitle className="text-xl font-bold text-slate-900 pr-8">
+        <DialogHeader className="border-b border-slate-200 pb-4 mb-4">
+          <DialogTitle className="text-xl font-bold text-slate-900">
             Resume: {candidateName}
           </DialogTitle>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onClose}
-            className="absolute right-0 top-0 h-8 w-8 p-0 hover:bg-slate-100 rounded-full"
-          >
-            <X className="h-4 w-4" />
-            <span className="sr-only">Close</span>
-          </Button>
         </DialogHeader>
         
         <div className="overflow-y-auto max-h-[70vh] pr-2">
