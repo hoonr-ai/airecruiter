@@ -1261,8 +1261,6 @@ class JobDivaService:
                 response = await client.post(url, json=payload, headers=headers)
                 if response.status_code != 200: return None
                 data = response.json()
-                # DEBUG: Log the full response to find the customer name field
-                print(f"DEBUG: JobDiva Raw Data for {job_id}: {json.dumps(data, indent=2)}")
                 jobs = data if isinstance(data, list) else data.get("data", [])
                 if not jobs: return None
                 j = jobs[0]
@@ -2347,5 +2345,150 @@ class JobDivaService:
         except Exception as e:
             logger.error(f"Enhanced talent pool search failed: {e}")
             return []
+
+    async def talent_search_api(self, search_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Call JobDiva TalentSearch API with hierarchical search payload
+        """
+        token = await self.authenticate()
+        if not token:
+            logger.error("❌ TalentSearch failed: Could not authenticate with JobDiva")
+            return []
+        
+        url = f"{self.api_url}/apiv2/jobdiva/TalentSearch"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        
+        try:
+            logger.info(f"🌐 Calling JobDiva TalentSearch API with {len(search_payload.get('advancedSkills', []))} skills, {len(search_payload.get('titles', []))} titles")
+            
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(url, json=search_payload, headers=headers)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    raw_candidates = data if isinstance(data, list) else (data.get("candidates") or data.get("results") or [])
+                    
+                    # Convert JobDiva response to standardized format
+                    candidates = []
+                    for candidate_data in raw_candidates:
+                        try:
+                            candidate = self._standardize_talent_candidate(candidate_data)
+                            if candidate:
+                                candidates.append(candidate)
+                        except Exception as e:
+                            logger.error(f"❌ Error processing talent candidate: {e}")
+                            continue
+                    
+                    logger.info(f"✅ TalentSearch API returned {len(candidates)} candidates")
+                    return candidates
+                    
+                else:
+                    logger.error(f"❌ TalentSearch API error: {response.status_code} - {response.text}")
+                    return []
+                    
+        except Exception as e:
+            logger.error(f"❌ TalentSearch API call failed: {e}")
+            return []
+    
+    def _standardize_talent_candidate(self, candidate_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Convert JobDiva TalentSearch candidate to standardized format
+        """
+        try:
+            # Extract basic info
+            candidate_id = str(get_field(candidate_data, ["candidateId", "id", "ID"]) or "")
+            if not candidate_id:
+                return None
+            
+            first_name = get_field(candidate_data, ["firstName", "firstname", "FIRSTNAME"]) or ""
+            last_name = get_field(candidate_data, ["lastName", "lastname", "LASTNAME"]) or ""
+            name = f"{first_name} {last_name}".strip() or "Unknown Candidate"
+            
+            # Extract location
+            city = get_field(candidate_data, ["city", "locationCity", "CITY"]) or ""
+            state = get_field(candidate_data, ["state", "locationState", "STATE"]) or ""
+            location = f"{city}, {state}".strip(", ") if city or state else ""
+            
+            # Extract skills
+            skills_raw = get_field(candidate_data, ["skills", "SKILLS", "skillsList"]) or []
+            skills = []
+            if isinstance(skills_raw, str):
+                skills = [skill.strip() for skill in skills_raw.split(",") if skill.strip()]
+            elif isinstance(skills_raw, list):
+                skills = [str(skill) for skill in skills_raw if skill]
+            
+            # Extract experience
+            years_exp = 0
+            exp_raw = get_field(candidate_data, ["experience", "yearsExperience", "totalExperience"]) or "0"
+            try:
+                years_exp = int(float(str(exp_raw)))
+            except (ValueError, TypeError):
+                years_exp = 0
+            
+            # Extract resume data
+            resume_text = self._extract_resume_text(candidate_data) or ""
+            resume_url = get_field(candidate_data, ["resumeUrl", "resume_url"]) or ""
+            
+            # Extract companies from resume text
+            companies = self._extract_companies_from_resume(resume_text)
+            
+            return {
+                "candidateId": candidate_id,
+                "name": name,
+                "firstName": first_name,
+                "lastName": last_name,
+                "email": get_field(candidate_data, ["email", "EMAIL"]) or "",
+                "phone": get_field(candidate_data, ["phone", "PHONE", "phoneNumber"]) or "",
+                "title": get_field(candidate_data, ["title", "currentTitle", "TITLE"]) or "",
+                "location": location,
+                "city": city,
+                "state": state,
+                "skills": skills,
+                "experience": years_exp,
+                "companies": companies,
+                "resumeText": resume_text,
+                "resumeUrl": resume_url,
+                "source": "talent_search"
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Error standardizing talent candidate: {e}")
+            return None
+    
+    def _extract_companies_from_resume(self, resume_text: str) -> List[str]:
+        """
+        Extract company names from resume text using simple pattern matching
+        """
+        if not resume_text:
+            return []
+        
+        companies = []
+        
+        # Common patterns for company identification in resumes
+        import re
+        
+        # Look for patterns like "Company Name, City" or "Company Name - Title"
+        company_patterns = [
+            r'(?:^|\n)([A-Z][A-Za-z\s&\.,-]+?)\s*(?:,\s*[A-Z]{2}|,\s*\w+\s*[A-Z]{2}|\s*-\s*)',
+            r'(?:at|@)\s+([A-Z][A-Za-z\s&\.,-]+?)(?:\s*,|\s*\n|$)',
+            r'(?:Company|Employer|Organization):\s*([A-Za-z\s&\.,-]+)',
+        ]
+        
+        for pattern in company_patterns:
+            matches = re.findall(pattern, resume_text, re.MULTILINE)
+            for match in matches:
+                company = match.strip()
+                # Filter out common non-company words
+                if (len(company) > 2 and 
+                    company not in ['Inc', 'LLC', 'Corp', 'Ltd', 'Company'] and
+                    not any(word in company.lower() for word in ['experience', 'education', 'skills', 'summary'])):
+                    companies.append(company)
+        
+        # Remove duplicates and limit to reasonable number
+        unique_companies = list(dict.fromkeys(companies))[:10]
+        return unique_companies
 
 jobdiva_service = JobDivaService()

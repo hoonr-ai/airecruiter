@@ -22,7 +22,6 @@ router = APIRouter()
 # Initialize OpenAI client
 client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-print(f"DEBUG: OPENAI_API_KEY loaded: {'Set' if OPENAI_API_KEY else 'NOT SET'}")
 
 class JobDescriptionRequest(BaseModel):
     jobTitle: str = ""

@@ -44,7 +44,6 @@ from models import (
     JobDraftResponse, JobPublishRequest, JobBasicInfoUpdate, SkillsExtractionRequest, SkillsExtractionResponse,
     JobSkillsSummaryResponse
 )
-from services.criteria import criteria_service
 from matcher import mock_match_candidates
 from services.extractor import llm_extractor
 from services.jobdiva import jobdiva_service
@@ -152,6 +151,103 @@ async def parse_job_description(request: ParsedJobRequest):
 @app.post("/candidates/search")
 async def search_jobdiva_candidates(request: CandidateSearchRequest):
     """
+    Unified candidate search with hierarchical skills/titles and intelligent resume processing.
+    
+    TIER 1: JobDiva Job Applicants with hierarchical matching
+    TIER 2: TalentSearch Pool with hierarchical matching
+    
+    Features:
+    - Hierarchical skill/title matching from taxonomy
+    - Smart resume deduplication and extraction tracking
+    - Company experience matching from resume text
+    - Two-pool search strategy with prioritization
+    """
+    logger.info(f"🔍 Unified candidate search for job_id: {request.job_id}")
+    
+    if not request.job_id:
+        return {"candidates": [], "message": "job_id required for candidate search"}
+    
+    try:
+        from services.unified_candidate_search import unified_search_service, SearchCriteria
+        
+        # Convert request to search criteria
+        titles = []
+        skills = []
+        
+        # Extract titles from various sources
+        if request.titles:
+            titles.extend([t.value for t in request.titles if t.match_type != 'exclude'])
+        
+        # Extract skills from various sources 
+        if request.skill_criteria:
+            skills.extend([s.value for s in request.skill_criteria if s.match_type != 'exclude'])
+        if request.skills:
+            skills.extend([s.value for s in request.skills])
+        
+        # Extract location
+        location = ""
+        if request.locations:
+            location = request.locations[0].value
+        elif request.location:
+            location = request.location
+        
+        # Extract companies
+        companies = request.companies or []
+        
+        # Build search criteria
+        criteria = SearchCriteria(
+            job_id=request.job_id,
+            titles=titles,
+            skills=skills,
+            location=location,
+            within_miles=25,  # Default radius
+            companies=companies,
+            page_size=request.limit or 100
+        )
+        
+        # Execute unified search
+        search_results = await unified_search_service.search_candidates(criteria)
+        
+        logger.info(f"✅ Unified search completed: {search_results['summary']}")
+        
+        return {
+            "candidates": search_results["candidates"],
+            "total": search_results["summary"]["total_candidates"],
+            "job_applicants": search_results["summary"]["job_applicants_count"],
+            "talent_pool": search_results["summary"]["talent_search_count"],
+            "cached_results": search_results["summary"]["cached_results"],
+            "new_extractions": search_results["summary"]["new_extractions"],
+            "search_criteria": search_results["search_criteria"],
+            "message": f"Found {search_results['summary']['total_candidates']} candidates using unified search"
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Unified search failed: {e}")
+        # Fallback to original search logic
+        try:
+            from services.jobdiva import JobDivaService
+            jobdiva_service = JobDivaService()
+            
+            # Simple fallback search
+            candidates = await jobdiva_service.get_enhanced_job_candidates(request.job_id)
+            
+            return {
+                "candidates": candidates[:request.limit or 100],
+                "total": len(candidates),
+                "job_applicants": len(candidates),
+                "talent_pool": 0,
+                "message": f"Found {len(candidates)} candidates using fallback search (unified search failed)"
+            }
+            
+        except Exception as fallback_error:
+            logger.error(f"❌ Fallback search also failed: {fallback_error}")
+            raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+@app.post("/candidates/search/legacy")
+async def search_jobdiva_candidates_legacy(request: CandidateSearchRequest):
+    """
+    Legacy search endpoint (preserved for backward compatibility)
+    
     Enhanced multi-criteria candidate search with separate title, skill, and location filtering.
     
     TIER 1: JobDiva Job Applicants filtered by titles, skills, and locations
