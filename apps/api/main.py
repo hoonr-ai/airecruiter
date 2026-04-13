@@ -202,7 +202,9 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             location=location,
             within_miles=25,  # Default radius
             companies=companies,
-            page_size=request.limit or 100
+            page_size=request.limit or 100,
+            sources=request.sources or ["JobDiva", "LinkedIn"],
+            open_to_work=request.open_to_work
         )
         
         # Execute unified search

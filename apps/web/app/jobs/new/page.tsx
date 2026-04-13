@@ -65,6 +65,7 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { ResumeModal } from "@/components/ResumeModal";
+import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 
 // Utility function to clean location_type values and filter out employment terms
 function cleanLocationType(locationType: string | null | undefined): string {
@@ -140,7 +141,7 @@ function NewJobPageContent() {
   const [emailError, setEmailError] = useState(false);
   const [isInputInvalid, setIsInputInvalid] = useState(false);
   const [emailErrorMessage, setEmailErrorMessage] = useState("");
-  
+
   // Email modal state
   const [selectedCandidateForEmail, setSelectedCandidateForEmail] = useState<any>(null);
   const [messageModalOpen, setMessageModalOpen] = useState(false);
@@ -150,20 +151,20 @@ function NewJobPageContent() {
     try {
       const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates/${candidateId}/resume`);
       const data = await response.json();
-      
+
       // Check if the API returned an error or no real resume
       if (data.status === "error" || !data.resume_text) {
         console.log(`⚠️ No real resume available for candidate ${candidateId}: ${data.message}`);
         return null; // Return null instead of fake content
       }
-      
+
       // Verify it's not auto-generated content
       if (data.resume_text.includes("Professional experience details available upon request") ||
-          data.resume_text.includes("Experienced professional with a strong background")) {
+        data.resume_text.includes("Experienced professional with a strong background")) {
         console.log(`⚠️ Auto-generated content detected for candidate ${candidateId} - rejecting`);
         return null;
       }
-      
+
       return data.resume_text;
     } catch (error) {
       console.error("Error fetching resume:", error);
@@ -174,7 +175,7 @@ function NewJobPageContent() {
   // Enhanced resume viewing handler - only show REAL JobDiva resumes
   const handleViewResume = async (candidate: any) => {
     let resumeText = candidate.resume_text || candidate.resumeText || candidate.data?.resume_text;
-    
+
     // Check if this is a fake auto-generated resume
     if (resumeText && (
       resumeText.includes("Professional experience details available upon request") ||
@@ -185,12 +186,12 @@ function NewJobPageContent() {
       alert("This candidate's resume is not available from JobDiva. Only real resumes from JobDiva are displayed.");
       return;
     }
-    
+
     // If no resume text available, try to fetch it from JobDiva API
     if (!resumeText || resumeText.trim() === "") {
       console.log(`🔍 Fetching real resume for candidate: ${candidate.firstName} ${candidate.lastName}`);
       resumeText = await fetchCandidateResume(candidate.id || candidate.candidateId || candidate.candidate_id);
-      
+
       // If fetchCandidateResume returns null, no real resume is available
       if (!resumeText) {
         console.log(`⚠️ No real resume available for ${candidate.firstName} ${candidate.lastName}`);
@@ -198,7 +199,7 @@ function NewJobPageContent() {
         return;
       }
     }
-    
+
     // Only proceed with real resume content
     if (resumeText && resumeText.trim().length > 50) {
       setSelectedCandidateForResume({
@@ -212,6 +213,8 @@ function NewJobPageContent() {
   };
   const [selectedCandidateForResume, setSelectedCandidateForResume] = useState<any>(null);
   const [resumeModalOpen, setResumeModalOpen] = useState(false);
+  const [selectedCandidateForDetails, setSelectedCandidateForDetails] = useState<any>(null);
+  const [detailsModalOpen, setDetailsModalOpen] = useState(false);
   const [jobTitle, setJobTitle] = useState("");
   const [enhancedTitle, setEnhancedTitle] = useState("");
   const [jobPosting, setJobPosting] = useState("");
@@ -2424,572 +2427,567 @@ function NewJobPageContent() {
           <div className="border border-slate-200 rounded-2xl bg-white shadow-sm overflow-hidden p-7 space-y-8">
             <div className="space-y-8">
               {/* First line: PAIR Badge and Run Search */}
-            <div className="flex items-center justify-between mb-2">
-              <div className="bg-[#ede9fe] text-[#6366f1] text-[11px] font-bold px-3 py-1 rounded-lg border border-[#ddd6fe] flex items-center gap-2">
-                <Sparkles className="w-3.5 h-3.5" /> PAIR Pre-filled from Rubric
-              </div>
-              <Button
-                className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
-                onClick={async () => {
-                  setIsSearching(true);
-                  setHasSearched(true);
-                  
-                  try {
-                    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-                    
-                    // Enhanced format: separate criteria arrays
-                    const titleCriteria = sourceTitles
-                      .filter(t => t.matchType !== 'exclude')
-                      .map(t => ({
-                        value: t.value || "Title",
-                        match_type: t.matchType || "must",
-                        years: t.years || 0,
-                        recent: t.recent || false
-                      }));
-                    
-                    const skillCriteria = sourceSkills
-                      .filter(s => s.matchType !== 'exclude')
-                      .map(s => ({
-                        value: s.value || "Skill", 
-                        match_type: s.matchType || "must",
-                        years: s.years || 0,
-                        recent: s.recent || false
-                      }));
-                    
-                    const locationCriteria = sourceLocations.map(l => ({
-                      value: l.value,
-                      radius: l.radius || "25"
-                    }));
+              <div className="flex items-center justify-between mb-2">
+                <div className="bg-[#ede9fe] text-[#6366f1] text-[11px] font-bold px-3 py-1 rounded-lg border border-[#ddd6fe] flex items-center gap-2">
+                  <Sparkles className="w-3.5 h-3.5" /> PAIR Pre-filled from Rubric
+                </div>
+                <Button
+                  className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
+                  onClick={async () => {
+                    setIsSearching(true);
+                    setHasSearched(true);
 
-                    // Legacy format fallback (for compatibility)
-                    const skillsToSearch = [];
-                    sourceTitles.forEach(t => {
-                      if (t.matchType !== 'exclude') {
-                        skillsToSearch.push({
+                    try {
+                      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+
+                      // Enhanced format: separate criteria arrays
+                      const titleCriteria = sourceTitles
+                        .filter(t => t.matchType !== 'exclude')
+                        .map(t => ({
                           value: t.value || "Title",
-                          priority: t.matchType === 'must' ? 'Must Have' : 'Flexible',
-                          years_experience: t.years || 0
-                        });
-                      }
-                    });
-                    
-                    sourceSkills.forEach(s => {
-                      if (s.matchType !== 'exclude') {
-                        skillsToSearch.push({
-                          value: s.value || "Skill",
-                          priority: s.matchType === 'must' ? 'Must Have' : 'Flexible',
-                          years_experience: s.years || 0
-                        });
-                      }
-                    });
+                          match_type: t.matchType || "must",
+                          years: t.years || 0,
+                          recent: t.recent || false
+                        }));
 
-                    // Ensure we search something
-                    if (titleCriteria.length === 0 && skillCriteria.length === 0 && skillsToSearch.length === 0) {
-                      skillsToSearch.push({ value: jobTitle || "Role", priority: "Flexible", years_experience: 0 });
-                    }
-                    
-                    const selectedSourcesArray = Object.keys(searchSources)
-                      .filter(k => (searchSources as any)[k])
-                      .map(k => {
-                        if (k === 'jobdiva') return 'JobDiva';
-                        if (k === 'jobdiva_hotlist') return 'JobDivaHotlist';
-                        if (k === 'linkedin') return 'LinkedIn';
-                        if (k === 'dice') return 'Dice';
-                        return k;
+                      const skillCriteria = sourceSkills
+                        .filter(s => s.matchType !== 'exclude')
+                        .map(s => ({
+                          value: s.value || "Skill",
+                          match_type: s.matchType || "must",
+                          years: s.years || 0,
+                          recent: s.recent || false
+                        }));
+
+                      const locationCriteria = sourceLocations.map(l => ({
+                        value: l.value,
+                        radius: l.radius || "25"
+                      }));
+
+                      // Legacy format fallback (for compatibility)
+                      const skillsToSearch = [];
+                      sourceTitles.forEach(t => {
+                        if (t.matchType !== 'exclude') {
+                          skillsToSearch.push({
+                            value: t.value || "Title",
+                            priority: t.matchType === 'must' ? 'Must Have' : 'Flexible',
+                            years_experience: t.years || 0
+                          });
+                        }
                       });
 
-                    setSearchStatus("Enhanced multi-criteria search in progress...");
-                    
-                    const searchPayload = {
-                      job_id: numericJobId || jobdivaId,
-                      // Enhanced criteria (new format)
-                      titles: titleCriteria,
-                      skill_criteria: skillCriteria,
-                      locations: locationCriteria,
-                      keywords: sourceKeywords,
-                      companies: sourceCompanies,
-                      // Legacy compatibility  
-                      skills: skillsToSearch,
-                      location: sourceLocations.length > 0 ? sourceLocations[0].value : "",
-                      location_type: "Unspecified", 
-                      sources: selectedSourcesArray,
-                      open_to_work: false,
-                      page: 1,
-                      limit: 100
-                    };
-                    
-                    console.log("🚀 Enhanced search payload:", searchPayload);
+                      sourceSkills.forEach(s => {
+                        if (s.matchType !== 'exclude') {
+                          skillsToSearch.push({
+                            value: s.value || "Skill",
+                            priority: s.matchType === 'must' ? 'Must Have' : 'Flexible',
+                            years_experience: s.years || 0
+                          });
+                        }
+                      });
 
-                    const response = await fetch(`${apiUrl}/candidates/search`, {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify(searchPayload)
-                    });
-                    
-                    if (response.ok) {
-                      const data = await response.json();
-                      setCandidates(data.candidates || []);
-                      console.log("✅ Enhanced search results:", data);
-                    } else {
+                      // Ensure we search something
+                      if (titleCriteria.length === 0 && skillCriteria.length === 0 && skillsToSearch.length === 0) {
+                        skillsToSearch.push({ value: jobTitle || "Role", priority: "Flexible", years_experience: 0 });
+                      }
+
+                      const selectedSourcesArray = Object.keys(searchSources)
+                        .filter(k => (searchSources as any)[k])
+                        .map(k => {
+                          if (k === 'jobdiva') return 'JobDiva';
+                          if (k === 'jobdiva_hotlist') return 'JobDivaHotlist';
+                          if (k === 'linkedin') return 'LinkedIn';
+                          if (k === 'dice') return 'Dice';
+                          return k;
+                        });
+
+                      setSearchStatus("Enhanced multi-criteria search in progress...");
+
+                      const searchPayload = {
+                        job_id: numericJobId || jobdivaId,
+                        // Enhanced criteria (new format)
+                        titles: titleCriteria,
+                        skill_criteria: skillCriteria,
+                        locations: locationCriteria,
+                        keywords: sourceKeywords,
+                        companies: sourceCompanies,
+                        // Legacy compatibility  
+                        skills: skillsToSearch,
+                        location: sourceLocations.length > 0 ? sourceLocations[0].value : "",
+                        location_type: "Unspecified",
+                        sources: selectedSourcesArray,
+                        page: 1,
+                        limit: 100
+                      };
+
+                      console.log("🚀 Enhanced search payload:", searchPayload);
+
+                      const response = await fetch(`${apiUrl}/candidates/search`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(searchPayload)
+                      });
+
+                      if (response.ok) {
+                        const data = await response.json();
+                        setCandidates(data.candidates || []);
+                        console.log("✅ Enhanced search results:", data);
+                      } else {
+                        setCandidates([]);
+                        console.error("❌ Search failed:", response.status);
+                      }
+                    } catch (error) {
+                      console.error("Failed to search candidates:", error);
                       setCandidates([]);
-                      console.error("❌ Search failed:", response.status);
+                    } finally {
+                      setIsSearching(false);
                     }
-                  } catch (error) {
-                    console.error("Failed to search candidates:", error);
-                    setCandidates([]);
-                  } finally {
-                    setIsSearching(false);
-                  }
-                }}
-                disabled={isSearching}
-              >
-                {isSearching ? (
-                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                ) : (
-                  <Rocket className="w-4 h-4 fill-white" />
-                )}
-                Run Search
-              </Button>
-            </div>
+                  }}
+                  disabled={isSearching}
+                >
+                  {isSearching ? (
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  ) : (
+                    <Rocket className="w-4 h-4 fill-white" />
+                  )}
+                  Run Search
+                </Button>
+              </div>
 
-            <section>
-              <div className="flex items-center gap-3 mb-5">
-                <Globe className="w-4 h-4 text-slate-400" />
-                <span className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Search Sources:</span>
-                <div className="flex items-center gap-5 ml-1">
-                  {[
-                    { id: 'jobdiva', label: 'JobDiva', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false },
-                    { id: 'jobdiva_hotlist', label: 'JobDiva Hotlist', icon: <Zap className="w-4 h-4 text-orange-500 fill-orange-500" />, disabled: true },
-                    { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: true },
-                    { id: 'dice', label: 'Dice', icon: <Box className="w-4 h-4 text-slate-700" />, disabled: true }
-                  ].map(source => (
-                    <label key={source.id} className={`flex items-center gap-2 ${source.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer group'}`} title={source.disabled ? "Integration coming soon" : ""}>
-                      <Checkbox
-                        checked={source.disabled ? false : (searchSources as any)[source.id]}
-                        onCheckedChange={(checked) => !source.disabled && setSearchSources(prev => ({ ...prev, [source.id]: !!checked }))}
-                        className={`w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-[#6366f1] data-[state=checked]:border-[#6366f1] ${source.disabled ? 'opacity-50' : ''}`}
-                        disabled={source.disabled}
-                      />
-                      <div className={`flex items-center gap-1.5 ${source.disabled ? 'opacity-60' : 'opacity-80 group-hover:opacity-100 transition-opacity'}`}>
-                        {source.icon}
-                        <span className="text-[13px] font-bold text-slate-700">{source.label}</span>
-                      </div>
-                    </label>
-                  ))}
+              <section>
+                <div className="flex items-center gap-3 mb-5">
+                  <Globe className="w-4 h-4 text-slate-400" />
+                  <span className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Search Sources:</span>
+                  <div className="flex items-center gap-5 ml-1">
+                    {[
+                      { id: 'jobdiva', label: 'JobDiva', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false },
+                      { id: 'jobdiva_hotlist', label: 'JobDiva Hotlist', icon: <Zap className="w-4 h-4 text-orange-500 fill-orange-500" />, disabled: false },
+                      { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: false },
+                      { id: 'dice', label: 'Dice', icon: <Box className="w-4 h-4 text-slate-700" />, disabled: false }
+                    ].map(source => (
+                      <label key={source.id} className={`flex items-center gap-2 ${source.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer group'}`} title={source.disabled ? "Integration coming soon" : ""}>
+                        <Checkbox
+                          checked={source.disabled ? false : (searchSources as any)[source.id]}
+                          onCheckedChange={(checked) => !source.disabled && setSearchSources(prev => ({ ...prev, [source.id]: !!checked }))}
+                          className={`w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-[#6366f1] data-[state=checked]:border-[#6366f1] ${source.disabled ? 'opacity-50' : ''}`}
+                          disabled={source.disabled}
+                        />
+                        <div className={`flex items-center gap-1.5 ${source.disabled ? 'opacity-60' : 'opacity-80 group-hover:opacity-100 transition-opacity'}`}>
+                          {source.icon}
+                          <span className="text-[13px] font-bold text-slate-700">{source.label}</span>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            </section>
+              </section>
 
-            <section>
-              <div className="flex items-center gap-3 mb-4">
-                <Clipboard className="w-4 h-4 text-slate-400" />
-                <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Job Titles</h3>
-                <span className="bg-[#ede9fe] text-[#6366f1] text-[11px] font-bold px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">{sourceTitles.length} added</span>
-              </div>
+              <section>
+                <div className="flex items-center gap-3 mb-4">
+                  <Clipboard className="w-4 h-4 text-slate-400" />
+                  <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Job Titles</h3>
+                  <span className="bg-[#ede9fe] text-[#6366f1] text-[11px] font-bold px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">{sourceTitles.length} added</span>
+                </div>
 
-              <div className="space-y-3 mb-3">
-                {sourceTitles.map((title) => (
-                  <div key={title.id} className="flex flex-col gap-1">
-                    <div className="flex items-center gap-3 p-1 pl-2.5 rounded-xl border border-[#e0e7ff] bg-white shadow-sm group">
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <div className={`flex items-center justify-between px-2.5 h-8 min-w-[125px] rounded-xl text-[12px] font-bold cursor-pointer transition-all ${title.matchType === 'must' ? 'bg-[#f5f3ff] text-[#6366f1] border border-[#e0e7ff]' :
-                          title.matchType === 'exclude' ? 'bg-[#fef2f2] text-[#dc2626] border border-[#fee2e2]' :
-                            'bg-[#f0fdf4] text-[#16a34a] border border-[#dcfce7]'
-                          }`}>
-                          {title.matchType === 'must' ? 'Must have' : title.matchType === 'exclude' ? 'Must not have' : 'Can have'}
-                          <ChevronDown className="w-4 h-4 opacity-50 ml-1" />
-                        </div>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="start" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
-                        <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'must' } : t))}>
-                          Must have
-                        </DropdownMenuItem>
-                        <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'can' } : t))}>
-                          Can have
-                        </DropdownMenuItem>
-                        <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px] text-red-600" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'exclude' } : t))}>
-                          Must not have
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                    <span className="flex-1 text-[13px] font-bold text-slate-800 px-1">{title.value}</span>
-
-                    <div className="flex items-center h-8 bg-white border border-slate-200 rounded-lg overflow-hidden ml-auto shadow-sm">
-                      <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, years: Math.max(0, t.years - 1) } : t))}>-</button>
-                      <span className="px-2 h-full flex items-center justify-center text-[11px] font-bold text-slate-700 min-w-[58px] text-center border-x border-slate-100">{title.years === 0 ? 'Any exp' : `${title.years}+ yr${title.years > 1 ? 's' : ''}`}</span>
-                      <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, years: t.years + 1 } : t))}>+</button>
-                    </div>
-
-                    <button
-                      className={`flex items-center gap-1.5 px-2.5 h-8 rounded-xl text-[11px] font-bold transition-all border shadow-sm ${title.recent ? 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff]' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
-                        }`}
-                      onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, recent: !t.recent } : t))}
-                    >
-                      <History className={`w-3.5 h-3.5 ${title.recent ? 'text-[#6366f1]' : 'text-slate-400'}`} />
-                      Recent
-                    </button>
-
-                    {/* Similar button */}
-                    {(title.similarTitles || []).length > 0 && (
-                      <button
-                        className={`flex items-center gap-1.5 px-2.5 h-8 rounded-lg text-[11px] font-bold transition-all border ${
-                          title.similarExpanded ? 'bg-[#ede9fe] text-[#6366f1] border-[#ddd6fe]' : 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff] hover:bg-[#ede9fe]'
-                        }`}
-                        onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, similarExpanded: !t.similarExpanded } : t))}
-                      >
-                        {title.selectedSimilarTitles?.length || 0}/{title.similarTitles.length} similar
-                        <ChevronDown className={`w-3.5 h-3.5 opacity-60 transition-transform ${title.similarExpanded ? 'rotate-180' : ''}`} />
-                      </button>
-                    )}
-
-                    <button
-                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
-                      onClick={() => setSourceTitles(prev => prev.filter(t => t.id !== title.id))}
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-
-                  {/* Inline similar titles panel */}
-                  {title.similarExpanded && (title.similarTitles || []).length > 0 && (
-                    <div className="mx-1 mb-1 rounded-xl border border-[#e0e7ff] bg-[#f5f3ff] px-4 py-3">
-                      <div className="flex items-center justify-between mb-3">
-                        <span className="text-[12px] font-bold text-[#6366f1]">
-                          {title.selectedSimilarTitles?.length || 0}/{title.similarTitles.length} similar titles also included
-                        </span>
-                        <button
-                          className="text-[11px] font-bold text-slate-500 hover:text-[#6366f1] transition-colors"
-                          onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, selectedSimilarTitles: t.selectedSimilarTitles?.length === t.similarTitles.length ? [] : t.similarTitles } : t))}
-                        >
-                          {(title.selectedSimilarTitles?.length || 0) === title.similarTitles.length ? 'Deselect all' : 'Select all'}
-                        </button>
-                      </div>
-                      <div className="grid grid-cols-2 gap-x-6 gap-y-2">
-                        {title.similarTitles.map((st, i) => (
-                          <label key={i} className="flex items-center gap-2 cursor-pointer group">
-                            <div
-                              className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 border transition-all ${
-                                (title.selectedSimilarTitles || []).includes(st)
-                                  ? 'bg-[#6366f1] border-[#6366f1]'
-                                  : 'bg-white border-slate-300 group-hover:border-[#6366f1]'
-                              }`}
-                              onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? {
-                                ...t,
-                                selectedSimilarTitles: (t.selectedSimilarTitles || []).includes(st)
-                                  ? (t.selectedSimilarTitles || []).filter(x => x !== st)
-                                  : [...(t.selectedSimilarTitles || []), st]
-                              } : t))}
-                            >
-                              {(title.selectedSimilarTitles || []).includes(st) && (
-                                <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 12 12"><path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                              )}
+                <div className="space-y-3 mb-3">
+                  {sourceTitles.map((title) => (
+                    <div key={title.id} className="flex flex-col gap-1">
+                      <div className="flex items-center gap-3 p-1 pl-2.5 rounded-xl border border-[#e0e7ff] bg-white shadow-sm group">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <div className={`flex items-center justify-between px-2.5 h-8 min-w-[125px] rounded-xl text-[12px] font-bold cursor-pointer transition-all ${title.matchType === 'must' ? 'bg-[#f5f3ff] text-[#6366f1] border border-[#e0e7ff]' :
+                              title.matchType === 'exclude' ? 'bg-[#fef2f2] text-[#dc2626] border border-[#fee2e2]' :
+                                'bg-[#f0fdf4] text-[#16a34a] border border-[#dcfce7]'
+                              }`}>
+                              {title.matchType === 'must' ? 'Must have' : title.matchType === 'exclude' ? 'Must not have' : 'Can have'}
+                              <ChevronDown className="w-4 h-4 opacity-50 ml-1" />
                             </div>
-                            <span className="text-[12px] font-medium text-slate-700">{st}</span>
-                          </label>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  </div>
-                ))}
-              </div>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="start" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
+                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'must' } : t))}>
+                              Must have
+                            </DropdownMenuItem>
+                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'can' } : t))}>
+                              Can have
+                            </DropdownMenuItem>
+                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px] text-red-600" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'exclude' } : t))}>
+                              Must not have
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                        <span className="flex-1 text-[13px] font-bold text-slate-800 px-1">{title.value}</span>
 
-              <div className="relative">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                <Input
-                  placeholder="Search job titles..."
-                  className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl font-medium text-slate-600 placeholder:text-slate-400"
-                />
-              </div>
-            </section>
-
-            <div className="border-t border-slate-100" />
-
-            <section>
-              <div className="flex items-center gap-3 mb-4">
-                <Zap className="w-4 h-4 text-slate-400" />
-                <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Skills & Experience</h3>
-                <span className="bg-[#ede9fe] text-[#6366f1] text-[11px] font-bold px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">{sourceSkills.length} added</span>
-              </div>
-
-              <div className="space-y-3 mb-3">
-                {sourceSkills.map((skill) => (
-                  <div key={skill.id} className="flex flex-col gap-1">
-                    <div className="flex items-center gap-3 p-1 pl-2.5 rounded-xl border border-slate-200 bg-white group hover:border-[#6366f1]/30 transition-all shadow-sm">
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <div className={`flex items-center justify-between px-2.5 h-8 min-w-[125px] rounded-xl text-[12px] font-bold cursor-pointer transition-all ${skill.matchType === 'must' ? 'bg-[#f5f3ff] text-[#6366f1] border border-[#e0e7ff]' :
-                          skill.matchType === 'exclude' ? 'bg-[#fef2f2] text-[#dc2626] border border-[#fee2e2]' :
-                            'bg-[#f0fdf4] text-[#16a34a] border border-[#dcfce7]'
-                          }`}>
-                          {skill.matchType === 'must' ? 'Must have' : skill.matchType === 'exclude' ? 'Must not have' : 'Can have'}
-                          <ChevronDown className="w-4 h-4 opacity-50 ml-1" />
+                        <div className="flex items-center h-8 bg-white border border-slate-200 rounded-lg overflow-hidden ml-auto shadow-sm">
+                          <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, years: Math.max(0, t.years - 1) } : t))}>-</button>
+                          <span className="px-2 h-full flex items-center justify-center text-[11px] font-bold text-slate-700 min-w-[58px] text-center border-x border-slate-100">{title.years === 0 ? 'Any exp' : `${title.years}+ yr${title.years > 1 ? 's' : ''}`}</span>
+                          <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, years: t.years + 1 } : t))}>+</button>
                         </div>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="start" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
-                        <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'must' } : s))}>
-                          Must have
-                        </DropdownMenuItem>
-                        <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'can' } : s))}>
-                          Can have
-                        </DropdownMenuItem>
-                        <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px] text-red-600" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'exclude' } : s))}>
-                          Must not have
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                    <span className="flex-1 text-[13px] font-bold text-slate-800 px-1">{skill.value}</span>
 
-                    <div className="flex items-center h-8 bg-white border border-slate-200 rounded-lg overflow-hidden ml-auto shadow-sm">
-                      <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, years: Math.max(0, s.years - 1) } : s))}>-</button>
-                      <span className="px-2 h-full flex items-center justify-center text-[11px] font-bold text-slate-700 min-w-[58px] text-center border-x border-slate-100">{skill.years === 0 ? 'Any exp' : `${skill.years}+ yr${skill.years > 1 ? 's' : ''}`}</span>
-                      <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, years: s.years + 1 } : s))}>+</button>
-                    </div>
-
-                    <button
-                      className={`flex items-center gap-1.5 px-2.5 h-8 rounded-xl text-[11px] font-bold transition-all border shadow-sm ${skill.recent ? 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff]' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
-                        }`}
-                      onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, recent: !s.recent } : s))}
-                    >
-                      <History className={`w-3.5 h-3.5 ${skill.recent ? 'text-[#6366f1]' : 'text-slate-400'}`} />
-                      Recent
-                    </button>
-
-                    {/* Similar button */}
-                    {(skill.similarSkills || []).length > 0 && (
-                      <button
-                        className={`flex items-center gap-1.5 px-2.5 h-8 rounded-lg text-[11px] font-bold transition-all border ${
-                          skill.similarExpanded ? 'bg-[#ede9fe] text-[#6366f1] border-[#ddd6fe]' : 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff] hover:bg-[#ede9fe]'
-                        }`}
-                        onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, similarExpanded: !s.similarExpanded } : s))}
-                      >
-                        {skill.selectedSimilarSkills?.length || 0}/{skill.similarSkills.length} similar
-                        <ChevronDown className={`w-3.5 h-3.5 opacity-60 transition-transform ${skill.similarExpanded ? 'rotate-180' : ''}`} />
-                      </button>
-                    )}
-
-                    <button
-                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
-                      onClick={() => setSourceSkills(prev => prev.filter(s => s.id !== skill.id))}
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
-                  </div>
-
-                  {/* Inline similar skills panel */}
-                  {skill.similarExpanded && (skill.similarSkills || []).length > 0 && (
-                    <div className="mx-1 mb-1 rounded-xl border border-[#e0e7ff] bg-[#f5f3ff] px-4 py-3">
-                      <div className="flex items-center justify-between mb-3">
-                        <span className="text-[12px] font-bold text-[#6366f1]">
-                          {skill.selectedSimilarSkills?.length || 0}/{skill.similarSkills.length} similar skills also included
-                        </span>
                         <button
-                          className="text-[11px] font-bold text-slate-500 hover:text-[#6366f1] transition-colors"
-                          onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, selectedSimilarSkills: s.selectedSimilarSkills?.length === s.similarSkills.length ? [] : s.similarSkills } : s))}
+                          className={`flex items-center gap-1.5 px-2.5 h-8 rounded-xl text-[11px] font-bold transition-all border shadow-sm ${title.recent ? 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff]' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+                            }`}
+                          onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, recent: !t.recent } : t))}
                         >
-                          {(skill.selectedSimilarSkills?.length || 0) === skill.similarSkills.length ? 'Deselect all' : 'Select all'}
+                          <History className={`w-3.5 h-3.5 ${title.recent ? 'text-[#6366f1]' : 'text-slate-400'}`} />
+                          Recent
                         </button>
-                      </div>
-                      <div className="grid grid-cols-2 gap-x-6 gap-y-2">
-                        {skill.similarSkills.map((ss, i) => (
-                          <label key={i} className="flex items-center gap-2 cursor-pointer group">
-                            <div
-                              className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 border transition-all ${
-                                (skill.selectedSimilarSkills || []).includes(ss)
-                                  ? 'bg-[#6366f1] border-[#6366f1]'
-                                  : 'bg-white border-slate-300 group-hover:border-[#6366f1]'
+
+                        {/* Similar button */}
+                        {(title.similarTitles || []).length > 0 && (
+                          <button
+                            className={`flex items-center gap-1.5 px-2.5 h-8 rounded-lg text-[11px] font-bold transition-all border ${title.similarExpanded ? 'bg-[#ede9fe] text-[#6366f1] border-[#ddd6fe]' : 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff] hover:bg-[#ede9fe]'
                               }`}
-                              onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? {
-                                ...s,
-                                selectedSimilarSkills: (s.selectedSimilarSkills || []).includes(ss)
-                                  ? (s.selectedSimilarSkills || []).filter(x => x !== ss)
-                                  : [...(s.selectedSimilarSkills || []), ss]
-                              } : s))}
-                            >
-                              {(skill.selectedSimilarSkills || []).includes(ss) && (
-                                <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 12 12"><path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                              )}
-                            </div>
-                            <span className="text-[12px] font-medium text-slate-700">{ss}</span>
-                          </label>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                  </div>
-                ))}
-              </div>
+                            onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, similarExpanded: !t.similarExpanded } : t))}
+                          >
+                            {title.selectedSimilarTitles?.length || 0}/{title.similarTitles.length} similar
+                            <ChevronDown className={`w-3.5 h-3.5 opacity-60 transition-transform ${title.similarExpanded ? 'rotate-180' : ''}`} />
+                          </button>
+                        )}
 
-              <div className="relative">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                <Input
-                  placeholder="Search skills..."
-                  className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl font-medium text-slate-600 placeholder:text-slate-400"
-                />
-              </div>
-            </section>
-
-            <div className="border-t border-slate-100" />
-
-            <section>
-              <div className="flex items-center gap-3 mb-4">
-                <MapPin className="w-4 h-4 text-slate-400" />
-                <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Locations</h3>
-              </div>
-
-              <div className="space-y-4">
-                <div className="flex flex-col gap-3">
-                  {sourceLocations.map((loc) => (
-                    <div key={loc.id} className="flex items-center justify-between p-2.5 pl-3.5 rounded-xl border border-[#ddd6fe] bg-[#f5f3ff]">
-                      <div className="flex items-center gap-3">
-                        <MapPin className="w-4.5 h-4.5 text-[#6366f1]" />
-                        <span className="text-[13px] font-bold text-slate-800 tracking-tight">{loc.value}</span>
-                      </div>
-                      <div className="flex items-center gap-3">
-                        <div className="px-4 h-8 bg-white border border-[#ddd6fe] rounded-lg text-[#6366f1] text-[11px] font-bold flex items-center justify-center min-w-[110px]">
-                          {loc.radius}
-                        </div>
-                        <button 
+                        <button
                           className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
-                          onClick={() => setSourceLocations(prev => prev.filter(l => l.id !== loc.id))}
+                          onClick={() => setSourceTitles(prev => prev.filter(t => t.id !== title.id))}
                         >
                           <X className="w-4 h-4" />
                         </button>
                       </div>
-                    </div>
-                  ))}
-                </div>
 
-                <div className="flex items-center gap-4">
-                  <div className="relative flex-1">
-                    <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-4.5 h-4.5 text-slate-300" />
-                    <Input
-                      placeholder="City, state, or zip code..."
-                      className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl font-medium"
-                    />
-                  </div>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <div className="flex items-center justify-between px-4 h-11 min-w-[120px] border border-slate-200 rounded-xl text-slate-800 text-[13px] font-bold cursor-pointer hover:bg-slate-50 transition-colors">
-                        Within 25 mi
-                        <ChevronDown className="w-4 h-4 text-slate-400" />
-                      </div>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
-                      <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px]">Within 10 mi</DropdownMenuItem>
-                      <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px] bg-slate-50 flex items-center justify-between">
-                        Within 25 mi
-                        <Check className="w-3.5 h-3.5 text-[#6366f1]" />
-                      </DropdownMenuItem>
-                      <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px]">Within 50 mi</DropdownMenuItem>
-                      <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px]">Within 100 mi</DropdownMenuItem>
-                      <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px]">Exact location</DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </div>
-              </div>
-            </section>
-
-            <div className="border-t border-slate-100" />
-
-            <section>
-              <div className="flex items-center gap-3 mb-4">
-                <Clipboard className="w-4 h-4 text-slate-400" />
-                <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Companies</h3>
-              </div>
-              <div className="relative">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
-                <Input
-                  placeholder="Search companies..."
-                  className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl font-medium"
-                />
-              </div>
-            </section>
-
-            <div className="border-t border-slate-100" />
-
-            <section>
-              <div className="flex items-center gap-3 mb-4">
-                <Type className="w-4 h-4 text-slate-400" />
-                <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Keywords</h3>
-              </div>
-
-              <div className="space-y-4">
-                <div className="flex flex-wrap gap-2.5">
-                  {sourceKeywords.map((tag) => (
-                    <div key={tag} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[12.5px] font-bold text-slate-700 shadow-sm">
-                      {tag}
-                      <button 
-                        className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-5 h-5 flex items-center justify-center rounded-md transition-all duration-200"
-                        onClick={() => setSourceKeywords(prev => prev.filter(t => t !== tag))}
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
+                      {/* Inline similar titles panel */}
+                      {title.similarExpanded && (title.similarTitles || []).length > 0 && (
+                        <div className="mx-1 mb-1 rounded-xl border border-[#e0e7ff] bg-[#f5f3ff] px-4 py-3">
+                          <div className="flex items-center justify-between mb-3">
+                            <span className="text-[12px] font-bold text-[#6366f1]">
+                              {title.selectedSimilarTitles?.length || 0}/{title.similarTitles.length} similar titles also included
+                            </span>
+                            <button
+                              className="text-[11px] font-bold text-slate-500 hover:text-[#6366f1] transition-colors"
+                              onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, selectedSimilarTitles: t.selectedSimilarTitles?.length === t.similarTitles.length ? [] : t.similarTitles } : t))}
+                            >
+                              {(title.selectedSimilarTitles?.length || 0) === title.similarTitles.length ? 'Deselect all' : 'Select all'}
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+                            {title.similarTitles.map((st, i) => (
+                              <label key={i} className="flex items-center gap-2 cursor-pointer group">
+                                <div
+                                  className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 border transition-all ${(title.selectedSimilarTitles || []).includes(st)
+                                      ? 'bg-[#6366f1] border-[#6366f1]'
+                                      : 'bg-white border-slate-300 group-hover:border-[#6366f1]'
+                                    }`}
+                                  onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? {
+                                    ...t,
+                                    selectedSimilarTitles: (t.selectedSimilarTitles || []).includes(st)
+                                      ? (t.selectedSimilarTitles || []).filter(x => x !== st)
+                                      : [...(t.selectedSimilarTitles || []), st]
+                                  } : t))}
+                                >
+                                  {(title.selectedSimilarTitles || []).includes(st) && (
+                                    <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 12 12"><path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                                  )}
+                                </div>
+                                <span className="text-[12px] font-medium text-slate-700">{st}</span>
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
 
                 <div className="relative">
-                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
+                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                   <Input
-                    placeholder="Profile keywords or phrases..."
-                    className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl placeholder:italic font-medium"
+                    placeholder="Search job titles..."
+                    className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl font-medium text-slate-600 placeholder:text-slate-400"
                   />
                 </div>
+              </section>
 
-                <div className="bg-[#f8faff] border border-[#e0e7ff] rounded-xl overflow-hidden mt-3">
-                  <button
-                    className="w-full flex items-center gap-4 px-6 py-3.5 h-12 hover:bg-[#f1f5f9] transition-colors"
-                    onClick={async () => {
-                      const nextState = !booleanStringOpen;
-                      setBooleanStringOpen(nextState);
-                      
-                      // Auto-save when expanding the boolean string view to feed the agent
-                      if (nextState) {
-                        setGeneratedBoolean(""); // Reset
-                        await saveJobDraft({ currentStep, saveType: "auto", skipToast: true });
-                        
-                        // Mock the agent string building after a delay
-                        setTimeout(() => {
-                           const mockedStr = `(TITLE("${sourceTitles.length ? sourceTitles[0].value : 'Role'}") OR TITLE("Alternative")) AND ("${sourceSkills.length ? sourceSkills[0].value : 'Skill'}") AND ("${sourceLocations.length ? sourceLocations[0].value : 'Location'}")`;
-                           setGeneratedBoolean(mockedStr);
-                        }, 3000);
-                      }
-                    }}
-                  >
-                    <FileText className="w-4.5 h-4.5 text-[#6366f1]" />
-                    <span className="text-[13px] font-bold text-slate-700 flex-1 text-left flex items-center gap-2">
-                      <code className="text-[#6366f1] text-lg lg:text-base font-mono font-bold leading-none">&lt;/&gt;</code> View generated boolean string
-                    </span>
-                    <ChevronDown className={`w-4.5 h-4.5 text-slate-400 transition-transform duration-300 ${booleanStringOpen ? 'rotate-180' : ''}`} />
-                  </button>
-                  {booleanStringOpen && (
-                    <div className="px-6 pb-6 pt-1 animate-in fade-in slide-in-from-top-1">
-                      {generatedBoolean ? (
-                        <div className="p-4 bg-white border border-slate-200 rounded-xl overflow-x-auto shadow-inner">
-                          <div className="flex items-center justify-between mb-2">
-                            <span className="text-[11px] font-bold uppercase tracking-widest text-[#6366f1] bg-[#ede9fe] px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">
-                              PAIR Generated
-                            </span>
-                          </div>
-                          <code className="text-[13px] font-mono font-medium text-[#2563eb] whitespace-pre leading-relaxed tracking-tight break-all">
-                            {generatedBoolean}
-                          </code>
+              <div className="border-t border-slate-100" />
+
+              <section>
+                <div className="flex items-center gap-3 mb-4">
+                  <Zap className="w-4 h-4 text-slate-400" />
+                  <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Skills & Experience</h3>
+                  <span className="bg-[#ede9fe] text-[#6366f1] text-[11px] font-bold px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">{sourceSkills.length} added</span>
+                </div>
+
+                <div className="space-y-3 mb-3">
+                  {sourceSkills.map((skill) => (
+                    <div key={skill.id} className="flex flex-col gap-1">
+                      <div className="flex items-center gap-3 p-1 pl-2.5 rounded-xl border border-slate-200 bg-white group hover:border-[#6366f1]/30 transition-all shadow-sm">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <div className={`flex items-center justify-between px-2.5 h-8 min-w-[125px] rounded-xl text-[12px] font-bold cursor-pointer transition-all ${skill.matchType === 'must' ? 'bg-[#f5f3ff] text-[#6366f1] border border-[#e0e7ff]' :
+                              skill.matchType === 'exclude' ? 'bg-[#fef2f2] text-[#dc2626] border border-[#fee2e2]' :
+                                'bg-[#f0fdf4] text-[#16a34a] border border-[#dcfce7]'
+                              }`}>
+                              {skill.matchType === 'must' ? 'Must have' : skill.matchType === 'exclude' ? 'Must not have' : 'Can have'}
+                              <ChevronDown className="w-4 h-4 opacity-50 ml-1" />
+                            </div>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="start" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
+                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'must' } : s))}>
+                              Must have
+                            </DropdownMenuItem>
+                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'can' } : s))}>
+                              Can have
+                            </DropdownMenuItem>
+                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px] text-red-600" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'exclude' } : s))}>
+                              Must not have
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                        <span className="flex-1 text-[13px] font-bold text-slate-800 px-1">{skill.value}</span>
+
+                        <div className="flex items-center h-8 bg-white border border-slate-200 rounded-lg overflow-hidden ml-auto shadow-sm">
+                          <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, years: Math.max(0, s.years - 1) } : s))}>-</button>
+                          <span className="px-2 h-full flex items-center justify-center text-[11px] font-bold text-slate-700 min-w-[58px] text-center border-x border-slate-100">{skill.years === 0 ? 'Any exp' : `${skill.years}+ yr${skill.years > 1 ? 's' : ''}`}</span>
+                          <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, years: s.years + 1 } : s))}>+</button>
                         </div>
-                      ) : (
-                        <div className="p-4 bg-white border border-[#e0e7ff] rounded-xl overflow-x-auto shadow-inner flex flex-col items-center justify-center py-6">
-                          <span className="w-5 h-5 border-2 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-3" />
-                          <p className="text-[13px] font-bold text-slate-700">Context Saved to Database</p>
-                          <p className="text-[12px] font-medium text-slate-500 mt-1">Waiting for PAIR to generate boolean string...</p>
+
+                        <button
+                          className={`flex items-center gap-1.5 px-2.5 h-8 rounded-xl text-[11px] font-bold transition-all border shadow-sm ${skill.recent ? 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff]' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+                            }`}
+                          onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, recent: !s.recent } : s))}
+                        >
+                          <History className={`w-3.5 h-3.5 ${skill.recent ? 'text-[#6366f1]' : 'text-slate-400'}`} />
+                          Recent
+                        </button>
+
+                        {/* Similar button */}
+                        {(skill.similarSkills || []).length > 0 && (
+                          <button
+                            className={`flex items-center gap-1.5 px-2.5 h-8 rounded-lg text-[11px] font-bold transition-all border ${skill.similarExpanded ? 'bg-[#ede9fe] text-[#6366f1] border-[#ddd6fe]' : 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff] hover:bg-[#ede9fe]'
+                              }`}
+                            onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, similarExpanded: !s.similarExpanded } : s))}
+                          >
+                            {skill.selectedSimilarSkills?.length || 0}/{skill.similarSkills.length} similar
+                            <ChevronDown className={`w-3.5 h-3.5 opacity-60 transition-transform ${skill.similarExpanded ? 'rotate-180' : ''}`} />
+                          </button>
+                        )}
+
+                        <button
+                          className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
+                          onClick={() => setSourceSkills(prev => prev.filter(s => s.id !== skill.id))}
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+
+                      {/* Inline similar skills panel */}
+                      {skill.similarExpanded && (skill.similarSkills || []).length > 0 && (
+                        <div className="mx-1 mb-1 rounded-xl border border-[#e0e7ff] bg-[#f5f3ff] px-4 py-3">
+                          <div className="flex items-center justify-between mb-3">
+                            <span className="text-[12px] font-bold text-[#6366f1]">
+                              {skill.selectedSimilarSkills?.length || 0}/{skill.similarSkills.length} similar skills also included
+                            </span>
+                            <button
+                              className="text-[11px] font-bold text-slate-500 hover:text-[#6366f1] transition-colors"
+                              onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, selectedSimilarSkills: s.selectedSimilarSkills?.length === s.similarSkills.length ? [] : s.similarSkills } : s))}
+                            >
+                              {(skill.selectedSimilarSkills?.length || 0) === skill.similarSkills.length ? 'Deselect all' : 'Select all'}
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+                            {skill.similarSkills.map((ss, i) => (
+                              <label key={i} className="flex items-center gap-2 cursor-pointer group">
+                                <div
+                                  className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 border transition-all ${(skill.selectedSimilarSkills || []).includes(ss)
+                                      ? 'bg-[#6366f1] border-[#6366f1]'
+                                      : 'bg-white border-slate-300 group-hover:border-[#6366f1]'
+                                    }`}
+                                  onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? {
+                                    ...s,
+                                    selectedSimilarSkills: (s.selectedSimilarSkills || []).includes(ss)
+                                      ? (s.selectedSimilarSkills || []).filter(x => x !== ss)
+                                      : [...(s.selectedSimilarSkills || []), ss]
+                                  } : s))}
+                                >
+                                  {(skill.selectedSimilarSkills || []).includes(ss) && (
+                                    <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 12 12"><path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                                  )}
+                                </div>
+                                <span className="text-[12px] font-medium text-slate-700">{ss}</span>
+                              </label>
+                            ))}
+                          </div>
                         </div>
                       )}
                     </div>
-                  )}
+                  ))}
                 </div>
-              </div>
-            </section>
-          </div>
+
+                <div className="relative">
+                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <Input
+                    placeholder="Search skills..."
+                    className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl font-medium text-slate-600 placeholder:text-slate-400"
+                  />
+                </div>
+              </section>
+
+              <div className="border-t border-slate-100" />
+
+              <section>
+                <div className="flex items-center gap-3 mb-4">
+                  <MapPin className="w-4 h-4 text-slate-400" />
+                  <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Locations</h3>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="flex flex-col gap-3">
+                    {sourceLocations.map((loc) => (
+                      <div key={loc.id} className="flex items-center justify-between p-2.5 pl-3.5 rounded-xl border border-[#ddd6fe] bg-[#f5f3ff]">
+                        <div className="flex items-center gap-3">
+                          <MapPin className="w-4.5 h-4.5 text-[#6366f1]" />
+                          <span className="text-[13px] font-bold text-slate-800 tracking-tight">{loc.value}</span>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <div className="px-4 h-8 bg-white border border-[#ddd6fe] rounded-lg text-[#6366f1] text-[11px] font-bold flex items-center justify-center min-w-[110px]">
+                            {loc.radius}
+                          </div>
+                          <button
+                            className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
+                            onClick={() => setSourceLocations(prev => prev.filter(l => l.id !== loc.id))}
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="flex items-center gap-4">
+                    <div className="relative flex-1">
+                      <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-4.5 h-4.5 text-slate-300" />
+                      <Input
+                        placeholder="City, state, or zip code..."
+                        className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl font-medium"
+                      />
+                    </div>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <div className="flex items-center justify-between px-4 h-11 min-w-[120px] border border-slate-200 rounded-xl text-slate-800 text-[13px] font-bold cursor-pointer hover:bg-slate-50 transition-colors">
+                          Within 25 mi
+                          <ChevronDown className="w-4 h-4 text-slate-400" />
+                        </div>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
+                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px]">Within 10 mi</DropdownMenuItem>
+                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px] bg-slate-50 flex items-center justify-between">
+                          Within 25 mi
+                          <Check className="w-3.5 h-3.5 text-[#6366f1]" />
+                        </DropdownMenuItem>
+                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px]">Within 50 mi</DropdownMenuItem>
+                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px]">Within 100 mi</DropdownMenuItem>
+                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px]">Exact location</DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
+                </div>
+              </section>
+
+              <div className="border-t border-slate-100" />
+
+              <section>
+                <div className="flex items-center gap-3 mb-4">
+                  <Clipboard className="w-4 h-4 text-slate-400" />
+                  <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Companies</h3>
+                </div>
+                <div className="relative">
+                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
+                  <Input
+                    placeholder="Search companies..."
+                    className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl font-medium"
+                  />
+                </div>
+              </section>
+
+              <div className="border-t border-slate-100" />
+
+              <section>
+                <div className="flex items-center gap-3 mb-4">
+                  <Type className="w-4 h-4 text-slate-400" />
+                  <h3 className="text-[11px] font-bold text-slate-400 uppercase tracking-widest">Keywords</h3>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="flex flex-wrap gap-2.5">
+                    {sourceKeywords.map((tag) => (
+                      <div key={tag} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[12.5px] font-bold text-slate-700 shadow-sm">
+                        {tag}
+                        <button
+                          className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-5 h-5 flex items-center justify-center rounded-md transition-all duration-200"
+                          onClick={() => setSourceKeywords(prev => prev.filter(t => t !== tag))}
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="relative">
+                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
+                    <Input
+                      placeholder="Profile keywords or phrases..."
+                      className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl placeholder:italic font-medium"
+                    />
+                  </div>
+
+                  <div className="bg-[#f8faff] border border-[#e0e7ff] rounded-xl overflow-hidden mt-3">
+                    <button
+                      className="w-full flex items-center gap-4 px-6 py-3.5 h-12 hover:bg-[#f1f5f9] transition-colors"
+                      onClick={async () => {
+                        const nextState = !booleanStringOpen;
+                        setBooleanStringOpen(nextState);
+
+                        // Auto-save when expanding the boolean string view to feed the agent
+                        if (nextState) {
+                          setGeneratedBoolean(""); // Reset
+                          await saveJobDraft({ currentStep, saveType: "auto", skipToast: true });
+
+                          // Mock the agent string building after a delay
+                          setTimeout(() => {
+                            const mockedStr = `(TITLE("${sourceTitles.length ? sourceTitles[0].value : 'Role'}") OR TITLE("Alternative")) AND ("${sourceSkills.length ? sourceSkills[0].value : 'Skill'}") AND ("${sourceLocations.length ? sourceLocations[0].value : 'Location'}")`;
+                            setGeneratedBoolean(mockedStr);
+                          }, 3000);
+                        }
+                      }}
+                    >
+                      <FileText className="w-4.5 h-4.5 text-[#6366f1]" />
+                      <span className="text-[13px] font-bold text-slate-700 flex-1 text-left flex items-center gap-2">
+                        <code className="text-[#6366f1] text-lg lg:text-base font-mono font-bold leading-none">&lt;/&gt;</code> View generated boolean string
+                      </span>
+                      <ChevronDown className={`w-4.5 h-4.5 text-slate-400 transition-transform duration-300 ${booleanStringOpen ? 'rotate-180' : ''}`} />
+                    </button>
+                    {booleanStringOpen && (
+                      <div className="px-6 pb-6 pt-1 animate-in fade-in slide-in-from-top-1">
+                        {generatedBoolean ? (
+                          <div className="p-4 bg-white border border-slate-200 rounded-xl overflow-x-auto shadow-inner">
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-[11px] font-bold uppercase tracking-widest text-[#6366f1] bg-[#ede9fe] px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">
+                                PAIR Generated
+                              </span>
+                            </div>
+                            <code className="text-[13px] font-mono font-medium text-[#2563eb] whitespace-pre leading-relaxed tracking-tight break-all">
+                              {generatedBoolean}
+                            </code>
+                          </div>
+                        ) : (
+                          <div className="p-4 bg-white border border-[#e0e7ff] rounded-xl overflow-x-auto shadow-inner flex flex-col items-center justify-center py-6">
+                            <span className="w-5 h-5 border-2 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-3" />
+                            <p className="text-[13px] font-bold text-slate-700">Context Saved to Database</p>
+                            <p className="text-[12px] font-medium text-slate-500 mt-1">Waiting for PAIR to generate boolean string...</p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </section>
+            </div>
 
             {/* Sourced Candidates Section */}
             <div className="border-t border-slate-200 pt-8 mt-10">
@@ -3002,16 +3000,16 @@ function NewJobPageContent() {
                 </div>
                 {candidates.length > 0 && (
                   <div className="flex items-center gap-2">
-                    <Button 
-                      variant="outline" 
+                    <Button
+                      variant="outline"
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50"
                       onClick={() => {
                         const first150 = candidates.slice(0, 150);
                         const first150Ids = new Set(first150.map(c => c.id));
-                        
+
                         // Check if all first 150 are already selected
                         const allFirst150Selected = first150.every(c => selectedCandidates.has(c.id));
-                        
+
                         if (allFirst150Selected) {
                           // Deselect all first 150
                           setSelectedCandidates(prev => {
@@ -3037,13 +3035,13 @@ function NewJobPageContent() {
                       })()
                       }
                     </Button>
-                    <Button 
-                      variant="outline" 
+                    <Button
+                      variant="outline"
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white"
                       onClick={() => {
                         const allIds = candidates.map(c => c.id);
                         const allSelected = allIds.every(id => selectedCandidates.has(id));
-                        
+
                         if (allSelected) {
                           // Deselect all
                           setSelectedCandidates(new Set());
@@ -3083,111 +3081,124 @@ function NewJobPageContent() {
                         sourceSkills[1]?.value,
                         sourceLocations[0]?.value ? `Local to ${sourceLocations[0].value}` : null
                       ].filter(Boolean);
-                      
+
                       return (
-                      <div key={`${candidate.id}-${idx}`} className="p-5 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-purple-200 hover:shadow-md transition-all flex items-center gap-4">
-                        <Checkbox 
-                          className="w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600"
-                          checked={selectedCandidates.has(candidate.id)}
-                          onCheckedChange={(checked) => {
-                            setSelectedCandidates(prev => {
-                              const next = new Set(prev);
-                              if (checked) next.add(candidate.id);
-                              else next.delete(candidate.id);
-                              return next;
-                            });
-                          }}
-                        />
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center justify-between gap-4 mb-3">
-                            <div className="flex-1 min-w-0">
-                              <a 
-                                href="#" 
-                                className="text-[15px] font-bold text-slate-900 leading-tight hover:text-purple-600 flex items-center gap-1.5 transition-colors"
-                                onClick={(e) => {
-                                  e.preventDefault();
-                                  handleViewResume(candidate);
-                                }}
-                                title="Click to view resume"
-                              >
-                                {candidate.firstName} {candidate.lastName} <ArrowRight className="w-3.5 h-3.5 -rotate-45 opacity-60" />
-                              </a>
-                            </div>
-                            
-                            {/* Action Buttons - Enhanced to match Master Candidate Pool */}
-                            <div className="flex items-center justify-center gap-1.5 shrink-0">
-                              {candidate.profile_url && (
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  asChild
-                                  className="h-6 w-6 p-0 border-slate-200 hover:bg-slate-50 text-slate-400 hover:text-[#6366f1]"
-                                  title="View External Profile"
+                        <div key={`${candidate.id}-${idx}`} className="p-5 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-purple-200 hover:shadow-md transition-all flex items-center gap-4">
+                          <Checkbox
+                            className="w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600"
+                            checked={selectedCandidates.has(candidate.id)}
+                            onCheckedChange={(checked) => {
+                              setSelectedCandidates(prev => {
+                                const next = new Set(prev);
+                                if (checked) next.add(candidate.id);
+                                else next.delete(candidate.id);
+                                return next;
+                              });
+                            }}
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center justify-between gap-4">
+                              <div className="flex items-center gap-3 min-w-0">
+                                <a
+                                  href="#"
+                                  className="text-[17px] font-bold text-slate-900 hover:text-[#6366f1] flex items-center gap-2 transition-colors group/name"
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    handleViewResume(candidate);
+                                  }}
+                                  title="Click to view resume"
                                 >
-                                  <a href={candidate.profile_url} target="_blank" rel="noopener noreferrer">
-                                    <ExternalLink className="w-3 h-3" />
-                                  </a>
+                                  {candidate.firstName} {candidate.lastName}
+                                  <ArrowRight className="w-4 h-4 -rotate-45 text-slate-300 group-hover/name:text-[#6366f1] transition-colors" />
+                                </a>
+                                <span className={`px-2.5 py-0.5 rounded-lg text-[10px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 border ${candidate.source === 'LinkedIn'
+                                    ? 'bg-blue-50 text-blue-700 border-blue-200'
+                                    : 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff]'
+                                  }`}>
+                                  {candidate.source === 'LinkedIn' ? <Linkedin className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
+                                  {candidate.source || "JobDiva"}
+                                </span>
+                                
+                              </div>
+
+                              <div className="flex items-center gap-2 shrink-0">
+                                {(candidate.match_score !== undefined && candidate.match_score > 0) && (
+                                  <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center shadow-sm h-fit border ${
+                                    candidate.match_score >= 80 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 
+                                    candidate.match_score >= 60 ? 'bg-amber-50 text-amber-700 border-amber-200' : 
+                                    'bg-rose-50 text-rose-700 border-rose-200'
+                                  }`}>
+                                    {candidate.match_score}% Match
+                                  </span>
+                                )}
+                                
+                                {candidate.profile_url && (
+                                  <Button
+                                    variant="outline"
+                                    size="sm"
+                                    asChild
+                                    className="h-8 w-8 p-0 border-slate-200 hover:bg-slate-50 text-slate-400 hover:text-[#0A66C2] rounded-lg transition-all"
+                                    title="Open Profile"
+                                  >
+                                    <a href={candidate.profile_url} target="_blank" rel="noopener noreferrer">
+                                      <ExternalLink className="w-4 h-4" />
+                                    </a>
+                                  </Button>
+                                )}
+                                <Button
+                                  size="sm"
+                                  className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center gap-2"
+                                  onClick={() => {
+                                    setSelectedCandidateForEmail({
+                                      name: `${candidate.firstName} ${candidate.lastName}`,
+                                      email: candidate.email || "Email not available",
+                                      firstName: candidate.firstName,
+                                      lastName: candidate.lastName
+                                    });
+                                    setMessageModalOpen(true);
+                                  }}
+                                >
+                                  <Mail className="w-3.5 h-3.5" />
+                                  Email
                                 </Button>
-                              )}
-                              <Button
-                                size="sm"
-                                className="h-6 px-2 bg-white border border-[#6366f1]/30 text-[#6366f1] hover:bg-[#6366f1]/5 font-medium text-[11px]"
-                                onClick={() => {
-                                  setSelectedCandidateForEmail({
-                                    name: `${candidate.firstName} ${candidate.lastName}`,
-                                    email: candidate.email || "Email not available",
-                                    firstName: candidate.firstName,
-                                    lastName: candidate.lastName
-                                  });
-                                  setMessageModalOpen(true);
-                                }}
-                              >
-                                <Mail className="w-3 h-3 mr-1" />
-                                Email
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="h-6 px-2 text-[11px] opacity-50"
-                                disabled
-                                title="Engage (Coming in Next Phase)"
-                              >
-                                Engage
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="h-6 px-2 text-[11px] opacity-50"
-                                disabled
-                                title="Assess (Coming in Next Phase)"
-                              >
-                                Assess
-                              </Button>
+                                <Button
+                                  size="sm"
+                                  className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center gap-2"
+                                >
+                                  Engage
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center gap-2"
+                                >
+                                  Assess
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center gap-2"
+                                  onClick={() => {
+                                    setSelectedCandidateForDetails({
+                                      name: `${candidate.firstName} ${candidate.lastName}`,
+                                      profileUrl: candidate.profile_url,
+                                      imageUrl: candidate.image_url,
+                                      details: `${candidate.title || "Target Role"} • ${3 + (idx % 5)} yrs exp • ${candidate.city ? `${candidate.city}, ${candidate.state}` : "Location unspecified"}`,
+                                      tags: badgeOptions,
+                                      matchScore: candidate.match_score,
+                                      missingSkills: candidate.missing_skills,
+                                      explainability: candidate.explainability
+                                    });
+                                    setDetailsModalOpen(true);
+                                  }}
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                  View
+                                </Button>
+                              </div>
                             </div>
-                          </div>
-                          
-                          <div className="flex items-center gap-2 flex-wrap mb-4">
-                            <span className="text-[13px] text-slate-500">{candidate.title || "Target Role"}</span>
-                            <span className="text-[13px] text-slate-300">•</span>
-                            <span className="text-[13px] text-slate-500">{3 + (idx % 5)} yrs exp</span>
-                            <span className="text-[13px] text-slate-300">•</span>
-                            <span className="text-[13px] text-slate-500">{candidate.city ? `${candidate.city}, ${candidate.state}` : "Location unspecified"}</span>
-                            <span className="text-[13px] text-slate-300">•</span>
-                            <span className="bg-blue-50 text-blue-700 text-[11px] font-bold px-2 py-0.5 rounded-full border border-blue-200">
-                              {candidate.source || "JobDiva"}
-                            </span>
-                          </div>
-                          
-                          <div className="flex flex-wrap gap-2">
-                            {badgeOptions.map((badge, i) => (
-                              <span key={i} className="bg-purple-50 text-purple-700 border border-purple-200 rounded-full px-2.5 py-0.5 text-[11.5px] font-semibold whitespace-nowrap">
-                                {badge}
-                              </span>
-                            ))}
                           </div>
                         </div>
-                      </div>
-                    )})}
+                      )
+                    })}
                   </div>
                 ) : (
                   <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
@@ -3213,7 +3224,7 @@ function NewJobPageContent() {
                 className={`h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group ${candidates.length > 0 && selectedCandidates.size > 0 ? "bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98]" : "bg-slate-300 cursor-not-allowed"}`}
                 onClick={async () => {
                   if (selectedCandidates.size === 0) return;
-                  
+
                   try {
                     // Prepare candidates payload with proper structure
                     const candidatesPayload = candidates.map(c => ({
@@ -3232,7 +3243,7 @@ function NewJobPageContent() {
                       resume_id: c.resumeId || c.resume_id,
                       is_selected: selectedCandidates.has(c.id)
                     }));
-                    
+
                     const selectedCount = candidatesPayload.filter(c => c.is_selected).length;
                     console.log(`🚀 Launching PAIR with ${selectedCount} selected candidates out of ${candidatesPayload.length} total`);
                     console.log('Payload preview:', candidatesPayload.slice(0, 2).map(c => ({
@@ -3241,7 +3252,7 @@ function NewJobPageContent() {
                       is_selected: c.is_selected,
                       has_resume: !!c.resume_text
                     })));
-                    
+
                     const apiUrl = process.env.NEXT_PUBLIC_API_URL;
                     const response = await fetch(`${apiUrl}/candidates/save`, {
                       method: "POST",
@@ -3251,10 +3262,10 @@ function NewJobPageContent() {
                         candidates: candidatesPayload
                       })
                     });
-                    
+
                     const result = await response.json();
                     console.log('Save candidates result:', result);
-                    
+
                     if (response.ok && result.status === 'success') {
                       const saved = result.saved_count || selectedCount;
                       showToast(`Successfully saved ${saved} candidates to Master Pool! 🎉`, "success");
@@ -3266,7 +3277,7 @@ function NewJobPageContent() {
                     console.error("Failed to save candidates:", e);
                     showToast("Failed to save candidates", "error");
                   }
-                  
+
                   setTimeout(() => {
                     router.push(`/candidates`);
                   }, 2000);
@@ -3501,6 +3512,24 @@ function NewJobPageContent() {
           onClose={() => {
             setResumeModalOpen(false);
             setSelectedCandidateForResume(null);
+          }}
+        />
+      )}
+
+      {selectedCandidateForDetails && (
+        <CandidateDetailsModal
+          isOpen={detailsModalOpen}
+          candidateName={selectedCandidateForDetails.name}
+          profileUrl={selectedCandidateForDetails.profileUrl}
+          imageUrl={selectedCandidateForDetails.imageUrl}
+          details={selectedCandidateForDetails.details}
+          tags={selectedCandidateForDetails.tags}
+          matchScore={selectedCandidateForDetails.matchScore}
+          missingSkills={selectedCandidateForDetails.missingSkills}
+          explainability={selectedCandidateForDetails.explainability}
+          onClose={() => {
+            setDetailsModalOpen(false);
+            setSelectedCandidateForDetails(null);
           }}
         />
       )}

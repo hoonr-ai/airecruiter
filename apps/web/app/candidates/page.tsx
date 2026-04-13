@@ -180,6 +180,7 @@ export default function CandidatesPage() {
                 <TableRow className="border-slate-100">
                   <TableHead className="w-[64px] pl-8"></TableHead>
                   <TableHead className="w-[200px] text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Candidate</TableHead>
+                  <TableHead className="text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Match</TableHead>
                   <TableHead className="text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Applied For</TableHead>
                   <TableHead className="text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Sourcing Details</TableHead>
                   <TableHead className="text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Sourced On</TableHead>
@@ -211,6 +212,21 @@ export default function CandidatesPage() {
                           <Briefcase className="w-3.5 h-3.5 text-slate-500 shrink-0" />
                           <p className="text-[13px] text-slate-600 font-medium line-clamp-1">{candidate.headline}</p>
                         </div>
+                      </div>
+                    </TableCell>
+                    <TableCell className="py-6">
+                      <div className="flex items-center">
+                        {(candidate as any).match_score || candidate.data?.match_score ? (
+                          <span className={`px-2.5 py-1 rounded-full text-[12px] font-bold shadow-sm ${
+                            ((candidate as any).match_score || candidate.data?.match_score) >= 80 ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' : 
+                            ((candidate as any).match_score || candidate.data?.match_score) >= 60 ? 'bg-amber-100 text-amber-700 border border-amber-200' : 
+                            'bg-rose-100 text-rose-700 border border-rose-200'
+                          }`}>
+                            {((candidate as any).match_score || candidate.data?.match_score)}% Match
+                          </span>
+                        ) : (
+                          <span className="text-[12px] text-slate-400 font-medium px-2 py-1 bg-slate-50 rounded-md border border-slate-100">N/A</span>
+                        )}
                       </div>
                     </TableCell>
                     <TableCell className="py-6">
@@ -266,7 +282,6 @@ export default function CandidatesPage() {
                             size="sm"
                             variant="outline"
                             className="h-8 px-3 opacity-50"
-                            disabled
                          >
                             Engage
                          </Button>
@@ -274,7 +289,6 @@ export default function CandidatesPage() {
                             size="sm"
                             variant="outline" 
                             className="h-8 px-3 opacity-50"
-                            disabled
                          >
                             Assess
                          </Button>

@@ -104,7 +104,7 @@ class UnipileService:
             
         return None
 
-    async def search_candidates(self, skills: List[Any], location: str, open_to_work: bool = False, limit: int = 25) -> List[Dict[str, Any]]:
+    async def search_candidates(self, skills: List[Any], location: str, open_to_work: bool = True, limit: int = 25) -> List[Dict[str, Any]]:
         """
         Search LinkedIn via Unipile using the Recruiter API mode.
         """
@@ -169,6 +169,8 @@ class UnipileService:
             "category": "people"
         }
         
+        logger.info(f"Resolved {len(skill_ids)} skill IDs and {len(location_ids)} location IDs for LinkedIn search")
+
         if skill_ids:
             payload["skills"] = [{"id": s["id"], "priority": s["priority"]} for s in skill_ids]
             
@@ -184,10 +186,7 @@ class UnipileService:
                 logger.info(f"Unipile Recruiter Search Payload: {json.dumps(payload)}")
                 resp = await client.post(url, params=params, json=payload, headers=self._get_headers())
                 
-                if resp.status_code == 200: # Unipile often returns 201 for Async? 
-                    # Docs say "Perform search...". Sync/Async?
-                    # Getting Started said "export result".
-                    # Real-time search might be synchronous.
+                if resp.status_code in [200, 201]: 
                     data = resp.json()
                     items = data.get("items", [])
                     
@@ -218,9 +217,11 @@ class UnipileService:
                         results.append(cand)
                 else:
                     logger.error(f"Unipile Search Failed: {resp.status_code} - {resp.text}")
+                    return []
 
         except Exception as e:
             logger.error(f"Unipile Search Exception: {e}")
+            return []
 
         logger.info(f"Unipile returned {len(results)} candidates")
         return results

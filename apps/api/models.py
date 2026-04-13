@@ -117,7 +117,7 @@ class CandidateSearchRequest(BaseModel):
     companies: List[str] = []  # Target companies (UI only for now)
     location_type: str = "Unspecified"
     sources: List[str] = ["VettedDB", "JobDiva", "LinkedIn"]  # Enable JobDiva and LinkedIn by default
-    open_to_work: bool = False
+    open_to_work: bool = True
     page: int = 1
     limit: int = 100
 

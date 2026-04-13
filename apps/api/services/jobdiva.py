@@ -1481,32 +1481,6 @@ class JobDivaService:
             logger.error(f"SearchJob Error: {e}")
             return None
 
-    # DISABLED: Duplicate method that was overriding the correct one
-    # async def get_candidate_resume(self, candidate_id: str) -> Optional[str]:
-        """Fetches resume text with cascading fallback."""
-        token = await self.authenticate()
-        if not token: return None
-        headers = {"Authorization": f"Bearer {token}"}
-        
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                res_url = f"{self.api_url}/apiv2/bi/CandidateResumesDetail"
-                resp = await client.get(res_url, params={"candidateId": candidate_id}, headers=headers)
-                if resp.status_code == 200:
-                    recs = resp.json()
-                    if isinstance(recs, dict): recs = recs.get("data", [])
-                    if recs:
-                        rid = recs[0].get("RESUMEID")
-                        det_url = f"{self.api_url}/apiv2/bi/ResumeDetail"
-                        det_resp = await client.get(det_url, params={"resumeId": rid}, headers=headers)
-                        if det_resp.status_code == 200:
-                            data = det_resp.json()
-                            if isinstance(data, dict): data = data.get("data", [{}])[0]
-                            text = get_field(data, ["PLAINTEXT", "text"])
-                            if text: return unescape(text)
-        except Exception as e:
-            logger.error(f"Resume Fetch Error: {e}")
-        return "Resume content unavailable."
 
     async def get_enhanced_job_candidates(self, job_id: str) -> List[Dict[str, Any]]:
         """
@@ -1523,15 +1497,27 @@ class JobDivaService:
         enhanced_candidates = []
 
         try:
+            # Resolve numeric ID if it's a reference number
+            safe_id = job_id
+            if "-" in job_id:
+                logger.info(f"🔄 Resolving numeric ID for reference {job_id}")
+                job_info = await self.get_job_by_id(job_id)
+                if job_info:
+                    # SearchJob returns job id in different fields sometimes
+                    resolved_id = get_field(job_info, ["id", "jobId", "jobOrderID"])
+                    if resolved_id:
+                        safe_id = str(resolved_id)
+                        logger.info(f"✅ Resolved {job_id} to internal numeric ID: {safe_id}")
+
             # Step 1: Get Job Applicants using JobApplicantsDetail
             applicants_url = f"{self.api_url}/apiv2/bi/JobApplicantsDetail"
             
             async with httpx.AsyncClient(timeout=30.0) as client:
-                print(f"🔍 Fetching job applicants for job_id: {job_id}")
+                print(f"🔍 Fetching job applicants for job_id: {safe_id} (original: {job_id})")
                 
                 applicants_response = await client.get(
                     applicants_url, 
-                    params={"jobId": job_id}, 
+                    params={"jobId": safe_id}, 
                     headers=headers
                 )
                 
@@ -1729,6 +1715,7 @@ class JobDivaService:
             
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resume_text = await self._get_resume_detail(candidate_id, client, headers)
+                resume_id = None # Default if not returned by detail call
                 
                 if resume_text and resume_text.strip():
                     # Update database

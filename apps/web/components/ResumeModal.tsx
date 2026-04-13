@@ -92,7 +92,11 @@ export function ResumeModal({ isOpen, onClose, candidateName, resumeText }: Resu
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden">
+      <DialogContent 
+        className="max-w-4xl max-h-[90vh] overflow-hidden"
+        onOpenAutoFocus={(e) => e.preventDefault()}
+        onCloseAutoFocus={(e) => e.preventDefault()}
+      >
         <DialogHeader className="border-b border-slate-200 pb-4 mb-4">
           <DialogTitle className="text-xl font-bold text-slate-900">
             Resume: {candidateName}
