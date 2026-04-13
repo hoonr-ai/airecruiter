@@ -223,7 +223,7 @@ function NewJobPageContent() {
   const [isEditingJD, setIsEditingJD] = useState(false);
   const [selectedJobBoards, setSelectedJobBoards] = useState<string[]>([]);
   const [screeningLevel, setScreeningLevel] = useState<ScreeningLevel>("L1.5");
-  const [toast, setToast] = useState<{ message: string; type: "success" | "info" } | null>(null);
+  const [toast, setToast] = useState<{ message: string; type: "success" | "info" | "error"} | null>(null);
   const [pageSubtitle, setPageSubtitle] = useState(STEP_DESCRIPTIONS[1]);
   const [rubricData, setRubricData] = useState<any>(null);
   const [isGeneratingRubric, setIsGeneratingRubric] = useState(false);
@@ -315,7 +315,7 @@ function NewJobPageContent() {
     }
   }, [searchParams]);
 
-  const showToast = (message: string, type: "success" | "info" = "success") => {
+  const showToast = (message: string, type: "success" | "info" | "error" = "success") => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3000);
   };
