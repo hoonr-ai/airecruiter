@@ -166,6 +166,7 @@ Read the following job description and extract specific facts.
    - DO NOT extract Location or years of experience.
 
 5. SKILL CATEGORIZATION:
+   - Extract all relevant skills required for the role from the job description.
    - Categorize each skill into: ["hard", "soft", "certification"]
    - "hard": Measurable technical skills, tools, or procedures (e.g., "X-Ray", "Vascular Access").
    - "soft": Any skill that cannot be measured (e.g., "Patient Care", "Bedside Manner", "Clinical Behaviors", "Communication").
@@ -177,11 +178,15 @@ Read the following job description and extract specific facts.
    - DO NOT include education-related details or degree levels in "other_requirements".
    - Return 0 if not explicitly mentioned.
 
+7. JOB ROLE:
+   - Extract the most appropriate standardized job title(s) for this position.
+
 JD TEXT:
 {grounding_text}
 
 Return JSON:
 {{ 
+  "job_roles": [ {{ "name": "Role Title" }} ],
   "education": [], 
   "domain": [], 
   "customer_requirements": [], 
@@ -211,6 +216,18 @@ Return JSON:
         customer_requirements = []
         min_years = int(phase2_result.get("min_years_experience", 0))
         
+        # If we don't have Azure Agent skills, use the extracted ones from LLM directly
+        if not all_grounded:
+            for item in phase2_result.get("categorized_skills", []):
+                if isinstance(item, dict) and 'name' in item:
+                    all_grounded.append({"value": item["name"], "source": "PAIR"})
+                    
+        # Extract Job roles using LLM
+        if not grounded_roles:
+            for item in phase2_result.get("job_roles", []):
+                if isinstance(item, dict) and 'name' in item:
+                    grounded_roles.append({"value": item["name"], "source": "PAIR"})
+
         cat_map = {item['name'].upper(): item['category'].lower() 
                    for item in phase2_result.get("categorized_skills", []) 
                    if isinstance(item, dict) and 'name' in item}

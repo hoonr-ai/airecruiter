@@ -94,7 +94,7 @@ async def lifespan(app: FastAPI):
     logger.info("📋 Stopping scheduler...")
     scheduler.shutdown()
     
-from routers import engagement, ai_generation, voice_agent, boolean_agent, candidate_processing, job_archive, agent_test
+from routers import engagement, ai_generation, voice_agent, boolean_agent, candidate_processing, job_archive
 
 app = FastAPI(title="Hoonr.ai API", lifespan=lifespan)
 app.include_router(ai_generation.router, prefix="/api/v1/ai-generation")
@@ -103,7 +103,6 @@ app.include_router(voice_agent.router, prefix="/api/v1/voice")
 app.include_router(boolean_agent.router, prefix="/api/v1/boolean")
 app.include_router(candidate_processing.router, prefix="/api/v1/candidates")
 app.include_router(job_archive.router)
-app.include_router(agent_test.router, prefix="/api/v1/test")
 
 app.add_middleware(
     CORSMiddleware,
