@@ -2,6 +2,7 @@ import logging
 import asyncio
 import json
 import random
+import time
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 
@@ -32,26 +33,49 @@ class UnifiedCandidateSearch:
         """
         Orchestrate candidate search across multiple providers.
         """
-        logger.info(f"🚀 Starting Unified Search for job_id: {criteria.job_id}")
+        # Start timing the full extraction process
+        start_time = time.time()
+        
+        logger.info("=" * 80)
+        logger.info(f"🚀 UNIFIED CANDIDATE SEARCH - Job ID: {criteria.job_id}")
+        logger.info(f"⏱️  START TIME: {time.strftime('%H:%M:%S')}")
+        logger.info("=" * 80)
+        
+        # 1. First run JobDiva Applicants (Always included if job_id exists)
+        logger.info("📋 STEP 1: Fetching JobDiva Applicants...")
+        jobdiva_applicants_result = await self._search_jobdiva_applicants(criteria)
+        app_candidates = jobdiva_applicants_result.get("candidates", [])
+        logger.info(f"✅ STEP 1 COMPLETE: Found {len(app_candidates)} JobDiva applicants")
         
         tasks = []
         
-        # 1. JobDiva Applicants (Always included if job_id exists)
-        tasks.append(self._search_jobdiva_applicants(criteria))
-        
         # 2. LinkedIn (Unipile)
         if "LinkedIn" in criteria.sources:
+            logger.info("📋 STEP 2: Adding LinkedIn search...")
             tasks.append(self._search_linkedin(criteria))
             
         # 3. VettedDB
         if "VettedDB" in criteria.sources:
+            logger.info("📋 STEP 2: Adding VettedDB search...")
             tasks.append(self._search_vetted(criteria))
             
-        # 4. JobDiva Talent Search (Disabled in current JobDivaService but structured here)
-        # tasks.append(self._search_jobdiva_talent(criteria))
+        # 4. JobDiva Talent Search - Only if less than 3 applicants were found
+        if len(app_candidates) < 3:
+            logger.info(f"📋 STEP 2: Only {len(app_candidates)} applicants found. Adding Talent Search fallback...")
+            tasks.append(self._search_jobdiva_talent(criteria))
+        else:
+            logger.info(f"📋 STEP 2: Skipping Talent Search (found {len(app_candidates)} applicants >= 3)")
 
-        # Execute all searches concurrently
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Execute remaining searches concurrently
+        logger.info("-" * 80)
+        logger.info("⏳ Executing additional search sources...")
+        results = []
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            logger.info(f"✅ Additional searches complete ({len(tasks)} sources)")
+            
+        # Add applicants result manually to the results list
+        results.append(jobdiva_applicants_result)
         
         combined_candidates = []
         summary = {
@@ -93,13 +117,50 @@ class UnifiedCandidateSearch:
                 summary["talent_search_count"] = len(source_candidates)
 
         # Deduplicate candidates (by email if available, or name+title)
+        logger.info("-" * 80)
+        logger.info("📋 STEP 3: Deduplicating candidates...")
         deduplicated = self._deduplicate_candidates(combined_candidates)
+        logger.info(f"✅ STEP 3 COMPLETE: Deduplicated to {len(deduplicated)} unique candidates")
         
+        from services.sourced_candidates_storage import process_jobdiva_candidate
+        
+        # Pre-process JobDiva candidates to extract AI info and save to candidate_enhanced_info
+        logger.info("=" * 80)
+        logger.info("🤖 STEP 4: AI EXTRACTION - Azure Agent + LLM Processing")
+        logger.info("=" * 80)
+        jobdiva_candidates = [c for c in deduplicated if c.get("source", "").startswith("JobDiva")]
+        logger.info(f"📊 Found {len(jobdiva_candidates)} JobDiva candidates to process")
+        
+        for idx, candidate in enumerate(jobdiva_candidates, 1):
+            candidate_id = candidate.get("candidate_id", "unknown")
+            candidate_name = candidate.get("name", "Unknown")
+            logger.info(f"\n{'─' * 60}")
+            logger.info(f"🔄 [{idx}/{len(jobdiva_candidates)}] Processing: {candidate_name} (ID: {candidate_id})")
+            logger.info(f"{'─' * 60}")
+            try:
+                await process_jobdiva_candidate(candidate)
+                summary["new_extractions"] += 1
+                logger.info(f"✅ [{idx}/{len(jobdiva_candidates)}] COMPLETE: {candidate_name}")
+            except Exception as e:
+                logger.error(f"❌ [{idx}/{len(jobdiva_candidates)}] FAILED: {candidate_name} - {e}")
+        
+        logger.info("=" * 80)
+        logger.info(f"✅ STEP 4 COMPLETE: {summary['new_extractions']}/{len(jobdiva_candidates)} candidates processed")
+        logger.info("=" * 80)
+
         # Apply match logic for sourced candidates with the JD
         required_set = set(s.lower() for s in criteria.skills)
 
         for candidate in deduplicated:
-            cand_skills_list = candidate.get("skills", [])
+            # If the candidate was just processed by Azure, formatted structured skills will be in `candidate_enhanced_info` or `candidate["skills"]` if it was modified
+            cand_skills_list = []
+            if isinstance(candidate.get("skills"), list):
+                for skill_entry in candidate.get("skills", []):
+                    if isinstance(skill_entry, dict) and "skill" in skill_entry:
+                        cand_skills_list.append(skill_entry["skill"])
+                    elif isinstance(skill_entry, str):
+                        cand_skills_list.append(skill_entry)
+
             candidate_skills = set(s.lower() for s in cand_skills_list)
 
             common = required_set.intersection(candidate_skills)
@@ -131,11 +192,47 @@ class UnifiedCandidateSearch:
             
         summary["total_candidates"] = len(deduplicated)
         
+        # Calculate and log total extraction time
+        end_time = time.time()
+        total_duration = end_time - start_time
+        minutes = int(total_duration // 60)
+        seconds = int(total_duration % 60)
+        
+        logger.info("\n" + "=" * 80)
+        logger.info("🎉 FULL EXTRACTION COMPLETE")
+        logger.info("=" * 80)
+        logger.info(f"⏱️  TOTAL TIME: {minutes}m {seconds}s ({total_duration:.1f} seconds)")
+        logger.info(f"📊 SUMMARY:")
+        logger.info(f"   - JobDiva Applicants: {summary['job_applicants_count']}")
+        logger.info(f"   - Talent Search: {summary['talent_search_count']}")
+        logger.info(f"   - LinkedIn: {summary['linkedin_count']}")
+        logger.info(f"   - VettedDB: {summary['vetted_count']}")
+        logger.info(f"   - Total Unique Candidates: {summary['total_candidates']}")
+        logger.info(f"   - AI Extractions Completed: {summary['new_extractions']}")
+        logger.info(f"   - Avg Time Per Candidate: {total_duration/max(summary['new_extractions'], 1):.1f}s")
+        logger.info("=" * 80)
+        
         return {
             "candidates": deduplicated,
             "summary": summary,
-            "search_criteria": criteria.dict()
+            "search_criteria": criteria.dict(),
+            "extraction_time_seconds": round(total_duration, 1)
         }
+        
+    async def _search_jobdiva_talent(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        try:
+            candidates = await self.jobdiva_service.search_candidates(
+                skills=criteria.skills,
+                location=criteria.location,
+                limit=criteria.page_size,
+                job_id=None
+            )
+            for c in candidates:
+                c["source"] = "JobDiva-TalentSearch"
+            return {"candidates": candidates, "source_type": "JobDiva-TalentSearch"}
+        except Exception as e:
+            logger.error(f"JobDiva Talent Search failed: {e}")
+            return {"candidates": [], "source_type": "JobDiva-TalentSearch"}
 
     async def _search_jobdiva_applicants(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:

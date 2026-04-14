@@ -138,7 +138,7 @@ CRITICAL CLASSIFICATION RULES:
    - NOT certifications, NOT domain knowledge, NOT soft skills.
 
 2. soft_skills: Interpersonal or workplace skills.
-   - e.g. "Communication Skills", "Problem Solving", "Teamwork", "Attention to Detail"
+   - e.g. "Communication Skills", "Problem Solving", "Teamwork", "Attention to Detail", "Stakeholder Engagement"
 
 3. certifications: Licenses, certifications, degrees required.
    - e.g. "ARRT Certification", "BLS Certification", "Bachelor's Degree in IT"

@@ -94,7 +94,7 @@ async def lifespan(app: FastAPI):
     logger.info("📋 Stopping scheduler...")
     scheduler.shutdown()
     
-from routers import engagement, ai_generation, voice_agent, boolean_agent, candidate_processing
+from routers import engagement, ai_generation, voice_agent, boolean_agent, candidate_processing, job_archive, agent_test
 
 app = FastAPI(title="Hoonr.ai API", lifespan=lifespan)
 app.include_router(ai_generation.router, prefix="/api/v1/ai-generation")
@@ -102,6 +102,8 @@ app.include_router(ai_generation.router, prefix="/api/v1/gemini")
 app.include_router(voice_agent.router, prefix="/api/v1/voice")
 app.include_router(boolean_agent.router, prefix="/api/v1/boolean")
 app.include_router(candidate_processing.router, prefix="/api/v1/candidates")
+app.include_router(job_archive.router)
+app.include_router(agent_test.router, prefix="/api/v1/test")
 
 app.add_middleware(
     CORSMiddleware,
@@ -2203,16 +2205,31 @@ async def remove_job_from_monitoring(job_id: str):
         raise HTTPException(status_code=404, detail="Job not in monitoring list")
 
 @app.get("/jobs/monitored")
-async def get_monitored_jobs():
+async def get_monitored_jobs(include_archived: bool = False):
     """
     Get all jobs currently being monitored from the database.
+    By default, excludes archived jobs unless include_archived=true is passed.
     """
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Fetch all columns from monitored_jobs
-        cursor.execute("SELECT * FROM monitored_jobs ORDER BY created_at DESC")
+        # Ensure is_archived column exists
+        try:
+            cursor.execute("""
+                ALTER TABLE monitored_jobs 
+                ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE
+            """)
+            conn.commit()
+        except Exception as e:
+            logger.warning(f"Could not add is_archived column: {e}")
+        
+        # Fetch all columns from monitored_jobs, optionally filtering out archived
+        if include_archived:
+            cursor.execute("SELECT * FROM monitored_jobs WHERE is_archived = TRUE ORDER BY created_at DESC")
+        else:
+            cursor.execute("SELECT * FROM monitored_jobs WHERE is_archived = FALSE OR is_archived IS NULL ORDER BY created_at DESC")
+        
         columns = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
         
@@ -2222,9 +2239,11 @@ async def get_monitored_jobs():
             # Format Job ID for JSON compatibility if needed
             jid = str(job_data.get("jobdiva_id") or job_data.get("job_id"))
             
-            # Convert Timestamps to ISO strings
-            if job_data.get("created_at"): job_data["created_at"] = job_data["created_at"].isoformat()
-            if job_data.get("updated_at"): job_data["updated_at"] = job_data["updated_at"].isoformat()
+            # Convert Timestamps to ISO strings if they are datetime objects
+            if job_data.get("created_at") and hasattr(job_data["created_at"], "isoformat"): 
+                job_data["created_at"] = job_data["created_at"].isoformat()
+            if job_data.get("updated_at") and hasattr(job_data["updated_at"], "isoformat"): 
+                job_data["updated_at"] = job_data["updated_at"].isoformat()
             
             jobs[jid] = job_data
             
@@ -2474,6 +2493,7 @@ async def update_job_basic_info(job_id: str, update: JobBasicInfoUpdate):
     except Exception as e:
         logger.error(f"Error updating basic info for job {job_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update job: {str(e)}")
+
 
 if __name__ == "__main__":
     import uvicorn

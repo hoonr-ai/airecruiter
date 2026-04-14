@@ -520,7 +520,7 @@ class JobDivaService:
         """
         Search for candidates. 
         - If job_id provided: Search applicants to that specific job (with optional filtering)
-        - If no job_id: Return empty list (talent pool search disabled)
+        - If no job_id: Search the general Talent Pool based on skills and location
         """
         token = await self.authenticate()
         if not token: return []
@@ -529,9 +529,9 @@ class JobDivaService:
         if job_id:
             return await self._search_job_applicants(job_id, limit, token, skills, location)
         
-        # Talent pool search is disabled - only show candidates who applied for jobs
-        print("ℹ️ Talent pool search disabled - please provide a job_id to search job applicants")
-        return []
+        # Talent pool search
+        logger.info("🌐 Searching general talent pool based on criteria")
+        return await self._search_talent_pool(skills, location, limit, token)
 
     async def _search_job_applicants(self, job_id: str, limit: int, token: str, skills: List[Any] = None, location: str = "") -> List[Dict[str, Any]]:
         """
@@ -539,7 +539,7 @@ class JobDivaService:
         Location constraints removed - only skills filtering if needed.
         """
         # Always get all job applicants - location constraints removed
-        print(f"📋 Getting all job applicants for job_id={job_id} (location constraints removed)")
+        logger.info(f"📋 Getting all job applicants for job_id={job_id}")
         return await self._get_all_job_applicants(job_id, limit, token)
 
     async def _get_all_job_applicants(self, job_id: str, limit: int, token: str) -> List[Dict[str, Any]]:
@@ -1053,7 +1053,7 @@ class JobDivaService:
         """Get detailed candidate information using /apiv2/bi/CandidatesDetail endpoint."""
         token = await self.authenticate()
         if not token:
-            print(f"❌ JobDiva authentication failed for candidate {candidate_id}")
+            logger.warning(f"JobDiva authentication failed for candidate {candidate_id}")
             return None
         
         headers = {
@@ -1062,28 +1062,25 @@ class JobDivaService:
         }
         
         endpoint = f"{self.api_url}/apiv2/bi/CandidatesDetail"
-        params = {"candidateIds": [candidate_id]}  # Use candidateIds as array
+        params = {"candidateIds": [candidate_id]}
         
         try:
-            print(f"🔍 Fetching candidate details from: {endpoint} with candidateIds=[{candidate_id}]")
+            logger.debug(f"Fetching candidate details for {candidate_id}")
             
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(endpoint, params=params, headers=headers)
                 
-                print(f"📡 Candidate Details API Response: {response.status_code}")
-                
                 if response.status_code == 200:
                     data = response.json()
-                    print(f"✅ Candidate details received for {candidate_id}")
+                    logger.debug(f"Candidate details received for {candidate_id}")
                     
-                    # Extract candidate data
                     if isinstance(data, dict) and "data" in data:
                         candidates = data["data"]
                         if candidates and len(candidates) > 0:
                             return candidates[0] if isinstance(candidates, list) else candidates
                     
         except Exception as e:
-            print(f"⚠️ Error fetching candidate details: {e}")
+            logger.debug(f"Error fetching candidate details for {candidate_id}: {e}")
         
         return None
     
@@ -1091,7 +1088,7 @@ class JobDivaService:
         """Get all resumes for a candidate using /apiv2/bi/CandidatesResumesDetail endpoint."""
         token = await self.authenticate()
         if not token:
-            print(f"❌ JobDiva authentication failed for candidate {candidate_id}")
+            logger.warning(f"JobDiva authentication failed for candidate {candidate_id}")
             return None
         
         headers = {
@@ -1100,39 +1097,36 @@ class JobDivaService:
         }
         
         endpoint = f"{self.api_url}/apiv2/bi/CandidatesResumesDetail"
-        params = {"candidateIds": [candidate_id]}  # Use candidateIds as array
+        params = {"candidateIds": [candidate_id]}
         
         try:
-            print(f"🔍 Fetching candidate resumes from: {endpoint} with candidateIds=[{candidate_id}]")
+            logger.debug(f"Fetching candidate resumes for {candidate_id}")
             
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(endpoint, params=params, headers=headers)
                 
-                print(f"📡 Candidate Resumes API Response: {response.status_code}")
-                
                 if response.status_code == 200:
                     data = response.json()
-                    print(f"✅ Candidate resumes received for {candidate_id}")
                     
-                    # Extract resume data
                     if isinstance(data, dict) and "data" in data:
                         resumes = data["data"]
                         if resumes:
-                            print(f"📄 Found {len(resumes) if isinstance(resumes, list) else 1} resume(s)")
+                            resume_count = len(resumes) if isinstance(resumes, list) else 1
+                            logger.info(f"📄 Found {resume_count} resume(s) for candidate {candidate_id}")
                             return resumes if isinstance(resumes, list) else [resumes]
                     
         except Exception as e:
-            print(f"⚠️ Error fetching candidate resumes: {e}")
+            logger.debug(f"Error fetching candidate resumes for {candidate_id}: {e}")
         
         return None
 
     async def get_candidate_resume(self, candidate_id: str) -> Optional[Dict[str, Any]]:
         """Fetch full candidate resume/details by ID using JobDiva API v2 endpoints."""
-        print(f"🔍 Getting resume for candidate {candidate_id}")
+        logger.debug(f"Getting resume for candidate {candidate_id}")
         
         token = await self.authenticate()
         if not token:
-            print(f"❌ JobDiva authentication failed for candidate {candidate_id}")
+            logger.warning(f"JobDiva authentication failed for candidate {candidate_id}")
             return None
         
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -1153,7 +1147,7 @@ class JobDivaService:
                         candidates = details_data["data"]
                         if candidates and len(candidates) > 0:
                             candidate_info = candidates[0] if isinstance(candidates, list) else candidates
-                            print(f"✅ Got candidate details for {candidate_id}")
+                            logger.debug(f"Got candidate details for {candidate_id}")
                 
                 # Step 2: Try to get resume using the working method
                 res_url = f"{self.api_url}/apiv2/bi/CandidatesResumesDetail"
@@ -1178,10 +1172,10 @@ class JobDivaService:
                                 resume_text = get_field(data, ["PLAINTEXT", "text", "resumeText", "content"]) or ""
                                 if resume_text:
                                     resume_text = unescape(resume_text)
-                                    print(f"✅ Resume text found: {len(resume_text)} characters")
+                                    logger.info(f"✅ Resume text found: {len(resume_text)} characters")
                                 
         except Exception as e:
-            print(f"⚠️ Error fetching candidate resume: {e}")
+            logger.warning(f"Error fetching candidate resume for {candidate_id}: {e}")
         
         # If we didn't get candidate info, create basic info from candidate_id
         if not candidate_info:
@@ -1272,8 +1266,8 @@ class JobDivaService:
                 j_ref = str(get_field(j, ["reference #", "jobdivaref", "ref", "jobdivano"]) or "")
                 
                 if is_ref:
-                    if job_id.lower() != j_ref.lower():
-                        logger.warning(f"Bogus JobDiva response: requested ref {job_id}, got ref {j_ref}")
+                    if search_id.lower() != j_ref.lower():
+                        logger.warning(f"Bogus JobDiva response: requested ref {search_id}, got ref {j_ref}")
                         return None
                 else:
                     if safe_id != j_id:
@@ -1515,7 +1509,7 @@ class JobDivaService:
             applicants_url = f"{self.api_url}/apiv2/bi/JobApplicantsDetail"
             
             async with httpx.AsyncClient(timeout=30.0) as client:
-                print(f"🔍 Fetching job applicants for job_id: {safe_id} (original: {job_id})")
+                logger.info(f"🔍 Fetching job applicants for job_id: {safe_id}")
                 
                 applicants_response = await client.get(
                     applicants_url, 
@@ -1524,24 +1518,30 @@ class JobDivaService:
                 )
                 
                 if applicants_response.status_code != 200:
-                    print(f"❌ JobApplicantsDetail failed: {applicants_response.status_code}")
+                    logger.error(f"❌ JobApplicantsDetail failed: {applicants_response.status_code}")
                     return enhanced_candidates
                 
                 applicants_data = applicants_response.json()
                 applicants = applicants_data.get("data", []) if isinstance(applicants_data, dict) else applicants_data
                 
-                print(f"📋 Found {len(applicants)} job applicants")
+                logger.info(f"📋 Found {len(applicants)} job applicants")
                 
                 # Step 2 & 3: For each applicant, get detailed info and resume
-                for applicant in applicants:
+                for idx, applicant in enumerate(applicants, 1):
                     try:
                         candidate_id = applicant.get("CANDIDATEID") or applicant.get("candidateId")
+                        resume_id = applicant.get("RESUMEID") or applicant.get("resumeId")
+                        
                         if not candidate_id:
                             continue
+                        
+                        logger.debug(f"[{idx}/{len(applicants)}] Processing applicant {candidate_id}")
                             
                         # Get candidate details
                         candidate_detail = await self._get_candidate_detail(candidate_id, client, headers)
-                        resume_text = await self._get_resume_detail(candidate_id, client, headers)
+                        
+                        # Use the specific resume ID from applicant data
+                        resume_text = await self._get_resume_text_by_id(resume_id, client, headers)
                         
                         # Combine all data
                         enhanced_candidate = self._format_enhanced_candidate(
@@ -1551,11 +1551,11 @@ class JobDivaService:
                         enhanced_candidates.append(enhanced_candidate)
                         
                     except Exception as e:
-                        print(f"⚠️ Error processing applicant {candidate_id}: {e}")
+                        logger.warning(f"⚠️ Error processing applicant {candidate_id}: {e}")
                         continue
 
         except Exception as e:
-            print(f"❌ Error in get_enhanced_job_candidates: {e}")
+            logger.error(f"❌ Error in get_enhanced_job_candidates: {e}")
         
         return enhanced_candidates
 
@@ -1577,19 +1577,20 @@ class JobDivaService:
             
             if response.status_code == 200:
                 data = response.json()
-                print(f"✅ CandidatesDetail retrieved for {candidate_id}")
+                logger.info(f"✅ CandidatesDetail retrieved for {candidate_id}")
                 return data.get("data", [{}])[0] if isinstance(data, dict) else data[0] if data else {}
             else:
-                print(f"⚠️ CandidatesDetail failed for {candidate_id}: {response.status_code}")
+                # Silently handle 400 errors - we'll fallback to resume fetching
+                logger.debug(f"CandidatesDetail returned {response.status_code} for {candidate_id}, using fallback")
         except Exception as e:
-            print(f"⚠️ Error fetching candidate detail for {candidate_id}: {e}")
+            logger.debug(f"Error fetching candidate detail for {candidate_id}: {e}")
         
         return {}
 
     async def _get_resume_detail(self, candidate_id: str, client: httpx.AsyncClient, headers: dict) -> str:
         """Get full resume text using CandidateResumesDetail → ResumesTextDetail endpoint flow."""
         try:
-            print(f"📄 Fetching resume for candidate ID: {candidate_id}")
+            logger.debug(f"📄 Fetching resume for candidate ID: {candidate_id}")
             
             # Step 1: Get all resume IDs for this candidate using CandidateResumesDetail
             resume_list_url = f"{self.api_url}/apiv2/bi/CandidateResumesDetail"
@@ -1600,33 +1601,31 @@ class JobDivaService:
             )
             
             if resume_list_response.status_code != 200:
-                print(f"⚠️ CandidateResumesDetail failed: {resume_list_response.status_code}")
+                logger.debug(f"CandidateResumesDetail returned {resume_list_response.status_code} for {candidate_id}")
                 return ""
                 
             resume_data = resume_list_response.json()
             resumes = resume_data.get("data", []) if isinstance(resume_data, dict) else resume_data
             
             if not resumes:
-                print(f"⚠️ No resumes found for candidate {candidate_id}")
+                logger.debug(f"No resumes found for candidate {candidate_id}")
                 return ""
                 
-            print(f"📋 Found {len(resumes)} resume(s) for candidate {candidate_id}")
+            logger.info(f"📄 Found {len(resumes)} resume(s) for candidate {candidate_id}")
             
             # Step 2: Get resume text using ResumesTextDetail (plural) endpoint
-            # Try the most recent resume first
-            for i, resume in enumerate(resumes):
+            for resume in resumes:
                 resume_id = resume.get("RESUMEID") or resume.get("resumeId") or resume.get("ID")
                 if not resume_id:
                     continue
                     
                 try:
-                    print(f"📖 Fetching resume text for resume ID: {resume_id}")
+                    logger.debug(f"📖 Fetching resume text for resume ID: {resume_id}")
                     
-                    # Use ResumesTextDetail endpoint (note: plural "Resumes")
                     resume_text_url = f"{self.api_url}/apiv2/bi/ResumesTextDetail"
                     resume_response = await client.get(
                         resume_text_url,
-                        params={"resumeIds": resume_id},  # Note: resumeIds (plural)
+                        params={"resumeIds": resume_id},
                         headers=headers
                     )
                     
@@ -1651,20 +1650,66 @@ class JobDivaService:
                                      resume_content.get("resumeText") or "")
                         
                         if resume_text and resume_text.strip():
-                            print(f"✅ Successfully fetched resume text ({len(resume_text)} chars)")
+                            logger.info(f"✅ Successfully fetched resume text ({len(resume_text)} chars)")
                             return unescape(resume_text.strip())
                         else:
-                            print(f"⚠️ Resume text empty for resume ID {resume_id}")
+                            logger.debug(f"Resume text empty for resume ID {resume_id}")
                             
                     else:
-                        print(f"⚠️ ResumesTextDetail failed for resume {resume_id}: {resume_response.status_code}")
+                        logger.debug(f"ResumesTextDetail failed for resume {resume_id}: {resume_response.status_code}")
                         
                 except Exception as e:
-                    print(f"⚠️ Error fetching resume text for resume {resume_id}: {e}")
+                    logger.debug(f"Error fetching resume text for resume {resume_id}: {e}")
                     continue
                     
         except Exception as e:
-            print(f"❌ Error in _get_resume_detail for candidate {candidate_id}: {e}")
+            logger.error(f"❌ Error in _get_resume_detail for candidate {candidate_id}: {e}")
+        
+        return ""
+
+    async def _get_resume_text_by_id(self, resume_id: str, client: httpx.AsyncClient, headers: dict) -> str:
+        """Get resume text using a specific resume ID with ResumesTextDetail endpoint."""
+        try:
+            logger.debug(f"📖 Fetching resume text for resume ID: {resume_id}")
+            
+            resume_text_url = f"{self.api_url}/apiv2/bi/ResumesTextDetail"
+            resume_response = await client.get(
+                resume_text_url,
+                params={"resumeIds": resume_id},
+                headers=headers
+            )
+            
+            if resume_response.status_code == 200:
+                resume_detail = resume_response.json()
+                
+                # Handle different response structures
+                if isinstance(resume_detail, dict):
+                    resume_content = resume_detail.get("data", [{}])
+                    if isinstance(resume_content, list) and resume_content:
+                        resume_content = resume_content[0]
+                    elif not isinstance(resume_content, dict):
+                        resume_content = resume_detail
+                else:
+                    resume_content = resume_detail[0] if resume_detail else {}
+                
+                # Extract text from various possible fields
+                resume_text = (resume_content.get("PLAINTEXT") or 
+                             resume_content.get("plainText") or
+                             resume_content.get("text") or 
+                             resume_content.get("TEXT") or 
+                             resume_content.get("resumeText") or "")
+                
+                if resume_text and resume_text.strip():
+                    from html import unescape
+                    logger.info(f"✅ Successfully fetched resume text ({len(resume_text)} chars) for resume {resume_id}")
+                    return unescape(resume_text.strip())
+                else:
+                    logger.debug(f"Resume text empty for resume ID {resume_id}")
+            else:
+                logger.debug(f"ResumesTextDetail failed for resume {resume_id}: {resume_response.status_code}")
+                
+        except Exception as e:
+            logger.debug(f"Error fetching resume text for resume {resume_id}: {e}")
         
         return ""
 
@@ -1711,7 +1756,7 @@ class JobDivaService:
     async def update_candidate_resume_text(self, candidate_id: str) -> bool:
         """Update resume text for an existing candidate using new CandidateResumesDetail → ResumesTextDetail flow."""
         try:
-            print(f"🔄 Updating resume text for candidate: {candidate_id}")
+            logger.info(f"🔄 Updating resume text for candidate: {candidate_id}")
             token = await self.authenticate()
             if not token:
                 return False
@@ -1720,10 +1765,9 @@ class JobDivaService:
             
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resume_text = await self._get_resume_detail(candidate_id, client, headers)
-                resume_id = None # Default if not returned by detail call
+                resume_id = None
                 
                 if resume_text and resume_text.strip():
-                    # Update database
                     import psycopg2
                     from core.config import DATABASE_URL
                     
@@ -1738,14 +1782,14 @@ class JobDivaService:
                             updated_rows = cur.rowcount
                             conn.commit()
                             
-                            print(f"✅ Updated resume text for {updated_rows} candidate records ({len(resume_text)} chars)")
+                            logger.info(f"✅ Updated resume text for {updated_rows} candidate records ({len(resume_text)} chars)")
                             return updated_rows > 0
                 else:
-                    print(f"⚠️ No resume text found for candidate {candidate_id}")
+                    logger.warning(f"⚠️ No resume text found for candidate {candidate_id}")
                     return False
                     
         except Exception as e:
-            print(f"❌ Error updating resume for candidate {candidate_id}: {e}")
+            logger.error(f"❌ Error updating resume for candidate {candidate_id}: {e}")
             return False
 
     def _extract_location(self, data: Dict[str, Any]) -> str:
@@ -1779,7 +1823,7 @@ class JobDivaService:
         
         # Deduplicate after saving (prioritize job applicants over talent search)
         dedup_count = storage.deduplicate_candidates(job_id)
-        print(f"💾 Saved {saved_count} enhanced candidates, deduplicated {dedup_count}")
+        logger.info(f"💾 Saved {saved_count} enhanced candidates, deduplicated {dedup_count}")
         
         return saved_count
 
@@ -2231,7 +2275,7 @@ class JobDivaService:
         Enhanced job applicant search with separate title, skill, and location criteria.
         Applies intelligent filtering to job applicants based on multiple criteria types.
         """
-        print(f"🎯 Enhanced job applicant search for job {job_id}")
+        logger.info(f"🎯 Enhanced job applicant search for job {job_id}")
         
         try:
             # Build search criteria from enhanced format
@@ -2264,7 +2308,7 @@ class JobDivaService:
             if not search_skills and legacy_skills:
                 search_skills = legacy_skills
                 
-            print(f"📋 Search criteria - Skills: {len(search_skills)}, Location: '{search_location}'")
+            logger.info(f"📋 Search criteria - Skills: {len(search_skills)}, Location: '{search_location}'")
             
             # Use existing search_candidates method with job_id to get applicants
             return await self.search_candidates(
@@ -2290,7 +2334,7 @@ class JobDivaService:
         Enhanced talent pool search with separate title, skill, and location criteria.
         Searches broader talent database with intelligent multi-criteria filtering.
         """
-        print(f"🌐 Enhanced talent pool search - Page {page}, Limit {limit}")
+        logger.info(f"🌐 Enhanced talent pool search - Page {page}, Limit {limit}")
         
         try:
             # Build search criteria from enhanced format
@@ -2323,7 +2367,7 @@ class JobDivaService:
             if not search_skills and legacy_skills:
                 search_skills = legacy_skills
                 
-            print(f"📋 Talent search criteria - Skills: {len(search_skills)}, Location: '{search_location}'")
+            logger.info(f"📋 Talent search criteria - Skills: {len(search_skills)}, Location: '{search_location}'")
             
             # Use existing search_candidates method without job_id for talent pool
             return await self.search_candidates(

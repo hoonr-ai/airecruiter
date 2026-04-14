@@ -3,19 +3,11 @@
 import { useState, useEffect } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { ArrowLeft, Save, Edit3, Building2, MapPin, Calendar, DollarSign, User } from "lucide-react";
+import { ArrowLeft, Save, Edit3, Building2, MapPin, Calendar, DollarSign, User, Archive, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-const getStatusColor = (status: string) => {
-  switch (status?.toLowerCase()) {
-    case 'open': return 'bg-green-100 text-green-800';
-    case 'closed': return 'bg-red-100 text-red-800'; 
-    case 'on hold': return 'bg-yellow-100 text-yellow-800';
-    default: return 'bg-gray-100 text-gray-800';
-  }
-};
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import {
@@ -25,6 +17,24 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+
+const getStatusColor = (status: string) => {
+  switch (status?.toLowerCase()) {
+    case 'open': return 'bg-green-100 text-green-800';
+    case 'closed': return 'bg-red-100 text-red-800'; 
+    case 'on hold': return 'bg-yellow-100 text-yellow-800';
+    case 'archived': return 'bg-gray-100 text-gray-800';
+    default: return 'bg-gray-100 text-gray-800';
+  }
+};
 
 // Employment Type Options
 const employmentTypeOptions = [
@@ -72,6 +82,9 @@ interface JobDetailData {
   work_authorization?: string;
   location_type?: string;
   recruiter_emails?: string[]; // JSONB array from backend
+  is_archived?: boolean;
+  archive_reason?: string;
+  archived_at?: string;
 }
 
 export default function JobDetailPage() {
@@ -91,6 +104,14 @@ export default function JobDetailPage() {
   });
   const [recruiterEmailInput, setRecruiterEmailInput] = useState("");
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
+  
+  // Archive dialog state
+  const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
+  const [isArchiving, setIsArchiving] = useState(false);
+  
+  // Unarchive dialog state
+  const [unarchiveDialogOpen, setUnarchiveDialogOpen] = useState(false);
+  const [isUnarchiving, setIsUnarchiving] = useState(false);
 
   const employmentTypeOptions = [
     { value: "Full-Time", label: "Full-Time" },
@@ -115,9 +136,17 @@ export default function JobDetailPage() {
   const fetchJobDetail = async () => {
     setIsLoading(true);
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/jobs/monitored`);
-      const data = await response.json();
-      const job = data.jobs[jobId];
+      // Try fetching active jobs first, then archived if not found
+      let response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/jobs/monitored?include_archived=false`);
+      let data = await response.json();
+      let job = data.jobs[jobId];
+      
+      // If not found in active jobs, try archived jobs
+      if (!job) {
+        response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/jobs/monitored?include_archived=true`);
+        data = await response.json();
+        job = data.jobs[jobId];
+      }
       
       if (job) {
         const jobDetail = {
@@ -273,24 +302,48 @@ export default function JobDetailPage() {
           <Badge variant="secondary" className={`${getStatusColor(jobData.status)} border-0`}>
             {jobData.status}
           </Badge>
-          {!isEditing ? (
-            <Button onClick={() => setIsEditing(true)} className="flex items-center gap-2">
-              <Edit3 className="h-4 w-4" />
-              Edit Details
-            </Button>
-          ) : (
-            <div className="flex items-center gap-2">
-              <Button variant="outline" onClick={handleCancel} disabled={isSaving}>
-                Cancel
+          {!jobData.is_archived && (
+            !isEditing ? (
+              <Button onClick={() => setIsEditing(true)} className="flex items-center gap-2">
+                <Edit3 className="h-4 w-4" />
+                Edit Details
               </Button>
-              <Button onClick={handleSave} disabled={isSaving} className="flex items-center gap-2">
-                <Save className="h-4 w-4" />
-                {isSaving ? "Saving..." : "Save"}
-              </Button>
-            </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <Button variant="outline" onClick={handleCancel} disabled={isSaving}>
+                  Cancel
+                </Button>
+                <Button onClick={handleSave} disabled={isSaving} className="flex items-center gap-2">
+                  <Save className="h-4 w-4" />
+                  {isSaving ? "Saving..." : "Save"}
+                </Button>
+              </div>
+            )
           )}
         </div>
       </div>
+
+      {/* Archived Job Banner */}
+      {jobData.is_archived && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 mb-6">
+          <div className="flex items-start gap-3">
+            <Archive className="h-5 w-5 text-amber-600 mt-0.5" />
+            <div>
+              <h3 className="font-semibold text-amber-800">This job is archived</h3>
+              {jobData.archive_reason && (
+                <p className="text-sm text-amber-700 mt-1">
+                  <span className="font-medium">Reason:</span> {jobData.archive_reason}
+                </p>
+              )}
+              {jobData.archived_at && (
+                <p className="text-sm text-amber-600 mt-1">
+                  Archived on: {jobData.archived_at}
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Main Job Details */}
@@ -489,13 +542,160 @@ export default function JobDetailPage() {
             <CardContent className="space-y-2">
               <Button variant="outline" className="w-full">View Candidates</Button>
               <Button variant="outline" className="w-full">Export Job Details</Button>
-              <Button variant="outline" className="w-full text-red-600 hover:text-red-700">
-                Archive Job
-              </Button>
+              {jobData.is_archived ? (
+                <Button 
+                  variant="outline" 
+                  className="w-full text-green-600 hover:text-green-700"
+                  onClick={() => setUnarchiveDialogOpen(true)}
+                >
+                  Unarchive Job
+                </Button>
+              ) : (
+                <Button 
+                  variant="outline" 
+                  className="w-full text-red-600 hover:text-red-700"
+                  onClick={() => setArchiveDialogOpen(true)}
+                >
+                  <Archive className="h-4 w-4 mr-2" />
+                  Archive Job
+                </Button>
+              )}
             </CardContent>
           </Card>
         </div>
       </div>
+      
+      {/* Archive Confirmation Dialog */}
+      <Dialog open={archiveDialogOpen} onOpenChange={setArchiveDialogOpen}>
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-600">
+              <AlertTriangle className="h-5 w-5" />
+              Archive Job
+            </DialogTitle>
+            <DialogDescription>
+              Are you sure you want to archive this job? This action will hide the job from the active jobs list.
+            </DialogDescription>
+          </DialogHeader>
+          {jobData && (
+            <div className="py-4">
+              <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
+                <p className="font-semibold text-slate-900">{jobData.title}</p>
+                <p className="text-sm text-slate-500">ID: {jobData.id}</p>
+                <p className="text-sm text-slate-500">Customer: {jobData.customer_name}</p>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setArchiveDialogOpen(false)}
+              disabled={isArchiving}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={async () => {
+                setIsArchiving(true);
+                try {
+                  const response = await fetch(
+                    `${process.env.NEXT_PUBLIC_API_URL}/jobs/${jobId}/archive`,
+                    {
+                      method: "PUT",
+                      headers: {
+                        "Content-Type": "application/json",
+                      },
+                    }
+                  );
+                  if (response.ok) {
+                    setToast({ message: "Job archived successfully", type: "success" });
+                    setArchiveDialogOpen(false);
+                    await fetchJobDetail();
+                  } else {
+                    const errorData = await response.json().catch(() => ({ detail: "Unknown error" }));
+                    console.error("Archive error:", errorData);
+                    setToast({ message: errorData.detail || "Failed to archive job", type: "error" });
+                  }
+                } catch (error) {
+                  console.error("Archive exception:", error);
+                  setToast({ message: "Failed to archive job", type: "error" });
+                } finally {
+                  setIsArchiving(false);
+                }
+              }}
+              disabled={isArchiving}
+            >
+              {isArchiving ? "Archiving..." : "Archive Job"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      
+      {/* Unarchive Confirmation Dialog */}
+      <Dialog open={unarchiveDialogOpen} onOpenChange={setUnarchiveDialogOpen}>
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-green-600">
+              <Archive className="h-5 w-5" />
+              Unarchive Job
+            </DialogTitle>
+            <DialogDescription>
+              Are you sure you want to unarchive this job? This will restore the job to the active jobs list.
+            </DialogDescription>
+          </DialogHeader>
+          {jobData && (
+            <div className="py-4">
+              <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
+                <p className="font-semibold text-slate-900">{jobData.title}</p>
+                <p className="text-sm text-slate-500">ID: {jobData.id}</p>
+                <p className="text-sm text-slate-500">Customer: {jobData.customer_name}</p>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setUnarchiveDialogOpen(false)}
+              disabled={isUnarchiving}
+            >
+              Cancel
+            </Button>
+            <Button
+              className="bg-green-600 hover:bg-green-700 text-white"
+              onClick={async () => {
+                setIsUnarchiving(true);
+                try {
+                  const response = await fetch(
+                    `${process.env.NEXT_PUBLIC_API_URL}/jobs/${jobId}/unarchive`,
+                    {
+                      method: "PUT",
+                      headers: {
+                        "Content-Type": "application/json",
+                      },
+                    }
+                  );
+                  if (response.ok) {
+                    setToast({ message: "Job unarchived successfully", type: "success" });
+                    setUnarchiveDialogOpen(false);
+                    await fetchJobDetail();
+                  } else {
+                    const errorData = await response.json().catch(() => ({ detail: "Unknown error" }));
+                    setToast({ message: errorData.detail || "Failed to unarchive job", type: "error" });
+                  }
+                } catch (error) {
+                  setToast({ message: "Failed to unarchive job", type: "error" });
+                } finally {
+                  setIsUnarchiving(false);
+                }
+              }}
+              disabled={isUnarchiving}
+            >
+              {isUnarchiving ? "Unarchiving..." : "Unarchive Job"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

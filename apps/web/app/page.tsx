@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { Search, Plus, FileText, ArrowUpDown, MoreVertical, Link as LinkIcon } from "lucide-react";
+import { Search, Plus, FileText, ArrowUpDown, MoreVertical, Link as LinkIcon, AlertTriangle, Archive } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -11,6 +11,14 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Users } from "lucide-react";
 
 interface Job {
@@ -43,15 +51,38 @@ export default function DashboardPage() {
   const [allJobs, setAllJobs] = useState<Job[]>([]);
   const [filteredJobs, setFilteredJobs] = useState<Job[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  
+  // Archive dialog state
+  const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
+  const [jobToArchive, setJobToArchive] = useState<Job | null>(null);
+  const [isArchiving, setIsArchiving] = useState(false);
+  const [archiveReason, setArchiveReason] = useState("");
+  const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
+  
+  // Unarchive dialog state
+  const [unarchiveDialogOpen, setUnarchiveDialogOpen] = useState(false);
+  const [jobToUnarchive, setJobToUnarchive] = useState<Job | null>(null);
+  const [isUnarchiving, setIsUnarchiving] = useState(false);
+  
+  // Tab state
+  const [activeTab, setActiveTab] = useState<"active" | "archived">("active");
 
   useEffect(() => {
     fetchJobs();
-  }, []);
+  }, [activeTab]);
+  
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => setToast(null), 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [toast]);
 
   const fetchJobs = async () => {
     setIsLoading(true);
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/jobs/monitored`);
+      const includeArchived = activeTab === "archived";
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/jobs/monitored?include_archived=${includeArchived}`);
       const data = await response.json();
 
       const jobs: Job[] = Object.entries(data.jobs).map(([id, details]: [string, any]) => {
@@ -60,8 +91,10 @@ export default function DashboardPage() {
 
         let pairStatus = "Unpublished";
 
-        // PAIR Status mapping based on internal processing_status
-        if (procStatus === "monitoring_added" || procStatus === "manual_created") {
+        // Check if job is archived first
+        if (details.is_archived) {
+          pairStatus = "Archived";
+        } else if (procStatus === "monitoring_added" || procStatus === "manual_created") {
           // Setup is finished. Check JobDiva status for Active/Inactive
           if (status.toLowerCase() === "closed" || status.toLowerCase() === "cancelled") {
             pairStatus = "Inactive";
@@ -156,6 +189,7 @@ export default function DashboardPage() {
     if (s === 'active') return 'bg-[#dcfce7] text-[#166534]';
     if (s === 'inactive' || s === 'paused') return 'bg-[#fee2e2] text-[#b91c1c]';
     if (s === 'unpublished') return 'bg-[#f1f5f9] text-[#475569]'; // Custom gray
+    if (s === 'archived') return 'bg-[#e2e8f0] text-[#64748b]'; // Slate gray for archived
     return 'bg-slate-100 text-slate-700';
   };
 
@@ -171,7 +205,33 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6 max-w-[1240px] mx-auto pb-10">
       {/* Page Header */}
-      <h1 className="text-[28px] font-bold text-slate-900 tracking-tight mt-2">Jobs Portfolio</h1>
+      <div className="flex items-center justify-between mt-2">
+        <h1 className="text-[28px] font-bold text-slate-900 tracking-tight">Jobs Portfolio</h1>
+        
+        {/* Tabs */}
+        <div className="flex bg-slate-100 p-1 rounded-lg">
+          <button
+            onClick={() => setActiveTab("active")}
+            className={`px-4 py-2 rounded-md text-[13px] font-medium transition-all ${
+              activeTab === "active"
+                ? "bg-white text-slate-900 shadow-sm"
+                : "text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            Active Jobs
+          </button>
+          <button
+            onClick={() => setActiveTab("archived")}
+            className={`px-4 py-2 rounded-md text-[13px] font-medium transition-all ${
+              activeTab === "archived"
+                ? "bg-white text-slate-900 shadow-sm"
+                : "text-slate-500 hover:text-slate-700"
+            }`}
+          >
+            Archived Jobs
+          </button>
+        </div>
+      </div>
 
       {/* Controls Bar */}
       <div className="flex justify-between items-center gap-4 mt-4">
@@ -206,7 +266,7 @@ export default function DashboardPage() {
 
       {/* Jobs Table */}
       <div className="bg-white rounded-2xl shadow-[0_2px_10px_-4px_rgba(0,0,0,0.1)] border border-slate-200 overflow-hidden mt-2">
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto overflow-y-auto" style={{ maxHeight: 'calc(100vh - 240px)' }}>
           <table className="min-w-full divide-y divide-slate-100">
             <thead className="bg-[#fcfdfd]">
               <tr>
@@ -315,18 +375,48 @@ export default function DashboardPage() {
                             </Link>
                           </DropdownMenuItem>
                         )}
-                        <DropdownMenuItem className="cursor-pointer">Edit Job</DropdownMenuItem>
-                        <DropdownMenuItem className="text-red-600 focus:text-red-700 cursor-pointer">
-                          Archive Job
-                        </DropdownMenuItem>
+                        {activeTab !== "archived" && (
+                          <DropdownMenuItem className="cursor-pointer" asChild>
+                            <Link href={`/jobs/${job.jobdiva_id || job.id}`} className="w-full">
+                              Edit Job
+                            </Link>
+                          </DropdownMenuItem>
+                        )}
+                        {activeTab === "archived" ? (
+                          <DropdownMenuItem 
+                            className="text-green-600 focus:text-green-700 cursor-pointer"
+                            onClick={() => {
+                              setJobToUnarchive(job);
+                              setUnarchiveDialogOpen(true);
+                            }}
+                          >
+                            Unarchive Job
+                          </DropdownMenuItem>
+                        ) : (
+                          <DropdownMenuItem 
+                            className="text-red-600 focus:text-red-700 cursor-pointer"
+                            onClick={() => {
+                              setJobToArchive(job);
+                              setArchiveDialogOpen(true);
+                            }}
+                          >
+                            Archive Job
+                          </DropdownMenuItem>
+                        )}
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </td>
                 </tr>
               )) : (
                 <tr>
-                  <td colSpan={16} className="text-center py-10 px-6">
-                    <p className="text-[14px] font-medium text-slate-400 italic">No job results to display.</p>
+                  <td colSpan={17} className="py-12 px-6">
+                    <div className="flex flex-col items-center justify-center gap-3" style={{ minWidth: '600px' }}>
+                      <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center">
+                        <Search className="w-6 h-6 text-slate-400" />
+                      </div>
+                      <p className="text-[15px] font-medium text-slate-500">No job results to display</p>
+                      <p className="text-[13px] text-slate-400">Try adjusting your search or create a new job</p>
+                    </div>
                   </td>
                 </tr>
               )}
@@ -334,6 +424,174 @@ export default function DashboardPage() {
           </table>
         </div>
       </div>
+      
+      {/* Archive Confirmation Dialog */}
+      <Dialog open={archiveDialogOpen} onOpenChange={setArchiveDialogOpen}>
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-600">
+              <AlertTriangle className="h-5 w-5" />
+              Archive Job
+            </DialogTitle>
+            <DialogDescription>
+              Are you sure you want to archive this job? This action will hide the job from the active jobs list.
+            </DialogDescription>
+          </DialogHeader>
+          {jobToArchive && (
+            <div className="py-4 space-y-4">
+              <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
+                <p className="font-semibold text-slate-900">{jobToArchive.title}</p>
+                <p className="text-sm text-slate-500">ID: {jobToArchive.jobdiva_id || jobToArchive.id}</p>
+                <p className="text-sm text-slate-500">Customer: {jobToArchive.customer_name}</p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-2">
+                  Archive Reason <span className="text-slate-400">(optional)</span>
+                </label>
+                <textarea
+                  value={archiveReason}
+                  onChange={(e) => setArchiveReason(e.target.value)}
+                  placeholder="e.g., Position filled, Job cancelled, On hold..."
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-red-500/20 focus:border-red-500 resize-none"
+                  rows={3}
+                />
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setArchiveDialogOpen(false);
+                setJobToArchive(null);
+                setArchiveReason("");
+              }}
+              disabled={isArchiving}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={async () => {
+                if (!jobToArchive) return;
+                setIsArchiving(true);
+                try {
+                  const response = await fetch(
+                    `${process.env.NEXT_PUBLIC_API_URL}/jobs/${jobToArchive.jobdiva_id || jobToArchive.id}/archive`,
+                    {
+                      method: "PUT",
+                      headers: {
+                        "Content-Type": "application/json",
+                      },
+                      body: JSON.stringify({ reason: archiveReason.trim() || undefined }),
+                    }
+                  );
+                  if (response.ok) {
+                    setToast({ message: "Job archived successfully", type: "success" });
+                    // Remove the archived job from the list
+                    setAllJobs(prev => prev.filter(j => j.id !== jobToArchive.id));
+                    setFilteredJobs(prev => prev.filter(j => j.id !== jobToArchive.id));
+                  } else {
+                    const errorData = await response.json().catch(() => ({ detail: "Unknown error" }));
+                    console.error("Archive error:", errorData);
+                    setToast({ message: errorData.detail || "Failed to archive job", type: "error" });
+                  }
+                } catch (error) {
+                  console.error("Archive exception:", error);
+                  setToast({ message: "Failed to archive job", type: "error" });
+                } finally {
+                  setIsArchiving(false);
+                  setArchiveDialogOpen(false);
+                  setJobToArchive(null);
+                  setArchiveReason("");
+                }
+              }}
+              disabled={isArchiving}
+            >
+              {isArchiving ? "Archiving..." : "Archive Job"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      
+      {/* Unarchive Confirmation Dialog */}
+      <Dialog open={unarchiveDialogOpen} onOpenChange={setUnarchiveDialogOpen}>
+        <DialogContent className="sm:max-w-[425px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-green-600">
+              <Archive className="h-5 w-5" />
+              Unarchive Job
+            </DialogTitle>
+            <DialogDescription>
+              Are you sure you want to unarchive this job? This will restore the job to the active jobs list.
+            </DialogDescription>
+          </DialogHeader>
+          {jobToUnarchive && (
+            <div className="py-4">
+              <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
+                <p className="font-semibold text-slate-900">{jobToUnarchive.title}</p>
+                <p className="text-sm text-slate-500">ID: {jobToUnarchive.jobdiva_id || jobToUnarchive.id}</p>
+                <p className="text-sm text-slate-500">Customer: {jobToUnarchive.customer_name}</p>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setUnarchiveDialogOpen(false);
+                setJobToUnarchive(null);
+              }}
+              disabled={isUnarchiving}
+            >
+              Cancel
+            </Button>
+            <Button
+              className="bg-green-600 hover:bg-green-700 text-white"
+              onClick={async () => {
+                if (!jobToUnarchive) return;
+                setIsUnarchiving(true);
+                try {
+                  const response = await fetch(
+                    `${process.env.NEXT_PUBLIC_API_URL}/jobs/${jobToUnarchive.jobdiva_id || jobToUnarchive.id}/unarchive`,
+                    {
+                      method: "PUT",
+                      headers: {
+                        "Content-Type": "application/json",
+                      },
+                    }
+                  );
+                  if (response.ok) {
+                    setToast({ message: "Job unarchived successfully", type: "success" });
+                    fetchJobs();
+                  } else {
+                    const errorData = await response.json().catch(() => ({ detail: "Unknown error" }));
+                    setToast({ message: errorData.detail || "Failed to unarchive job", type: "error" });
+                  }
+                } catch (error) {
+                  setToast({ message: "Failed to unarchive job", type: "error" });
+                } finally {
+                  setIsUnarchiving(false);
+                  setUnarchiveDialogOpen(false);
+                  setJobToUnarchive(null);
+                }
+              }}
+              disabled={isUnarchiving}
+            >
+              {isUnarchiving ? "Unarchiving..." : "Unarchive Job"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      
+      {/* Toast Notification */}
+      {toast && (
+        <div className={`fixed top-4 right-4 z-50 rounded-lg p-4 text-white ${
+          toast.type === 'success' ? 'bg-green-500' : 'bg-red-500'
+        }`}>
+          {toast.message}
+        </div>
+      )}
     </div>
   );
 }

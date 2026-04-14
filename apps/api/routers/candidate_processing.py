@@ -20,13 +20,17 @@ async def get_job_applicants(
     jobdiva_id: str,
     page: int = Query(1, ge=1),
     limit: int = Query(100, ge=1, le=500),
-    skills: Optional[str] = Query(None, description="Comma-separated skill names for filtering")
+    skills: Optional[str] = Query(None, description="Comma-separated skill names for filtering"),
+    extract: bool = Query(False, description="Auto-extract resume info using Azure Agent + LLM")
 ) -> Dict[str, Any]:
     """
     Get candidates who applied to a specific job.
+    
+    Set extract=true to automatically process resumes through Azure Agent 
+    for skill extraction and save to candidate_enhanced_info table.
     """
     try:
-        logger.info(f"Fetching job applicants for job: {jobdiva_id}")
+        logger.info(f"Fetching job applicants for job: {jobdiva_id} (extract={extract})")
         
         jobdiva_service = JobDivaService()
         
@@ -45,6 +49,20 @@ async def get_job_applicants(
             job_id=jobdiva_id
         )
         
+        # Auto-extract resume info if requested
+        extracted_count = 0
+        if extract and candidates:
+            from services.sourced_candidates_storage import process_jobdiva_candidate
+            
+            logger.info(f"Auto-extracting resume info for {len(candidates)} candidates")
+            for candidate in candidates:
+                try:
+                    if candidate.get("resume_text"):
+                        await process_jobdiva_candidate(candidate)
+                        extracted_count += 1
+                except Exception as proc_err:
+                    logger.warning(f"Failed to extract info for candidate {candidate.get('candidate_id')}: {proc_err}")
+        
         # Calculate pagination info
         total = len(candidates)
         start_idx = (page - 1) * limit
@@ -52,7 +70,7 @@ async def get_job_applicants(
         paginated_candidates = candidates[start_idx:end_idx]
         has_more = end_idx < total
         
-        return {
+        response = {
             "jobdiva_id": jobdiva_id,
             "candidates": paginated_candidates,
             "total": total,
@@ -62,8 +80,96 @@ async def get_job_applicants(
             "source": "JobDiva Job Applicants"
         }
         
+        if extract:
+            response["extraction_summary"] = {
+                "processed": extracted_count,
+                "total": len(candidates),
+                "status": "completed"
+            }
+        
+        return response
+        
     except Exception as e:
         logger.error(f"Error fetching job applicants for {jobdiva_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/job-applicants/{jobdiva_id}/extract-all")
+async def extract_all_job_applicants(
+    jobdiva_id: str,
+    background_tasks: Optional[Any] = None
+) -> Dict[str, Any]:
+    """
+    Bulk extract resume information for all applicants of a specific job.
+    
+    This endpoint:
+    1. Fetches all applicants for the job from JobDiva
+    2. Sends each resume to Azure Agent for skill extraction
+    3. Uses LLM to extract enhanced profile details
+    4. Saves all data to candidate_enhanced_info table
+    
+    Returns immediately with a processing status. Use the GET endpoint
+    to check individual candidate enhanced info.
+    """
+    try:
+        logger.info(f"Starting bulk extraction for job applicants: {jobdiva_id}")
+        
+        from fastapi import BackgroundTasks
+        from services.sourced_candidates_storage import process_jobdiva_candidate
+        
+        jobdiva_service = JobDivaService()
+        
+        # Get all job applicants
+        candidates = await jobdiva_service.search_candidates(
+            skills=[],
+            location="",
+            page=1,
+            limit=500,  # Get maximum
+            job_id=jobdiva_id
+        )
+        
+        if not candidates:
+            return {
+                "status": "completed",
+                "jobdiva_id": jobdiva_id,
+                "message": "No applicants found for this job",
+                "processed": 0,
+                "total": 0
+            }
+        
+        # Process candidates with resume text
+        candidates_with_resume = [c for c in candidates if c.get("resume_text")]
+        
+        async def process_all_candidates():
+            """Background task to process all candidates"""
+            processed = 0
+            failed = 0
+            
+            for candidate in candidates_with_resume:
+                try:
+                    await process_jobdiva_candidate(candidate)
+                    processed += 1
+                except Exception as e:
+                    logger.error(f"Failed to process candidate {candidate.get('candidate_id')}: {e}")
+                    failed += 1
+            
+            logger.info(f"Bulk extraction completed for job {jobdiva_id}: {processed} processed, {failed} failed")
+        
+        # Run processing in background
+        import asyncio
+        asyncio.create_task(process_all_candidates())
+        
+        return {
+            "status": "processing",
+            "jobdiva_id": jobdiva_id,
+            "message": f"Processing {len(candidates_with_resume)} candidates in background",
+            "total_candidates": len(candidates),
+            "with_resume": len(candidates_with_resume),
+            "check_status": f"Use GET /candidates/{{candidate_id}}/enhanced to check individual results"
+        }
+        
+    except Exception as e:
+        logger.error(f"Error starting bulk extraction for {jobdiva_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/talent-search")
@@ -301,4 +407,136 @@ async def list_all_candidates(
         
     except Exception as e:
         logger.error(f"Error listing candidates: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{candidate_id}/extract")
+async def extract_candidate_info(candidate_id: str, source: str = "JobDiva") -> Dict[str, Any]:
+    """
+    Extract and process candidate resume from JobDiva (applicants or talent search).
+    
+    - Fetches resume from JobDiva
+    - Sends to Azure Agent for skill extraction
+    - Uses LLM to extract enhanced profile details
+    - Saves to candidate_enhanced_info table
+    
+    Args:
+        candidate_id: The candidate ID from JobDiva
+        source: Source type - "JobDiva-Applicants" or "JobDiva-TalentSearch"
+    """
+    try:
+        logger.info(f"Extracting candidate info for {candidate_id} from {source}")
+        
+        from services.jobdiva import JobDivaService
+        from services.sourced_candidates_storage import process_jobdiva_candidate
+        
+        jobdiva_service = JobDivaService()
+        
+        # Step 1: Fetch candidate resume from JobDiva
+        candidate_data = await jobdiva_service.get_candidate_resume(candidate_id)
+        
+        if not candidate_data:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Candidate {candidate_id} not found or resume not available in JobDiva"
+            )
+        
+        resume_text = candidate_data.get("resume_text", "")
+        if not resume_text or len(resume_text.strip()) < 50:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Candidate {candidate_id} has insufficient resume text for processing"
+            )
+        
+        # Step 2: Prepare candidate object for processing
+        candidate = {
+            "candidate_id": candidate_id,
+            "name": candidate_data.get("name", ""),
+            "email": candidate_data.get("email", ""),
+            "phone": candidate_data.get("phone", ""),
+            "title": candidate_data.get("title", ""),
+            "location": candidate_data.get("location", ""),
+            "resume_text": resume_text,
+            "source": source
+        }
+        
+        # Step 3: Process candidate through Azure Agent + LLM
+        logger.info(f"Processing candidate {candidate_id} through Azure Agent for skill extraction")
+        result = await process_jobdiva_candidate(candidate)
+        
+        return {
+            "status": "success",
+            "candidate_id": candidate_id,
+            "source": source,
+            "message": "Candidate resume processed successfully",
+            "data": {
+                "name": result.get("name"),
+                "current_title": result.get("current_title"),
+                "location": result.get("location"),
+                "years_experience": result.get("years_experience"),
+                "skills_count": len(result.get("skills", [])),
+                "skills": result.get("skills", []),
+                "summary": result.get("summary")
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error extracting candidate info for {candidate_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to extract candidate info: {str(e)}")
+
+
+@router.get("/{candidate_id}/enhanced")
+async def get_candidate_enhanced_info(candidate_id: str) -> Dict[str, Any]:
+    """
+    Retrieve enhanced candidate information from candidate_enhanced_info table.
+    This contains AI-extracted skills, summary, experience, etc.
+    """
+    try:
+        logger.info(f"Fetching enhanced info for candidate: {candidate_id}")
+        
+        import sqlalchemy
+        from sqlalchemy import text
+        from core.config import DATABASE_URL, SUPABASE_DB_URL
+        
+        db_url = DATABASE_URL or SUPABASE_DB_URL
+        if not db_url:
+            raise HTTPException(status_code=500, detail="Database not configured")
+        
+        engine = sqlalchemy.create_engine(db_url)
+        with engine.connect() as conn:
+            result = conn.execute(text("""
+                SELECT candidate_id, job_title, location, years_experience, 
+                       skills, summary, data, resume_text, created_at, updated_at
+                FROM candidate_enhanced_info
+                WHERE candidate_id = :candidate_id
+            """), {"candidate_id": candidate_id})
+            
+            row = result.fetchone()
+            if not row:
+                raise HTTPException(
+                    status_code=404, 
+                    detail=f"No enhanced info found for candidate {candidate_id}. Run extract endpoint first."
+                )
+            
+            import json
+            return {
+                "status": "success",
+                "candidate_id": row[0],
+                "job_title": row[1],
+                "location": row[2],
+                "years_experience": row[3],
+                "skills": json.loads(row[4]) if row[4] else [],
+                "summary": row[5],
+                "data": json.loads(row[6]) if row[6] else {},
+                "resume_preview": row[7][:500] + "..." if row[7] and len(row[7]) > 500 else row[7],
+                "created_at": str(row[8]) if row[8] else None,
+                "updated_at": str(row[9]) if row[9] else None
+            }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching enhanced info for {candidate_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -11,15 +11,24 @@ Flow:
   3. Returns strict JSON with grounded roles and skills.
   4. We cascade through the hierarchy columns to pick the most-specific name.
   5. NO fallback — if the agent finds no taxonomy match, the item is dropped.
+
+Rate Limiting:
+  - Azure Agent has strict rate limiting: max 1 concurrent call
+  - 429 errors trigger exponential backoff retry starting at 10s
 """
 
 import json
 import asyncio
 import logging
 import re
+import time
+import random
 from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+# Global semaphore to enforce max 1 concurrent Azure Agent call
+_azure_agent_semaphore = asyncio.Semaphore(1)
 
 # ── Role hierarchy (most specific → broadest) ─────────────────────────────────
 ROLE_COLUMNS = [
@@ -56,15 +65,38 @@ class AzureAgentService:
     # Public async entry-point
     # ─────────────────────────────────────────────────────────────────────────
 
-    async def extract_roles_and_skills(self, ai_jd: str) -> Dict:
+    async def extract_roles_and_skills(self, ai_jd: str, max_retries: int = 3) -> Dict:
         """
         Sends the full AI JD to the Azure agent and returns raw parsed JSON.
         Raises on failure — NO silent fallback.
+        
+        Implements rate limiting protection:
+        - Max 1 concurrent call (semaphore)
+        - Exponential backoff retry on 429 errors (starting at 10s)
 
         Returns dict with keys: job_roles (list), job_skills (list)
         """
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, lambda: self._call_agent_sync(ai_jd))
+        async with _azure_agent_semaphore:
+            for attempt in range(max_retries):
+                try:
+                    loop = asyncio.get_event_loop()
+                    return await loop.run_in_executor(None, lambda: self._call_agent_sync(ai_jd))
+                except Exception as e:
+                    error_str = str(e).lower()
+                    is_rate_limit = (
+                        "429" in str(e) or 
+                        "too_many_requests" in error_str or
+                        "rate limit" in error_str or
+                        "too many requests" in error_str
+                    )
+                    
+                    if is_rate_limit and attempt < max_retries - 1:
+                        # Exponential backoff: 10s, 20s, 40s...
+                        delay = 10 * (2 ** attempt) + random.uniform(0, 2)
+                        logger.warning(f"⚠️ Azure Agent rate limit (429) hit. Retry {attempt + 1}/{max_retries - 1} after {delay:.1f}s...")
+                        await asyncio.sleep(delay)
+                    else:
+                        raise
 
     # ─────────────────────────────────────────────────────────────────────────
     # Sync SDK call (runs in thread pool)
@@ -87,18 +119,32 @@ class AzureAgentService:
         logger.info("=" * 80)
         logger.info("🚀 Step 1: Send text to the Azure Agent.")
         logger.info("-" * 40)
-        logger.info(f"📄 INPUT TEXT SNIPPET:\n{ai_jd[:500]}...")
+        # Truncate long inputs for logging
+        log_snippet = ai_jd[:500] + "..." if len(ai_jd) > 500 else ai_jd
+        logger.info(f"📄 INPUT TEXT SNIPPET:\n{log_snippet}")
+        logger.info(f"📊 INPUT LENGTH: {len(ai_jd)} characters")
         logger.info("=" * 80)
 
-        response = client.responses.create(
-            input=ai_jd,
-            extra_body={
-                "agent_reference": {
-                    "name": self.agent_name,
-                    "type": "agent_reference",
-                }
-            },
-        )
+        try:
+            response = client.responses.create(
+                input=ai_jd,
+                extra_body={
+                    "agent_reference": {
+                        "name": self.agent_name,
+                        "type": "agent_reference",
+                    }
+                },
+            )
+        except openai.RateLimitError as e:
+            # Explicitly handle rate limit errors
+            logger.error(f"❌ Azure Agent rate limit error (429): {e}")
+            raise Exception(f"429 too_many_requests: Azure Agent rate limit exceeded") from e
+        except Exception as e:
+            # Check for 429 in the error message
+            if "429" in str(e) or "too many requests" in str(e).lower():
+                logger.error(f"❌ Azure Agent rate limit error (429): {e}")
+                raise Exception(f"429 too_many_requests: {e}") from e
+            raise
 
         raw_text = response.output_text or ""
         return self._parse_agent_response(raw_text)
