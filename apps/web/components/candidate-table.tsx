@@ -145,8 +145,8 @@ export function CandidateTable({ candidates, onView, onSelectionChange, selected
             <Table>
                 <TableHeader>
                     <TableRow>
-                        <TableHead className="w-[40px]"></TableHead>
-                        <TableHead className="w-[200px]">Name</TableHead>
+                        <TableHead className="w-10"></TableHead>
+                        <TableHead className="w-50">Name</TableHead>
                         <TableHead>Email</TableHead>
                         <TableHead>Match</TableHead>
                         <TableHead>Location</TableHead>
@@ -169,7 +169,7 @@ export function CandidateTable({ candidates, onView, onSelectionChange, selected
             </Table>
 
             <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-                <DialogContent className="sm:max-w-[500px]">
+                <DialogContent className="sm:max-w-125">
                     <DialogHeader>
                         <DialogTitle>Message {currentCandidate?.firstName} {currentCandidate?.lastName}</DialogTitle>
                         <DialogDescription>
@@ -183,7 +183,7 @@ export function CandidateTable({ candidates, onView, onSelectionChange, selected
                                 id="message"
                                 value={messageText}
                                 onChange={(e) => setMessageText(e.target.value)}
-                                className="h-[150px]"
+                                className="h-37.5"
                             />
                         </div>
                     </div>
@@ -255,6 +255,8 @@ function CandidateRow({
         }
     };
 
+    // Fallback logic for candidate name
+    const displayName = candidate.name?.trim() || `${candidate.firstName || ''} ${candidate.lastName || ''}`.trim() || 'Unknown';
     return (
         <TableRow>
             <TableCell>
@@ -266,16 +268,16 @@ function CandidateRow({
             <TableCell className="font-medium">
                 <div className="flex items-center gap-3">
                     <Avatar className="h-8 w-8">
-                        <AvatarFallback>{candidate.firstName[0]}{candidate.lastName?.[0] || ''}</AvatarFallback>
+                        <AvatarFallback>{displayName[0] || '?'}</AvatarFallback>
                     </Avatar>
                     <div>
                         <div className="flex items-center gap-2">
                             {candidate.profile_url ? (
                                 <a href={candidate.profile_url} target="_blank" rel="noopener noreferrer" className="hover:underline font-semibold text-primary">
-                                    {candidate.firstName} {candidate.lastName}
+                                    {displayName}
                                 </a>
                             ) : (
-                                <span>{candidate.firstName} {candidate.lastName}</span>
+                                <span>{displayName}</span>
                             )}
                             {candidate.open_to_work && (
                                 <span className="flex h-2 w-2 rounded-full bg-green-500" title="Open to Work" />

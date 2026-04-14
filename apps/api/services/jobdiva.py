@@ -1203,7 +1203,7 @@ class JobDivaService:
         candidate_id = get_field(candidate, ["candidateId", "id", "ID", "CANDIDATEID"]) or ""
         first_name = get_field(candidate, ["firstName", "FIRSTNAME", "firstname"]) or ""
         last_name = get_field(candidate, ["lastName", "LASTNAME", "lastname"]) or ""
-        full_name = f"{first_name} {last_name}".strip()
+        full_name = f"{first_name} {last_name}".strip() or candidate.get("name", "") or "Professional Candidate"
         
         # Extract resume text - could be in different fields
         resume_text = get_field(candidate, ["resume_text", "resumeText", "RESUMETEXT", "text", "content"]) or ""
@@ -1214,7 +1214,9 @@ class JobDivaService:
         
         return {
             "id": str(candidate_id),
-            "name": full_name or "Professional Candidate",
+            "name": full_name,
+            "firstName": first_name,
+            "lastName": last_name,
             "email": get_field(candidate, ["email", "EMAIL", "emailAddress"]) or "Available upon request",
             "phone": get_field(candidate, ["phone", "PHONE", "phoneNumber", "mobilePhone"]) or "Available upon request", 
             "title": get_field(candidate, ["title", "TITLE", "currentTitle", "jobTitle"]) or "",
@@ -1676,15 +1678,18 @@ class JobDivaService:
         
         # Extract basic info with fallbacks
         first_name = (get_field(applicant, ["FIRSTNAME", "firstName"]) or 
-                     get_field(candidate_detail, ["FIRSTNAME", "firstName"]) or "")
+                 get_field(candidate_detail, ["FIRSTNAME", "firstName"]) or "")
         last_name = (get_field(applicant, ["LASTNAME", "lastName"]) or 
-                    get_field(candidate_detail, ["LASTNAME", "lastName"]) or "")
+                get_field(candidate_detail, ["LASTNAME", "lastName"]) or "")
+        full_name = f"{first_name} {last_name}".strip() or applicant.get("name", "") or candidate_detail.get("name", "") or "Professional Candidate"
         
         return {
             "jobdiva_id": applicant.get("JOBID") or candidate_detail.get("JOBID") or "",
             "candidate_id": candidate_id,
             "source": "JobDiva-Applicants" if candidate_type == "job_applicant" else "JobDiva-TalentSearch",
-            "name": f"{first_name} {last_name}".strip(),
+            "name": full_name,
+            "firstName": first_name,
+            "lastName": last_name,
             "email": get_field(candidate_detail, ["EMAIL", "email"]) or get_field(applicant, ["EMAIL", "email"]),
             "phone": get_field(candidate_detail, ["PHONE", "phone"]) or get_field(applicant, ["PHONE", "phone"]),
             "headline": (get_field(candidate_detail, ["TITLE", "title", "currentTitle"]) or 
