@@ -107,31 +107,35 @@ class JobSkillsExtractor:
         grounded_roles       = []
         all_grounded         = []
 
-        if AZURE_AGENT_AVAILABLE and _azure_agent:
-            try:
-                agent_result = await _azure_agent.extract_roles_and_skills(grounding_text)
-
-                logger.info("=" * 80)
-                logger.info("🛠️  Step 4: Extract grounded roles and placeholder skills from taxonomy.")
-                logger.info("-" * 40)
-
-                grounded_roles = _azure_agent.convert_to_rubric_roles(
-                    agent_result.get("job_roles", []),
-                    target_job_title=job_title,
-                )
-                all_grounded = _azure_agent.convert_to_rubric_skills(
-                    agent_result.get("job_skills") or agent_result.get("skills") or []
-                )
-                
-                if grounded_roles:
-                    logger.info(f"   👔 PRIMARY TITLE : {grounded_roles[0]['value']}")
-                
-                logger.info(f"   🛠️  GROUNDED SKILLS ({len(all_grounded)}) queued for LLM categorization.")
-                for s in all_grounded:
-                    logger.info(f"      - {s['value']}")
-                        
-            except Exception as azure_err:
-                logger.error(f"❌ Azure Agent call failed: {azure_err}")
+        # AZURE AGENT COMMENTED OUT - Using LLM-only extraction for now
+        # TODO: Re-enable Azure Agent when rate limiting issues are resolved
+        # if AZURE_AGENT_AVAILABLE and _azure_agent:
+        #     try:
+        #         agent_result = await _azure_agent.extract_roles_and_skills(grounding_text)
+        #
+        #         logger.info("=" * 80)
+        #         logger.info("🛠️  Step 4: Extract grounded roles and placeholder skills from taxonomy.")
+        #         logger.info("-" * 40)
+        #
+        #         grounded_roles = _azure_agent.convert_to_rubric_roles(
+        #             agent_result.get("job_roles", []),
+        #             target_job_title=job_title,
+        #         )
+        #         all_grounded = _azure_agent.convert_to_rubric_skills(
+        #             agent_result.get("job_skills") or agent_result.get("skills") or []
+        #         )
+        #         
+        #         if grounded_roles:
+        #             logger.info(f"   👔 PRIMARY TITLE : {grounded_roles[0]['value']}")
+        #         
+        #         logger.info(f"   🛠️  GROUNDED SKILLS ({len(all_grounded)}) queued for LLM categorization.")
+        #         for s in all_grounded:
+        #             logger.info(f"      - {s['value']}")
+        #                 
+        #     except Exception as azure_err:
+        #         logger.error(f"❌ Azure Agent call failed: {azure_err}")
+        
+        logger.info("📝 Azure Agent disabled - Using LLM-only extraction")
 
         logger.info("=" * 80)
         logger.info("🧠 Step 5: Extract general rubric details & Categorize skills via LLM.")
@@ -155,22 +159,77 @@ Read the following job description and extract specific facts.
    - Short industry names (e.g. "Healthcare").
 
 3. CUSTOMER REQUIREMENTS:
-   - Extract EXPLICIT non-employment restrictions.
-   - MANDATORY: If a non-employment restriction exists, ONLY output the exact sentence: "Must not have been employed by {customer_name if customer_name else 'the client'}."
-   - DO NOT include any other details, timeframes (e.g. "6 months"), or conditions.
-   - Keep it strictly to that one sentence.
+   - DEFAULT: If customer name is provided, ALWAYS include: "Must not be employed by {customer_name}."
+   - Extract any EXPLICIT non-employment restrictions if mentioned.
 
 4. OTHER REQUIREMENTS:
    - Extract Shift (Day/Night, Rotating), Work Authorization, or Travel %.
-   - MANDATORY: Use concise, professional sentences. Keep under 15 words.
+   - MANDATORY: Use complete, professional sentences with proper punctuation (must end with a period/full stop).
+   - MANDATORY: Keep under 15 words per sentence.
+   - EXAMPLES: 
+     * "Day and night shifts are required." (NOT "Day and night shifts required")
+     * "Must be authorized to work in the US." (NOT "US work authorization required")
+     * "Up to 25% travel is expected." (NOT "25% travel")
    - DO NOT extract Location or years of experience.
 
-5. SKILL CATEGORIZATION:
-   - Extract all relevant skills required for the role from the job description.
-   - Categorize each skill into: ["hard", "soft", "certification"]
-   - "hard": Measurable technical skills, tools, or procedures (e.g., "X-Ray", "Vascular Access").
-   - "soft": Any skill that cannot be measured (e.g., "Patient Care", "Bedside Manner", "Clinical Behaviors", "Communication").
-   - "certification": Licenses or professional certifications (e.g., "BLS", "ARRT").
+5. SKILLS (CRITICAL - Extract ALL explicit AND implied skills from JD):
+   - Extract ALL skills mentioned in the job description (both hard and soft skills).
+   - PRIORITY ORDER: 
+     1. EXPLICIT SKILLS FIRST: Skills that are directly listed in skill sections, requirements lists, or clearly stated (e.g., "Required Skills: Python, AWS, Docker")
+     2. DIRECT MENTIONS: Skills explicitly mentioned in sentences (e.g., "Must have experience with React and Node.js")
+     3. INFERRED SKILLS LAST: Skills that must be inferred from job responsibilities (e.g., "Build APIs" → "REST API Development")
+   - CRITICAL: You MUST infer skills from sentences, job responsibilities, and context - not just explicitly listed skills.
+   - READ BETWEEN THE LINES: If a sentence describes a task or responsibility, extract the underlying skills needed to perform it.
+   
+   EXAMPLES OF EXPLICIT/DIRECT SKILLS (HIGHEST PRIORITY):
+   - "Required: Python, JavaScript, AWS" → extract: ["Python", "JavaScript", "AWS"]
+   - "Must have 5+ years of Docker experience" → extract: ["Docker"]
+   - "Proficiency in SQL required" → extract: ["SQL"]
+   
+   EXAMPLES OF INFERRED SKILLS (LOWER PRIORITY - only if under 8 skills):
+   - "Build RESTful APIs" → infer skills: ["REST API Development", "Backend Development", "API Design"]
+   - "Manage cloud infrastructure on AWS" → infer skills: ["AWS", "Cloud Infrastructure Management", "DevOps"]
+   - "Analyze data to drive business decisions" → infer skills: ["Data Analysis", "Business Intelligence", "Statistical Analysis"]
+   - "Collaborate with cross-functional teams" → infer skills: ["Cross-functional Collaboration", "Team Communication"]
+   - "Optimize database queries for performance" → infer skills: ["Database Optimization", "SQL", "Performance Tuning"]
+   - "Implement CI/CD pipelines" → infer skills: ["CI/CD", "DevOps", "Automation"]
+   - "Conduct code reviews" → infer skills: ["Code Review", "Software Quality Assurance"]
+   - "Design microservices architecture" → infer skills: ["Microservices Architecture", "System Design", "Distributed Systems"]
+   
+   For each skill, extract:
+     - "name": The skill name
+     - "category": One of ["hard", "soft"]
+     - "hard": Measurable technical skills, tools, or procedures (e.g., "Python", "AWS", "Docker", "DAST", "SAST").
+       - "soft": Interpersonal or behavioral skills (e.g., "Communication", "Teamwork", "Leadership", "Problem-solving").
+     - "importance": One of ["required", "preferred"] - determine based on context ("must have" = required, "nice to have" = preferred, implied responsibilities = required)
+     - "min_years": Minimum years of experience for THIS skill if explicitly mentioned, otherwise use the global min_years_experience value
+     - "evidence_type": One of ["direct", "inferred"]
+       - "direct": Explicitly present in the JD, requirements, qualifications, tools, certifications, procedures, duties, or responsibilities.
+       - "inferred": Strongly implied by the role but not stated directly. Only use if fewer than 8 hard skills are available directly from the JD.
+   - CRITICAL FORMATTING RULES FOR SKILL NAMES:
+     - Use proper Title Case (capitalize first letter of each word): "Radiographic Equipment Operation", NOT "radiographic equipment operation"
+     - Fix typos and misspellings: "Radiographic" NOT "Ragiographic"
+     - Use singular form for procedures/skills: "Radiographic Procedure" NOT "Radiographic Procedures"
+     - Use standard professional terminology: "Radiation Safety Standards" NOT "radiation safety practices"
+     - Remove punctuation errors: "Patient Care" NOT "Patient Care,"
+     - Keep skill names concise and professional (2-5 words typically)
+   - COMPREHENSIVENESS: Extract the MOST IMPORTANT skills only.
+   - TARGET: Return UP TO 8 HARD SKILLS FROM THE JD ITSELF. You may also return soft skills separately, but soft skills must NOT displace or reduce the number of hard skills.
+   - The total number of items in the `skills` array may exceed 8 if that is needed to include soft skills in addition to up to 8 hard skills.
+   - Prioritize the most critical and essential skills for the role.
+   - Focus on core technical competencies and key soft skills.
+   - **CRITICAL PRIORITY RULE**: Always include explicit/direct hard skills FIRST before considering inferred hard skills.
+   - If the JD explicitly supports more than 3 hard skills, keep extracting until you have the strongest set of up to 8 hard skills.
+   - Infer additional hard skills only from the JD text, responsibilities, tools, procedures, workflows, and qualifications. Do NOT invent skills unrelated to the JD.
+   - Skills like Patient Care, Communication, Teamwork, Flexibility, Attention to Detail, Empathy, Collaboration, and Customer Service are SOFT skills, not hard skills.
+   - Look for skills in:
+     * Explicit skill lists (HIGHEST PRIORITY)
+     * Required qualifications sections (HIGH PRIORITY)
+     * Job responsibilities and duties (MEDIUM PRIORITY - infer from these)
+     * Day-to-day activities described (MEDIUM PRIORITY - infer from these)
+     * Tools and technologies mentioned in context (MEDIUM PRIORITY)
+     * Methodologies and frameworks implied (LOWER PRIORITY - infer only if needed)
+     * Domain knowledge required (LOWER PRIORITY - infer only if needed)
 
 6. EXPERIENCE:
    - Extract the MINIMUM number of years of total experience required as a single number (e.g., 4).
@@ -180,28 +239,36 @@ Read the following job description and extract specific facts.
 
 7. JOB ROLE:
    - Extract the most appropriate standardized job title(s) for this position.
+   - IMPORTANT: All match types must be "Similar" - do not use any other match type.
 
 JD TEXT:
 {grounding_text}
 
 Return JSON:
 {{ 
-  "job_roles": [ {{ "name": "Role Title" }} ],
+  "job_roles": [ {{ "name": "Role Title", "match_type": "Similar", "required": "Preferred" }} ],
   "education": [], 
   "domain": [], 
   "customer_requirements": [], 
   "other_requirements": [],
   "min_years_experience": 0,
-  "categorized_skills": [ 
-     {{ "name": "Skill Name", "category": "hard/soft/certification" }} 
+  "skills": [ 
+     {{ "name": "Skill Name", "category": "hard/soft", "importance": "required/preferred", "min_years": 0, "evidence_type": "direct/inferred" }} 
   ]
 }}
+
+IMPORTANT: 
+- All job_roles MUST have "match_type": "Similar" - this is mandatory.
+- Do not use any other match type values like "Exact", "Broad", etc.
 """
         try:
             p2_resp = await self.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[{"role": "user", "content": phase2_prompt}],
-                temperature=0,
+                messages=[
+                    {"role": "system", "content": "You are an expert recruiter and skills analyst. Extract up to 8 HARD skills from the JD itself, plus any truly important SOFT skills. HARD SKILLS ARE THE PRIORITY. Soft skills must never crowd out hard skills or reduce the hard-skill count. The skills array may contain more than 8 total items if needed, but no more than 8 should be hard skills. PRIORITY ORDER FOR HARD SKILLS: 1) Explicit skills listed in requirements/qualifications/tools/procedures (HIGHEST), 2) Direct skill mentions in duties or responsibilities (HIGH), 3) Strongly inferred hard skills from the JD only if fewer than 8 direct hard skills are available (MEDIUM). Patient Care, Communication, Teamwork, Flexibility, Attention to Detail, Empathy, Collaboration, and Customer Service are soft skills. Mark each skill with evidence_type = direct or inferred."},
+                    {"role": "user", "content": phase2_prompt}
+                ],
+                temperature=0.2,  # Slightly higher to encourage more comprehensive extraction
                 response_format={"type": "json_object"},
             )
             phase2_result = json.loads(p2_resp.choices[0].message.content)
@@ -209,62 +276,121 @@ Return JSON:
             logger.error(f"❌ Phase 2 failed: {p2_err}")
             phase2_result = {}
 
-        # Merge results - Categorized Skills
+        # Merge results - Extract ALL skills from LLM and categorize
         grounded_hard_skills = []
         grounded_soft_skills = []
         other_requirements = []
         customer_requirements = []
         min_years = int(phase2_result.get("min_years_experience", 0))
         
-        # If we don't have Azure Agent skills, use the extracted ones from LLM directly
-        if not all_grounded:
-            for item in phase2_result.get("categorized_skills", []):
-                if isinstance(item, dict) and 'name' in item:
-                    all_grounded.append({"value": item["name"], "source": "PAIR"})
+        normalized_grounding_text = "".join(ch.lower() if ch.isalnum() else " " for ch in grounding_text)
+
+        def skill_priority(item: dict) -> tuple[int, int, int, str]:
+            evidence_type = (item.get("evidence_type") or "").lower()
+            importance = (item.get("importance") or "preferred").lower()
+            value = item.get("value", "")
+            normalized_value = " ".join("".join(ch.lower() if ch.isalnum() else " " for ch in value).split())
+            is_direct_text_match = bool(normalized_value and normalized_value in normalized_grounding_text)
+
+            direct_rank = 0 if evidence_type == "direct" or is_direct_text_match else 1
+            importance_rank = 0 if importance == "required" else 1
+            inferred_rank = 0 if is_direct_text_match else 1
+            return (direct_rank, importance_rank, inferred_rank, value)
+
+        # Extract ALL Skills from LLM (Azure Agent disabled)
+        skills_from_llm = phase2_result.get("skills", [])
+        logger.info(f"📊 LLM returned {len(skills_from_llm)} skills before categorization")
+
+        # Strict filter: Remove any skills that are certifications or education
+        def is_cert_or_edu(skill_name: str) -> bool:
+            name = skill_name.lower()
+            cert_keywords = [
+                "certification", "certified", "license", "licence", "licensure", "registration", "registered",
+                "diploma", "degree", "bachelor", "master", "phd", "doctor", "associate", "ged", "high school"
+            ]
+            # e.g. "Basic Life Support Certification", "Registered Nurse License", "Bachelor's Degree in IT"
+            return any(kw in name for kw in cert_keywords)
+
+        def normalize_skill_category(skill_name: str, category: str) -> str:
+            name = skill_name.lower().strip()
+            soft_skill_phrases = {
+                "patient care",
+                "communication",
+                "communication skills",
+                "teamwork",
+                "attention to detail",
+                "flexibility",
+                "empathy",
+                "collaboration",
+                "customer service",
+                "interpersonal skills",
+                "problem solving",
+                "problem-solving",
+                "adaptability",
+                "time management",
+                "active listening",
+                "compassion",
+                "professionalism",
+                "bedside manner",
+                "relationship building",
+            }
+            if name in soft_skill_phrases:
+                return "soft"
+            return category
+
+        for item in skills_from_llm:
+            if isinstance(item, dict) and 'name' in item:
+                if is_cert_or_edu(item["name"]):
+                    continue  # Skip certifications and education in skills
+                evidence_type = (item.get('evidence_type') or '').lower()
+                skill_min_years = item.get('min_years', min_years)
+                category = normalize_skill_category(item["name"], item.get('category', 'hard').lower())
+                normalized_value = " ".join("".join(ch.lower() if ch.isalnum() else " " for ch in item["name"]).split())
+                is_direct_text_match = bool(normalized_value and normalized_value in normalized_grounding_text)
+                is_direct_hard_skill = category == "hard" and (evidence_type == "direct" or is_direct_text_match)
+                required_label = "Required" if is_direct_hard_skill else ("Preferred" if category == "hard" else item.get('importance', 'preferred').capitalize())
+                importance = required_label.lower()
+
+                skill_obj = {
+                    "value": item["name"],
+                    "source": "PAIR",
+                    "matchType": "Similar",  # Always use Similar for all skills
+                    "importance": importance,
+                    "required": required_label,
+                    "minYears": skill_min_years if skill_min_years else min_years,
+                    "category": category,
+                    "evidence_type": "direct" if is_direct_hard_skill else (evidence_type or ("direct" if is_direct_text_match else "inferred"))
+                }
+
+                # Separate into hard and soft skills based on category
+                if category == "soft":
+                    grounded_soft_skills.append(skill_obj)
+                else:
+                    grounded_hard_skills.append(skill_obj)
+
+        grounded_hard_skills.sort(key=skill_priority)
+        # Limit to a maximum of 8 hard skills (soft skills are not counted in this limit)
+        grounded_hard_skills = grounded_hard_skills[:8]
                     
-        # Extract Job roles using LLM
+        # Extract Job roles using LLM - ALWAYS use "Similar" match type
         if not grounded_roles:
             for item in phase2_result.get("job_roles", []):
                 if isinstance(item, dict) and 'name' in item:
-                    grounded_roles.append({"value": item["name"], "source": "PAIR"})
-
-        cat_map = {item['name'].upper(): item['category'].lower() 
-                   for item in phase2_result.get("categorized_skills", []) 
-                   if isinstance(item, dict) and 'name' in item}
-
-        for s in all_grounded:
-            s_name = s['value'].upper()
-            cat = cat_map.get(s_name, "hard")
-            
-            # Logic Guardrail: If name contains 'Certification' or 'License', force category
-            if any(term in s_name for term in ["CERTIFICATION", "LICENSE", "ARRT", "BLS", "CPR"]):
-                cat = "certification"
-            
-            # Logic Guardrail: If name contains behavioral keywords, force soft
-            if any(term in s_name for term in ["CARE", "COMMUNICATION", "INTERPERSONAL", "BEHAVIOR", "INTERACTION"]):
-                cat = "soft"
-
-            if cat == "certification":
-                education.append({
-                    "degree": "Certification / License",
-                    "field": s['value'],
-                    "required": "Required",
-                    "source": "PAIR (Agent)"
-                })
-            elif cat == "soft":
-                s['category'] = "soft"
-                grounded_soft_skills.append(s)
-            else:
-                s['category'] = "hard"
-                s['minYears'] = min_years
-                grounded_hard_skills.append(s)
+                    grounded_roles.append({
+                        "value": item["name"], 
+                        "source": "PAIR",
+                        "matchType": "Similar",  # Always use Similar for job titles
+                        "required": item.get('required', 'Preferred')
+                    })
 
         if not grounded_roles:
-            final_titles = [{"value": enhanced_job_title or job_title or "No Title", "source": "PAIR", "minYears": min_years}]
+            final_titles = [{"value": enhanced_job_title or job_title or "No Title", "source": "PAIR", "minYears": min_years, "matchType": "Similar", "required": "Preferred"}]
         else:
             final_titles = []
             for r in grounded_roles:
                 r['minYears'] = min_years
+                r['matchType'] = 'Similar'  # Always use Similar for job titles
+                r['required'] = r.get('required', 'Preferred')
                 final_titles.append(r)
 
         # Normalise additional education items
@@ -327,14 +453,31 @@ Return JSON:
             if not val.strip(): continue
             # Avoid location duplication if LLM ignored the instruction
             if "LOCATION" in val.upper(): continue
-            if len(val.split()) < 4: continue 
+            if len(val.split()) < 4: continue
             
-            if isinstance(r, dict): other_requirements.append(r)
-            elif isinstance(r, str): other_requirements.append({"value": val, "required": "Required"})
+            # Ensure the value ends with a period (full stop)
+            val = val.strip()
+            if not val.endswith('.'):
+                val = val + '.'
+            
+            if isinstance(r, dict): 
+                r['value'] = val
+                other_requirements.append(r)
+            elif isinstance(r, str): 
+                other_requirements.append({"value": val, "required": "Required"})
 
         # Customer Requirements (and routing technical ones back to Other)
         customer_requirements_raw = phase2_result.get("customer_requirements", [])
         customer_requirements = []
+
+        def infer_customer_requirement_type(text: str) -> str:
+            text_upper = (text or "").upper()
+            if "PREVIOUS" in text_upper or "WORKED" in text_upper:
+                return "Previously employed by"
+            if "CURRENT" in text_upper:
+                return "Currently employed by"
+            return "Must not be employed by"
+
         for r in customer_requirements_raw:
             val = r.get("value", "") if isinstance(r, dict) else str(r)
             if not val.strip(): continue
@@ -350,14 +493,18 @@ Return JSON:
             
             if is_true_customer_req:
                 # Only return the candidate name as the UI dropdown already has the prefix
+                req_type = infer_customer_requirement_type(val)
                 if customer_name:
                     val = customer_name
                 else:
                     val = "the client"
                     
-                customer_requirements.append({"value": val, "required": "Required"})
+                customer_requirements.append({"type": req_type, "value": val, "required": "Required"})
             else:
                 # Salvage to Other Requirements since it doesn't fit the solicitation dropdown
+                # Ensure it ends with a period
+                if not val.endswith('.'):
+                    val = val + '.'
                 other_requirements.append({"value": val, "required": "Required"})
         
         if not customer_requirements and customer_name:
@@ -374,10 +521,18 @@ Return JSON:
             if not val.strip(): continue
             # Avoid location duplication (even if AI ignores the 'DO NOT extract location' rule)
             if "LOCATION" in val.upper(): continue
-            if len(val.split()) < 4: continue 
+            if len(val.split()) < 4: continue
             
-            if isinstance(r, dict): other_requirements.append(r)
-            elif isinstance(r, str): other_requirements.append({"value": val, "required": "Required"})
+            # Ensure the value ends with a period (full stop)
+            val = val.strip()
+            if not val.endswith('.'):
+                val = val + '.'
+            
+            if isinstance(r, dict): 
+                r['value'] = val
+                other_requirements.append(r)
+            elif isinstance(r, str): 
+                other_requirements.append({"value": val, "required": "Required"})
 
         # Deduplicate other_requirements by normalized value (case-insensitive)
         seen_other = set()
@@ -394,7 +549,30 @@ Return JSON:
         if job_location:
             other_requirements.append({"value": f"The work location for this role is {job_location}.", "required": "Required"})
 
+        # Enforce maximum of 8 hard skills. Soft skills do not consume the hard-skill cap.
+        total_hard_skills_before = len(grounded_hard_skills)
+        if total_hard_skills_before > 8:
+            # Prioritize required hard skills, then preferred hard skills, up to 8 total hard skills.
+            required_hard = [s for s in grounded_hard_skills if s.get('importance') == 'required']
+            preferred_hard = [s for s in grounded_hard_skills if s.get('importance') == 'preferred']
+            
+            grounded_hard_skills = []
+            
+            # Add required hard skills first
+            for s in required_hard:
+                if len(grounded_hard_skills) < 8:
+                    grounded_hard_skills.append(s)
+            
+            # Add preferred hard skills if room
+            for s in preferred_hard:
+                if len(grounded_hard_skills) < 8:
+                    grounded_hard_skills.append(s)
+
+            logger.info(f"⚠️  Limited hard skills from {total_hard_skills_before} to {len(grounded_hard_skills)} (max 8)")
+
         # Log Step 5 Results
+        total_skills = len(grounded_hard_skills) + len(grounded_soft_skills)
+        logger.info(f"   📊 TOTAL SKILLS EXTRACTED: {total_skills} (hard skills capped at 8)")
         logger.info(f"   🛠️  HARD SKILLS ({len(grounded_hard_skills)}):")
         for s in grounded_hard_skills: logger.info(f"      - {s['value']}")
         if grounded_soft_skills:

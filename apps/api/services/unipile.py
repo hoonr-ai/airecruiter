@@ -2,6 +2,8 @@ import httpx
 import json
 import logging
 import asyncio
+import re
+from urllib.parse import urlparse
 from typing import List, Dict, Any, Optional
 from core import (
     UNIPILE_API_KEY, UNIPILE_DSN, UNIPILE_ACCOUNT_ID
@@ -20,6 +22,96 @@ class UnipileService:
         self.api_key = UNIPILE_API_KEY
         self.account_id = UNIPILE_ACCOUNT_ID # Use from config if available
         self._id_cache = {} # Simple in-memory cache for skill/location IDs
+
+    def _clean_candidate_name(self, value: Optional[str]) -> Optional[str]:
+        raw = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not raw:
+            return None
+
+        normalized = raw.casefold()
+        placeholders = {
+            "linkedin candidate",
+            "professional candidate",
+            "unknown candidate",
+            "candidate",
+            "unknown",
+        }
+        if normalized in placeholders:
+            return None
+        return raw
+
+    def _derive_name_from_profile_url(self, profile_url: Optional[str]) -> Optional[str]:
+        if not profile_url:
+            return None
+
+        try:
+            parsed = urlparse(profile_url)
+        except Exception:
+            return None
+
+        slug = ""
+        path_parts = [part for part in (parsed.path or "").split("/") if part]
+        if "in" in path_parts:
+            in_index = path_parts.index("in")
+            if in_index + 1 < len(path_parts):
+                slug = path_parts[in_index + 1]
+        elif path_parts:
+            slug = path_parts[-1]
+
+        slug = re.sub(r"[-_]+", " ", slug).strip()
+        slug = re.sub(r"\b\d+\b", " ", slug)
+        slug = re.sub(r"\s+", " ", slug).strip()
+        if not slug:
+            return None
+
+        if not re.search(r"[a-zA-Z]{2,}", slug):
+            return None
+
+        candidate_name = " ".join(part.capitalize() for part in slug.split()[:4])
+        return self._clean_candidate_name(candidate_name)
+
+    def _resolve_candidate_name(self, item: Dict[str, Any]) -> str:
+        # Try multiple fallbacks before using generic name
+        explicit_name = self._clean_candidate_name(item.get("name"))
+        if explicit_name:
+            return explicit_name
+
+        # Try first_name + last_name from profile
+        first_name = self._clean_candidate_name(item.get("first_name") or item.get("firstName"))
+        last_name = self._clean_candidate_name(item.get("last_name") or item.get("lastName"))
+        if first_name or last_name:
+            return f"{first_name} {last_name}".strip()
+
+        derived_name = self._derive_name_from_profile_url(
+            item.get("profile_url") or item.get("public_profile_url")
+        )
+        if derived_name:
+            return derived_name
+
+        # Try using headline as fallback
+        headline = self._clean_candidate_name(item.get("headline"))
+        if headline:
+            return headline
+        
+        # Try using current company or title
+        company = item.get("company") or item.get("current_company")
+        title = item.get("title") or item.get("current_title")
+        if company or title:
+            return f"{title or 'Professional'} at {company or 'Company'}".strip()
+
+        # Last resort - use provider ID to make it unique
+        provider_id = item.get("id") or item.get("provider_id")
+        if provider_id:
+            return f"LinkedIn Professional {str(provider_id)[:8]}"
+
+        return "LinkedIn Candidate"
+
+    def _split_candidate_name(self, full_name: str) -> tuple[str, str]:
+        cleaned = re.sub(r"\s+", " ", str(full_name or "")).strip()
+        if not cleaned:
+            return "", ""
+        parts = cleaned.split(" ", 1)
+        return parts[0], parts[1] if len(parts) > 1 else ""
 
     def _get_headers(self):
         return {
@@ -192,7 +284,8 @@ class UnipileService:
                     
                     for item in items:
                         c_id = item.get("id")
-                        full_name = item.get("name") or "LinkedIn Candidate"
+                        full_name = self._resolve_candidate_name(item)
+                        first_name, last_name = self._split_candidate_name(full_name)
                         
                         # Handle potential nulls and field variations from docs
                         img_url = item.get("img") or item.get("profile_picture_url")
@@ -201,8 +294,9 @@ class UnipileService:
                         cand = {
                             "id": f"unipile_{c_id}",
                             "provider_id": c_id,
-                            "firstName": full_name.split(" ")[0],
-                            "lastName": " ".join(full_name.split(" ")[1:]) if " " in full_name else "",
+                            "name": full_name,
+                            "firstName": first_name,
+                            "lastName": last_name,
                             "email": "",
                             "city": item.get("location", ""),
                             "state": "",

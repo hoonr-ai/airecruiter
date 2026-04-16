@@ -5,6 +5,31 @@ from typing import List, Dict, Optional
 from dataclasses import asdict
 from core.config import DATABASE_URL
 
+def _normalize_title(value: str) -> str:
+    return "".join(ch.lower() for ch in (value or "").strip() if ch.isalnum())
+
+
+def _parse_customer_requirement(requirement: str) -> Dict[str, str]:
+    requirement = (requirement or "").strip()
+    known_prefixes = [
+        "Must not be employed by",
+        "Currently employed by",
+        "Previously employed by",
+    ]
+
+    for prefix in known_prefixes:
+        marker = f"{prefix}:"
+        if requirement.startswith(marker):
+            return {
+                "type": prefix,
+                "value": requirement[len(marker):].strip(),
+            }
+
+    return {
+        "type": "Must not be employed by",
+        "value": requirement,
+    }
+
 class JobRubricDB:
     """Handles structured persistent storage for all components of a job rubric."""
     
@@ -30,6 +55,13 @@ class JobRubricDB:
         try:
             with psycopg2.connect(self.db_url) as conn:
                 with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT title FROM monitored_jobs WHERE jobdiva_id = %s OR job_id = %s LIMIT 1",
+                        (jobdiva_id, jobdiva_id)
+                    )
+                    monitored_job = cur.fetchone()
+                    primary_job_title = _normalize_title(monitored_job[0]) if monitored_job and monitored_job[0] else ""
+
                     # 1. Clear existing rubric data for this job
                     cur.execute("DELETE FROM job_skills WHERE jobdiva_id = %s", (jobdiva_id,))
                     cur.execute("DELETE FROM job_education WHERE jobdiva_id = %s", (jobdiva_id,))
@@ -68,14 +100,17 @@ class JobRubricDB:
                             s.get('value', ''),
                             s.get('minYears', 0),
                             bool(s.get('recent', False)),
-                            s.get('matchType', 'Exact'),
-                            (s.get('required', 'Required') == 'Required'),
+                            s.get('matchType', 'Similar'),
+                            (s.get('importance', s.get('required', 'Required')) == 'Required'),
                             s.get('category', 'hard'),
                             s.get('similar_skills', []) # psycopg2 handles list as postgres ARRAY
                         ))
 
                     # 3. Save Titles / Experience
                     for t in rubric.get('titles', []):
+                        normalized_title = _normalize_title(t.get('value', ''))
+                        is_direct_title = bool(primary_job_title and normalized_title == primary_job_title)
+
                         cur.execute("""
                             INSERT INTO job_titles (jobdiva_id, title, min_years, recent, match_type, is_required, similar_titles, source)
                             VALUES (%s, %s, %s, %s, %s, %s, %s::text[], %s)
@@ -84,8 +119,8 @@ class JobRubricDB:
                             t.get('value', ''),
                             t.get('minYears', 0),
                             bool(t.get('recent', False)),
-                            t.get('matchType', 'Exact'),
-                            (t.get('required', 'Required') == 'Required'),
+                            'Similar',
+                            is_direct_title or (t.get('required', 'Required') == 'Required'),
                             t.get('similar_titles', []), # postgres ARRAY
                             t.get('source', 'PAIR')
                         ))
@@ -181,7 +216,7 @@ class JobRubricDB:
                             "value": r['skill_name'],
                             "minYears": r['min_years'],
                             "recent": r['recent'],
-                            "matchType": r['match_type'],
+                            "matchType": 'Similar' if not r['match_type'] or r['match_type'].lower() == 'similar' else r['match_type'],
                             "required": "Required" if r['is_required'] else "Preferred",
                             "similar_skills": list(r['similar_skills']) if r.get('similar_skills') else []
                         }
@@ -195,7 +230,7 @@ class JobRubricDB:
                         "value": r['title'],
                         "minYears": r['min_years'],
                         "recent": r['recent'],
-                        "matchType": r['match_type'],
+                        "matchType": 'Similar' if not r['match_type'] or r['match_type'].lower() == 'similar' else r['match_type'],
                         "required": "Required" if r['is_required'] else "Preferred",
                         "source": "PAIR",
                         "similar_titles": list(r['similar_titles']) if r.get('similar_titles') else []
@@ -209,9 +244,10 @@ class JobRubricDB:
                     } for r in cur.fetchall()]
 
                     cur.execute("SELECT * FROM job_customer_requirements WHERE jobdiva_id = %s", (jobdiva_id,))
-                    customer_reqs = [{
-                        "value": r['requirement']
-                    } for r in cur.fetchall()]
+                    customer_reqs = [
+                        _parse_customer_requirement(r['requirement'])
+                        for r in cur.fetchall()
+                    ]
 
                     cur.execute("SELECT * FROM job_other_requirements WHERE jobdiva_id = %s", (jobdiva_id,))
                     other_reqs = [{

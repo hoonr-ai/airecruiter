@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, Suspense } from "react";
+import { useState, useEffect, useEffectEvent, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -115,6 +115,35 @@ const STEP_DESCRIPTIONS: Record<Step, string> = {
   3: "Define evaluation criteria and rubric for candidate assessment.",
   4: "Configure filters and requirements for candidate matching.",
   5: "Launch sourcing and begin candidate collection."
+};
+
+const getCandidateDisplayName = (candidate: {
+  name?: string;
+  firstName?: string;
+  lastName?: string;
+  title?: string;
+  source?: string;
+}) => {
+  const normalize = (value?: string) => {
+    const cleaned = (value || "").replace(/\s+/g, " ").trim();
+    if (!cleaned) return "";
+    const lowered = cleaned.toLowerCase();
+    if (["linkedin candidate", "professional candidate", "unknown candidate", "unknown"].includes(lowered)) {
+      return "";
+    }
+    return cleaned;
+  };
+
+  const fullName = normalize(candidate.name);
+  if (fullName) return fullName;
+
+  const composed = normalize([candidate.firstName, candidate.lastName].filter(Boolean).join(" "));
+  if (composed) return composed;
+
+  const title = normalize(candidate.title);
+  if (title) return title;
+
+  return candidate.source === "LinkedIn" ? "LinkedIn profile" : "Unnamed candidate";
 };
 
 export default function NewJobPage() {
@@ -261,6 +290,7 @@ function NewJobPageContent() {
     similarTitles: string[];
     selectedSimilarTitles?: string[];
     similarExpanded?: boolean;
+    fromRubric?: boolean;
   }>>([]);
   const [sourceSkills, setSourceSkills] = useState<Array<{
     id: number;
@@ -272,18 +302,27 @@ function NewJobPageContent() {
     similarSkills: string[];
     selectedSimilarSkills?: string[];
     similarExpanded?: boolean;
+    fromRubric?: boolean;
   }>>([]);
   const [sourceLocations, setSourceLocations] = useState<Array<{
     id: number;
     value: string;
     radius: string;
   }>>([]);
+  const [hasSeededSourceLocation, setHasSeededSourceLocation] = useState(false);
   const [sourceCompanies, setSourceCompanies] = useState<string[]>([]);
   const [sourceKeywords, setSourceKeywords] = useState<string[]>([]);
+  const [sourceTitleInput, setSourceTitleInput] = useState("");
+  const [sourceSkillInput, setSourceSkillInput] = useState("");
+  const [sourceLocationInput, setSourceLocationInput] = useState("");
+  const [sourceLocationRadius, setSourceLocationRadius] = useState("Within 25 mi");
+  const [sourceCompanyInput, setSourceCompanyInput] = useState("");
+  const [sourceKeywordInput, setSourceKeywordInput] = useState("");
   const [isSearching, setIsSearching] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [booleanStringOpen, setBooleanStringOpen] = useState(false);
   const [generatedBoolean, setGeneratedBoolean] = useState("");
+  const [isRefreshingBoolean, setIsRefreshingBoolean] = useState(false);
   const [candidates, setCandidates] = useState<any[]>([]);
   const [selectedCandidates, setSelectedCandidates] = useState<Set<string>>(new Set());
   const [searchStatus, setSearchStatus] = useState("Fetching applicants...");
@@ -314,6 +353,10 @@ function NewJobPageContent() {
       loadJobDraft(jobIdFromUrl);
     }
   }, [searchParams]);
+
+  useEffect(() => {
+    setHasSeededSourceLocation(false);
+  }, [numericJobId, jobdivaId]);
 
   const showToast = (message: string, type: "success" | "info" | "error" = "success") => {
     setToast({ message, type });
@@ -393,6 +436,26 @@ function NewJobPageContent() {
       if (draft.selected_job_boards?.length) setSelectedJobBoards(draft.selected_job_boards);
       if (draft.work_authorization) setWorkAuthorization(draft.work_authorization);
       if (draft.bot_introduction) setBotIntroduction(draft.bot_introduction);
+
+      // Restore resume match filters if they exist
+      if (draft.resume_match_filters && draft.resume_match_filters.length > 0) {
+        setResumeMatchFilters(draft.resume_match_filters);
+        const maxId = Math.max(...draft.resume_match_filters.map((f: any) => f.id));
+        setFilterIdCounter(maxId + 1);
+        console.log(`✅ Restored ${draft.resume_match_filters.length} resume match filters from database`);
+      }
+
+      // Restore sourcing filters if they exist
+      if (draft.sourcing_filters) {
+        const sf = draft.sourcing_filters;
+        if (sf.sources) setSearchSources(sf.sources);
+        if (sf.titles) setSourceTitles(sf.titles);
+        if (sf.skills) setSourceSkills(sf.skills);
+        if (sf.locations) setSourceLocations(sf.locations);
+        if (sf.companies) setSourceCompanies(sf.companies);
+        if (sf.keywords) setSourceKeywords(sf.keywords);
+        console.log('✅ Restored sourcing filters from database');
+      }
 
       // 5. Navigate to the saved step
       if (draft.current_step) {
@@ -687,10 +750,18 @@ function NewJobPageContent() {
           screening_level: screeningLevel,
           selected_job_boards: selectedJobBoards,
           rubric: {
-            ...rubricData,
+            ...getNormalizedRubricPayload(),
             screen_questions: screenQuestions
           }, // 🔥 SEND FULL RUBRIC DATA + Screen Questions
           bot_introduction: botIntroduction,
+          resume_match_filters: resumeMatchFilters.map(f => ({
+            id: f.id,
+            category: f.category,
+            value: f.value,
+            active: f.active,
+            ai: f.ai,
+            fromRubric: f.fromRubric
+          })),
           sourcing_filters: {
             sources: searchSources,
             titles: sourceTitles,
@@ -706,7 +777,12 @@ function NewJobPageContent() {
         })
       });
 
-      if (!response.ok) throw new Error("Save failed");
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => null);
+        const errorMessage = errorData?.detail || errorData?.message || `Save failed (HTTP ${response.status})`;
+        console.error("API Error Response:", errorData);
+        throw new Error(errorMessage);
+      }
 
       const result = await response.json();
       if (!stepData.skipToast) {
@@ -716,7 +792,8 @@ function NewJobPageContent() {
     } catch (error) {
       console.error("Error saving job to monitored jobs:", error);
       if (!stepData.skipToast) {
-        showToast("Failed to save. Please try again.", "info");
+        const errorMsg = error instanceof Error ? error.message : "Failed to save. Please try again.";
+        showToast(errorMsg, "error");
       }
       return false;
     }
@@ -835,7 +912,7 @@ function NewJobPageContent() {
     <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
       {/* Card Header — reference style: no heavy background, very subtle gradient */}
       <div className="flex flex-row items-start gap-4 px-7 py-6 border-b border-slate-100"
-        style={{ background: "linear-gradient(135deg, #f8f7ff 0%, #ffffff 60%)" }}>
+        style={{ background: "linear-gradient(135deg, #f5f3ff 0%, #ffffff 60%)" }}>
         <FileInput className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[20px] font-semibold text-slate-900 leading-tight tracking-tight">Intake</h2>
@@ -1145,7 +1222,7 @@ function NewJobPageContent() {
   const publishStep = (
     <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
       <div className="flex flex-row items-start gap-4 px-7 py-6 border-b border-slate-100"
-        style={{ background: "linear-gradient(135deg, #f8f7ff 0%, #ffffff 60%)" }}>
+        style={{ background: "linear-gradient(135deg, #f5f3ff 0%, #ffffff 60%)" }}>
         <Megaphone className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight">Publish</h2>
@@ -1184,7 +1261,7 @@ function NewJobPageContent() {
             </div>
 
             <div className="flex items-center justify-between mb-3 mt-8">
-              <div className="bg-[#eef2ff] text-[#4f46e5] flex items-center gap-1.5 px-3 py-1 rounded-full text-[11.5px] font-medium border border-[#e0e7ff]">
+              <div className="bg-[#eef2ff] text-[#4f46e5] flex items-center gap-1.5 px-3 py-1 rounded-full text-[11.5px] font-medium border border-[#ddd6fe]">
                 <Sparkles className="w-3.5 h-3.5" />
                 PAIR-Enhanced Job Posting
               </div>
@@ -1300,12 +1377,89 @@ function NewJobPageContent() {
     </div>
   );
 
+  const normalizeTitle = (value: string | null | undefined) =>
+    (value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, "");
+
+  const getPrimaryJobTitle = () => normalizeTitle(jobData?.title || jobTitle);
+
+  const isRubricItemRequired = (item: any) => {
+    if (!item) return false;
+
+    if (typeof item.is_required === "boolean") {
+      return item.is_required;
+    }
+
+    const rawRequired = String(
+      item.required ?? item.priority ?? item.importance ?? item.matchType ?? ""
+    )
+      .trim()
+      .toLowerCase();
+
+    return ["required", "must", "must have", "mandatory", "hard"].includes(rawRequired);
+  };
+
+  const isDirectResumeTitle = (titleObj: any) => {
+    const primaryJobTitle = getPrimaryJobTitle();
+    if (!primaryJobTitle) return false;
+
+    return normalizeTitle(titleObj?.value) === primaryJobTitle;
+  };
+
+  const getNormalizedTitleItem = (titleItem: any) => {
+    if (isDirectResumeTitle(titleItem)) {
+      return {
+        ...titleItem,
+        required: "Required",
+        matchType: "Similar",
+      };
+    }
+
+    return {
+      ...titleItem,
+      required: isRubricItemRequired(titleItem) ? "Required" : "Preferred",
+      matchType: "Similar",
+    };
+  };
+
+  const getNormalizedSkillItem = (skillItem: any) => ({
+    ...skillItem,
+    required: isRubricItemRequired(skillItem) ? "Required" : "Preferred",
+    matchType: "Similar",
+  });
+
+  const getNormalizedRubricPayload = () => {
+    if (!rubricData) return rubricData;
+
+    return {
+      ...rubricData,
+      titles: (rubricData.titles || []).map((title: any) => getNormalizedTitleItem(title)),
+      skills: (rubricData.skills || []).map((skill: any) => getNormalizedSkillItem(skill)),
+      soft_skills: (rubricData.soft_skills || []).map((skill: any) => getNormalizedSkillItem(skill)),
+    };
+  };
+
   const updateRubricItem = (category: string, index: number, field: string, value: any) => {
     setRubricData((prev: any) => {
       if (!prev || !prev[category]) return prev;
       const updated = { ...prev };
       updated[category] = [...updated[category]];
-      updated[category][index] = { ...updated[category][index], [field]: value };
+      if (category === "titles") {
+        const nextTitle = getNormalizedTitleItem({
+          ...updated[category][index],
+          [field]: value,
+        });
+        updated[category][index] = nextTitle;
+      } else if (category === "skills") {
+        updated[category][index] = getNormalizedSkillItem({
+          ...updated[category][index],
+          [field]: value,
+        });
+      } else {
+        updated[category][index] = { ...updated[category][index], [field]: value };
+      }
       return updated;
     });
   };
@@ -1338,14 +1492,30 @@ function NewJobPageContent() {
       if (!prev) return prev;
       const updated = { ...prev };
       if (!updated[category]) updated[category] = [];
-      updated[category] = [...updated[category], newItem];
+      // For titles, always set source to 'PAIR' and remove any other source
+      if (category === 'titles') {
+        const pairTitle = getNormalizedTitleItem({
+          ...newItem,
+          required: 'Preferred',
+          matchType: 'Similar',
+          source: 'PAIR',
+        });
+        updated[category] = [...updated[category], pairTitle];
+      } else if (category === "skills") {
+        updated[category] = [...updated[category], getNormalizedSkillItem({
+          ...newItem,
+          matchType: "Similar",
+        })];
+      } else {
+        updated[category] = [...updated[category], newItem];
+      }
       return updated;
     });
   };
 
   const establishRubricStep = (
     <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
-      <div className="flex flex-row items-start gap-4 px-7 py-6 border-b border-slate-100" style={{ background: "linear-gradient(135deg, #f8f7ff 0%, #ffffff 60%)" }}>
+      <div className="flex flex-row items-start gap-4 px-7 py-6 border-b border-slate-100" style={{ background: "linear-gradient(135deg, #f5f3ff 0%, #ffffff 60%)" }}>
         <ListChecks className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[21px] font-medium text-slate-900 leading-tight tracking-tight">Establish Rubric</h2>
@@ -1389,7 +1559,10 @@ function NewJobPageContent() {
             </div>
 
             <div className="space-y-0">
-              {rubricData.titles?.map((title: any, idx: number) => (
+              {rubricData.titles?.map((rawTitle: any, idx: number) => {
+                const title = getNormalizedTitleItem(rawTitle);
+
+                return (
                 <div key={idx} className="flex items-center gap-2.5 py-2 border-b border-slate-200 last:border-b-0">
                   <div className="flex-1 min-w-0 flex items-center gap-2">
                     <input
@@ -1398,18 +1571,7 @@ function NewJobPageContent() {
                       onChange={(e) => updateRubricItem('titles', idx, 'value', e.target.value)}
                       className="flex-1 min-w-0 text-[13px] font-normal text-slate-700 bg-transparent border border-transparent rounded px-2 py-1.5 outline-none focus:border-slate-200 focus:bg-white transition-all"
                     />
-                    {title.source === 'JobDiva' && (
-                      <span className="bg-slate-100 text-slate-600 text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap border border-slate-200">JOBDIVA</span>
-                    )}
-                    {title.source === 'PAIR' && (
-                      <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap border border-[#ddd6fe]">PAIR</span>
-                    )}
-                    {title.source === 'AI' && (
-                      <span className="bg-[#dcfce7] text-[#166534] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap border border-[#bbf7d0]">AI</span>
-                    )}
-                    {(!title.source || title.source === 'User') && (
-                      <span className="bg-blue-50 text-blue-600 text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap border border-blue-100">USER</span>
-                    )}
+                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap">PAIR</span>
                   </div>
                   <div className="w-[110px] flex-shrink-0 flex items-center gap-1.5">
                     <input
@@ -1426,14 +1588,36 @@ function NewJobPageContent() {
                   </div>
                   <div className="w-[170px] flex-shrink-0">
                     <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[118px] bg-white cursor-pointer select-none">
-                      <button onClick={() => updateRubricItem('titles', idx, 'matchType', 'Exact')} className={`flex-1 py-[3px] rounded-full transition-all ${title.matchType === 'Exact' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}>Exact</button>
-                      <button onClick={() => updateRubricItem('titles', idx, 'matchType', 'Similar')} className={`flex-1 py-[3px] rounded-full transition-all ${title.matchType === 'Similar' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}>Similar</button>
+                      <button
+                        onClick={() => updateRubricItem('titles', idx, 'matchType', 'Exact')}
+                        disabled
+                        className="flex-1 py-[3px] rounded-full transition-all text-slate-500 cursor-not-allowed"
+                      >
+                        Exact
+                      </button>
+                      <button
+                        onClick={() => updateRubricItem('titles', idx, 'matchType', 'Similar')}
+                        className={`flex-1 py-[3px] rounded-full transition-all ${title.matchType === 'Similar' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}
+                      >
+                        Similar
+                      </button>
                     </div>
                   </div>
                   <div className="w-[190px] flex-shrink-0 flex items-center justify-center">
                     <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[135px] bg-white cursor-pointer select-none">
-                      <button onClick={() => updateRubricItem('titles', idx, 'required', 'Required')} className={`flex-1 py-[3px] rounded-full transition-all ${title.required === 'Required' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}>Required</button>
-                      <button onClick={() => updateRubricItem('titles', idx, 'required', 'Preferred')} className={`flex-1 py-[3px] rounded-full transition-all ${title.required === 'Preferred' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}>Preferred</button>
+                      <button
+                        onClick={() => updateRubricItem('titles', idx, 'required', 'Required')}
+                        className={`flex-1 py-[3px] rounded-full transition-all ${title.required === 'Required' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}
+                      >
+                        Required
+                      </button>
+                      <button
+                        onClick={() => updateRubricItem('titles', idx, 'required', 'Preferred')}
+                        disabled={isDirectResumeTitle(title)}
+                        className={`flex-1 py-[3px] rounded-full transition-all ${title.required === 'Preferred' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'} ${isDirectResumeTitle(title) ? 'opacity-40 cursor-not-allowed' : ''}`}
+                      >
+                        Preferred
+                      </button>
                     </div>
                   </div>
                   <div className="w-[70px] flex-shrink-0 flex flex-col gap-1 items-center">
@@ -1466,14 +1650,14 @@ function NewJobPageContent() {
                     </button>
                   </div>
                 </div>
-              ))}
+              )})}
 
               <div className="mt-3">
                 <Button
                   variant="outline"
                   size="sm"
                   disabled={(rubricData.titles?.length || 0) >= 5}
-                  onClick={() => addRubricItem('titles', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'User' })}
+                  onClick={() => addRubricItem('titles', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'PAIR' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
@@ -1553,7 +1737,7 @@ function NewJobPageContent() {
                   </div>
                   <div className="w-[170px] flex-shrink-0">
                     <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[118px] bg-white cursor-pointer select-none">
-                      <button onClick={() => updateRubricItem('skills', idx, 'matchType', 'Exact')} className={`flex-1 py-[3px] rounded-full transition-all ${skill.matchType === 'Exact' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}>Exact</button>
+                      <button disabled className="flex-1 py-[3px] rounded-full transition-all text-slate-500 cursor-not-allowed">Exact</button>
                       <button onClick={() => updateRubricItem('skills', idx, 'matchType', 'Similar')} className={`flex-1 py-[3px] rounded-full transition-all ${skill.matchType === 'Similar' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}>Similar</button>
                     </div>
                   </div>
@@ -1600,7 +1784,7 @@ function NewJobPageContent() {
                   variant="outline"
                   size="sm"
                   disabled={(rubricData.skills?.length || 0) >= 8}
-                  onClick={() => addRubricItem('skills', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred' })}
+                  onClick={() => addRubricItem('skills', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'PAIR' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
@@ -1634,7 +1818,7 @@ function NewJobPageContent() {
                     <select
                       value={edu.degree}
                       onChange={(e) => updateRubricItem('education', idx, 'degree', e.target.value)}
-                      className="h-[34px] w-[150px] bg-slate-50 border border-slate-200 rounded-lg text-slate-700 text-[13px] px-2 font-medium outline-none cursor-pointer flex-shrink-0 hover:border-slate-300 transition-all shadow-sm"
+                      className="h-[34px] w-[220px] bg-slate-50 border border-slate-200 rounded-lg text-slate-700 text-[13px] px-2 font-medium outline-none cursor-pointer flex-shrink-0 hover:border-slate-300 transition-all shadow-sm"
                     >
                       <option value="No requirement">No requirement</option>
                       <option value="High School / GED">High School / GED</option>
@@ -1682,7 +1866,7 @@ function NewJobPageContent() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => addRubricItem('education', { degree: "Bachelor's degree", field: '', required: 'Required' })}
+                  onClick={() => addRubricItem('education', { degree: "Bachelor's degree", field: '', required: 'Preferred' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
@@ -1745,7 +1929,7 @@ function NewJobPageContent() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => addRubricItem('domain', { value: '', required: 'Required' })}
+                  onClick={() => addRubricItem('domain', { value: '', required: 'Preferred' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
@@ -1870,7 +2054,7 @@ function NewJobPageContent() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => addRubricItem('other_requirements', { value: '', required: 'Required' })}
+                  onClick={() => addRubricItem('other_requirements', { value: '', required: 'Preferred' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
@@ -1928,8 +2112,9 @@ function NewJobPageContent() {
 
   // Initialize filters from rubric data when moving to step 4
   const initializeFiltersFromRubric = () => {
-    if (!rubricData || resumeMatchFilters.length > 0) return;
+    if (!rubricData) return;
 
+    const manualFilters = resumeMatchFilters.filter(filter => !filter.fromRubric);
     const filters: Array<{
       id: number;
       category: string;
@@ -1941,14 +2126,24 @@ function NewJobPageContent() {
 
     let idCounter = 1;
 
+    // Preserve user's active/inactive preferences for existing filters
+    const existingFilterPrefs = new Map<string, boolean>();
+    resumeMatchFilters.forEach(f => {
+      // Create a key from category + base value (without minYears/matchType which may change)
+      const baseValue = f.value.split('—')[0].trim();
+      existingFilterPrefs.set(`${f.category}|${baseValue}`, f.active);
+    });
+
     // Add title filters (all active)
     if (rubricData.titles) {
       rubricData.titles.forEach((title: any) => {
+        const filterKey = `Required Title|${title.value}`;
+        const wasActive = existingFilterPrefs.has(filterKey) ? (existingFilterPrefs.get(filterKey) ?? true) : true;
         filters.push({
           id: idCounter++,
           category: 'Required Title',
           value: `${title.value} — ${title.minYears}+ yrs, ${title.matchType} match`,
-          active: true,
+          active: wasActive,
           ai: true,
           fromRubric: true
         });
@@ -1958,11 +2153,13 @@ function NewJobPageContent() {
     // Add skill filters (first few active, rest inactive to show variety)
     if (rubricData.skills) {
       rubricData.skills.forEach((skill: any, index: number) => {
+        const filterKey = `${skill.required === 'Required' ? 'Required Skill' : 'Preferred Skill'}|${skill.value}`;
+        const wasActive = existingFilterPrefs.has(filterKey) ? (existingFilterPrefs.get(filterKey) ?? (index < 4)) : (index < 4);
         filters.push({
           id: idCounter++,
           category: skill.required === 'Required' ? 'Required Skill' : 'Preferred Skill',
           value: `${skill.value} — ${skill.minYears}+ yrs, ${skill.matchType} match`,
-          active: index < 4, // First 4 skills active, rest inactive
+          active: wasActive,
           ai: true,
           fromRubric: true
         });
@@ -2023,7 +2220,15 @@ function NewJobPageContent() {
       }
     }
 
-    setResumeMatchFilters(filters);
+    const nextFilters = [
+      ...filters,
+      ...manualFilters.map(filter => ({
+        ...filter,
+        id: idCounter++
+      }))
+    ];
+
+    setResumeMatchFilters(nextFilters);
     setFilterIdCounter(idCounter);
   };
 
@@ -2035,6 +2240,9 @@ function NewJobPageContent() {
 
     let idCounter = 1;
     const questions: ScreenQuestion[] = [];
+    const customQuestions = screenQuestions.filter(
+      question => question.category !== "default" && question.category !== "role-specific"
+    );
 
     // 1. Bot Introduction
     const intro = `Hi {{candidate name}}, I'm Nova, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${jobTitle || "role"} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
@@ -2065,7 +2273,7 @@ function NewJobPageContent() {
 
     // 3. Role-Specific Questions (from rubric skills)
     if (rubricData?.skills) {
-      rubricData.skills.forEach((skill: any, index: number) => {
+      rubricData.skills.forEach((skill: any) => {
         // Only generate questions for required skills or first 4 skills
         if (questions.length < 12) {
           questions.push({
@@ -2080,60 +2288,365 @@ function NewJobPageContent() {
       });
     }
 
-    setScreenQuestions(questions);
-    setQuestionIdCounter(idCounter);
+    const remainingSlots = Math.max(0, 12 - questions.length);
+    const mergedQuestions = [
+      ...questions,
+      ...customQuestions.slice(0, remainingSlots).map((question, index) => ({
+        ...question,
+        id: idCounter + index,
+        order_index: questions.length + index
+      }))
+    ];
+
+    setScreenQuestions(mergedQuestions);
+    setQuestionIdCounter(mergedQuestions.length + 1);
   };
 
   const initializeSourceFromRubric = () => {
     if (!rubricData) return;
 
-    let idCounter = 1;
+    const getRubricDrivenMatchType = (item: any, existingMatchType?: 'must' | 'can' | 'exclude') => {
+      if (existingMatchType === 'exclude') return 'exclude';
+      return isRubricItemRequired(item) ? "must" : "can";
+    };
+
+    const activeRubricFilterKeys = new Set(
+      resumeMatchFilters
+        .filter(filter => filter.fromRubric && filter.active)
+        .map(filter => {
+          const baseValue = filter.value.split("—")[0].trim();
+          return `${filter.category}|${baseValue}`;
+        })
+    );
+
+    const shouldIncludeRubricItem = (category: string, value: string) => {
+      if (activeRubricFilterKeys.size === 0) return true;
+      return activeRubricFilterKeys.has(`${category}|${value.trim()}`);
+    };
 
     // 1. Titles
-    if (rubricData.titles && sourceTitles.length === 0) {
-      setSourceTitles(rubricData.titles.map((t: any) => ({
-        id: idCounter++,
-        value: t.value || "",
-        matchType: t.required === "Required" ? 'must' : 'can',
-        years: t.minYears || 0,
-        recent: t.recent || false,
-        similarCount: `${(t.similar_titles || []).length}/${(t.similar_titles || []).length} similar`,
-        similarTitles: t.similar_titles || [],
-        selectedSimilarTitles: t.similar_titles || [],
-        similarExpanded: false
-      })));
+    if (rubricData.titles) {
+      setSourceTitles(prev => {
+        const existingByValue = new Map(prev.map(title => [title.value, title]));
+        const manualTitles = prev.filter(title => !title.fromRubric);
+        const rubricTitles = rubricData.titles
+          .filter((title: any) => shouldIncludeRubricItem("Required Title", title.value || ""))
+          .map((title: any, index: number) => {
+          const existing = existingByValue.get(title.value || "");
+
+          return {
+            id: existing?.id ?? index + 1,
+            value: title.value || "",
+            matchType: getRubricDrivenMatchType(title, existing?.matchType),
+            years: title.minYears || 0,
+            recent: existing?.recent ?? !!title.recent,
+            similarCount: `${(title.similar_titles || []).length}/${(title.similar_titles || []).length} similar`,
+            similarTitles: title.similar_titles || [],
+            selectedSimilarTitles: existing?.selectedSimilarTitles?.filter((item: string) =>
+              (title.similar_titles || []).includes(item)
+            ) ?? (title.similar_titles || []),
+            similarExpanded: existing?.similarExpanded ?? false,
+            fromRubric: true
+          };
+        });
+
+        return [...rubricTitles, ...manualTitles];
+      });
     }
 
     // 2. Skills
-    if (rubricData.skills && sourceSkills.length === 0) {
-      setSourceSkills(rubricData.skills.map((s: any) => ({
-        id: idCounter++,
-        value: s.value || "",
-        matchType: s.required === "Required" ? 'must' : 'can',
-        years: s.minYears || 0,
-        recent: s.recent || false,
-        similarCount: `${(s.similar_skills || []).length}/${(s.similar_skills || []).length} similar`,
-        similarSkills: s.similar_skills || [],
-        selectedSimilarSkills: s.similar_skills || [],
-        similarExpanded: false
-      })));
+    if (rubricData.skills) {
+      setSourceSkills(prev => {
+        const existingByValue = new Map(prev.map(skill => [skill.value, skill]));
+        const manualSkills = prev.filter(skill => !skill.fromRubric);
+        const rubricSkills = rubricData.skills
+          .filter((skill: any) => shouldIncludeRubricItem(
+            isRubricItemRequired(skill) ? "Required Skill" : "Preferred Skill",
+            skill.value || ""
+          ))
+          .map((skill: any, index: number) => {
+          const existing = existingByValue.get(skill.value || "");
+
+          return {
+            id: existing?.id ?? index + 1001,
+            value: skill.value || "",
+            matchType: getRubricDrivenMatchType(skill, existing?.matchType),
+            years: skill.minYears || 0,
+            recent: existing?.recent ?? !!skill.recent,
+            similarCount: `${(skill.similar_skills || []).length}/${(skill.similar_skills || []).length} similar`,
+            similarSkills: skill.similar_skills || [],
+            selectedSimilarSkills: existing?.selectedSimilarSkills?.filter((item: string) =>
+              (skill.similar_skills || []).includes(item)
+            ) ?? (skill.similar_skills || []),
+            similarExpanded: existing?.similarExpanded ?? false,
+            fromRubric: true
+          };
+        });
+
+        return [...rubricSkills, ...manualSkills];
+      });
     }
 
     // 3. Locations
-    if (jobData && sourceLocations.length === 0) {
-      const loc = `${jobData.city || ""}, ${jobData.state || ""}`.trim().replace(/^, |, $/g, "");
-      if (loc) {
-        setSourceLocations([{
-          id: idCounter++,
-          value: loc,
-          radius: "within 25 mi"
-        }]);
+    if (!hasSeededSourceLocation) {
+      setHasSeededSourceLocation(true);
+      if (jobData && sourceLocations.length === 0) {
+        const loc = `${jobData.city || ""}, ${jobData.state || ""}`.trim().replace(/^, |, $/g, "");
+        if (loc) {
+          setSourceLocations([{
+            id: 1,
+            value: loc,
+            radius: "within 25 mi"
+          }]);
+        }
       }
     }
 
     // 4. Keywords
     // Don't auto-populate sourceKeywords anymore
   };
+
+  const syncStepFourData = useEffectEvent(() => {
+    if (!rubricData) return;
+
+    initializeFiltersFromRubric();
+    initializeScreenQuestionsFromRubric();
+  });
+
+  const syncStepFiveData = useEffectEvent(() => {
+    if (!rubricData) return;
+
+    initializeSourceFromRubric();
+  });
+
+  useEffect(() => {
+    if (!rubricData?.titles?.length) return;
+
+    const normalizedTitles = rubricData.titles.map((title: any) => getNormalizedTitleItem(title));
+    const hasChanges = normalizedTitles.some((title: any, index: number) => {
+      const currentTitle = rubricData.titles[index];
+      return (
+        title.required !== currentTitle.required ||
+        title.matchType !== currentTitle.matchType
+      );
+    });
+
+    if (!hasChanges) return;
+
+    setRubricData((prev: any) => {
+      if (!prev?.titles) return prev;
+      return {
+        ...prev,
+        titles: prev.titles.map((title: any) => getNormalizedTitleItem(title)),
+      };
+    });
+  }, [rubricData?.titles, jobData?.title, jobTitle]);
+
+  useEffect(() => {
+    if (!rubricData?.skills?.length) return;
+
+    const normalizedSkills = rubricData.skills.map((skill: any) => getNormalizedSkillItem(skill));
+    const hasChanges = normalizedSkills.some((skill: any, index: number) => {
+      const currentSkill = rubricData.skills[index];
+      return skill.matchType !== currentSkill.matchType;
+    });
+
+    if (!hasChanges) return;
+
+    setRubricData((prev: any) => {
+      if (!prev?.skills) return prev;
+      return {
+        ...prev,
+        skills: prev.skills.map((skill: any) => getNormalizedSkillItem(skill)),
+      };
+    });
+  }, [rubricData?.skills]);
+
+  useEffect(() => {
+    if (currentStep !== 4) return;
+
+    syncStepFourData();
+  }, [currentStep, rubricData, jobData, screenQuestions.length]);
+
+  useEffect(() => {
+    if (currentStep !== 5) return;
+
+    syncStepFiveData();
+  }, [currentStep, rubricData, jobData, resumeMatchFilters]);
+
+  const addSourceTitle = (value: string) => {
+    const cleanValue = value.trim();
+    if (!cleanValue) return;
+    setSourceTitles(prev => [
+      ...prev,
+      {
+        id: Date.now(),
+        value: cleanValue,
+        matchType: "must",
+        years: 0,
+        recent: false,
+        similarCount: "0/0 similar",
+        similarTitles: [],
+        selectedSimilarTitles: [],
+        similarExpanded: false,
+        fromRubric: false
+      }
+    ]);
+    setSourceTitleInput("");
+    setGeneratedBoolean("");
+  };
+
+  const addSourceSkill = (value: string) => {
+    const cleanValue = value.trim();
+    if (!cleanValue) return;
+    setSourceSkills(prev => [
+      ...prev,
+      {
+        id: Date.now(),
+        value: cleanValue,
+        matchType: "can",
+        years: 0,
+        recent: false,
+        similarCount: "0/0 similar",
+        similarSkills: [],
+        selectedSimilarSkills: [],
+        similarExpanded: false,
+        fromRubric: false
+      }
+    ]);
+    setSourceSkillInput("");
+    setGeneratedBoolean("");
+  };
+
+  const addSourceLocation = (value: string) => {
+    const cleanValue = value.trim();
+    if (!cleanValue) return;
+    setSourceLocations(prev => [
+      ...prev,
+      {
+        id: Date.now(),
+        value: cleanValue,
+        radius: sourceLocationRadius.toLowerCase()
+      }
+    ]);
+    setSourceLocationInput("");
+    setGeneratedBoolean("");
+  };
+
+  const addSourceCompany = (value: string) => {
+    const cleanValue = value.trim();
+    if (!cleanValue || sourceCompanies.includes(cleanValue)) return;
+    setSourceCompanies(prev => [...prev, cleanValue]);
+    setSourceCompanyInput("");
+    setGeneratedBoolean("");
+  };
+
+  const addSourceKeyword = (value: string) => {
+    const cleanValue = value.trim();
+    if (!cleanValue || sourceKeywords.includes(cleanValue)) return;
+    setSourceKeywords(prev => [...prev, cleanValue]);
+    setSourceKeywordInput("");
+    setGeneratedBoolean("");
+  };
+
+  const buildGeneratedBooleanString = () => {
+    const quote = (value: string) => `"${value.replace(/"/g, '\\"')}"`;
+    const normalizeTerm = (value: string) =>
+      value
+        .toLowerCase()
+        .replace(/^must be local to\s*/i, "")
+        .replace(/\s*metro$/i, "")
+        .replace(/^must not be employed by:\s*/i, "")
+        .replace(/["()]/g, "")
+        .replace(/\s+within\s+\d+\s+mi$/i, "")
+        .replace(/\s+recent$/i, "")
+        .replace(/\s+over\s+\d+\s+years?$/i, "")
+        .trim();
+    const normalizeResumeFilterValue = (value: string) =>
+      value
+        .replace(/^Must not be employed by:\s*/i, "")
+        .replace(/^Must be local to\s*/i, "")
+        .replace(/^(must have|must include|must be|can have|preferred|nice to have)\s*:?\s*/i, "")
+        .replace(/\s*metro$/i, "")
+        .trim();
+    const sourceTermKeys = new Set<string>();
+    const addSourceKey = (value: string) => {
+      const key = normalizeTerm(value);
+      if (key) sourceTermKeys.add(key);
+    };
+    const criterionGroup = (value: string, similar: string[] = [], years = 0, recent = false) => {
+      addSourceKey(value);
+      similar.forEach(addSourceKey);
+      const terms = [value, ...similar].map(term => term.trim()).filter(Boolean).map(quote);
+      const base = terms.length > 1 ? `(${terms.join(" OR ")})` : terms[0];
+      if (!base) return "";
+      const experienceClause = years > 0 ? ` over ${years} year${years > 1 ? "s" : ""}` : "";
+      const recentClause = recent ? " recent" : "";
+      return `${base}${recentClause}${experienceClause}`;
+    };
+
+    const must: string[] = [];
+    const can: string[] = [];
+    const exclude: string[] = [];
+    const seenMust = new Set<string>();
+    const seenCan = new Set<string>();
+    const seenExclude = new Set<string>();
+    const addUnique = (bucket: string[], seen: Set<string>, clause: string, keyValue = clause) => {
+      const key = normalizeTerm(keyValue);
+      if (!clause || !key || seen.has(key)) return;
+      seen.add(key);
+      bucket.push(clause);
+    };
+
+    sourceTitles.forEach(title => {
+      const group = criterionGroup(title.value, title.selectedSimilarTitles || [], title.years, title.recent);
+      if (!group) return;
+      if (title.matchType === "exclude") addUnique(exclude, seenExclude, group, title.value);
+      else if (title.matchType === "can") addUnique(can, seenCan, group, title.value);
+      else addUnique(must, seenMust, group, title.value);
+    });
+
+    sourceSkills.forEach(skill => {
+      const group = criterionGroup(skill.value, skill.selectedSimilarSkills || [], skill.years, skill.recent);
+      if (!group) return;
+      if (skill.matchType === "exclude") addUnique(exclude, seenExclude, group, skill.value);
+      else if (skill.matchType === "can") addUnique(can, seenCan, group, skill.value);
+      else addUnique(must, seenMust, group, skill.value);
+    });
+
+    sourceKeywords.filter(Boolean).forEach(keyword => {
+      addSourceKey(keyword);
+      addUnique(must, seenMust, quote(keyword), keyword);
+    });
+    sourceCompanies.filter(Boolean).forEach(company => {
+      addSourceKey(company);
+      addUnique(must, seenMust, quote(company), company);
+    });
+    sourceLocations
+      .filter(location => location.value)
+      .forEach(location => {
+        addSourceKey(location.value);
+        addUnique(must, seenMust, `${quote(location.value)} ${location.radius}`, location.value);
+      });
+
+    const parts = [...must];
+    if (can.length) parts.push(`(${can.join(" OR ")})`);
+    let booleanString = parts.length ? parts.join(" AND ") : quote(jobTitle || "Role");
+    if (exclude.length) booleanString += ` NOT (${exclude.join(" OR ")})`;
+    return booleanString;
+  };
+
+  const resolvedGeneratedBoolean = generatedBoolean || buildGeneratedBooleanString();
+
+  useEffect(() => {
+    setIsRefreshingBoolean(true);
+    const timeoutId = window.setTimeout(() => {
+      setGeneratedBoolean(buildGeneratedBooleanString());
+      setIsRefreshingBoolean(false);
+    }, 150);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [sourceTitles, sourceSkills, sourceLocations, sourceCompanies, sourceKeywords, resumeMatchFilters, jobTitle]);
 
   const addScreenQuestion = () => {
     const newQuestion: ScreenQuestion = {
@@ -2159,7 +2672,7 @@ function NewJobPageContent() {
   const setFiltersStep = (
     <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
       <div className="flex flex-row items-start gap-4 px-7 py-6 border-b border-slate-100"
-        style={{ background: "linear-gradient(135deg, #f8f7ff 0%, #ffffff 60%)" }}>
+        style={{ background: "linear-gradient(135deg, #f5f3ff 0%, #ffffff 60%)" }}>
         <Filter className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight">Set Filters</h2>
@@ -2324,7 +2837,7 @@ function NewJobPageContent() {
           </div>
 
           {/* Bot Introduction */}
-          <div className="bg-[#f8faff] rounded-xl border border-[#e0e7ff] p-5 mb-6 relative">
+          <div className="bg-[#f5f3ff] rounded-xl border border-[#ddd6fe] p-5 mb-6 relative">
             <div className="flex items-center gap-2 mb-2">
               <div className="w-5 h-5 bg-[#6d28d9] rounded flex items-center justify-center">
                 <Users className="w-3 h-3 text-white" />
@@ -2368,7 +2881,7 @@ function NewJobPageContent() {
                   type="text"
                   value={q.pass_criteria}
                   onChange={(e) => updateScreenQuestion(q.id, 'pass_criteria', e.target.value)}
-                  className={`w-full text-[13px] bg-transparent border-none outline-none font-medium ${q.pass_criteria ? 'text-[#4338ca]' : 'text-slate-300 italic'}`}
+                  className={`w-full text-[13px] bg-transparent border-none outline-none font-medium ${q.pass_criteria ? 'text-[#4f46e5]' : 'text-slate-300 italic'}`}
                   placeholder="No hard filter"
                 />
               </div>
@@ -2410,14 +2923,14 @@ function NewJobPageContent() {
       <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
         {/* Step 5 Header - Aligned with Step 4 Style */}
         <div className="flex flex-row items-start gap-5 px-8 py-6 border-b border-slate-100"
-          style={{ background: "linear-gradient(135deg, #f8f7ff 0%, #ffffff 60%)" }}>
+          style={{ background: "linear-gradient(135deg, #f5f3ff 0%, #ffffff 60%)" }}>
           <div className="w-11 h-11 flex items-center justify-center mt-0.5 flex-shrink-0">
             <Search className="w-5 h-5 text-[#6366f1]" strokeWidth={3} />
           </div>
           <div className="flex-1 text-left">
             <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight mb-1">Source</h2>
             <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">
-              Build your candidate search using structured filters. PAIR generates the boolean string and searches across JobDiva, LinkedIn, and Dice.
+              Build your candidate search using structured filters. PAIR generates the Boolean string, searches JobDiva applicants first, then uses JobDiva Talent Search if fewer than 3 applicants match.
             </p>
           </div>
         </div>
@@ -2442,27 +2955,27 @@ function NewJobPageContent() {
 
                       // Enhanced format: separate criteria arrays
                       const titleCriteria = sourceTitles
-                        .filter(t => t.matchType !== 'exclude')
                         .map(t => ({
                           value: t.value || "Title",
                           match_type: t.matchType || "must",
                           years: t.years || 0,
-                          recent: t.recent || false
+                          recent: t.recent || false,
+                          similar_terms: t.selectedSimilarTitles || []
                         }));
 
                       const skillCriteria = sourceSkills
-                        .filter(s => s.matchType !== 'exclude')
                         .map(s => ({
                           value: s.value || "Skill",
                           match_type: s.matchType || "must",
                           years: s.years || 0,
-                          recent: s.recent || false
+                          recent: s.recent || false,
+                          similar_terms: s.selectedSimilarSkills || []
                         }));
 
-                      const locationCriteria = sourceLocations.map(l => ({
-                        value: l.value,
-                        radius: l.radius || "25"
-                      }));
+                      const primaryLocation = sourceLocations[0];
+                      const withinMiles = primaryLocation?.radius?.match(/(\d+)/)?.[1]
+                        ? Number(primaryLocation.radius.match(/(\d+)/)?.[1])
+                        : 25;
 
                       // Legacy format fallback (for compatibility)
                       const skillsToSearch = [];
@@ -2501,23 +3014,32 @@ function NewJobPageContent() {
                           return k;
                         });
 
-                      setSearchStatus("Enhanced multi-criteria search in progress...");
+                      const booleanString = buildGeneratedBooleanString();
+                      setGeneratedBoolean(booleanString);
+                      setSearchStatus("Searching JobDiva applicants, then Talent Search if fewer than 3 match...");
 
                       const searchPayload = {
                         job_id: numericJobId || jobdivaId,
                         // Enhanced criteria (new format)
-                        titles: titleCriteria,
+                        title_criteria: titleCriteria,
                         skill_criteria: skillCriteria,
-                        locations: locationCriteria,
                         keywords: sourceKeywords,
                         companies: sourceCompanies,
+                        resume_match_filters: resumeMatchFilters
+                          .filter(filter => filter.active)
+                          .map(filter => ({
+                            category: filter.category,
+                            value: filter.value,
+                            active: filter.active
+                          })),
                         // Legacy compatibility  
                         skills: skillsToSearch,
-                        location: sourceLocations.length > 0 ? sourceLocations[0].value : "",
-                        location_type: "Unspecified",
+                        location: primaryLocation?.value || "",
+                        within_miles: withinMiles,
                         sources: selectedSourcesArray,
+                        boolean_string: booleanString,
                         page: 1,
-                        limit: 100
+                        page_size: 100
                       };
 
                       console.log("🚀 Enhanced search payload:", searchPayload);
@@ -2592,10 +3114,10 @@ function NewJobPageContent() {
                 <div className="space-y-3 mb-3">
                   {sourceTitles.map((title) => (
                     <div key={title.id} className="flex flex-col gap-1">
-                      <div className="flex items-center gap-3 p-1 pl-2.5 rounded-xl border border-[#e0e7ff] bg-white shadow-sm group">
+                      <div className="flex items-center gap-3 p-1 pl-2.5 rounded-xl border border-[#ddd6fe] bg-white shadow-sm group">
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
-                            <div className={`flex items-center justify-between px-2.5 h-8 min-w-[125px] rounded-xl text-[12px] font-bold cursor-pointer transition-all ${title.matchType === 'must' ? 'bg-[#f5f3ff] text-[#6366f1] border border-[#e0e7ff]' :
+                            <div className={`flex items-center justify-between px-2.5 h-8 min-w-[125px] rounded-xl text-[12px] font-bold cursor-pointer transition-all ${title.matchType === 'must' ? 'bg-[#f5f3ff] text-[#6366f1] border border-[#ddd6fe]' :
                               title.matchType === 'exclude' ? 'bg-[#fef2f2] text-[#dc2626] border border-[#fee2e2]' :
                                 'bg-[#f0fdf4] text-[#16a34a] border border-[#dcfce7]'
                               }`}>
@@ -2624,7 +3146,7 @@ function NewJobPageContent() {
                         </div>
 
                         <button
-                          className={`flex items-center gap-1.5 px-2.5 h-8 rounded-xl text-[11px] font-bold transition-all border shadow-sm ${title.recent ? 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff]' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+                          className={`flex items-center gap-1.5 px-2.5 h-8 rounded-xl text-[11px] font-bold transition-all border shadow-sm ${title.recent ? 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
                             }`}
                           onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, recent: !t.recent } : t))}
                         >
@@ -2635,7 +3157,7 @@ function NewJobPageContent() {
                         {/* Similar button */}
                         {(title.similarTitles || []).length > 0 && (
                           <button
-                            className={`flex items-center gap-1.5 px-2.5 h-8 rounded-lg text-[11px] font-bold transition-all border ${title.similarExpanded ? 'bg-[#ede9fe] text-[#6366f1] border-[#ddd6fe]' : 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff] hover:bg-[#ede9fe]'
+                            className={`flex items-center gap-1.5 px-2.5 h-8 rounded-lg text-[11px] font-bold transition-all border ${title.similarExpanded ? 'bg-[#ede9fe] text-[#6366f1] border-[#ddd6fe]' : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe] hover:bg-[#ede9fe]'
                               }`}
                             onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, similarExpanded: !t.similarExpanded } : t))}
                           >
@@ -2654,7 +3176,7 @@ function NewJobPageContent() {
 
                       {/* Inline similar titles panel */}
                       {title.similarExpanded && (title.similarTitles || []).length > 0 && (
-                        <div className="mx-1 mb-1 rounded-xl border border-[#e0e7ff] bg-[#f5f3ff] px-4 py-3">
+                        <div className="mx-1 mb-1 rounded-xl border border-[#ddd6fe] bg-[#f5f3ff] px-4 py-3">
                           <div className="flex items-center justify-between mb-3">
                             <span className="text-[12px] font-bold text-[#6366f1]">
                               {title.selectedSimilarTitles?.length || 0}/{title.similarTitles.length} similar titles also included
@@ -2698,8 +3220,14 @@ function NewJobPageContent() {
                 <div className="relative">
                   <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                   <Input
+                    value={sourceTitleInput}
+                    onChange={(e) => setSourceTitleInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") addSourceTitle(sourceTitleInput);
+                    }}
+                    onBlur={() => addSourceTitle(sourceTitleInput)}
                     placeholder="Search job titles..."
-                    className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl font-medium text-slate-600 placeholder:text-slate-400"
+                    className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f5f3ff] rounded-xl font-medium text-slate-600 placeholder:text-slate-400"
                   />
                 </div>
               </section>
@@ -2719,7 +3247,7 @@ function NewJobPageContent() {
                       <div className="flex items-center gap-3 p-1 pl-2.5 rounded-xl border border-slate-200 bg-white group hover:border-[#6366f1]/30 transition-all shadow-sm">
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
-                            <div className={`flex items-center justify-between px-2.5 h-8 min-w-[125px] rounded-xl text-[12px] font-bold cursor-pointer transition-all ${skill.matchType === 'must' ? 'bg-[#f5f3ff] text-[#6366f1] border border-[#e0e7ff]' :
+                            <div className={`flex items-center justify-between px-2.5 h-8 min-w-[125px] rounded-xl text-[12px] font-bold cursor-pointer transition-all ${skill.matchType === 'must' ? 'bg-[#f5f3ff] text-[#6366f1] border border-[#ddd6fe]' :
                               skill.matchType === 'exclude' ? 'bg-[#fef2f2] text-[#dc2626] border border-[#fee2e2]' :
                                 'bg-[#f0fdf4] text-[#16a34a] border border-[#dcfce7]'
                               }`}>
@@ -2748,7 +3276,7 @@ function NewJobPageContent() {
                         </div>
 
                         <button
-                          className={`flex items-center gap-1.5 px-2.5 h-8 rounded-xl text-[11px] font-bold transition-all border shadow-sm ${skill.recent ? 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff]' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
+                          className={`flex items-center gap-1.5 px-2.5 h-8 rounded-xl text-[11px] font-bold transition-all border shadow-sm ${skill.recent ? 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
                             }`}
                           onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, recent: !s.recent } : s))}
                         >
@@ -2759,7 +3287,7 @@ function NewJobPageContent() {
                         {/* Similar button */}
                         {(skill.similarSkills || []).length > 0 && (
                           <button
-                            className={`flex items-center gap-1.5 px-2.5 h-8 rounded-lg text-[11px] font-bold transition-all border ${skill.similarExpanded ? 'bg-[#ede9fe] text-[#6366f1] border-[#ddd6fe]' : 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff] hover:bg-[#ede9fe]'
+                            className={`flex items-center gap-1.5 px-2.5 h-8 rounded-lg text-[11px] font-bold transition-all border ${skill.similarExpanded ? 'bg-[#ede9fe] text-[#6366f1] border-[#ddd6fe]' : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe] hover:bg-[#ede9fe]'
                               }`}
                             onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, similarExpanded: !s.similarExpanded } : s))}
                           >
@@ -2778,7 +3306,7 @@ function NewJobPageContent() {
 
                       {/* Inline similar skills panel */}
                       {skill.similarExpanded && (skill.similarSkills || []).length > 0 && (
-                        <div className="mx-1 mb-1 rounded-xl border border-[#e0e7ff] bg-[#f5f3ff] px-4 py-3">
+                        <div className="mx-1 mb-1 rounded-xl border border-[#ddd6fe] bg-[#f5f3ff] px-4 py-3">
                           <div className="flex items-center justify-between mb-3">
                             <span className="text-[12px] font-bold text-[#6366f1]">
                               {skill.selectedSimilarSkills?.length || 0}/{skill.similarSkills.length} similar skills also included
@@ -2822,8 +3350,14 @@ function NewJobPageContent() {
                 <div className="relative">
                   <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                   <Input
+                    value={sourceSkillInput}
+                    onChange={(e) => setSourceSkillInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") addSourceSkill(sourceSkillInput);
+                    }}
+                    onBlur={() => addSourceSkill(sourceSkillInput)}
                     placeholder="Search skills..."
-                    className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl font-medium text-slate-600 placeholder:text-slate-400"
+                    className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f5f3ff] rounded-xl font-medium text-slate-600 placeholder:text-slate-400"
                   />
                 </div>
               </section>
@@ -2863,26 +3397,37 @@ function NewJobPageContent() {
                     <div className="relative flex-1">
                       <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-4.5 h-4.5 text-slate-300" />
                       <Input
+                        value={sourceLocationInput}
+                        onChange={(e) => setSourceLocationInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") addSourceLocation(sourceLocationInput);
+                        }}
+                        onBlur={() => addSourceLocation(sourceLocationInput)}
                         placeholder="City, state, or zip code..."
-                        className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl font-medium"
+                        className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f5f3ff] rounded-xl font-medium"
                       />
                     </div>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <div className="flex items-center justify-between px-4 h-11 min-w-[120px] border border-slate-200 rounded-xl text-slate-800 text-[13px] font-bold cursor-pointer hover:bg-slate-50 transition-colors">
-                          Within 25 mi
+                          {sourceLocationRadius}
                           <ChevronDown className="w-4 h-4 text-slate-400" />
                         </div>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
-                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px]">Within 10 mi</DropdownMenuItem>
-                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px] bg-slate-50 flex items-center justify-between">
-                          Within 25 mi
-                          <Check className="w-3.5 h-3.5 text-[#6366f1]" />
-                        </DropdownMenuItem>
-                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px]">Within 50 mi</DropdownMenuItem>
-                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px]">Within 100 mi</DropdownMenuItem>
-                        <DropdownMenuItem className="rounded-lg py-2 cursor-pointer font-bold text-[13px]">Exact location</DropdownMenuItem>
+                        {["Within 10 mi", "Within 25 mi", "Within 50 mi", "Within 100 mi", "Exact location"].map(radius => (
+                          <DropdownMenuItem
+                            key={radius}
+                            className={`rounded-lg py-2 cursor-pointer font-bold text-[13px] ${sourceLocationRadius === radius ? "bg-slate-50 flex items-center justify-between" : ""}`}
+                            onClick={() => {
+                              setSourceLocationRadius(radius);
+                              setGeneratedBoolean("");
+                            }}
+                          >
+                            {radius}
+                            {sourceLocationRadius === radius && <Check className="w-3.5 h-3.5 text-[#6366f1]" />}
+                          </DropdownMenuItem>
+                        ))}
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </div>
@@ -2899,10 +3444,34 @@ function NewJobPageContent() {
                 <div className="relative">
                   <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
                   <Input
+                    value={sourceCompanyInput}
+                    onChange={(e) => setSourceCompanyInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") addSourceCompany(sourceCompanyInput);
+                    }}
+                    onBlur={() => addSourceCompany(sourceCompanyInput)}
                     placeholder="Search companies..."
-                    className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl font-medium"
+                    className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f5f3ff] rounded-xl font-medium"
                   />
                 </div>
+                {sourceCompanies.length > 0 && (
+                  <div className="flex flex-wrap gap-2.5 mt-3">
+                    {sourceCompanies.map((company) => (
+                      <div key={company} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[12.5px] font-bold text-slate-700 shadow-sm">
+                        {company}
+                        <button
+                          className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-5 h-5 flex items-center justify-center rounded-md transition-all duration-200"
+                          onClick={() => {
+                            setSourceCompanies(prev => prev.filter(item => item !== company));
+                            setGeneratedBoolean("");
+                          }}
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </section>
 
               <div className="border-t border-slate-100" />
@@ -2931,28 +3500,33 @@ function NewJobPageContent() {
                   <div className="relative">
                     <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
                     <Input
+                      value={sourceKeywordInput}
+                      onChange={(e) => setSourceKeywordInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") addSourceKeyword(sourceKeywordInput);
+                      }}
+                      onBlur={() => addSourceKeyword(sourceKeywordInput)}
                       placeholder="Profile keywords or phrases..."
-                      className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f8faff] rounded-xl placeholder:italic font-medium"
+                      className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f5f3ff] rounded-xl placeholder:italic font-medium"
                     />
                   </div>
 
-                  <div className="bg-[#f8faff] border border-[#e0e7ff] rounded-xl overflow-hidden mt-3">
+                  <div className="bg-[#f5f3ff] border border-[#ddd6fe] rounded-xl overflow-hidden mt-3">
                     <button
-                      className="w-full flex items-center gap-4 px-6 py-3.5 h-12 hover:bg-[#f1f5f9] transition-colors"
+                      className="w-full flex items-center gap-4 px-6 py-3.5 h-12 hover:bg-[#ede9fe] transition-colors"
                       onClick={async () => {
                         const nextState = !booleanStringOpen;
                         setBooleanStringOpen(nextState);
 
                         // Auto-save when expanding the boolean string view to feed the agent
                         if (nextState) {
-                          setGeneratedBoolean(""); // Reset
-                          await saveJobDraft({ currentStep, saveType: "auto", skipToast: true });
-
-                          // Mock the agent string building after a delay
-                          setTimeout(() => {
-                            const mockedStr = `(TITLE("${sourceTitles.length ? sourceTitles[0].value : 'Role'}") OR TITLE("Alternative")) AND ("${sourceSkills.length ? sourceSkills[0].value : 'Skill'}") AND ("${sourceLocations.length ? sourceLocations[0].value : 'Location'}")`;
-                            setGeneratedBoolean(mockedStr);
-                          }, 3000);
+                          setIsRefreshingBoolean(true);
+                          try {
+                            await saveJobDraft({ currentStep, saveType: "auto", skipToast: true });
+                            setGeneratedBoolean(buildGeneratedBooleanString());
+                          } finally {
+                            setIsRefreshingBoolean(false);
+                          }
                         }
                       }}
                     >
@@ -2964,22 +3538,22 @@ function NewJobPageContent() {
                     </button>
                     {booleanStringOpen && (
                       <div className="px-6 pb-6 pt-1 animate-in fade-in slide-in-from-top-1">
-                        {generatedBoolean ? (
+                        {!isRefreshingBoolean ? (
                           <div className="p-4 bg-white border border-slate-200 rounded-xl overflow-x-auto shadow-inner">
                             <div className="flex items-center justify-between mb-2">
-                              <span className="text-[11px] font-bold uppercase tracking-widest text-[#6366f1] bg-[#ede9fe] px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">
+                              <span className="text-[11px] font-bold uppercase tracking-widest text-[#5b21b6] bg-[#f5f3ff] px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">
                                 PAIR Generated
                               </span>
                             </div>
-                            <code className="text-[13px] font-mono font-medium text-[#2563eb] whitespace-pre leading-relaxed tracking-tight break-all">
-                              {generatedBoolean}
+                            <code className="text-[13px] font-mono font-medium text-slate-700 whitespace-pre leading-relaxed tracking-tight break-all">
+                              {resolvedGeneratedBoolean}
                             </code>
                           </div>
                         ) : (
-                          <div className="p-4 bg-white border border-[#e0e7ff] rounded-xl overflow-x-auto shadow-inner flex flex-col items-center justify-center py-6">
+                          <div className="p-4 bg-white border border-[#ddd6fe] rounded-xl overflow-x-auto shadow-inner flex flex-col items-center justify-center py-6">
                             <span className="w-5 h-5 border-2 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-3" />
-                            <p className="text-[13px] font-bold text-slate-700">Context Saved to Database</p>
-                            <p className="text-[12px] font-medium text-slate-500 mt-1">Waiting for PAIR to generate boolean string...</p>
+                            <p className="text-[13px] font-bold text-slate-700">Refreshing Boolean String</p>
+                            <p className="text-[12px] font-medium text-slate-500 mt-1">Combining Step 4 filters and Step 5 sourcing criteria...</p>
                           </div>
                         )}
                       </div>
@@ -3005,23 +3579,29 @@ function NewJobPageContent() {
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50"
                       onClick={() => {
                         const first150 = candidates.slice(0, 150);
-                        const first150Ids = new Set(first150.map(c => c.id));
+                        const first150Ids = new Set(first150.map(c => c.candidate_id || c.id));
 
                         // Check if all first 150 are already selected
-                        const allFirst150Selected = first150.every(c => selectedCandidates.has(c.id));
+                        const allFirst150Selected = first150.every(c => selectedCandidates.has(c.candidate_id || c.id));
 
                         if (allFirst150Selected) {
                           // Deselect all first 150
                           setSelectedCandidates(prev => {
                             const next = new Set(prev);
-                            first150Ids.forEach(id => next.delete(id));
+                            first150.forEach(c => {
+                              const id = c.candidate_id || c.id;
+                              next.delete(id);
+                            });
                             return next;
                           });
                         } else {
                           // Select all first 150
                           setSelectedCandidates(prev => {
                             const next = new Set(prev);
-                            first150Ids.forEach(id => next.add(id));
+                            first150.forEach(c => {
+                              const id = c.candidate_id || c.id;
+                              next.add(id);
+                            });
                             return next;
                           });
                         }
@@ -3030,7 +3610,7 @@ function NewJobPageContent() {
                       <Star className="w-3.5 h-3.5 fill-slate-700" />
                       {(() => {
                         const first150 = candidates.slice(0, 150);
-                        const allFirst150Selected = first150.every(c => selectedCandidates.has(c.id));
+                        const allFirst150Selected = first150.every(c => selectedCandidates.has(c.candidate_id || c.id));
                         return allFirst150Selected ? 'Deselect Best 150' : 'Select Best 150';
                       })()
                       }
@@ -3039,7 +3619,7 @@ function NewJobPageContent() {
                       variant="outline"
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white"
                       onClick={() => {
-                        const allIds = candidates.map(c => c.id);
+                        const allIds = candidates.map(c => c.candidate_id || c.id);
                         const allSelected = allIds.every(id => selectedCandidates.has(id));
 
                         if (allSelected) {
@@ -3052,7 +3632,7 @@ function NewJobPageContent() {
                       }}
                     >
                       {(() => {
-                        const allIds = candidates.map(c => c.id);
+                        const allIds = candidates.map(c => c.candidate_id || c.id);
                         const allSelected = allIds.every(id => selectedCandidates.has(id));
                         return allSelected ? 'Deselect All' : 'Select All';
                       })()
@@ -3083,20 +3663,24 @@ function NewJobPageContent() {
                       ].filter(Boolean);
 
                       return (
-                        <div key={`${candidate.id}-${idx}`} className="p-5 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-purple-200 hover:shadow-md transition-all flex items-center gap-4">
+                        <div key={`${candidate.candidate_id || candidate.id}-${idx}`} className="p-5 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-purple-200 hover:shadow-md transition-all flex items-center gap-4">
                           <Checkbox
                             className="w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600"
-                            checked={selectedCandidates.has(candidate.id)}
+                            checked={selectedCandidates.has(candidate.candidate_id || candidate.id)}
                             onCheckedChange={(checked) => {
                               setSelectedCandidates(prev => {
                                 const next = new Set(prev);
-                                if (checked) next.add(candidate.id);
-                                else next.delete(candidate.id);
+                                const id = candidate.candidate_id || candidate.id;
+                                if (checked) next.add(id);
+                                else next.delete(id);
                                 return next;
                               });
                             }}
                           />
-                          <div className="flex-1 min-w-0">
+                        <div className="flex-1 min-w-0">
+                          {(() => {
+                            const displayName = getCandidateDisplayName(candidate);
+                            return (
                             <div className="flex items-center justify-between gap-4">
                               <div className="flex items-center gap-3 min-w-0">
                                 <a
@@ -3108,14 +3692,16 @@ function NewJobPageContent() {
                                   }}
                                   title="Click to view resume"
                                 >
-                                  {candidate.firstName} {candidate.lastName}
+                                  {displayName}
                                   <ArrowRight className="w-4 h-4 -rotate-45 text-slate-300 group-hover/name:text-[#6366f1] transition-colors" />
                                 </a>
                                 <span className={`px-2.5 py-0.5 rounded-lg text-[10px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 border ${candidate.source === 'LinkedIn'
-                                    ? 'bg-blue-50 text-blue-700 border-blue-200'
-                                    : 'bg-[#f5f3ff] text-[#6366f1] border-[#e0e7ff]'
+                                    ? 'bg-violet-50 text-violet-700 border-violet-200'
+                                    : candidate.source === 'JobDiva-TalentSearch'
+                                      ? 'bg-orange-50 text-orange-700 border-orange-200'
+                                      : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]'
                                   }`}>
-                                  {candidate.source === 'LinkedIn' ? <Linkedin className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
+                                  {candidate.source === 'LinkedIn' ? <Linkedin className="w-3 h-3 fill-current" /> : candidate.source === 'JobDiva-TalentSearch' ? <Zap className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
                                   {candidate.source || "JobDiva"}
                                 </span>
                                 
@@ -3137,7 +3723,7 @@ function NewJobPageContent() {
                                     variant="outline"
                                     size="sm"
                                     asChild
-                                    className="h-8 w-8 p-0 border-slate-200 hover:bg-slate-50 text-slate-400 hover:text-[#0A66C2] rounded-lg transition-all"
+                                    className="h-8 w-8 p-0 border-slate-200 hover:bg-[#f5f3ff] text-slate-400 hover:text-[#6366f1] hover:border-[#c7d2fe] rounded-lg transition-all"
                                     title="Open Profile"
                                   >
                                     <a href={candidate.profile_url} target="_blank" rel="noopener noreferrer">
@@ -3150,9 +3736,9 @@ function NewJobPageContent() {
                                   className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center gap-2"
                                   onClick={() => {
                                     setSelectedCandidateForEmail({
-                                      name: `${candidate.firstName} ${candidate.lastName}`,
+                                      name: displayName,
                                       email: candidate.email || "Email not available",
-                                      firstName: candidate.firstName,
+                                      firstName: candidate.firstName || displayName,
                                       lastName: candidate.lastName
                                     });
                                     setMessageModalOpen(true);
@@ -3178,7 +3764,7 @@ function NewJobPageContent() {
                                   className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center gap-2"
                                   onClick={() => {
                                     setSelectedCandidateForDetails({
-                                      name: `${candidate.firstName} ${candidate.lastName}`,
+                                      name: displayName,
                                       profileUrl: candidate.profile_url,
                                       imageUrl: candidate.image_url,
                                       details: `${candidate.title || "Target Role"} • ${3 + (idx % 5)} yrs exp • ${candidate.city ? `${candidate.city}, ${candidate.state}` : "Location unspecified"}`,
@@ -3195,6 +3781,8 @@ function NewJobPageContent() {
                                 </Button>
                               </div>
                             </div>
+                            );
+                          })()}
                           </div>
                         </div>
                       )
@@ -3228,7 +3816,7 @@ function NewJobPageContent() {
                   try {
                     // Prepare candidates payload with proper structure
                     const candidatesPayload = candidates.map(c => ({
-                      candidate_id: String(c.id),
+                      candidate_id: String(c.candidate_id || c.id),  // Use candidate_id from API, fallback to id
                       name: c.name,
                       email: c.email || null,
                       phone: c.phone || null,
@@ -3241,7 +3829,14 @@ function NewJobPageContent() {
                       image_url: c.image_url,
                       resume_text: c.resume_text || c.resumeText || "",  // Support both snake_case and camelCase
                       resume_id: c.resumeId || c.resume_id,
-                      is_selected: selectedCandidates.has(c.id)
+                      is_selected: selectedCandidates.has(c.candidate_id || c.id),
+                      // Include ALL LLM-enriched data from enhanced_info
+                      education: c.education || c.candidate_education || [],
+                      certifications: c.certifications || c.candidate_certification || [],
+                      company_experience: c.company_experience || c.enhanced_info?.company_experience || [],
+                      urls: c.urls || c.enhanced_info?.urls || {},
+                      match_score: c.match_score || 0,
+                      enhanced_info: c.enhanced_info || null  // Include full enhanced info for reference
                     }));
 
                     const selectedCount = candidatesPayload.filter(c => c.is_selected).length;
@@ -3299,23 +3894,8 @@ function NewJobPageContent() {
       case 1: return intakeStep;
       case 2: return publishStep;
       case 3: return establishRubricStep;
-      case 4: {
-        // Initialize filters from rubric when entering step 4
-        if (rubricData && resumeMatchFilters.length === 0) {
-          initializeFiltersFromRubric();
-          if (screenQuestions.length === 0) {
-            initializeScreenQuestionsFromRubric();
-          }
-        }
-        return setFiltersStep;
-      }
-      case 5: {
-        // Initialize source filters when entering step 5
-        if (rubricData && sourceTitles.length === 0) {
-          initializeSourceFromRubric();
-        }
-        return sourceStep;
-      }
+      case 4: return setFiltersStep;
+      case 5: return sourceStep;
       default: return null;
     }
   };

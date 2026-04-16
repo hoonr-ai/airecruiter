@@ -12,16 +12,23 @@ class TitleCriterion(BaseModel):
     match_type: str = "must"  # must, can, exclude
     years: int = 0
     recent: bool = False
+    similar_terms: List[str] = []
 
 class SkillCriterion(BaseModel):
     value: str
     match_type: str = "must"  # must, can, exclude
     years: int = 0
     recent: bool = False
+    similar_terms: List[str] = []
 
 class LocationCriterion(BaseModel):
     value: str
     radius: str = "25"  # miles radius
+
+class ResumeMatchFilter(BaseModel):
+    category: str
+    value: str
+    active: bool = True
 
 class GroundedTitle(BaseModel):
     value: str
@@ -115,9 +122,11 @@ class CandidateSearchRequest(BaseModel):
     locations: List[LocationCriterion] = []
     keywords: List[str] = []  # General keywords (UI only for now)
     companies: List[str] = []  # Target companies (UI only for now)
+    resume_match_filters: List[ResumeMatchFilter] = []
     location_type: str = "Unspecified"
-    sources: List[str] = ["VettedDB", "JobDiva", "LinkedIn"]  # Enable JobDiva and LinkedIn by default
+    sources: List[str] = ["JobDiva"]
     open_to_work: bool = True
+    boolean_string: str = ""
     page: int = 1
     limit: int = 100
 
@@ -216,6 +225,7 @@ class JobDraftData(BaseModel):
     bot_introduction: Optional[str] = None
     screen_questions: List[Dict[str, Any]] = []
     sourcing_filters: Optional[Dict[str, Any]] = None
+    resume_match_filters: Optional[List[Dict[str, Any]]] = None
 
 class JobDraftRequirement(BaseModel):
     """Model for draft requirements"""

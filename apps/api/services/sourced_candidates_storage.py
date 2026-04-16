@@ -1,5 +1,6 @@
 
 import json
+import re
 import time
 import asyncio
 import logging
@@ -8,13 +9,144 @@ import sqlalchemy
 from sqlalchemy import text
 from core.config import (
     DATABASE_URL, SUPABASE_DB_URL,
-    AZURE_AI_PROJECT_ENDPOINT, AZURE_AI_AGENT_NAME, AZURE_OPENAI_API_KEY,
+    AZURE_OPENAI_API_KEY,
     OPENAI_API_KEY, OPENAI_MODEL
 )
 import httpx
 from models import SourcedCandidate
 
 logger = logging.getLogger(__name__)
+
+
+def _truncate_log_value(value: Any, limit: int = 80) -> str:
+    text_value = str(value or "").strip()
+    if len(text_value) <= limit:
+        return text_value or "-"
+    return text_value[: limit - 3] + "..."
+
+
+def _clean_extracted_value(value: Any) -> Optional[str]:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return None
+
+    invalid_markers = {
+        "not provided",
+        "n/a",
+        "na",
+        "unknown",
+        "none",
+        "null",
+        "professional candidate",
+        "available upon request",
+    }
+    if cleaned.lower() in invalid_markers:
+        return None
+    return cleaned
+
+
+def _has_real_resume_text(resume_text: str) -> bool:
+    cleaned = str(resume_text or "").strip()
+    if not cleaned:
+        return False
+
+    placeholder_markers = [
+        "resume content unavailable",
+        "professional experience details available upon request",
+        "experienced professional with a strong background",
+        "contact information and detailed work history available upon request",
+        "available upon request",
+    ]
+    lowered = cleaned.lower()
+    return not any(marker in lowered for marker in placeholder_markers)
+
+
+def _extract_resume_contact_details(resume_text: str) -> Dict[str, Any]:
+    cleaned = str(resume_text or "")
+    extracted: Dict[str, Any] = {"email": None, "phone": None, "urls": {}}
+    if not cleaned:
+        return extracted
+
+    email_match = re.search(r"([A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})", cleaned, re.IGNORECASE)
+    if email_match:
+        extracted["email"] = email_match.group(1).strip()
+
+    phone_match = re.search(
+        r"(\+?\d[\d\-\(\)\s]{7,}\d)",
+        cleaned,
+    )
+    if phone_match:
+        extracted["phone"] = re.sub(r"\s+", " ", phone_match.group(1)).strip()
+
+    urls: Dict[str, str] = {}
+    for raw_url in re.findall(r"(https?://[^\s\]\)<>]+|www\.[^\s\]\)<>]+|linkedin\.com/[^\s\]\)<>]+|github\.com/[^\s\]\)<>]+)", cleaned, re.IGNORECASE):
+        normalized = raw_url.strip().rstrip(".,;")
+        if normalized.lower().startswith("www."):
+            normalized = f"https://{normalized}"
+        elif not normalized.lower().startswith("http"):
+            normalized = f"https://{normalized}"
+
+        lowered = normalized.lower()
+        if "linkedin.com/" in lowered:
+            urls["linkedin"] = normalized
+        elif "github.com/" in lowered:
+            urls["github"] = normalized
+        elif "mailto:" not in lowered:
+            urls.setdefault("portfolio", normalized)
+
+    extracted["urls"] = _normalize_candidate_urls(urls)
+    return extracted
+
+
+def _normalize_llm_skills(llm_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    formatted_skills: List[Dict[str, Any]] = []
+    llm_skills = llm_result.get("skills", []) or llm_result.get("hard_skills", [])
+    for skill in llm_skills:
+        if isinstance(skill, dict) and skill.get("name"):
+            formatted_skills.append({
+                "skill": str(skill["name"]).strip(),
+                "similar_skills": [],
+            })
+        elif isinstance(skill, str) and skill.strip():
+            formatted_skills.append({
+                "skill": skill.strip(),
+                "similar_skills": [],
+            })
+    return formatted_skills
+
+
+def _normalize_candidate_urls(urls: Any) -> Dict[str, str]:
+    if not isinstance(urls, dict):
+        return {}
+
+    allowed_keys = {"linkedin", "github", "portfolio"}
+    normalized_urls: Dict[str, str] = {}
+    for key, value in urls.items():
+        normalized_key = str(key or "").strip().lower()
+        normalized_value = str(value or "").strip()
+        if normalized_key in allowed_keys and normalized_value:
+            normalized_urls[normalized_key] = normalized_value
+    return normalized_urls
+
+
+def _log_extraction_snapshot(candidate_id: str, enhanced_info: Dict[str, Any]) -> None:
+    skills = enhanced_info.get("structured_skills", []) or []
+    companies = enhanced_info.get("company_experience", []) or []
+    education = enhanced_info.get("candidate_education", []) or []
+    certifications = enhanced_info.get("candidate_certification", []) or []
+    logger.info(
+        "[ResumeExtract] candidate_id=%s status=%s name=%s title=%s years=%s location=%s skills=%s companies=%s education=%s certs=%s",
+        candidate_id,
+        enhanced_info.get("resume_extraction_status", "unknown"),
+        _truncate_log_value(enhanced_info.get("candidate_name")),
+        _truncate_log_value(enhanced_info.get("job_title")),
+        _truncate_log_value(enhanced_info.get("years_of_experience")),
+        _truncate_log_value(enhanced_info.get("current_location")),
+        len(skills),
+        len(companies),
+        len(education),
+        len(certifications),
+    )
 
 class SourcedCandidatesStorage:
     def __init__(self):
@@ -290,9 +422,7 @@ class SourcedCandidatesStorage:
 sourced_candidates_storage = SourcedCandidatesStorage()
 
 
-# Concurrency controls to prevent 429 Too Many Requests
-# NOTE: Azure Agent calls now go through AzureAgentService which has its own semaphore
-# This semaphore is kept for LLM calls only
+# Concurrency controls to prevent 429 Too Many Requests for LLM enrichment.
 _llm_semaphore = asyncio.Semaphore(2)  # Reduced to 2 to avoid rate limits
 
 async def crisp_resume_with_ai(resume_text: str, max_length: int = 7500) -> str:
@@ -398,62 +528,9 @@ async def crisp_resume_with_ai(resume_text: str, max_length: int = 7500) -> str:
     # Should not reach here, but just in case
     return resume_text[:max_length]
 
-async def extract_skills_with_azure(resume_text: str) -> Dict[str, Any]:
-    """Call Azure Agent API to extract skills from resume text using AzureAgentService.
-    
-    This function now delegates to AzureAgentService which handles:
-    - Global semaphore for max 1 concurrent call
-    - Exponential backoff retry on 429 errors
-    - Consistent error handling
-    """
-    logger.info(f"🤖 [Azure Agent] Starting skill extraction for resume ({len(resume_text)} chars)")
-    logger.info(f"🤖 [Azure Agent] Using endpoint: {AZURE_AI_PROJECT_ENDPOINT}")
-    logger.info(f"🤖 [Azure Agent] Using agent: {AZURE_AI_AGENT_NAME}")
-    
-    try:
-        # Import and use AzureAgentService for consistent rate limiting
-        from services.azure_agent_service import AzureAgentService
-        
-        agent = AzureAgentService(
-            project_endpoint=AZURE_AI_PROJECT_ENDPOINT,
-            api_key=AZURE_OPENAI_API_KEY,
-            agent_name=AZURE_AI_AGENT_NAME,
-        )
-        
-        # Truncate resume to 15K chars to speed up processing
-        truncated_resume = resume_text[:15000]
-        
-        # Call AzureAgentService which handles rate limiting and retries
-        result = await agent.extract_roles_and_skills(truncated_resume, max_retries=5)
-        
-        # Log the response summary
-        skill_count = len(result.get("job_skills", []) or result.get("skills", []))
-        role_count = len(result.get("job_roles", []) or result.get("roles", []))
-        
-        logger.info(f"📊 [Azure Agent] Response Summary:")
-        logger.info(f"   - Skills extracted: {skill_count}")
-        logger.info(f"   - Roles extracted: {role_count}")
-        if skill_count > 0:
-            skills_list = result.get("job_skills", []) or result.get("skills", [])
-            skill_names = [s.get("skill_mapped", s.get("extracted_skill", "N/A")) for s in skills_list[:5]]
-            logger.info(f"   - Top skills: {', '.join(skill_names)}")
-        if role_count > 0:
-            roles_list = result.get("job_roles", [])
-            role_names = [r.get("ROLE_K17000", r.get("extracted_title", "N/A")) for r in roles_list[:3]]
-            logger.info(f"   - Top roles: {', '.join(role_names)}")
-        
-        logger.info(f"✅ [Azure Agent] Successfully extracted skills and roles")
-        return result
-                    
-    except Exception as e:
-        logger.error(f"❌ [Azure Agent] Error extracting skills: {e}")
-        return {"error": str(e), "job_skills": [], "job_roles": []}
-
-
 async def extract_enhanced_info_with_llm(resume_text: str) -> Dict[str, Any]:
     """Call OpenAI LLM to extract enhanced info from resume text."""
-    logger.info(f"🧠 [LLM] Starting enhanced info extraction for resume ({len(resume_text)} chars)")
-    logger.info(f"🧠 [LLM] Using model: {OPENAI_MODEL}")
+    logger.info("[LLM] resume_chars=%s model=%s starting extraction", len(resume_text), OPENAI_MODEL)
     
     if not OPENAI_API_KEY or not OPENAI_MODEL:
         logger.error("❌ [LLM] OpenAI API key or model not configured")
@@ -464,21 +541,26 @@ async def extract_enhanced_info_with_llm(resume_text: str) -> Dict[str, Any]:
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
-    # Sanitize resume text to avoid JSON parsing issues
-    # Remove control characters and limit length
-    sanitized_resume = resume_text[:8000]
+    # Sanitize resume text to avoid JSON parsing issues while keeping enough of the
+    # resume to capture lower-page sections like education and certifications.
+    sanitized_resume = resume_text[:16000]
     # Remove null bytes and other control characters that could break JSON
     sanitized_resume = ''.join(char for char in sanitized_resume if ord(char) >= 32 or char in '\n\r\t')
     
-    # NOTE: job_title is extracted by Azure Agent, not LLM
     prompt = (
         "Extract the following information from the resume text and return ONLY valid JSON matching this exact structure (no summary field):\n"
         "{\n"
         '  "candidate_name": "Full Name",\n'
         '  "email": "email@example.com",\n'
         '  "phone": "+1-xxx-xxx-xxxx",\n'
+        '  "job_title": "Most recent or current job title",\n'
         '  "years_of_experience": 5,\n'
         '  "current_location": "City, State",\n'
+        '  "skills": [\n'
+        '    {\n'
+        '      "name": "Skill Name"\n'
+        '    }\n'
+        '  ],\n'
         '  "company_experience": [\n'
         '    {\n'
         '      "company": "Company Name",\n'
@@ -503,16 +585,22 @@ async def extract_enhanced_info_with_llm(resume_text: str) -> Dict[str, Any]:
         '  ],\n'
         '  "urls": {\n'
         '    "linkedin": "https://linkedin.com/in/...",\n'
+        '    "github": "https://github.com/...",\n'
         '    "portfolio": "https://..."\n'
         '  }\n'
         "}\n\n"
         "Instructions:\n"
-        "1. Extract company experience with clear start/end dates (e.g., 'Jan 2020' to 'Dec 2023' or 'Present')\n"
-        "2. List companies in reverse chronological order (most recent first)\n"
-        "3. Include all certifications mentioned\n"
-        "4. Extract LinkedIn/portfolio URLs if present\n"
-        "5. Return ONLY the JSON object, no markdown, no explanations\n"
-        "6. Ensure all strings are properly escaped and JSON is valid\n\n"
+        "1. Fill every field in the JSON from the resume text whenever the resume contains that information.\n"
+        "2. job_title must be the candidate's current or most recent title from the latest experience entry.\n"
+        "3. years_of_experience must be a numeric total based on the resume timeline or explicit summary.\n"
+        "4. Extract concrete professional skills into skills[].name. Include all meaningful technical and functional skills stated in the resume.\n"
+        "5. Extract complete company_experience entries with company, title, start_date, end_date. List them in reverse chronological order.\n"
+        "6. Extract all education entries present in the resume into candidate_education.\n"
+        "7. Extract all certifications/licenses present in the resume into candidate_certification.\n"
+        "8. Extract only LinkedIn, GitHub, and portfolio URLs into urls.\n"
+        "9. Do not use placeholders like 'available upon request', 'not provided', 'n/a', or empty dummy values.\n"
+        "10. Return ONLY the JSON object, no markdown, no explanations.\n"
+        "11. Ensure all strings are properly escaped and JSON is valid.\n\n"
         "Resume Text (parse this to extract the information above):\n"
         "---BEGIN RESUME---\n"
         + sanitized_resume +
@@ -526,7 +614,7 @@ async def extract_enhanced_info_with_llm(resume_text: str) -> Dict[str, Any]:
         ],
         "temperature": 0.1,
         "response_format": {"type": "json_object"},
-        "max_tokens": 800
+        "max_tokens": 1800
     }
     
     async with _llm_semaphore:
@@ -545,67 +633,27 @@ async def extract_enhanced_info_with_llm(resume_text: str) -> Dict[str, Any]:
                     
                     response.raise_for_status()
                     result = response.json()
-                    logger.info(f"✅ [LLM] Received response from OpenAI API")
+                    logger.info("[LLM] response received")
                     
                     # Parse the LLM's JSON output from the response
                     content = result["choices"][0]["message"]["content"]
-                    logger.info(f"🧠 [LLM] Response content length: {len(content)} chars")
+                    logger.info("[LLM] response_chars=%s", len(content))
                     
                     try:
                         parsed = json.loads(content)
                         
-                        # Log the LLM response summary matching table schema
-                        # NOTE: job_title is NOT extracted by LLM - it comes from Azure Agent
-                        logger.info(f"📊 [LLM] Response Summary:")
-                        logger.info(f"   - Name: {parsed.get('candidate_name', 'N/A')}")
-                        logger.info(f"   - Years of Experience: {parsed.get('years_of_experience', 'N/A')}")
-                        logger.info(f"   - Location: {parsed.get('current_location', 'N/A')}")
-                        logger.info(f"   - Email: {parsed.get('email', 'N/A')}")
-                        logger.info(f"   - Phone: {parsed.get('phone', 'N/A')}")
-                        
-                        # Company experience
-                        company_exp = parsed.get('company_experience', [])
-                        if company_exp and isinstance(company_exp, list) and len(company_exp) > 0:
-                            logger.info(f"   - Companies ({len(company_exp)}):")
-                            for idx, exp in enumerate(company_exp[:5], 1):
-                                company = exp.get('company', 'N/A')
-                                title = exp.get('title', 'N/A')
-                                start = exp.get('start_date', 'N/A')
-                                end = exp.get('end_date', 'N/A')
-                                logger.info(f"      {idx}. {company} | {title} | {start} - {end}")
-                        
-                        # Education
-                        education = parsed.get('candidate_education', [])
-                        if education and isinstance(education, list) and len(education) > 0:
-                            logger.info(f"   - Education ({len(education)}):")
-                            for idx, edu in enumerate(education[:3], 1):
-                                degree = edu.get('degree', 'N/A')
-                                inst = edu.get('institution', 'N/A')
-                                year = edu.get('year', 'N/A')
-                                logger.info(f"      {idx}. {degree} | {inst} | {year}")
-                        else:
-                            logger.info(f"   - Education: None found")
-                        
-                        # Certifications
-                        certs = parsed.get('candidate_certification', [])
-                        if certs and isinstance(certs, list) and len(certs) > 0:
-                            logger.info(f"   - Certifications ({len(certs)}):")
-                            for idx, cert in enumerate(certs[:5], 1):
-                                name = cert.get('name', 'N/A')
-                                issuer = cert.get('issuer', 'N/A')
-                                year = cert.get('year', 'N/A')
-                                logger.info(f"      {idx}. {name} | {issuer} | {year}")
-                        else:
-                            logger.info(f"   - Certifications: None found")
-                        
-                        # URLs
-                        urls = parsed.get('urls', {})
-                        if urls and isinstance(urls, dict):
-                            url_list = [f"{k}: {v}" for k, v in urls.items() if v]
-                            if url_list:
-                                logger.info(f"   - URLs: {', '.join(url_list[:3])}")
-                        
-                        logger.info(f"✅ [LLM] Successfully parsed JSON response")
+                        logger.info(
+                            "[LLM] parsed name=%s title=%s years=%s location=%s skills=%s companies=%s education=%s certs=%s urls=%s",
+                            _truncate_log_value(parsed.get("candidate_name")),
+                            _truncate_log_value(parsed.get("job_title")),
+                            _truncate_log_value(parsed.get("years_of_experience")),
+                            _truncate_log_value(parsed.get("current_location")),
+                            len(parsed.get("skills", []) or []),
+                            len(parsed.get("company_experience", []) or []),
+                            len(parsed.get("candidate_education", []) or []),
+                            len(parsed.get("candidate_certification", []) or []),
+                            len([v for v in (parsed.get("urls", {}) or {}).values() if v]),
+                        )
                         return parsed
                     except json.JSONDecodeError as json_err:
                         logger.warning(f"⚠️ [LLM] JSON parse error: {json_err}, returning raw content")
@@ -629,131 +677,91 @@ async def process_jobdiva_candidate(candidate: Dict[str, Any]):
     
     # Get original resume text (this is what gets saved to database and shown in UI)
     original_resume_text = candidate.get("resume_text", "")
-    if not original_resume_text:
-        logger.warning(f"⚠️ [Candidate:{candidate_id}] No resume text found, skipping processing")
+    if not _has_real_resume_text(original_resume_text):
+        logger.warning(f"⚠️ [Candidate:{candidate_id}] No usable resume text found, skipping processing")
         return candidate
     
     logger.info(f"📄 [Candidate:{candidate_id}] Original resume text length: {len(original_resume_text)} characters")
-    
-    # Step 1: Crisp the resume for LLM extraction (preserves all important details, removes fluff)
-    # This ensures complete extraction of all companies, education, certifications
-    logger.info(f"📄 [Candidate:{candidate_id}] Crisping resume for extraction...")
-    crisped_resume_text = await crisp_resume_with_ai(original_resume_text, max_length=7500)
-    logger.info(f"📄 [Candidate:{candidate_id}] Using crisped resume ({len(crisped_resume_text)} chars) for extraction")
+    resume_contact_fallbacks = _extract_resume_contact_details(original_resume_text)
+
+    # Step 1: Crisp the resume first, then let the LLM extract every field from
+    # that crisped version. This matches the earlier successful flow while
+    # keeping extraction fully LLM-driven.
+    logger.info(f"📄 [Candidate:{candidate_id}] Crisping resume for LLM extraction...")
+    crisped_resume_text = await crisp_resume_with_ai(original_resume_text, max_length=12000)
+    logger.info(f"📄 [Candidate:{candidate_id}] Using crisped resume ({len(crisped_resume_text)} chars) for LLM extraction")
         
-    # Step 2: Run extractions
-    # - Azure Agent: Uses original resume (handles up to 15K)
-    # - LLM: Uses crisped resume (complete data extraction, no truncation)
-    logger.info(f"🤖 [Candidate:{candidate_id}] Calling Azure Agent for skill extraction...")
-    skills_task = asyncio.create_task(extract_skills_with_azure(original_resume_text))
-    
+    # Step 2: Run LLM-only extraction for all enhanced candidate fields.
     logger.info(f"🧠 [Candidate:{candidate_id}] Calling LLM for enhanced info extraction (using crisped resume)...")
     enhanced_info_task = asyncio.create_task(extract_enhanced_info_with_llm(crisped_resume_text))
     
-    logger.info(f"⏳ [Candidate:{candidate_id}] Waiting for Azure Agent and LLM responses...")
-    skills_result, enhanced_info_result = await asyncio.gather(skills_task, enhanced_info_task)
+    logger.info(f"⏳ [Candidate:{candidate_id}] Waiting for LLM response...")
+    enhanced_info_result = await enhanced_info_task
     
-    # Log Azure Agent results
-    if skills_result.get("error"):
-        logger.error(f"❌ [Candidate:{candidate_id}] Azure Agent error: {skills_result.get('error')}")
-    else:
-        raw_skills = skills_result.get("job_skills") or skills_result.get("skills") or []
-        logger.info(f"✅ [Candidate:{candidate_id}] Azure Agent returned {len(raw_skills)} raw skills")
-
     # Log LLM results
     if enhanced_info_result.get("error"):
         logger.error(f"❌ [Candidate:{candidate_id}] LLM error: {enhanced_info_result.get('error')}")
+        formatted_skills = []
     else:
-        logger.info(f"✅ [Candidate:{candidate_id}] LLM returned enhanced info with keys: {list(enhanced_info_result.keys())}")
+        formatted_skills = _normalize_llm_skills(enhanced_info_result)
 
-    # Format the skills specifically from Azure Agent
-    raw_agent_skills = skills_result.get("job_skills") or skills_result.get("skills") or []
-    formatted_skills = []
-    
-    logger.info(f"🔄 [Candidate:{candidate_id}] Formatting {len(raw_agent_skills)} raw skills...")
-    
-    # Try to use AzureAgentService formatting if available to get skill_mapped + similar_skills
-    try:
-        from services.azure_agent_service import AzureAgentService
-        temp_agent = AzureAgentService(project_endpoint="", api_key="")
-        rubric_skills = temp_agent.convert_to_rubric_skills(raw_agent_skills)
-        
-        for s in rubric_skills:
-            formatted_skills.append({
-                "skill": s.get("value"),
-                "similar_skills": s.get("similar_skills", [])
-            })
-        logger.info(f"✅ [Candidate:{candidate_id}] Formatted {len(formatted_skills)} skills using AzureAgentService")
-    except Exception as e:
-        logger.warning(f"⚠️ [Candidate:{candidate_id}] Error formatting agent skills: {e}, using manual fallback")
-        for s in raw_agent_skills:
-            canonical = s.get("skill_mapped") or s.get("skill_k15000") or s.get("extracted_skill")
-            if canonical:
-                formatted_skills.append({
-                    "skill": canonical,
-                    "similar_skills": [v for k,v in s.items() if k.startswith("skill_k") and v != canonical]
-                })
-        logger.info(f"✅ [Candidate:{candidate_id}] Formatted {len(formatted_skills)} skills using manual fallback")
+    extracted_job_title = (
+        enhanced_info_result.get("job_title")
+        or enhanced_info_result.get("current_title")
+        or ((enhanced_info_result.get("company_experience") or [{}])[0].get("title") if isinstance(enhanced_info_result.get("company_experience"), list) and (enhanced_info_result.get("company_experience") or []) else None)
+        or candidate.get("title")
+        or candidate.get("headline")
+    )
 
-    # Extract job_title from Azure Agent's job_roles response
-    # Use the first role's extracted_title as the primary job title
-    job_roles = skills_result.get("job_roles", [])
-    extracted_job_title = None
-    if job_roles:
-        first_role = job_roles[0]
-        # Priority: extracted_title > ROLE_K17000 > first non-null ROLE_K*
-        extracted_job_title = first_role.get("extracted_title")
-        if not extracted_job_title:
-            # Try to find the most specific role from hierarchy
-            for col in ["ROLE_K17000", "ROLE_K10000", "ROLE_K5000", "ROLE_K1500", "ROLE_K1000", "ROLE_K500", "ROLE_K150", "ROLE_K50", "ROLE_K10"]:
-                val = first_role.get(col)
-                if val and str(val).upper() not in ["GUARDRAIL", "GUARDRAILS", "NULL", "NONE", "EMPTY"]:
-                    extracted_job_title = val
-                    break
-        logger.info(f"👔 [Candidate:{candidate_id}] Extracted job title from Azure Agent: {extracted_job_title}")
-    else:
-        logger.warning(f"⚠️ [Candidate:{candidate_id}] No job_roles found in Azure Agent response")
-
-    # Merge results - use LLM response for personal info, Azure Agent for job_title
     # Validate LLM-extracted name - fall back to JobDiva name if LLM returns "Not Provided" or empty
-    llm_name = enhanced_info_result.get("candidate_name", "").strip()
-    jobdiva_name = candidate.get("name", "").strip()
+    llm_name = _clean_extracted_value(enhanced_info_result.get("candidate_name"))
+    jobdiva_name = _clean_extracted_value(candidate.get("name"))
     
     # Use LLM name only if it's valid (not empty and not "Not Provided")
-    if llm_name and llm_name.lower() not in ["not provided", "n/a", "unknown", ""]:
+    if llm_name:
         final_name = llm_name
-    elif jobdiva_name and jobdiva_name.lower() not in ["professional candidate", ""]:
+    elif jobdiva_name:
         final_name = jobdiva_name
     else:
-        final_name = "Professional Candidate"
+        final_name = None
     
     logger.info(f"👤 [Candidate:{candidate_id}] Name selection: LLM='{llm_name}', JobDiva='{jobdiva_name}', Final='{final_name}'")
     
     enhanced_info = {
-        # Use LLM extracted values directly (except job_title which comes from Azure Agent)
-        # Name: prefer LLM extraction, but fall back to JobDiva if LLM returns "Not Provided"
+        # LLM-only extracted values for candidate enrichment
         "candidate_name": final_name,
-        "email": enhanced_info_result.get("email") or candidate.get("email"),
-        "phone": enhanced_info_result.get("phone") or candidate.get("phone"),
-        "job_title": extracted_job_title,  # From Azure Agent, NOT LLM
+        "email": _clean_extracted_value(enhanced_info_result.get("email")) or _clean_extracted_value(resume_contact_fallbacks.get("email")) or _clean_extracted_value(candidate.get("email")),
+        "phone": _clean_extracted_value(enhanced_info_result.get("phone")) or _clean_extracted_value(resume_contact_fallbacks.get("phone")) or _clean_extracted_value(candidate.get("phone")),
+        "job_title": _clean_extracted_value(extracted_job_title),
         "years_of_experience": enhanced_info_result.get("years_of_experience"),
-        "current_location": enhanced_info_result.get("current_location") or candidate.get("location"),
+        "current_location": _clean_extracted_value(enhanced_info_result.get("current_location")) or _clean_extracted_value(candidate.get("location")),
         
         # Structured data from LLM
         "company_experience": enhanced_info_result.get("company_experience", []),
         "candidate_education": enhanced_info_result.get("candidate_education", []),
         "candidate_certification": enhanced_info_result.get("candidate_certification", []),
-        "urls": enhanced_info_result.get("urls", {}),
-        
-        # Skills and Roles from Azure Agent
+        "urls": _normalize_candidate_urls({
+            **(resume_contact_fallbacks.get("urls") or {}),
+            **(enhanced_info_result.get("urls") or {}),
+        }),
         "structured_skills": formatted_skills,
-        "raw_agent_roles": job_roles,
-        "agent_raw": skills_result,
         
         # Metadata
         "source": candidate.get("source", "JobDiva"),
-        "resume_extraction_status": "completed" if formatted_skills else "partial"
+        "resume_extraction_status": "completed" if any([
+            final_name,
+            _clean_extracted_value(extracted_job_title),
+            formatted_skills,
+            enhanced_info_result.get("company_experience", []),
+            enhanced_info_result.get("candidate_education", []),
+            enhanced_info_result.get("candidate_certification", []),
+            _clean_extracted_value(enhanced_info_result.get("phone")),
+            _clean_extracted_value(enhanced_info_result.get("email")),
+            _clean_extracted_value(enhanced_info_result.get("current_location")),
+        ]) else "partial"
     }
+
+    _log_extraction_snapshot(candidate_id, enhanced_info)
 
     # Save to candidate_enhanced_info (using ORIGINAL resume, not crisped)
     logger.info(f"💾 [Candidate:{candidate_id}] Saving to candidate_enhanced_info table...")
@@ -763,15 +771,7 @@ async def process_jobdiva_candidate(candidate: Dict[str, Any]):
     except Exception as e:
         logger.error(f"❌ [Candidate:{candidate_id}] Failed to save to candidate_enhanced_info: {e}")
 
-    # Use enhanced info to populate sourced_candidates
-    logger.info(f"💾 [Candidate:{candidate_id}] Updating sourced_candidates table...")
-    try:
-        save_sourced_candidate(candidate, enhanced_info)
-        logger.info(f"✅ [Candidate:{candidate_id}] Successfully updated sourced_candidates")
-    except Exception as e:
-        logger.error(f"❌ [Candidate:{candidate_id}] Failed to update sourced_candidates: {e}")
-
-    logger.info(f"✅ [Candidate:{candidate_id}] Resume processing completed. Extracted {len(formatted_skills)} skills")
+    logger.info("[ResumeExtract] candidate_id=%s persisted=%s source=%s", candidate_id, "yes", enhanced_info.get("source", "JobDiva"))
     
     # Return merged/enriched data for API response
     return {
@@ -818,7 +818,7 @@ def save_candidate_enhanced_info(candidate_id: str, enhanced_info: Dict[str, Any
             """))
             
             # Safe int parsing for years_experience
-            raw_years = enhanced_info.get("years_experience")
+            raw_years = enhanced_info.get("years_of_experience")
             parsed_years = None
             if isinstance(raw_years, int) or isinstance(raw_years, float):
                 parsed_years = int(raw_years)
@@ -867,7 +867,7 @@ def save_candidate_enhanced_info(candidate_id: str, enhanced_info: Dict[str, Any
                 "phone": enhanced_info.get("phone"),
                 "job_title": enhanced_info.get("job_title"),
                 "current_location": enhanced_info.get("current_location"),
-                "years_of_experience": enhanced_info.get("years_of_experience"),
+                "years_of_experience": parsed_years,
                 "key_skills": json.dumps(enhanced_info.get("structured_skills", [])),
                 "company_experience": json.dumps(company_exp),
                 "candidate_education": json.dumps(education),
@@ -882,19 +882,49 @@ def save_candidate_enhanced_info(candidate_id: str, enhanced_info: Dict[str, Any
         print(f"Error saving candidate_enhanced_info for {candidate_id}: {e}")
 
 def save_sourced_candidate(candidate: Dict[str, Any], enhanced_info: Dict[str, Any]):
-    """Update sourced_candidates table with enriched info."""
+    """Update sourced_candidates table with enriched LLM-only candidate info."""
     try:
         engine = sqlalchemy.create_engine(DATABASE_URL)
         with engine.connect() as conn:
-            # Only update fields that are present in the table
+            sourced_payload = {
+                "candidate_name": enhanced_info.get("candidate_name") or candidate.get("name"),
+                "email": enhanced_info.get("email") or candidate.get("email"),
+                "phone": enhanced_info.get("phone") or candidate.get("phone"),
+                "job_title": enhanced_info.get("job_title") or candidate.get("title") or candidate.get("headline"),
+                "years_of_experience": enhanced_info.get("years_of_experience"),
+                "current_location": enhanced_info.get("current_location") or candidate.get("location"),
+                "skills": enhanced_info.get("structured_skills", []),
+                "company_experience": enhanced_info.get("company_experience", []),
+                "candidate_education": enhanced_info.get("candidate_education", []),
+                "candidate_certification": enhanced_info.get("candidate_certification", []),
+                "urls": enhanced_info.get("urls", {}),
+                "resume_text": candidate.get("resume_text", ""),
+                "resume_extraction_status": enhanced_info.get("resume_extraction_status", "pending"),
+                "source": enhanced_info.get("source", candidate.get("source", "JobDiva"))
+            }
+
             conn.execute(text("""
                 UPDATE sourced_candidates SET
+                    name = COALESCE(:name, name),
+                    email = COALESCE(:email, email),
+                    phone = COALESCE(:phone, phone),
+                    headline = COALESCE(:headline, headline),
+                    location = COALESCE(:location, location),
+                    resume_text = COALESCE(:resume_text, resume_text),
                     data = :data,
                     updated_at = CURRENT_TIMESTAMP
-                WHERE candidate_id = :candidate_id
+                WHERE jobdiva_id = :jobdiva_id AND candidate_id = :candidate_id AND source = :source
             """), {
-                "data": json.dumps(enhanced_info),
-                "candidate_id": candidate["candidate_id"]
+                "name": sourced_payload["candidate_name"],
+                "email": sourced_payload["email"],
+                "phone": sourced_payload["phone"],
+                "headline": sourced_payload["job_title"],
+                "location": sourced_payload["current_location"],
+                "resume_text": sourced_payload["resume_text"],
+                "data": json.dumps(sourced_payload),
+                "jobdiva_id": candidate.get("jobdiva_id"),
+                "candidate_id": candidate["candidate_id"],
+                "source": candidate.get("source", "JobDiva")
             })
             conn.commit()
     except Exception as e:

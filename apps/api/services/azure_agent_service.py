@@ -91,9 +91,10 @@ class AzureAgentService:
                     )
                     
                     if is_rate_limit and attempt < max_retries - 1:
-                        # Exponential backoff: 10s, 20s, 40s...
-                        delay = 10 * (2 ** attempt) + random.uniform(0, 2)
-                        logger.warning(f"⚠️ Azure Agent rate limit (429) hit. Retry {attempt + 1}/{max_retries - 1} after {delay:.1f}s...")
+                        # Exponential backoff: 60s, 120s, 240s... (Azure Agent requires ~1 min between calls)
+                        delay = 60 * (2 ** attempt) + random.uniform(0, 5)
+                        # AZURE AGENT LOGGING COMMENTED OUT
+                        # logger.warning(f"⚠️ Azure Agent rate limit (429) hit. Retry {attempt + 1}/{max_retries - 1} after {delay:.1f}s...")
                         await asyncio.sleep(delay)
                     else:
                         raise
@@ -111,21 +112,26 @@ class AzureAgentService:
         # Build the base URL: project_endpoint + /openai/v1
         base_url = self.project_endpoint.rstrip("/") + "/openai/v1"
 
+        # Create client with max_retries=0 to disable SDK retries
+        # We handle retries ourselves with semaphore + exponential backoff
         client = openai.OpenAI(
             api_key=self.api_key,
             base_url=base_url,
+            max_retries=0,  # Disable SDK retries - we handle them
         )
 
-        logger.info("=" * 80)
-        logger.info("🚀 Step 1: Send text to the Azure Agent.")
-        logger.info("-" * 40)
-        # Truncate long inputs for logging
-        log_snippet = ai_jd[:500] + "..." if len(ai_jd) > 500 else ai_jd
-        logger.info(f"📄 INPUT TEXT SNIPPET:\n{log_snippet}")
-        logger.info(f"📊 INPUT LENGTH: {len(ai_jd)} characters")
-        logger.info("=" * 80)
+        # AZURE AGENT LOGGING COMMENTED OUT - Using LLM-only extraction for now
+        # logger.info("=" * 80)
+        # logger.info("🚀 Step 1: Send text to the Azure Agent.")
+        # logger.info("-" * 40)
+        # # Truncate long inputs for logging
+        # log_snippet = ai_jd[:500] + "..." if len(ai_jd) > 500 else ai_jd
+        # logger.info(f"📄 INPUT TEXT SNIPPET:\n{log_snippet}")
+        # logger.info(f"📊 INPUT LENGTH: {len(ai_jd)} characters")
+        # logger.info("=" * 80)
 
         try:
+            # Disable SDK retries - we handle retries ourselves with semaphore
             response = client.responses.create(
                 input=ai_jd,
                 extra_body={
@@ -134,15 +140,18 @@ class AzureAgentService:
                         "type": "agent_reference",
                     }
                 },
+                timeout=60,  # 60 second timeout - Azure Agent can be slow
             )
         except openai.RateLimitError as e:
             # Explicitly handle rate limit errors
-            logger.error(f"❌ Azure Agent rate limit error (429): {e}")
+            # AZURE AGENT LOGGING COMMENTED OUT
+            # logger.error(f"❌ Azure Agent rate limit error (429): {e}")
             raise Exception(f"429 too_many_requests: Azure Agent rate limit exceeded") from e
         except Exception as e:
             # Check for 429 in the error message
             if "429" in str(e) or "too many requests" in str(e).lower():
-                logger.error(f"❌ Azure Agent rate limit error (429): {e}")
+                # AZURE AGENT LOGGING COMMENTED OUT
+                # logger.error(f"❌ Azure Agent rate limit error (429): {e}")
                 raise Exception(f"429 too_many_requests: {e}") from e
             raise
 
@@ -158,19 +167,20 @@ class AzureAgentService:
         Step 2: Receiving response.
         Step 3: Extracting taxonomy mappings. 
         """
-        logger.info("=" * 80)
-        logger.info("🚀 Step 2: Receive the complete response payload from the Azure Agent.")
-        logger.info("-" * 40)
+        # AZURE AGENT LOGGING COMMENTED OUT - Using LLM-only extraction for now
+        # logger.info("=" * 80)
+        # logger.info("🚀 Step 2: Receive the complete response payload from the Azure Agent.")
+        # logger.info("-" * 40)
 
         # Parse and log the raw response nicely
-        try:
-            temp_parsed = json.loads(raw_text)
-            pretty_json = json.dumps(temp_parsed, indent=2)
-            logger.info(f"📦 FULL AGENT RESPONSE:\n{pretty_json}")
-        except:
-             logger.info(f"📁 RAW AGENT RESPONSE:\n{raw_text}")
+        # try:
+        #     temp_parsed = json.loads(raw_text)
+        #     pretty_json = json.dumps(temp_parsed, indent=2)
+        #     logger.info(f"📦 FULL AGENT RESPONSE:\n{pretty_json}")
+        # except:
+        #      logger.info(f"📁 RAW AGENT RESPONSE:\n{raw_text}")
 
-        logger.info("-" * 40)
+        # logger.info("-" * 40)
 
         # Strip markdown code fences if present
         text = raw_text.strip()
@@ -186,29 +196,31 @@ class AzureAgentService:
             if brace_match:
                 parsed = json.loads(brace_match.group(0))
             else:
-                logger.error("❌ AzureAgentService: Could not parse JSON from agent response.")
+                # AZURE AGENT LOGGING COMMENTED OUT
+                # logger.error("❌ AzureAgentService: Could not parse JSON from agent response.")
                 raise ValueError(f"Could not parse JSON from agent response")
 
         roles  = parsed.get("job_roles",  [])
         # Handle both "job_skills" and "skills" as keys
         skills = parsed.get("job_skills") or parsed.get("skills") or []
         
-        logger.info("🎯 Step 3: Perform taxonomy mapping for exact Role and Skill values.")
-        logger.info("-" * 40)
+        # AZURE AGENT LOGGING COMMENTED OUT
+        # logger.info("🎯 Step 3: Perform taxonomy mapping for exact Role and Skill values.")
+        # logger.info("-" * 40)
         
         # Log Role Mapping
-        for r in roles:
-            raw_val = r.get("extracted_title") or r.get("raw_label") or "Unknown"
-            k17000 = r.get("ROLE_K17000", "None")
-            logger.info(f"   👔 Role Mapping  : '{raw_val}' ────▶ '{k17000}'")
-            
-        # Log Skill Mapping
-        for s in skills:
-            raw_val = s.get("extracted_skill") or s.get("raw_label") or "Unknown"
-            mapped = s.get("skill_mapped", "None")
-            logger.info(f"   🛠️  Skill Mapping : '{raw_val}' ────▶ '{mapped}'")
+        # for r in roles:
+        #     raw_val = r.get("extracted_title") or r.get("raw_label") or "Unknown"
+        #     k17000 = r.get("ROLE_K17000", "None")
+        #     logger.info(f"   👔 Role Mapping  : '{raw_val}' ────▶ '{k17000}'")
+        #     
+        # # Log Skill Mapping
+        # for s in skills:
+        #     raw_val = s.get("extracted_skill") or s.get("raw_label") or "Unknown"
+        #     mapped = s.get("skill_mapped", "None")
+        #     logger.info(f"   🛠️  Skill Mapping : '{raw_val}' ────▶ '{mapped}'")
 
-        logger.info("=" * 80)
+        # logger.info("=" * 80)
 
         # Ensure the downstream code sees a consistent key
         parsed["job_roles"] = roles
@@ -225,7 +237,8 @@ class AzureAgentService:
         Groups multiple JD-extracted titles that map to the same canonical taxonomy role.
         Excludes the raw JD-extracted title from the similar list per user requirement.
         """
-        logger.info(f"🔍 DEBUG: Raw Grounded Roles from Agent: {job_roles}")
+        # AZURE AGENT LOGGING COMMENTED OUT
+        # logger.info(f"🔍 DEBUG: Raw Grounded Roles from Agent: {job_roles}")
         
         # Grouping by canonical role (K17000)
         grouping = {} # canonical_name_upper -> { canonical_val, similar_titles_set }

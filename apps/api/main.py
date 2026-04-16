@@ -84,6 +84,21 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("🚀 Starting dynamic job status monitoring scheduler...")
     
+    # Ensure database columns exist
+    try:
+        from sqlalchemy import text
+        from core.engine import engine
+        
+        with engine.connect() as conn:
+            conn.execute(text("""
+                ALTER TABLE monitored_jobs 
+                ADD COLUMN IF NOT EXISTS resume_match_filters JSONB
+            """))
+            conn.commit()
+            logger.info("✅ Ensured resume_match_filters column exists in monitored_jobs")
+    except Exception as e:
+        logger.warning(f"Could not ensure resume_match_filters column: {e}")
+    
     scheduler.start()
     # Schedule first poll 5 minutes from now
     schedule_next_poll()
@@ -195,17 +210,46 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
         # Extract companies
         companies = request.companies or []
         
+        # Load resume match filters from database if not provided in request
+        resume_match_filters = []
+        if request.resume_match_filters and len(request.resume_match_filters) > 0:
+            # Use filters from request if provided
+            resume_match_filters = [f.dict() for f in request.resume_match_filters]
+            logger.info(f"Using {len(resume_match_filters)} resume match filters from request")
+        else:
+            # Load from database
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT resume_match_filters FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
+                    (request.job_id, request.job_id)
+                )
+                row = cursor.fetchone()
+                if row and row[0]:
+                    resume_match_filters = row[0] if isinstance(row[0], list) else json.loads(row[0])
+                    logger.info(f"Loaded {len(resume_match_filters)} resume match filters from database for job {request.job_id}")
+                cursor.close()
+                conn.close()
+            except Exception as e:
+                logger.warning(f"Failed to load resume match filters from database: {e}")
+        
         # Build search criteria
         criteria = SearchCriteria(
             job_id=request.job_id,
             titles=titles,
             skills=skills,
+            title_criteria=[t.dict() for t in request.titles],
+            skill_criteria=[s.dict() for s in request.skill_criteria],
+            keywords=request.keywords or [],
+            resume_match_filters=resume_match_filters,
             location=location,
             within_miles=25,  # Default radius
             companies=companies,
             page_size=request.limit or 100,
-            sources=request.sources or ["JobDiva", "LinkedIn"],
-            open_to_work=request.open_to_work
+            sources=request.sources or ["JobDiva"],
+            open_to_work=request.open_to_work,
+            boolean_string=request.boolean_string or ""
         )
         
         # Execute unified search
@@ -231,8 +275,15 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             from services.jobdiva import JobDivaService
             jobdiva_service = JobDivaService()
             
-            # Simple fallback search
-            candidates = await jobdiva_service.get_enhanced_job_candidates(request.job_id)
+            # Lightweight fallback: do not hydrate every applicant during search.
+            token = await jobdiva_service.authenticate()
+            candidates = await jobdiva_service._get_all_job_applicants(
+                request.job_id,
+                request.limit or 100,
+                token
+            ) if token else []
+            for candidate in candidates:
+                candidate["source"] = "JobDiva-Applicants"
             
             return {
                 "candidates": candidates[:request.limit or 100],
@@ -544,6 +595,7 @@ async def save_candidates(request: CandidatesSaveRequest):
         from core.config import DATABASE_URL
         
         saved_count = 0
+        processing_payloads = []
         
         with psycopg2.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
@@ -564,10 +616,15 @@ async def save_candidates(request: CandidatesSaveRequest):
                             "resume_id": getattr(c, 'resume_id', None),
                             "resume_text": getattr(c, 'resume_text', None),
                             "data": json.dumps({
-                                "skills": c.skills,
-                                "experience_years": c.experience_years,
+                                "skills": c.skills or [],
+                                "experience_years": c.experience_years or 0,
+                                "education": getattr(c, 'education', []) or getattr(c, 'candidate_education', []),
+                                "certifications": getattr(c, 'certifications', []) or getattr(c, 'candidate_certification', []),
+                                "company_experience": getattr(c, 'company_experience', []),
+                                "urls": getattr(c, 'urls', {}),
                                 "is_selected": True,
-                                "match_score": getattr(c, 'match_score', 0)
+                                "match_score": getattr(c, 'match_score', 0),
+                                "enhanced_info": getattr(c, 'enhanced_info', None)  # Full LLM extraction data
                             }),
                             "status": "sourced"
                         }
@@ -596,6 +653,7 @@ async def save_candidates(request: CandidatesSaveRequest):
                         """, candidate_data)
                         
                         saved_count += 1
+                        processing_payloads.append(candidate_data)
                         
                     except Exception as e:
                         print(f"❌ Error saving candidate {c.candidate_id}: {e}")
@@ -604,7 +662,40 @@ async def save_candidates(request: CandidatesSaveRequest):
             conn.commit()
             
         print(f"✅ Successfully saved {saved_count} sourced candidates to database")
-        return {"status": "success", "detail": f"Saved {saved_count} sourced candidates", "saved_count": saved_count}
+        enhanced_count = 0
+        if processing_payloads:
+            from services.sourced_candidates_storage import process_jobdiva_candidate
+
+            for payload in processing_payloads:
+                try:
+                    if str(payload.get("source", "")).startswith("JobDiva") and not payload.get("resume_text"):
+                        resume_data = await jobdiva_service.get_candidate_resume(
+                            payload["candidate_id"],
+                            resume_id=payload.get("resume_id"),
+                        )
+                        resume_text = (resume_data or {}).get("resume_text", "")
+                        if resume_text and "Resume content unavailable" not in resume_text:
+                            payload.update({
+                                "resume_text": resume_text,
+                                "resume_id": (resume_data or {}).get("resume_id") or payload.get("resume_id"),
+                                "email": payload.get("email") or (resume_data or {}).get("email"),
+                                "phone": payload.get("phone") or (resume_data or {}).get("phone"),
+                                "headline": payload.get("headline") or (resume_data or {}).get("title"),
+                                "location": payload.get("location") or (resume_data or {}).get("location"),
+                            })
+
+                    if payload.get("resume_text"):
+                        await process_jobdiva_candidate(payload)
+                        enhanced_count += 1
+                except Exception as e:
+                    print(f"⚠️ Enhanced processing failed for candidate {payload.get('candidate_id')}: {e}")
+
+        return {
+            "status": "success",
+            "detail": f"Saved {saved_count} sourced candidates",
+            "saved_count": saved_count,
+            "enhanced_count": enhanced_count
+        }
         
     except Exception as e:
         import logging
@@ -1393,6 +1484,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                 END,
                 jobdiva_id = %s, -- This is the reference string
                 sourcing_filters = %s,
+                resume_match_filters = %s,
                 updated_at = NOW()
             WHERE job_id = %s -- This is the numeric ID
         """, (
@@ -1412,6 +1504,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
             draft_data.customer_name, draft_data.customer_name,  # for CASE customer_name
             ref_code,                                           # 26-06182 (swapped)
             json.dumps(draft_data.sourcing_filters or {}),      # sourcing_filters
+            json.dumps(draft_data.resume_match_filters or []),  # resume_match_filters
             db_job_id                                           # 31920032 (PK)
         ))
         
@@ -1423,8 +1516,8 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                     selected_job_boards, recruiter_notes, recruiter_emails, 
                     selected_employment_types, work_authorization, bot_introduction,
                     screening_level,
-                    processing_status, current_step, customer_name, jobdiva_id, created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                    processing_status, current_step, customer_name, jobdiva_id, sourcing_filters, resume_match_filters, created_at, updated_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
             """, (
                 db_job_id,                                           # 31920032 (Numeric PK)
                 draft_data.title,
@@ -1440,7 +1533,9 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
                 f"step_{draft_data.current_step}_complete",
                 draft_data.current_step,
                 draft_data.customer_name,                            # NEW: customer_name
-                ref_code                                              # 26-06182 (Ref)
+                ref_code,                                            # 26-06182 (Ref)
+                json.dumps(draft_data.sourcing_filters or {}),      # sourcing_filters
+                json.dumps(draft_data.resume_match_filters or [])   # resume_match_filters
             ))
             logger.info(f"✅ Created new monitored_jobs record for job {db_job_id}")
         
@@ -1548,7 +1643,9 @@ async def get_job_draft(job_id: str, user_session: str = "default"):
                 "selected_employment_types": parse_json(job_row.get("selected_employment_types")),
                 "current_step": job_row.get("current_step") or 1,
                 "screening_level": job_row.get("screening_level") or "L1.5",
-                "bot_introduction": job_row.get("bot_introduction") or ""
+                "bot_introduction": job_row.get("bot_introduction") or "",
+                "resume_match_filters": parse_json(job_row.get("resume_match_filters")),
+                "sourcing_filters": job_row.get("sourcing_filters") or {}
             }
         }
         
@@ -1778,10 +1875,23 @@ async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData)
                             "recent": s.get("recent", True),
                             "matchType": s.get("matchType", "Similar"),
                             "required": s.get("required", "Required"),
-                            "category": "hard"
+                            "category": "hard",
+                            "importance": s.get("importance", s.get("required", "Required").lower()),
+                            "evidence_type": s.get("evidence_type", "direct")
                         } for s in grounded.get("hard_skills", [])
                     ],
-                    "soft_skills": [{"value": s["value"]} for s in grounded.get("soft_skills", [])],
+                    "soft_skills": [
+                        {
+                            "value": s["value"],
+                            "minYears": s.get("minYears", 0),
+                            "recent": s.get("recent", False),
+                            "matchType": s.get("matchType", "Similar"),
+                            "required": s.get("required", "Preferred"),
+                            "category": "soft",
+                            "importance": s.get("importance", s.get("required", "Preferred").lower()),
+                            "evidence_type": s.get("evidence_type", "direct")
+                        } for s in grounded.get("soft_skills", [])
+                    ],
                     "titles": titles_payload
                 }
                 

@@ -179,7 +179,7 @@ export default function SetCriteriaPage() {
             {(syncing) && <Loader2 className="h-5 w-5 animate-spin text-primary" />}
           </div>
           <div className="pt-4 flex items-center gap-4">
-             <Badge variant="secondary" className="bg-blue-50 text-blue-700 border-blue-100 py-1">
+             <Badge variant="secondary" className="bg-[#f5f3ff] text-[#5b21b6] border-[#ddd6fe] py-1">
                 AI pre-populated
              </Badge>
              <span className="text-sm text-muted-foreground">
@@ -206,7 +206,7 @@ export default function SetCriteriaPage() {
                 
                 <div className="flex items-center gap-3">
                   {item.is_ai_generated && (
-                    <Badge variant="outline" className="text-[10px] font-bold text-blue-500 bg-blue-50/50 border-blue-200 uppercase tracking-tighter">
+                    <Badge variant="outline" className="text-[10px] font-bold text-[#6d28d9] bg-[#f5f3ff] border-[#ddd6fe] uppercase tracking-tighter">
                       AI
                     </Badge>
                   )}

@@ -507,8 +507,11 @@ async def get_candidate_enhanced_info(candidate_id: str) -> Dict[str, Any]:
         engine = sqlalchemy.create_engine(db_url)
         with engine.connect() as conn:
             result = conn.execute(text("""
-                SELECT candidate_id, job_title, location, years_experience, 
-                       skills, summary, data, resume_text, created_at, updated_at
+                SELECT candidate_id, candidate_name, email, phone, job_title,
+                       current_location, years_of_experience, key_skills,
+                       company_experience, candidate_education,
+                       candidate_certification, urls, resume_text,
+                       resume_extraction_status, extracted_at
                 FROM candidate_enhanced_info
                 WHERE candidate_id = :candidate_id
             """), {"candidate_id": candidate_id})
@@ -520,19 +523,23 @@ async def get_candidate_enhanced_info(candidate_id: str) -> Dict[str, Any]:
                     detail=f"No enhanced info found for candidate {candidate_id}. Run extract endpoint first."
                 )
             
-            import json
             return {
                 "status": "success",
                 "candidate_id": row[0],
-                "job_title": row[1],
-                "location": row[2],
-                "years_experience": row[3],
-                "skills": json.loads(row[4]) if row[4] else [],
-                "summary": row[5],
-                "data": json.loads(row[6]) if row[6] else {},
-                "resume_preview": row[7][:500] + "..." if row[7] and len(row[7]) > 500 else row[7],
-                "created_at": str(row[8]) if row[8] else None,
-                "updated_at": str(row[9]) if row[9] else None
+                "candidate_name": row[1],
+                "email": row[2],
+                "phone": row[3],
+                "job_title": row[4],
+                "location": row[5],
+                "years_experience": row[6],
+                "skills": row[7] or [],
+                "company_experience": row[8] or [],
+                "candidate_education": row[9] or [],
+                "candidate_certification": row[10] or [],
+                "urls": row[11] or {},
+                "resume_preview": row[12][:500] + "..." if row[12] and len(row[12]) > 500 else row[12],
+                "resume_extraction_status": row[13],
+                "extracted_at": str(row[14]) if row[14] else None,
             }
         
     except HTTPException:

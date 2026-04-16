@@ -71,7 +71,8 @@ class MonitoredJobsStorage:
                 ADD COLUMN IF NOT EXISTS experience_level TEXT,
                 ADD COLUMN IF NOT EXISTS extraction_metadata JSONB,
                 ADD COLUMN IF NOT EXISTS bot_introduction TEXT,
-                ADD COLUMN IF NOT EXISTS sourcing_filters JSONB
+                ADD COLUMN IF NOT EXISTS sourcing_filters JSONB,
+                ADD COLUMN IF NOT EXISTS resume_match_filters JSONB
             """))
             
             # Update the monitored_jobs record with all processed data
