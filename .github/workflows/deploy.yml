@@ -24,7 +24,7 @@ jobs:
         run: |
           ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes ubuntu@${{ secrets.JOB_DIVA_QA_MACHINE }} << 'EOF'
             set -e
-            cd ~/codebase/livekit-airecruiter
+            cd ~/codebase/airecruiter
             # Pull using deploy key
             git fetch --all
             git reset --hard origin/feature/job-diva-sync
