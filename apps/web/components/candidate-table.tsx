@@ -256,7 +256,7 @@ function CandidateRow({
     };
 
     // Fallback logic for candidate name
-    const displayName = candidate.name?.trim() || `${candidate.firstName || ''} ${candidate.lastName || ''}`.trim() || 'Unknown';
+    const displayName = `${candidate.firstName || ''} ${candidate.lastName || ''}`.trim() || 'Unknown';
     return (
         <TableRow>
             <TableCell>
