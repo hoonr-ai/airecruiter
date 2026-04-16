@@ -17,7 +17,6 @@ deploy_log_*.txt
 apps/api/ontology_data.csv
 apps/api/monitored_jobs.json
 .vscode
-.github/
 
 # Backup and log files
 /var/backups/

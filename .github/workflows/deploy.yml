@@ -1,0 +1,42 @@
+name: Deploy to Azure VM
+
+on:
+  push:
+    branches:
+      - feature/job-diva-sync
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up SSH key for deployment
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.JOB_DIVA_QA_KEY_AZURE }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ secrets.JOB_DIVA_QA_MACHINE }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to Azure VM
+        run: |
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes ubuntu@${{ secrets.JOB_DIVA_QA_MACHINE }} << 'EOF'
+            set -e
+            cd ~/codebase/livekit-airecruiter
+            # Pull using deploy key
+            git fetch --all
+            git reset --hard origin/feature/job-diva-sync
+            bash deploy-azure.sh
+          EOF
+
+      - name: Display deployment INFO
+        run: |
+          HOSTNAME="http://20.57.137.251/"
+          echo "🚀 Deployment Complete!"
+          echo "📋 Commit: ${{ github.sha }} (short: ${GITHUB_SHA:0:8})"
+          echo "🌿 Branch: ${{ github.ref_name }}"
+          echo "👤 Author: ${{ github.event.head_commit.author.name }}"
+          echo "💬 Message: ${{ github.event.head_commit.message }}"
+          echo "🔗 Frontend: https://$HOSTNAME"
