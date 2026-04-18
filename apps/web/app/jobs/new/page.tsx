@@ -21,6 +21,7 @@ import {
   Check,
   CheckCircle2,
   ChevronRight,
+  ChevronLeft,
   Timer,
   Users,
   ArrowRight,
@@ -329,12 +330,19 @@ function NewJobPageContent() {
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
-  const candidatesPerPage = 10;
-  const totalPages = Math.ceil(candidates.length / candidatesPerPage);
+  const [candidatesPerPage, setCandidatesPerPage] = useState(10);
+  const totalPages = Math.max(1, Math.ceil(candidates.length / candidatesPerPage));
   const paginatedCandidates = candidates.slice(
     (currentPage - 1) * candidatesPerPage,
     currentPage * candidatesPerPage
   );
+
+  const visiblePages = (() => {
+    if (totalPages <= 5) return Array.from({length: totalPages}, (_, i) => i + 1);
+    if (currentPage <= 3) return [1, 2, 3, 4, "...", totalPages];
+    if (currentPage >= totalPages - 2) return [1, "...", totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
+    return [1, "...", currentPage - 1, currentPage, currentPage + 1, "...", totalPages];
+  })();
 
   // Resume modal state
   const [selectedCandidate, setSelectedCandidate] = useState<any>(null);
@@ -2134,7 +2142,7 @@ function NewJobPageContent() {
       existingFilterPrefs.set(`${f.category}|${baseValue}`, f.active);
     });
 
-    // Add title filters (all active)
+    // 1. Titles
     if (rubricData.titles) {
       rubricData.titles.forEach((title: any) => {
         const filterKey = `Required Title|${title.value}`;
@@ -2150,14 +2158,19 @@ function NewJobPageContent() {
       });
     }
 
-    // Add skill filters (first few active, rest inactive to show variety)
+    // 2. Skills
     if (rubricData.skills) {
-      rubricData.skills.forEach((skill: any, index: number) => {
-        const filterKey = `${skill.required === 'Required' ? 'Required Skill' : 'Preferred Skill'}|${skill.value}`;
-        const wasActive = existingFilterPrefs.has(filterKey) ? (existingFilterPrefs.get(filterKey) ?? (index < 4)) : (index < 4);
+      rubricData.skills.forEach((skill: any) => {
+        const category = skill.required === 'Required' ? 'Required Skill' : 'Preferred Skill';
+        const filterKey = `${category}|${skill.value}`;
+        // Active if explicitly "Required" or if it was previously active.
+        const wasActive = existingFilterPrefs.has(filterKey) 
+          ? (existingFilterPrefs.get(filterKey) ?? (skill.required === 'Required')) 
+          : (skill.required === 'Required');
+          
         filters.push({
           id: idCounter++,
-          category: skill.required === 'Required' ? 'Required Skill' : 'Preferred Skill',
+          category,
           value: `${skill.value} — ${skill.minYears}+ yrs, ${skill.matchType} match`,
           active: wasActive,
           ai: true,
@@ -2166,58 +2179,80 @@ function NewJobPageContent() {
       });
     }
 
-    // Add education filters (inactive by default)
+    // 3. Education
     if (rubricData.education) {
       rubricData.education.forEach((edu: any) => {
+        const filterKey = `Education|${edu.degree}${edu.field ? ` in ${edu.field}` : ''}`;
+        const wasActive = existingFilterPrefs.has(filterKey) 
+          ? (existingFilterPrefs.get(filterKey) ?? (edu.required === 'Required')) 
+          : (edu.required === 'Required');
+
         filters.push({
           id: idCounter++,
           category: 'Education',
           value: `${edu.degree}${edu.field ? ` in ${edu.field}` : ''}`,
-          active: false,
+          active: wasActive,
           ai: true,
           fromRubric: true
         });
       });
     }
 
-    // Add domain experience (inactive by default)
+    // 4. Domain Experience
     if (rubricData.domain) {
       rubricData.domain.forEach((dom: any) => {
+        const filterKey = `Domain|${dom.value}`;
+        const wasActive = existingFilterPrefs.has(filterKey) 
+          ? (existingFilterPrefs.get(filterKey) ?? (dom.required === 'Required')) 
+          : (dom.required === 'Required');
+
         filters.push({
           id: idCounter++,
           category: 'Domain',
           value: dom.value,
-          active: false,
+          active: wasActive,
           ai: true,
           fromRubric: true
         });
       });
     }
 
-    // Add common filters based on job data
-    if (jobData) {
-      const location = `${jobData.city || ''}, ${jobData.state || ''}`.trim();
-      if (location) {
-        filters.push({
-          id: idCounter++,
-          category: 'Requirement',
-          value: `Must be local to ${location} metro`,
-          active: true,
-          ai: false,
-          fromRubric: true
-        });
-      }
-
-      if (jobData.customer_name || jobData.customer) {
+    // 5. Customer Requirements
+    if (rubricData.customer_requirements) {
+      rubricData.customer_requirements.forEach((req: any) => {
+        if (!req.value) return;
+        const filterKey = `Customer Req.|${req.type}: ${req.value}`;
+        const wasActive = existingFilterPrefs.has(filterKey) ? (existingFilterPrefs.get(filterKey) ?? true) : true;
+        
         filters.push({
           id: idCounter++,
           category: 'Customer Req.',
-          value: `Must not be employed by: ${jobData.customer_name || jobData.customer}`,
-          active: true,
-          ai: false,
+          value: `${req.type}: ${req.value}`,
+          active: wasActive,
+          ai: true,
           fromRubric: true
         });
-      }
+      });
+    }
+
+    // 6. Other Requirements
+    if (rubricData.other_requirements) {
+      rubricData.other_requirements.forEach((req: any) => {
+        if (!req.value) return;
+        const filterKey = `Requirement|${req.value}`;
+        const wasActive = existingFilterPrefs.has(filterKey) 
+          ? (existingFilterPrefs.get(filterKey) ?? (req.required === 'Required')) 
+          : (req.required === 'Required');
+
+        filters.push({
+          id: idCounter++,
+          category: 'Requirement',
+          value: req.value,
+          active: wasActive,
+          ai: true,
+          fromRubric: true
+        });
+      });
     }
 
     const nextFilters = [
@@ -2231,6 +2266,7 @@ function NewJobPageContent() {
     setResumeMatchFilters(nextFilters);
     setFilterIdCounter(idCounter);
   };
+
 
   const initializeScreenQuestionsFromRubric = () => {
     if (!jobData) return;
@@ -2580,8 +2616,8 @@ function NewJobPageContent() {
       const terms = [value, ...similar].map(term => term.trim()).filter(Boolean).map(quote);
       const base = terms.length > 1 ? `(${terms.join(" OR ")})` : terms[0];
       if (!base) return "";
-      const experienceClause = years > 0 ? ` over ${years} year${years > 1 ? "s" : ""}` : "";
-      const recentClause = recent ? " recent" : "";
+      const experienceClause = years > 0 ? ` AND "${years}+ years"` : "";
+      const recentClause = recent ? " AND recent" : "";
       return `${base}${recentClause}${experienceClause}`;
     };
 
@@ -2631,9 +2667,14 @@ function NewJobPageContent() {
 
     const parts = [...must];
     if (can.length) parts.push(`(${can.join(" OR ")})`);
-    let booleanString = parts.length ? parts.join(" AND ") : quote(jobTitle || "Role");
+    let booleanString = parts.length ? parts.join(" AND ") : (isValidBoolean(jobTitle) ? jobTitle : quote(jobTitle || "Role"));
     if (exclude.length) booleanString += ` NOT (${exclude.join(" OR ")})`;
     return booleanString;
+  };
+
+  const isValidBoolean = (str: string) => {
+    if (!str) return false;
+    return str.includes(" AND ") || str.includes(" OR ") || str.includes(" NOT ") || (str.includes('"') && str.length > 5);
   };
 
   const resolvedGeneratedBoolean = generatedBoolean || buildGeneratedBooleanString();
@@ -3050,10 +3091,37 @@ function NewJobPageContent() {
                         body: JSON.stringify(searchPayload)
                       });
 
-                      if (response.ok) {
-                        const data = await response.json();
-                        setCandidates(data.candidates || []);
-                        console.log("✅ Enhanced search results:", data);
+                      if (response.ok && response.body) {
+                        const reader = response.body.getReader();
+                        const decoder = new TextDecoder();
+                        let buffer = "";
+                        setCandidates([]); // Clear existing results for new search
+                        setCurrentPage(1); // Reset to first page
+
+                        while (true) {
+                          const { done, value } = await reader.read();
+                          if (done) break;
+
+                          buffer += decoder.decode(value, { stream: true });
+                          const lines = buffer.split("\n");
+                          buffer = lines.pop() || "";
+
+                          for (const line of lines) {
+                            if (!line.trim()) continue;
+                            try {
+                              const event = JSON.parse(line);
+                              if (event.type === "candidate") {
+                                setCandidates(prev => [...prev, event.data]);
+                              } else if (event.type === "summary") {
+                                console.log("✅ Search stream complete:", event.data);
+                              } else if (event.type === "error") {
+                                console.error("❌ Stream error:", event.message);
+                              }
+                            } catch (e) {
+                              console.error("Failed to parse stream line:", line, e);
+                            }
+                          }
+                        }
                       } else {
                         setCandidates([]);
                         console.error("❌ Search failed:", response.status);
@@ -3550,10 +3618,12 @@ function NewJobPageContent() {
                             </code>
                           </div>
                         ) : (
-                          <div className="p-4 bg-white border border-[#ddd6fe] rounded-xl overflow-x-auto shadow-inner flex flex-col items-center justify-center py-6">
-                            <span className="w-5 h-5 border-2 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-3" />
-                            <p className="text-[13px] font-bold text-slate-700">Refreshing Boolean String</p>
-                            <p className="text-[12px] font-medium text-slate-500 mt-1">Combining Step 4 filters and Step 5 sourcing criteria...</p>
+                          <div className="p-4 bg-white border border-[#ddd6fe] rounded-xl overflow-x-auto shadow-inner flex items-center justify-center py-6 gap-3">
+                            <span className="w-5 h-5 border-2 border-slate-200 border-t-[#6366f1] rounded-full animate-spin" />
+                            <div className="flex flex-col">
+                              <p className="text-[13px] font-bold text-slate-700">Refreshing Boolean string...</p>
+                              <p className="text-[12px] font-medium text-slate-500">Based on Page 5 sourcing filters only</p>
+                            </div>
                           </div>
                         )}
                       </div>
@@ -3567,9 +3637,19 @@ function NewJobPageContent() {
             <div className="border-t border-slate-200 pt-8 mt-10">
               <div className="flex items-center justify-between mb-8">
                 <div>
-                  <h4 className="text-[15px] font-bold text-slate-900 mb-1">Sourced Candidates</h4>
-                  <p className="text-slate-500 text-[13px] font-medium tracking-tight">
-                    {hasSearched ? `${candidates.length} candidates found` : 'Run a search to find candidates.'}
+                  <h4 className="text-[15px] font-bold text-slate-900 mb-1 flex items-center gap-2">
+                    Sourced Candidates
+                    {isSearching && (
+                      <span className="flex h-2 w-2 relative">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#6366f1] opacity-75"></span>
+                        <span className="relative inline-flex rounded-full h-2 w-2 bg-[#6366f1]"></span>
+                      </span>
+                    )}
+                  </h4>
+                  <p className={`text-slate-500 text-[13px] font-medium tracking-tight transition-all ${isSearching ? 'animate-pulse text-[#6366f1]' : ''}`}>
+                    {hasSearched ? (
+                        isSearching ? `Sourcing candidates... ${candidates.length} found so far` : `${candidates.length} candidates found`
+                    ) : 'Run a search to find candidates.'}
                   </p>
                 </div>
                 {candidates.length > 0 && (
@@ -3643,17 +3723,28 @@ function NewJobPageContent() {
               </div>
 
               {hasSearched ? (
-                isSearching ? (
-                  <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-pulse">
-                    <div className="flex flex-col items-center gap-3">
-                      <div className="w-12 h-12 border-4 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-2" />
-                      <p className="text-slate-600 text-sm font-bold animate-pulse">{searchStatus}</p>
-                      <p className="text-slate-400 text-[12px] font-medium italic">Retrieving candidate records associated with Job ID {numericJobId || jobdivaId}...</p>
+                <>
+                  {isSearching && (
+                    <div className="mb-6 p-4 bg-[#f5f3ff]/50 backdrop-blur-sm border border-[#ddd6fe] rounded-2xl flex items-center justify-between shadow-sm animate-in fade-in slide-in-from-top-2 duration-300">
+                      <div className="flex items-center gap-4">
+                        <div className="relative flex items-center justify-center">
+                          <div className="w-8 h-8 border-3 border-[#ddd6fe] border-t-[#6366f1] rounded-full animate-spin" />
+                          <Search className="w-3.5 h-3.5 text-[#6366f1] absolute" />
+                        </div>
+                        <div>
+                          <p className="text-[13px] font-bold text-slate-800 leading-tight">{searchStatus}</p>
+                          <p className="text-[11px] font-medium text-slate-500 mt-0.5">Live sourcing in progress. Candidates appearing in real-time...</p>
+                        </div>
+                      </div>
+                      <div className="px-3 py-1 bg-[#6366f1] text-white text-[10px] font-black rounded-lg uppercase tracking-tighter shadow-sm animate-pulse">
+                        Live Search
+                      </div>
                     </div>
-                  </div>
-                ) : candidates.length > 0 ? (
-                  <div className="space-y-4">
-                    {candidates.map((candidate, idx) => {
+                  )}
+
+                  {candidates.length > 0 ? (
+                    <div className="space-y-4">
+                    {paginatedCandidates.map((candidate, idx) => {
                       // Select random badges to show matching elements
                       const badgeOptions = [
                         sourceTitles[0]?.value,
@@ -3788,19 +3879,112 @@ function NewJobPageContent() {
                       )
                     })}
                   </div>
+                ) : isSearching ? (
+                  <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-pulse mt-4">
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="w-12 h-12 border-4 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-2" />
+                      <p className="text-slate-600 text-sm font-bold animate-pulse">{searchStatus}</p>
+                      <p className="text-slate-400 text-[12px] font-medium italic">Retrieving candidate records associated with Job ID {numericJobId || jobdivaId}...</p>
+                    </div>
+                  </div>
                 ) : (
                   <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
                     <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-6 shadow-inner">
-                      <ShieldCheck className="w-8 h-8 text-slate-300" />
+                      <Users className="w-8 h-8 text-slate-300" />
                     </div>
                     <p className="text-slate-600 text-base font-bold">No candidates found with the current filters.</p>
                     <p className="text-slate-400 text-[13px] mt-2 font-medium">Try broadening your criteria or adding more titles/skills.</p>
                   </div>
-                )
-              ) : (
-                <div className="h-4 flex items-center justify-center opacity-0 mt-4">
-                </div>
-              )}
+                )}
+
+                {/* Pagination Controls */}
+                {/* Pagination Controls */}
+                {candidates.length > 0 && (
+                    <div className="mt-8 flex items-center justify-between bg-white/70 backdrop-blur-xl p-3.5 px-5 rounded-2xl border border-slate-200/60 shadow-[0_8px_30px_rgb(0,0,0,0.04)] animate-in fade-in slide-in-from-bottom-2 duration-500 sticky bottom-6 z-10">
+                      
+                      {/* Context & Rows Selection */}
+                      <div className="flex items-center gap-4">
+                        <div className="flex items-center gap-2 text-[13px]">
+                          <span className="text-slate-500 font-medium">Showing</span>
+                          <span className="font-bold text-slate-800">
+                            {(currentPage - 1) * candidatesPerPage + 1}-{Math.min(currentPage * candidatesPerPage, candidates.length)}
+                          </span>
+                          <span className="text-slate-500 font-medium">
+                            of {candidates.length} {isSearching ? <span className="italic text-slate-400 font-normal ml-0.5">(sourcing...)</span> : 'candidates'}
+                          </span>
+                        </div>
+                        
+                        <div className="h-4 w-[1px] bg-slate-200/80"></div>
+                        
+                        <select
+                          value={candidatesPerPage}
+                          onChange={(e) => {
+                            setCandidatesPerPage(Number(e.target.value));
+                            setCurrentPage(1);
+                          }}
+                          className="bg-transparent text-[13px] font-bold text-slate-600 outline-none cursor-pointer border hover:bg-white/50 border-transparent hover:border-slate-200 rounded-md py-1 px-2 transition-all appearance-none pr-6 relative"
+                          style={{ backgroundImage: `url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 6px center', backgroundSize: '12px' }}
+                        >
+                          <option value={10}>10 / page</option>
+                          <option value={20}>20 / page</option>
+                          <option value={50}>50 / page</option>
+                        </select>
+                      </div>
+
+                      {/* Numbered Pagination & Prev/Next */}
+                      <div className="flex items-center gap-1.5" key={`pagination-${currentPage}-${totalPages}`}>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={currentPage === 1}
+                          onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                          className="h-8 px-2.5 rounded-lg text-slate-500 font-bold hover:bg-slate-100 disabled:opacity-30 transition-all flex items-center justify-center"
+                        >
+                          <ChevronLeft className="w-4 h-4 shrink-0" />
+                          <span className="sr-only">Previous</span>
+                        </Button>
+                        
+                        <div className="flex items-center gap-1 mx-0.5">
+                          {visiblePages.map((pageNum, idx) => (
+                            pageNum === "..." ? (
+                              <span key={`ellipsis-${idx}`} className="w-8 h-8 flex items-center justify-center text-slate-400 font-bold text-[14px]">
+                                ...
+                              </span>
+                            ) : (
+                              <button
+                                key={`page-${pageNum}`}
+                                disabled={currentPage === pageNum}
+                                onClick={() => setCurrentPage(pageNum as number)}
+                                className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[13px] transition-all duration-200 ${
+                                  currentPage === pageNum 
+                                    ? 'bg-[#6366f1] text-white shadow-md transform scale-105 cursor-default' 
+                                    : 'text-slate-600 hover:bg-slate-100/80 cursor-pointer'
+                                }`}
+                              >
+                                {pageNum}
+                              </button>
+                            )
+                          ))}
+                        </div>
+
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={currentPage === totalPages}
+                          onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                          className="h-8 px-2.5 rounded-lg text-slate-500 font-bold hover:bg-slate-100 disabled:opacity-30 transition-all flex items-center justify-center"
+                        >
+                          <ChevronRight className="w-4 h-4 shrink-0" />
+                          <span className="sr-only">Next</span>
+                        </Button>
+                      </div>
+                    </div>
+                )}
+              </>
+            ) : (
+              <div className="h-4 flex items-center justify-center opacity-0 mt-4">
+              </div>
+            )}
             </div>
 
             {/* Launch Footer */}
