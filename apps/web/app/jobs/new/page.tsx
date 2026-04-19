@@ -3786,12 +3786,11 @@ function NewJobPageContent() {
                                   href={candidate.source === 'LinkedIn' ? candidate.profile_url || '#' : '#'}
                                   target={candidate.source === 'LinkedIn' ? "_blank" : undefined}
                                   rel={candidate.source === 'LinkedIn' ? "noopener noreferrer" : undefined}
-                                  className={`text-[17px] font-bold text-slate-900 flex items-center gap-2 transition-colors group/name ${
+                                  className={`text-[17px] font-bold text-slate-900 flex items-center gap-3 transition-colors group/name ${
                                     candidate.source === 'LinkedIn' ? 'hover:text-[#1d4ed8]' : 
                                     candidate.source === 'JobDiva-TalentSearch' ? 'hover:text-[#c2410c]' : 
                                     'hover:text-[#6366f1]'
                                   }`}
-                                  className="group/name flex items-center gap-3"
                                   onClick={(e) => {
                                     if (candidate.source !== 'LinkedIn') {
                                       e.preventDefault();
