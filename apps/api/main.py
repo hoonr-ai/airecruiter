@@ -85,21 +85,6 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("🚀 Starting dynamic job status monitoring scheduler...")
     
-    # Ensure database columns exist
-    try:
-        from sqlalchemy import text
-        from core.engine import engine
-        
-        with engine.connect() as conn:
-            conn.execute(text("""
-                ALTER TABLE monitored_jobs 
-                ADD COLUMN IF NOT EXISTS resume_match_filters JSONB
-            """))
-            conn.commit()
-            logger.info("✅ Ensured resume_match_filters column exists in monitored_jobs")
-    except Exception as e:
-        logger.warning(f"Could not ensure resume_match_filters column: {e}")
-    
     scheduler.start()
     # Schedule first poll 5 minutes from now
     schedule_next_poll()
@@ -538,41 +523,17 @@ async def message_candidate(request: CandidateMessageRequest):
     else:
         raise HTTPException(status_code=400, detail=f"Messaging not supported for source: {request.source}")
 
-@app.get("/jobs/{jobdiva_id}/candidates")
-async def get_job_candidates(jobdiva_id: str):
+@app.get("/jobs/{job_id}/candidates")
+async def get_job_candidates(job_id: str):
     """
-    Fetches all sourced candidates tied to a specific job.
+    Fetches all sourced candidates tied to a specific job (by either job_id or jobdiva_id).
     """
     try:
-        from core.config import DATABASE_URL
-        import psycopg2
-        from psycopg2.extras import RealDictCursor
-        
-        # Convert job_id to jobdiva_id
-        jobdiva_id = None
-        with psycopg2.connect(DATABASE_URL) as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s", (job_id,))
-                result = cur.fetchone()
-                if result:
-                    jobdiva_id = result[0]
-        
-        if not jobdiva_id:
-            return {"candidates": [], "message": f"No JobDiva ID found for job {jobdiva_id}"}
-        
-        with psycopg2.connect(DATABASE_URL) as conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT id, jobdiva_id, candidate_id, name, email, skills, 
-                           experience_years, source, match_score, is_selected, created_at
-                    FROM sourced_candidates
-                    WHERE jobdiva_id = %s
-                    ORDER BY created_at DESC;
-                """, (jobdiva_id,))
-                candidates = cur.fetchall()
-                
+        from services.sourced_candidates_storage import sourced_candidates_storage
+        candidates = sourced_candidates_storage.get_candidates_for_job(job_id)
         return {"status": "success", "candidates": candidates}
     except Exception as e:
+        logger.error(f"Error fetching candidates for job {job_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/candidates/save")
@@ -1999,53 +1960,85 @@ async def get_monitored_job_data(job_id: str):
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        cursor.execute("""
-            SELECT job_id, title, enhanced_title, ai_description, selected_job_boards,
-                   recruiter_notes, recruiter_emails, selected_employment_types,
-                   work_authorization, screening_level, current_step, processing_status,
-                   job_requirements, ai_enhanced, created_at, updated_at
-            FROM monitored_jobs 
-            WHERE job_id = %s
-        """, (job_id,))
-        
-        row = cursor.fetchone()
+        # STAGE 1: DEFENSIVE MINI-QUERY (Just for the title)
+        # This will NOT crash even if new columns (skills/requirements) are missing
+        title_data = None
+        try:
+            cursor.execute("SELECT job_id, title, jobdiva_id, openings, max_allowed_submittals FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s", (job_id, job_id))
+            title_row = cursor.fetchone()
+            if title_row:
+                title_data = {
+                    "job_id": title_row[0], 
+                    "title": title_row[1], 
+                    "jobdiva_id": title_row[2],
+                    "openings": title_row[3],
+                    "max_allowed_submittals": title_row[4]
+                }
+        except Exception as e:
+            logger.warning(f"Mini-query failed: {e}")
+
+        # STAGE 2: FULL QUERY (May crash if schema is old)
+        try:
+            cursor.execute("""
+                SELECT job_id, title, enhanced_title, ai_description, selected_job_boards,
+                    recruiter_notes, recruiter_emails, selected_employment_types,
+                    work_authorization, screening_level, current_step, processing_status,
+                    job_requirements, ai_enhanced, created_at, updated_at,
+                    hard_skills, soft_skills, resume_match_filters, jobdiva_id,
+                    openings, max_allowed_submittals
+                FROM monitored_jobs 
+                WHERE job_id = %s OR jobdiva_id = %s
+            """, (job_id, job_id))
+            
+            row = cursor.fetchone()
+            
+            if row:
+                columns = ["job_id", "title", "enhanced_title", "ai_description", "selected_job_boards",
+                        "recruiter_notes", "recruiter_emails", "selected_employment_types", 
+                        "work_authorization", "screening_level", "current_step", "processing_status",
+                        "job_requirements", "ai_enhanced", "created_at", "updated_at",
+                        "hard_skills", "soft_skills", "resume_match_filters", "jobdiva_id",
+                        "openings", "max_allowed_submittals"]
+                data = dict(zip(columns, row))
+                cursor.close()
+                conn.close()
+                return {"status": "success", "job_id": job_id, "data": data}
+        except Exception as full_query_error:
+            logger.warning(f"Full query failed (likely schema mismatch): {full_query_error}")
+
+        # STAGE 3: IF FULL QUERY FAILED BUT MINI-QUERY WORKED, RETURN MINI-DATA
+        if title_data:
+            cursor.close()
+            conn.close()
+            return {
+                "status": "success",
+                "job_id": job_id,
+                "data": {
+                    "job_id": title_data["job_id"],
+                    "title": title_data["title"],
+                    "jobdiva_id": title_data["jobdiva_id"],
+                    "openings": title_data.get("openings"),
+                    "max_allowed_submittals": title_data.get("max_allowed_submittals"),
+                    "processing_status": "partially_loaded"
+                }
+            }
+
+        # STAGE 4: CHECK DRAFTS
+        cursor.execute("SELECT job_id, title, workflow_status FROM job_drafts WHERE job_id = %s OR draft_id::text = %s", (job_id, job_id))
+        draft_row = cursor.fetchone()
+        if draft_row:
+            data = {"job_id": draft_row[0], "title": f"{draft_row[1]} (draft)", "processing_status": draft_row[2] or "draft"}
+            cursor.close()
+            conn.close()
+            return {"status": "success", "job_id": job_id, "data": data}
+
         cursor.close()
         conn.close()
-        
-        if not row:
-            raise HTTPException(status_code=404, detail=f"Job {job_id} not found in monitored_jobs")
-        
-        # Column names for reference
-        columns = ["job_id", "title", "enhanced_title", "ai_description", "selected_job_boards",
-                   "recruiter_notes", "recruiter_emails", "selected_employment_types", 
-                   "work_authorization", "screening_level", "current_step", "processing_status",
-                   "job_requirements", "ai_enhanced", "created_at", "updated_at"]
-        
-        data = dict(zip(columns, row))
-        
-        # Parse JSON fields for better readability
-        for json_field in ["selected_job_boards", "recruiter_emails", "selected_employment_types", "job_requirements"]:
-            if data[json_field]:
-                try:
-                    data[json_field] = json.loads(data[json_field]) if isinstance(data[json_field], str) else data[json_field]
-                except:
-                    pass
-        
-        # Convert datetime objects to strings
-        if data.get("created_at"):
-            data["created_at"] = data["created_at"].isoformat()
-        if data.get("updated_at"):
-            data["updated_at"] = data["updated_at"].isoformat()
-        
-        logger.info(f"📊 Retrieved monitored_jobs data for {job_id}")
-        return {
-            "status": "success",
-            "job_id": job_id,
-            "data": data
-        }
+        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
         
     except Exception as e:
         logger.error(f"Get Monitored Job Data Error: {e}")
+        if isinstance(e, HTTPException): raise e
         raise HTTPException(status_code=500, detail=f"Failed to get data: {str(e)}")
 
 @app.post("/jobs/{job_id}/publish")

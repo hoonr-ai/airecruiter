@@ -347,40 +347,53 @@ class SourcedCandidatesStorage:
             return []
             
         try:
-            engine = sqlalchemy.create_engine(self.db_url)
-            with engine.connect() as conn:
-                self._ensure_table(conn)
+            import psycopg2
+            import psycopg2.extras
+            import json
+            
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            
+            # Robust query that handles the mapping logic in SQL
+            # Same logic as get_all_candidates but filtered by job_id
+            query = """
+                SELECT sc.* 
+                FROM sourced_candidates sc
+                LEFT JOIN monitored_jobs mj ON (sc.jobdiva_id = mj.job_id OR sc.jobdiva_id = mj.jobdiva_id)
+                WHERE mj.job_id = %s OR mj.jobdiva_id = %s OR sc.jobdiva_id = %s
+                ORDER BY sc.created_at DESC
+            """
+            
+            cur.execute(query, (jobdiva_id, jobdiva_id, jobdiva_id))
+            
+            candidates = []
+            for row in cur.fetchall():
+                c_dict = dict(row)
+                if c_dict.get('data'):
+                    try:
+                        data = c_dict['data']
+                        if isinstance(data, str):
+                            data = json.loads(data)
+                            c_dict['data'] = data
+                            
+                        # Uplift key metrics for UI consumption
+                        if isinstance(data, dict):
+                            if 'match_score' in data and c_dict.get('match_score') is None:
+                                c_dict['match_score'] = data['match_score']
+                            if 'engage_score' in data and c_dict.get('engage_score') is None:
+                                c_dict['engage_score'] = data['engage_score']
+                            if 'engage_status' in data and c_dict.get('engage_status') is None:
+                                c_dict['engage_status'] = data['engage_status']
+                    except Exception as e:
+                        print(f"Error parsing candidate data: {e}")
+                if c_dict.get('created_at'):
+                    c_dict['created_at'] = str(c_dict['created_at'])
+                candidates.append(c_dict)
                 
-                # First, find both IDs for this job to ensure we catch all candidates
-                # A job can be identified by its numeric job_id OR its jobdiva_id (ref code)
-                alt_ids = [jobdiva_id]
-                job_lookup = conn.execute(text("""
-                    SELECT job_id, jobdiva_id FROM monitored_jobs 
-                    WHERE job_id = :id OR jobdiva_id = :id
-                """), {"id": jobdiva_id}).fetchone()
-                
-                if job_lookup:
-                    alt_ids = [job_lookup[0], job_lookup[1]]
-                
-                result = conn.execute(text("""
-                    SELECT * FROM sourced_candidates 
-                    WHERE job_id IN :ids 
-                    ORDER BY created_at DESC
-                """), {"ids": tuple(alt_ids)})
-                
-                candidates = []
-                for row in result:
-                    c_dict = dict(zip(result.keys(), row))
-                    if c_dict.get('data'):
-                        try:
-                            if isinstance(c_dict['data'], str):
-                                c_dict['data'] = json.loads(c_dict['data'])
-                        except:
-                            pass
-                    if c_dict.get('created_at'):
-                        c_dict['created_at'] = str(c_dict['created_at'])
-                    candidates.append(c_dict)
-                return candidates
+            cur.close()
+            conn.close()
+            return candidates
         except Exception as e:
             print(f"Error retrieving candidates for job {jobdiva_id}: {e}")
             return []

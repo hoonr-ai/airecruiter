@@ -295,10 +295,13 @@ export default function DashboardPage() {
               {filteredJobs.length > 0 ? filteredJobs.map((job) => (
                 <tr key={job.id} className="hover:bg-slate-50/70 transition-colors group">
                   <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-[#4f46e5]">
-                    <div className="flex items-center gap-1.5">
+                    <Link 
+                      href={`/jobs/${job.jobdiva_id || job.id}/rankings`}
+                      className="flex items-center gap-1.5 hover:underline decoration-[#4f46e5]/40 underline-offset-4"
+                    >
                       {job.jobdiva_id || job.id}
                       {job.pairStatus !== 'Unpublished' && <LinkIcon className="h-3 w-3 text-[#4f46e5]/70" />}
-                    </div>
+                    </Link>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap sticky left-0 bg-white group-hover:bg-[#f6f8fb] transition-colors border-r border-slate-100/50 z-10 shadow-[5px_0_15px_-5px_rgba(0,0,0,0.03)]">
                     <div className="flex items-center gap-2">
