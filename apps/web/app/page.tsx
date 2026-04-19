@@ -176,6 +176,59 @@ export default function DashboardPage() {
     setFilteredJobs(filtered);
   };
 
+  const handleExport = () => {
+    const headers = [
+      "JobDiva ID",
+      "Job Title",
+      "Customer Name",
+      "Location / Zip",
+      "Priority",
+      "Program Duration",
+      "Max Allowed Submittals",
+      "Job Status",
+      "PAIR Status",
+      "Candidates Sourced",
+      "Resumes Shortlisted",
+      "Complete Submissions",
+      "Pass Submissions",
+      "PAIR External Subs",
+      "Feedback Completed",
+      "Time to First Pass",
+    ];
+    const escapeCSV = (val: any) => {
+      const str = val === null || val === undefined ? "" : String(val);
+      return str.includes(",") || str.includes('"') || str.includes("\n")
+        ? `"${str.replace(/"/g, '""')}"`
+        : str;
+    };
+    const rows = filteredJobs.map(job => [
+      escapeCSV(job.jobdiva_id || job.id),
+      escapeCSV(job.title),
+      escapeCSV(job.customer_name),
+      escapeCSV(job.location),
+      escapeCSV(job.priority),
+      escapeCSV(job.programDuration),
+      escapeCSV(job.maxAllowedSubmittals),
+      escapeCSV(job.status),
+      escapeCSV(job.pairStatus),
+      escapeCSV(job.candidatesSourced),
+      escapeCSV(job.resumesShortlisted),
+      escapeCSV(job.completeSubmissions),
+      escapeCSV(job.passSubmissions),
+      escapeCSV(job.pairExternalSubs),
+      escapeCSV(job.feedbackCompleted),
+      escapeCSV(job.timeToFirstPass ? `${job.timeToFirstPass} mins` : "—"),
+    ].join(","));
+    const csv = [headers.join(","), ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "jobs_export.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const getStatusColor = (status: string) => {
     const s = status.toLowerCase();
     if (s === 'open') return 'bg-[#dcfce7] text-[#166534]'; // Custom soft green
@@ -245,7 +298,7 @@ export default function DashboardPage() {
           />
         </div>
         <div className="flex items-center gap-3">
-          <Button variant="outline" className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-700 font-semibold text-[13px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all">
+          <Button variant="outline" className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-700 font-semibold text-[13px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all" onClick={handleExport}>
             <FileText className="h-4 w-4" />
             Export to Excel
           </Button>

@@ -2317,8 +2317,7 @@ async def remove_job_from_monitoring(job_id: str):
 @app.get("/jobs/monitored")
 async def get_monitored_jobs(include_archived: bool = False):
     """
-    Get all jobs currently being monitored from the database.
-    By default, excludes archived jobs unless include_archived=true is passed.
+    Get all jobs currently being monitored from the database with live candidate stats.
     """
     try:
         conn = get_db_connection()
@@ -2344,19 +2343,90 @@ async def get_monitored_jobs(include_archived: bool = False):
         rows = cursor.fetchall()
         
         jobs = {}
+        job_id_map = {}  # jid -> {"job_id": ..., "jobdiva_id": ...}
         for row in rows:
             job_data = dict(zip(columns, row))
-            # Format Job ID for JSON compatibility if needed
             jid = str(job_data.get("jobdiva_id") or job_data.get("job_id"))
             
-            # Convert Timestamps to ISO strings if they are datetime objects
-            if job_data.get("created_at") and hasattr(job_data["created_at"], "isoformat"): 
+            if job_data.get("created_at") and hasattr(job_data["created_at"], "isoformat"):
                 job_data["created_at"] = job_data["created_at"].isoformat()
-            if job_data.get("updated_at") and hasattr(job_data["updated_at"], "isoformat"): 
+            if job_data.get("updated_at") and hasattr(job_data["updated_at"], "isoformat"):
                 job_data["updated_at"] = job_data["updated_at"].isoformat()
             
             jobs[jid] = job_data
+            job_id_map[jid] = {
+                "job_id": str(job_data.get("job_id") or ""),
+                "jobdiva_id": str(job_data.get("jobdiva_id") or ""),
+            }
             
+        # --- Live candidate stats from sourced_candidates ---
+        try:
+            cursor.execute("""
+                SELECT
+                    sc.jobdiva_id AS sc_key,
+                    COUNT(*) AS candidates_sourced,
+                    COUNT(*) FILTER (
+                        WHERE (sc.data->>'match_score') IS NOT NULL
+                          AND (sc.data->>'match_score')::numeric >= 70
+                    ) AS resumes_shortlisted,
+                    COUNT(*) FILTER (
+                        WHERE (sc.data->>'match_score') IS NOT NULL
+                          AND (sc.data->>'match_score')::numeric >= 70
+                    ) AS pass_submissions,
+                    COUNT(*) FILTER (
+                        WHERE sc.data->>'engage_status' IS NOT NULL
+                          AND sc.data->>'engage_status' != ''
+                    ) AS complete_submissions,
+                    COUNT(*) FILTER (
+                        WHERE sc.data->>'engage_status' ILIKE '%%pass%%'
+                    ) AS pair_external_subs,
+                    COUNT(*) FILTER (
+                        WHERE sc.data->>'engage_completed_at' IS NOT NULL
+                          AND sc.data->>'engage_completed_at' != ''
+                    ) AS feedback_completed,
+                    COALESCE(ROUND(AVG(
+                        CASE
+                            WHEN sc.data->>'engage_completed_at' IS NOT NULL
+                             AND sc.data->>'engage_completed_at' != ''
+                            THEN EXTRACT(EPOCH FROM (
+                                (sc.data->>'engage_completed_at')::timestamp - sc.created_at
+                            )) / 60.0
+                        END
+                    )), 0)::int AS time_to_first_pass
+                FROM sourced_candidates sc
+                GROUP BY sc.jobdiva_id
+            """)
+            stats_cols = [desc[0] for desc in cursor.description]
+            stats_lookup = {}
+            for srow in cursor.fetchall():
+                sdata = dict(zip(stats_cols, srow))
+                sc_key = str(sdata.pop("sc_key", "") or "")
+                if sc_key:
+                    stats_lookup[sc_key] = sdata
+
+            for jid, job_data in jobs.items():
+                ids = job_id_map.get(jid, {})
+                stats = (
+                    stats_lookup.get(ids.get("jobdiva_id", ""))
+                    or stats_lookup.get(ids.get("job_id", ""))
+                    or stats_lookup.get(jid)
+                    or {}
+                )
+                job_data["candidates_sourced"]   = int(stats.get("candidates_sourced",   0) or 0)
+                job_data["resumes_shortlisted"]  = int(stats.get("resumes_shortlisted",  0) or 0)
+                job_data["complete_submissions"] = int(stats.get("complete_submissions", 0) or 0)
+                job_data["pass_submissions"]     = int(stats.get("pass_submissions",     0) or 0)
+                job_data["pair_external_subs"]   = int(stats.get("pair_external_subs",   0) or 0)
+                job_data["feedback_completed"]   = int(stats.get("feedback_completed",   0) or 0)
+                job_data["time_to_first_pass"]   = int(stats.get("time_to_first_pass",   0) or 0)
+
+        except Exception as stats_err:
+            logger.warning(f"Could not compute candidate stats: {stats_err}")
+            for job_data in jobs.values():
+                for field in ["candidates_sourced", "resumes_shortlisted", "complete_submissions",
+                              "pass_submissions", "pair_external_subs", "feedback_completed", "time_to_first_pass"]:
+                    job_data.setdefault(field, 0)
+
         cursor.close()
         conn.close()
         
