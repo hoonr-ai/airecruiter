@@ -38,6 +38,25 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 
+// Utility function to format dates
+const formatDate = (dateStr: string) => {
+  if (!dateStr) return "—";
+  try {
+    const date = new Date(dateStr);
+    if (isNaN(date.getTime())) return dateStr;
+    return date.toLocaleString('en-GB', { 
+      day: '2-digit', 
+      month: '2-digit', 
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true
+    }).toUpperCase();
+  } catch (e) {
+    return dateStr;
+  }
+};
+
 interface JobDetails {
   job_id: string;
   jobdiva_id?: string;
