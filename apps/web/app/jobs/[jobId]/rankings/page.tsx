@@ -40,6 +40,7 @@ import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 
 interface JobDetails {
   job_id: string;
+  jobdiva_id?: string;
   title: string;
   customer_name?: string;
   openings?: number;
