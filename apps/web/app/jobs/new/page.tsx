@@ -331,8 +331,14 @@ function NewJobPageContent() {
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const [candidatesPerPage, setCandidatesPerPage] = useState(10);
-  const totalPages = Math.max(1, Math.ceil(candidates.length / candidatesPerPage));
-  const paginatedCandidates = candidates.slice(
+  const sortedCandidates = [...candidates].sort((a, b) => {
+    const scoreA = a.match_score || 0;
+    const scoreB = b.match_score || 0;
+    return scoreB - scoreA;
+  });
+
+  const totalPages = Math.max(1, Math.ceil(sortedCandidates.length / candidatesPerPage));
+  const paginatedCandidates = sortedCandidates.slice(
     (currentPage - 1) * candidatesPerPage,
     currentPage * candidatesPerPage
   );
@@ -3112,6 +3118,8 @@ function NewJobPageContent() {
                               const event = JSON.parse(line);
                               if (event.type === "candidate") {
                                 setCandidates(prev => [...prev, event.data]);
+                              } else if (event.type === "stage") {
+                                setSearchStatus(event.data);
                               } else if (event.type === "summary") {
                                 console.log("✅ Search stream complete:", event.data);
                               } else if (event.type === "error") {
@@ -3775,31 +3783,57 @@ function NewJobPageContent() {
                             <div className="flex items-center justify-between gap-4">
                               <div className="flex items-center gap-3 min-w-0">
                                 <a
-                                  href="#"
-                                  className="text-[17px] font-bold text-slate-900 hover:text-[#6366f1] flex items-center gap-2 transition-colors group/name"
+                                  href={candidate.source === 'LinkedIn' ? candidate.profile_url || '#' : '#'}
+                                  target={candidate.source === 'LinkedIn' ? "_blank" : undefined}
+                                  rel={candidate.source === 'LinkedIn' ? "noopener noreferrer" : undefined}
+                                  className={`text-[17px] font-bold text-slate-900 flex items-center gap-2 transition-colors group/name ${
+                                    candidate.source === 'LinkedIn' ? 'hover:text-[#1d4ed8]' : 
+                                    candidate.source === 'JobDiva-TalentSearch' ? 'hover:text-[#c2410c]' : 
+                                    'hover:text-[#6366f1]'
+                                  }`}
+                                  className="group/name flex items-center gap-3"
                                   onClick={(e) => {
-                                    e.preventDefault();
-                                    handleViewResume(candidate);
+                                    if (candidate.source !== 'LinkedIn') {
+                                      e.preventDefault();
+                                      handleViewResume(candidate);
+                                    }
                                   }}
-                                  title="Click to view resume"
                                 >
-                                  {displayName}
-                                  <ArrowRight className="w-4 h-4 -rotate-45 text-slate-300 group-hover/name:text-[#6366f1] transition-colors" />
+                                   <span className="flex items-center gap-2">
+                                     <span className={`text-[17px] font-bold text-slate-900 transition-colors ${
+                                       candidate.source === 'LinkedIn' ? 'group-hover/name:text-[#1d4ed8]' : 
+                                       candidate.source === 'JobDiva-TalentSearch' ? 'group-hover/name:text-[#c2410c]' : 
+                                       'group-hover/name:text-[#6366f1]'
+                                     }`}>
+                                       {displayName}
+                                     </span>
+                                     <span 
+                                       className={`h-7 w-7 flex items-center justify-center border border-slate-200 bg-white text-slate-400 rounded-lg shadow-sm transition-all ${
+                                         candidate.source === 'LinkedIn' 
+                                           ? 'group-hover/name:border-[#bfdbfe] group-hover/name:bg-[#eff6ff] group-hover/name:text-[#1d4ed8]' : 
+                                         candidate.source === 'JobDiva-TalentSearch' 
+                                           ? 'group-hover/name:border-[#fed7aa] group-hover/name:bg-[#fff7ed] group-hover/name:text-[#c2410c]' : 
+                                         'group-hover/name:border-[#c7d2fe] group-hover/name:bg-[#f5f3ff] group-hover/name:text-[#6366f1]'
+                                       }`}
+                                       title={candidate.source === 'LinkedIn' ? "View LinkedIn Profile" : "Click to view resume"}
+                                     >
+                                       <ExternalLink className="w-3.5 h-3.5" />
+                                     </span>
+                                   </span>
                                 </a>
-                                <span className={`px-2.5 py-0.5 rounded-lg text-[10px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 border ${candidate.source === 'LinkedIn'
-                                    ? 'bg-violet-50 text-violet-700 border-violet-200'
+                                <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow-sm h-fit border ${candidate.source === 'LinkedIn'
+                                    ? 'bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]'
                                     : candidate.source === 'JobDiva-TalentSearch'
-                                      ? 'bg-orange-50 text-orange-700 border-orange-200'
+                                      ? 'bg-[#fff7ed] text-[#c2410c] border-[#fed7aa]'
                                       : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]'
                                   }`}>
                                   {candidate.source === 'LinkedIn' ? <Linkedin className="w-3 h-3 fill-current" /> : candidate.source === 'JobDiva-TalentSearch' ? <Zap className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
                                   {candidate.source || "JobDiva"}
                                 </span>
-                                
                               </div>
 
-                              <div className="flex items-center gap-2 shrink-0">
-                                {(candidate.match_score !== undefined && candidate.match_score > 0) && (
+                              <div className="flex items-center gap-3 shrink-0">
+                                {candidate.match_score !== undefined && (
                                   <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center shadow-sm h-fit border ${
                                     candidate.match_score >= 80 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 
                                     candidate.match_score >= 60 ? 'bg-amber-50 text-amber-700 border-amber-200' : 
@@ -3808,61 +3842,23 @@ function NewJobPageContent() {
                                     {candidate.match_score}% Match
                                   </span>
                                 )}
-                                
-                                {candidate.profile_url && (
-                                  <Button
-                                    variant="outline"
-                                    size="sm"
-                                    asChild
-                                    className="h-8 w-8 p-0 border-slate-200 hover:bg-[#f5f3ff] text-slate-400 hover:text-[#6366f1] hover:border-[#c7d2fe] rounded-lg transition-all"
-                                    title="Open Profile"
-                                  >
-                                    <a href={candidate.profile_url} target="_blank" rel="noopener noreferrer">
-                                      <ExternalLink className="w-4 h-4" />
-                                    </a>
-                                  </Button>
-                                )}
                                 <Button
                                   size="sm"
-                                  className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center gap-2"
-                                  onClick={() => {
-                                    setSelectedCandidateForEmail({
-                                      name: displayName,
-                                      email: candidate.email || "Email not available",
-                                      firstName: candidate.firstName || displayName,
-                                      lastName: candidate.lastName
-                                    });
-                                    setMessageModalOpen(true);
-                                  }}
-                                >
-                                  <Mail className="w-3.5 h-3.5" />
-                                  Email
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center gap-2"
-                                >
-                                  Engage
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center gap-2"
-                                >
-                                  Assess
-                                </Button>
-                                <Button
-                                  size="sm"
-                                  className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center gap-2"
+                                  className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 min-w-[70px]"
                                   onClick={() => {
                                     setSelectedCandidateForDetails({
                                       name: displayName,
                                       profileUrl: candidate.profile_url,
                                       imageUrl: candidate.image_url,
-                                      details: `${candidate.title || "Target Role"} • ${3 + (idx % 5)} yrs exp • ${candidate.city ? `${candidate.city}, ${candidate.state}` : "Location unspecified"}`,
+                                      jobTitle: candidate.title || candidate.headline || "",
+                                      location: candidate.location || (candidate.city ? `${candidate.city}, ${candidate.state}` : ""),
+                                      experienceYears: candidate.experience_years || candidate.yearsExtracted || candidate.enhanced_info?.years_of_experience || null,
                                       tags: badgeOptions,
                                       matchScore: candidate.match_score,
                                       missingSkills: candidate.missing_skills,
-                                      explainability: candidate.explainability
+                                      explainability: candidate.explainability,
+                                      matchScoreDetails: candidate.match_score_details,
+                                      matchedSkills: candidate.matched_skills,
                                     });
                                     setDetailsModalOpen(true);
                                   }}
@@ -4025,12 +4021,6 @@ function NewJobPageContent() {
 
                     const selectedCount = candidatesPayload.filter(c => c.is_selected).length;
                     console.log(`🚀 Launching PAIR with ${selectedCount} selected candidates out of ${candidatesPayload.length} total`);
-                    console.log('Payload preview:', candidatesPayload.slice(0, 2).map(c => ({
-                      name: c.name,
-                      candidate_id: c.candidate_id,
-                      is_selected: c.is_selected,
-                      has_resume: !!c.resume_text
-                    })));
 
                     const apiUrl = process.env.NEXT_PUBLIC_API_URL;
                     const response = await fetch(`${apiUrl}/candidates/save`, {
@@ -4043,23 +4033,21 @@ function NewJobPageContent() {
                     });
 
                     const result = await response.json();
-                    console.log('Save candidates result:', result);
 
                     if (response.ok && result.status === 'success') {
                       const saved = result.saved_count || selectedCount;
-                      showToast(`Successfully saved ${saved} candidates to Master Pool! 🎉`, "success");
+                      showToast(`${saved} candidates saved to Master Pool — redirecting...`, "success");
+                      setTimeout(() => {
+                        router.push(`/candidates`);
+                      }, 1500);
                     } else {
                       console.error('Save failed:', result);
                       showToast(`Error saving candidates: ${result.message || 'Unknown error'}`, "error");
                     }
                   } catch (e) {
                     console.error("Failed to save candidates:", e);
-                    showToast("Failed to save candidates", "error");
+                    showToast("Failed to save candidates. Please try again.", "error");
                   }
-
-                  setTimeout(() => {
-                    router.push(`/candidates`);
-                  }, 2000);
                 }}
                 disabled={!hasSearched || isSearching || selectedCandidates.size === 0}
               >
@@ -4286,10 +4274,14 @@ function NewJobPageContent() {
           candidateName={selectedCandidateForDetails.name}
           profileUrl={selectedCandidateForDetails.profileUrl}
           imageUrl={selectedCandidateForDetails.imageUrl}
-          details={selectedCandidateForDetails.details}
+          jobTitle={selectedCandidateForDetails.jobTitle}
+          location={selectedCandidateForDetails.location}
+          experienceYears={selectedCandidateForDetails.experienceYears}
           tags={selectedCandidateForDetails.tags}
           matchScore={selectedCandidateForDetails.matchScore}
           missingSkills={selectedCandidateForDetails.missingSkills}
+          matchedSkills={selectedCandidateForDetails.matchedSkills}
+          matchScoreDetails={selectedCandidateForDetails.matchScoreDetails}
           explainability={selectedCandidateForDetails.explainability}
           onClose={() => {
             setDetailsModalOpen(false);
