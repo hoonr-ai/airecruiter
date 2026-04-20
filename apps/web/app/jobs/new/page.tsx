@@ -325,6 +325,11 @@ function NewJobPageContent() {
   const [booleanStringOpen, setBooleanStringOpen] = useState(false);
   const [generatedBoolean, setGeneratedBoolean] = useState("");
   const [isRefreshingBoolean, setIsRefreshingBoolean] = useState(false);
+  const [booleanUserEdited, setBooleanUserEdited] = useState(false);
+  const [booleanAttempts, setBooleanAttempts] = useState<{ query: string; label: string }[]>([]);
+  const MAX_BOOLEAN_ATTEMPTS = 4;
+  const QUALIFIED_SCORE_THRESHOLD = 70;
+  const QUALIFIED_TARGET_COUNT = 50;
   const [candidates, setCandidates] = useState<any[]>([]);
   const [selectedCandidates, setSelectedCandidates] = useState<Set<string>>(new Set());
   const [searchStatus, setSearchStatus] = useState("Fetching applicants...");
@@ -332,11 +337,35 @@ function NewJobPageContent() {
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const [candidatesPerPage, setCandidatesPerPage] = useState(10);
-  const sortedCandidates = [...candidates].sort((a, b) => {
-    const scoreA = a.match_score || 0;
-    const scoreB = b.match_score || 0;
-    return scoreB - scoreA;
-  });
+  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "linkedin-unipile" | "linkedin-exa" | "dice">("all");
+
+  const matchesSourceFilter = (cand: any) => {
+    const src = String(cand.source || "").toLowerCase();
+    switch (sourceFilter) {
+      case "all": return true;
+      case "jobdiva": return src.startsWith("jobdiva");
+      case "linkedin-unipile": return src === "linkedin-unipile" || src === "linkedin";
+      case "linkedin-exa": return src === "linkedin-exa";
+      case "dice": return src === "dice";
+      default: return true;
+    }
+  };
+  const sourceCounts = candidates.reduce((acc: Record<string, number>, c) => {
+    const s = String(c.source || "").toLowerCase();
+    if (s.startsWith("jobdiva")) acc["jobdiva"] = (acc["jobdiva"] || 0) + 1;
+    else if (s === "linkedin-unipile" || s === "linkedin") acc["linkedin-unipile"] = (acc["linkedin-unipile"] || 0) + 1;
+    else if (s === "linkedin-exa") acc["linkedin-exa"] = (acc["linkedin-exa"] || 0) + 1;
+    else if (s === "dice") acc["dice"] = (acc["dice"] || 0) + 1;
+    return acc;
+  }, {});
+
+  const sortedCandidates = [...candidates]
+    .filter(matchesSourceFilter)
+    .sort((a, b) => {
+      const scoreA = a.match_score || 0;
+      const scoreB = b.match_score || 0;
+      return scoreB - scoreA;
+    });
 
   const totalPages = Math.max(1, Math.ceil(sortedCandidates.length / candidatesPerPage));
   const paginatedCandidates = sortedCandidates.slice(
@@ -2687,6 +2716,7 @@ function NewJobPageContent() {
   const resolvedGeneratedBoolean = generatedBoolean || buildGeneratedBooleanString();
 
   useEffect(() => {
+    if (booleanUserEdited) return;
     setIsRefreshingBoolean(true);
     const timeoutId = window.setTimeout(() => {
       setGeneratedBoolean(buildGeneratedBooleanString());
@@ -2694,7 +2724,209 @@ function NewJobPageContent() {
     }, 150);
 
     return () => window.clearTimeout(timeoutId);
-  }, [sourceTitles, sourceSkills, sourceLocations, sourceCompanies, sourceKeywords, resumeMatchFilters, jobTitle]);
+  }, [sourceTitles, sourceSkills, sourceLocations, sourceCompanies, sourceKeywords, resumeMatchFilters, jobTitle, booleanUserEdited]);
+
+  const relaxBooleanString = (input: string, tier: number): { query: string; label: string } => {
+    let query = input;
+    let label = "";
+    if (tier === 1) {
+      query = query.replace(/within\s+(\d+)\s+mi/gi, (_m, n) => `within ${Math.max(50, Number(n) * 2)} mi`);
+      query = query.replace(/\s+AND\s+"\d+\+\s*years?"/gi, "");
+      label = "Widened radius · dropped year thresholds";
+    } else if (tier === 2) {
+      query = query.replace(/within\s+(\d+)\s+mi/gi, (_m, n) => `within ${Math.max(100, Number(n) * 2)} mi`);
+      query = query.replace(/\(([^()]+?)\)/g, (_m, inner) => {
+        const parts = String(inner).split(/\s+AND\s+/i).map((p: string) => p.trim()).filter(Boolean);
+        return parts.length > 1 ? `(${parts.join(" OR ")})` : `(${inner})`;
+      });
+      query = query.replace(/\s+AND\s+recent/gi, "");
+      label = "Radius widened further · required clauses OR-joined";
+    } else {
+      query = query.replace(/\s+NOT\s+\([^)]*\)/gi, "");
+      const andParts = query.split(/\s+AND\s+/i).map(p => p.trim()).filter(Boolean);
+      const locationPart = andParts.find(p => /within\s+\d+\s+mi/i.test(p));
+      const rolePart = andParts.find(p => !/within\s+\d+\s+mi/i.test(p) && !/"\d+\+\s*years?"/i.test(p));
+      const keep = [rolePart, locationPart].filter(Boolean) as string[];
+      query = keep.length ? keep.join(" AND ") : andParts[0] || query;
+      label = "Kept only role + location";
+    }
+    return { query: query.replace(/\s+/g, " ").trim(), label };
+  };
+
+  const countQualified = (list: any[]) =>
+    list.filter(c => (c.match_score || 0) >= QUALIFIED_SCORE_THRESHOLD).length;
+
+  const buildSearchPayload = (booleanString: string) => {
+    const titleCriteria = sourceTitles.map(t => ({
+      value: t.value || "Title",
+      match_type: t.matchType || "must",
+      years: t.years || 0,
+      recent: t.recent || false,
+      similar_terms: t.selectedSimilarTitles || []
+    }));
+    const skillCriteria = sourceSkills.map(s => ({
+      value: s.value || "Skill",
+      match_type: s.matchType || "must",
+      years: s.years || 0,
+      recent: s.recent || false,
+      similar_terms: s.selectedSimilarSkills || []
+    }));
+    const primaryLocation = sourceLocations[0];
+    const withinMiles = primaryLocation?.radius?.match(/(\d+)/)?.[1]
+      ? Number(primaryLocation.radius.match(/(\d+)/)?.[1])
+      : 25;
+    const skillsToSearch: any[] = [];
+    sourceTitles.forEach(t => {
+      if (t.matchType !== 'exclude') {
+        skillsToSearch.push({ value: t.value || "Title", priority: t.matchType === 'must' ? 'Must Have' : 'Flexible', years_experience: t.years || 0 });
+      }
+    });
+    sourceSkills.forEach(s => {
+      if (s.matchType !== 'exclude') {
+        skillsToSearch.push({ value: s.value || "Skill", priority: s.matchType === 'must' ? 'Must Have' : 'Flexible', years_experience: s.years || 0 });
+      }
+    });
+    if (titleCriteria.length === 0 && skillCriteria.length === 0 && skillsToSearch.length === 0) {
+      skillsToSearch.push({ value: jobTitle || "Role", priority: "Flexible", years_experience: 0 });
+    }
+    const selectedSourcesArray = Object.keys(searchSources)
+      .filter(k => (searchSources as any)[k])
+      .map(k => {
+        if (k === 'jobdiva') return 'JobDiva';
+        if (k === 'jobdiva_hotlist') return 'JobDivaHotlist';
+        if (k === 'linkedin') return 'LinkedIn';
+        if (k === 'dice') return 'Dice';
+        if (k === 'exa') return 'Exa';
+        return k;
+      });
+    return {
+      job_id: numericJobId || jobdivaId,
+      title_criteria: titleCriteria,
+      skill_criteria: skillCriteria,
+      keywords: sourceKeywords,
+      companies: sourceCompanies,
+      resume_match_filters: resumeMatchFilters.filter(f => f.active).map(f => ({ category: f.category, value: f.value, active: f.active })),
+      skills: skillsToSearch,
+      location: primaryLocation?.value || "",
+      within_miles: withinMiles,
+      sources: selectedSourcesArray,
+      boolean_string: booleanString,
+      page: 1,
+      page_size: 100
+    };
+  };
+
+  const runSearchStream = async (booleanString: string, mode: "replace" | "append"): Promise<any[]> => {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+    const payload = buildSearchPayload(booleanString);
+    const response = await fetch(`${apiUrl}/candidates/search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    if (!response.ok || !response.body) {
+      console.error("Search failed:", response.status);
+      if (mode === "replace") setCandidates([]);
+      return [];
+    }
+    if (mode === "replace") {
+      setCandidates([]);
+      setCurrentPage(1);
+    }
+    const seenIds = new Set<string>();
+    if (mode === "append") {
+      candidates.forEach(c => {
+        const id = String(c.candidate_id || c.id || "");
+        if (id) seenIds.add(id);
+      });
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let runList: any[] = [];
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const event = JSON.parse(line);
+          if (event.type === "candidate") {
+            const id = String(event.data.candidate_id || event.data.id || "");
+            if (id && seenIds.has(id)) continue;
+            if (id) seenIds.add(id);
+            runList.push(event.data);
+            setCandidates(prev => [...prev, event.data]);
+          } else if (event.type === "stage") {
+            setSearchStatus(event.data);
+          } else if (event.type === "summary") {
+            console.log("✅ Search stream complete:", event.data);
+          } else if (event.type === "error") {
+            console.error("❌ Stream error:", event.message);
+          }
+        } catch (e) {
+          console.error("Failed to parse stream line:", line, e);
+        }
+      }
+    }
+    return runList;
+  };
+
+  const handleRunSearch = async () => {
+    setIsSearching(true);
+    setHasSearched(true);
+    try {
+      const initial = resolvedGeneratedBoolean;
+      setGeneratedBoolean(initial);
+      const attempts: { query: string; label: string }[] = [{ query: initial, label: "PAIR generated" }];
+      setBooleanAttempts(attempts);
+      setSearchStatus("Searching candidates...");
+      const firstRun = await runSearchStream(initial, "replace");
+      let accumulated = [...firstRun];
+
+      let currentAttempts = attempts;
+      while (currentAttempts.length < MAX_BOOLEAN_ATTEMPTS) {
+        const qualified = countQualified(accumulated);
+        if (qualified >= QUALIFIED_TARGET_COUNT) break;
+        const relaxed = relaxBooleanString(currentAttempts[currentAttempts.length - 1].query, currentAttempts.length);
+        if (relaxed.query === currentAttempts[currentAttempts.length - 1].query) break;
+        currentAttempts = [...currentAttempts, { query: relaxed.query, label: relaxed.label }];
+        setBooleanAttempts(currentAttempts);
+        setGeneratedBoolean(relaxed.query);
+        setSearchStatus(`Only ${qualified}/${QUALIFIED_TARGET_COUNT} strong matches — relaxing boolean (attempt ${currentAttempts.length}/${MAX_BOOLEAN_ATTEMPTS})...`);
+        const nextRun = await runSearchStream(relaxed.query, "append");
+        accumulated = [...accumulated, ...nextRun];
+      }
+    } catch (error) {
+      console.error("Failed to search candidates:", error);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const handleExtendBoolean = async () => {
+    if (isSearching) return;
+    if (booleanAttempts.length >= MAX_BOOLEAN_ATTEMPTS) return;
+    const base = resolvedGeneratedBoolean;
+    const relaxed = relaxBooleanString(base, Math.max(1, booleanAttempts.length));
+    const nextAttempts = booleanAttempts.length
+      ? [...booleanAttempts, { query: relaxed.query, label: relaxed.label }]
+      : [{ query: base, label: "PAIR generated" }, { query: relaxed.query, label: relaxed.label }];
+    setBooleanAttempts(nextAttempts);
+    setGeneratedBoolean(relaxed.query);
+    setBooleanUserEdited(true);
+    setIsSearching(true);
+    setHasSearched(true);
+    try {
+      setSearchStatus(`Extending search with more lenient boolean (attempt ${nextAttempts.length}/${MAX_BOOLEAN_ATTEMPTS})...`);
+      await runSearchStream(relaxed.query, "append");
+    } finally {
+      setIsSearching(false);
+    }
+  };
 
   const addScreenQuestion = () => {
     const newQuestion: ScreenQuestion = {
@@ -2994,155 +3226,7 @@ function NewJobPageContent() {
                 </div>
                 <Button
                   className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
-                  onClick={async () => {
-                    setIsSearching(true);
-                    setHasSearched(true);
-
-                    try {
-                      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-
-                      // Enhanced format: separate criteria arrays
-                      const titleCriteria = sourceTitles
-                        .map(t => ({
-                          value: t.value || "Title",
-                          match_type: t.matchType || "must",
-                          years: t.years || 0,
-                          recent: t.recent || false,
-                          similar_terms: t.selectedSimilarTitles || []
-                        }));
-
-                      const skillCriteria = sourceSkills
-                        .map(s => ({
-                          value: s.value || "Skill",
-                          match_type: s.matchType || "must",
-                          years: s.years || 0,
-                          recent: s.recent || false,
-                          similar_terms: s.selectedSimilarSkills || []
-                        }));
-
-                      const primaryLocation = sourceLocations[0];
-                      const withinMiles = primaryLocation?.radius?.match(/(\d+)/)?.[1]
-                        ? Number(primaryLocation.radius.match(/(\d+)/)?.[1])
-                        : 25;
-
-                      // Legacy format fallback (for compatibility)
-                      const skillsToSearch = [];
-                      sourceTitles.forEach(t => {
-                        if (t.matchType !== 'exclude') {
-                          skillsToSearch.push({
-                            value: t.value || "Title",
-                            priority: t.matchType === 'must' ? 'Must Have' : 'Flexible',
-                            years_experience: t.years || 0
-                          });
-                        }
-                      });
-
-                      sourceSkills.forEach(s => {
-                        if (s.matchType !== 'exclude') {
-                          skillsToSearch.push({
-                            value: s.value || "Skill",
-                            priority: s.matchType === 'must' ? 'Must Have' : 'Flexible',
-                            years_experience: s.years || 0
-                          });
-                        }
-                      });
-
-                      // Ensure we search something
-                      if (titleCriteria.length === 0 && skillCriteria.length === 0 && skillsToSearch.length === 0) {
-                        skillsToSearch.push({ value: jobTitle || "Role", priority: "Flexible", years_experience: 0 });
-                      }
-
-                      const selectedSourcesArray = Object.keys(searchSources)
-                        .filter(k => (searchSources as any)[k])
-                        .map(k => {
-                          if (k === 'jobdiva') return 'JobDiva';
-                          if (k === 'jobdiva_hotlist') return 'JobDivaHotlist';
-                          if (k === 'linkedin') return 'LinkedIn';
-                          if (k === 'dice') return 'Dice';
-                          if (k === 'exa') return 'Exa';
-                          return k;
-                        });
-
-                      const booleanString = buildGeneratedBooleanString();
-                      setGeneratedBoolean(booleanString);
-                      setSearchStatus("Searching JobDiva applicants, then Talent Search if fewer than 3 match...");
-
-                      const searchPayload = {
-                        job_id: numericJobId || jobdivaId,
-                        // Enhanced criteria (new format)
-                        title_criteria: titleCriteria,
-                        skill_criteria: skillCriteria,
-                        keywords: sourceKeywords,
-                        companies: sourceCompanies,
-                        resume_match_filters: resumeMatchFilters
-                          .filter(filter => filter.active)
-                          .map(filter => ({
-                            category: filter.category,
-                            value: filter.value,
-                            active: filter.active
-                          })),
-                        // Legacy compatibility  
-                        skills: skillsToSearch,
-                        location: primaryLocation?.value || "",
-                        within_miles: withinMiles,
-                        sources: selectedSourcesArray,
-                        boolean_string: booleanString,
-                        page: 1,
-                        page_size: 100
-                      };
-
-                      console.log("🚀 Enhanced search payload:", searchPayload);
-
-                      const response = await fetch(`${apiUrl}/candidates/search`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(searchPayload)
-                      });
-
-                      if (response.ok && response.body) {
-                        const reader = response.body.getReader();
-                        const decoder = new TextDecoder();
-                        let buffer = "";
-                        setCandidates([]); // Clear existing results for new search
-                        setCurrentPage(1); // Reset to first page
-
-                        while (true) {
-                          const { done, value } = await reader.read();
-                          if (done) break;
-
-                          buffer += decoder.decode(value, { stream: true });
-                          const lines = buffer.split("\n");
-                          buffer = lines.pop() || "";
-
-                          for (const line of lines) {
-                            if (!line.trim()) continue;
-                            try {
-                              const event = JSON.parse(line);
-                              if (event.type === "candidate") {
-                                setCandidates(prev => [...prev, event.data]);
-                              } else if (event.type === "stage") {
-                                setSearchStatus(event.data);
-                              } else if (event.type === "summary") {
-                                console.log("✅ Search stream complete:", event.data);
-                              } else if (event.type === "error") {
-                                console.error("❌ Stream error:", event.message);
-                              }
-                            } catch (e) {
-                              console.error("Failed to parse stream line:", line, e);
-                            }
-                          }
-                        }
-                      } else {
-                        setCandidates([]);
-                        console.error("❌ Search failed:", response.status);
-                      }
-                    } catch (error) {
-                      console.error("Failed to search candidates:", error);
-                      setCandidates([]);
-                    } finally {
-                      setIsSearching(false);
-                    }
-                  }}
+                  onClick={handleRunSearch}
                   disabled={isSearching}
                 >
                   {isSearching ? (
@@ -3618,15 +3702,55 @@ function NewJobPageContent() {
                     {booleanStringOpen && (
                       <div className="px-6 pb-6 pt-1 animate-in fade-in slide-in-from-top-1">
                         {!isRefreshingBoolean ? (
-                          <div className="p-4 bg-white border border-slate-200 rounded-xl overflow-x-auto shadow-inner">
-                            <div className="flex items-center justify-between mb-2">
-                              <span className="text-[11px] font-bold uppercase tracking-widest text-[#5b21b6] bg-[#f5f3ff] px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">
-                                PAIR Generated
-                              </span>
+                          <div className="p-4 bg-white border border-slate-200 rounded-xl shadow-inner">
+                            <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-[11px] font-bold uppercase tracking-widest text-[#5b21b6] bg-[#f5f3ff] px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">
+                                  {booleanUserEdited ? "Edited" : "PAIR Generated"}
+                                </span>
+                                {booleanAttempts.length > 0 && (
+                                  <span className="text-[11px] font-bold uppercase tracking-widest text-slate-500 bg-slate-50 px-2.5 py-0.5 rounded-full border border-slate-200">
+                                    Attempt {booleanAttempts.length}/{MAX_BOOLEAN_ATTEMPTS}
+                                  </span>
+                                )}
+                                {booleanAttempts.length > 1 && (
+                                  <span className="text-[11px] font-medium text-slate-500">
+                                    {booleanAttempts[booleanAttempts.length - 1].label}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-2">
+                                {booleanUserEdited && (
+                                  <button
+                                    onClick={() => {
+                                      setBooleanUserEdited(false);
+                                      setGeneratedBoolean(buildGeneratedBooleanString());
+                                    }}
+                                    className="text-[11px] font-bold text-slate-500 hover:text-[#6366f1] px-2.5 py-1 rounded-md border border-slate-200 bg-white hover:bg-slate-50 transition-colors"
+                                  >
+                                    Reset
+                                  </button>
+                                )}
+                                <button
+                                  onClick={handleExtendBoolean}
+                                  disabled={isSearching || booleanAttempts.length >= MAX_BOOLEAN_ATTEMPTS}
+                                  className="text-[11px] font-bold text-[#6366f1] hover:text-white hover:bg-[#6366f1] px-2.5 py-1 rounded-md border border-[#ddd6fe] bg-[#f5f3ff] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                  title="Relax the boolean string and search again, appending new candidates"
+                                >
+                                  Make more lenient
+                                </button>
+                              </div>
                             </div>
-                            <code className="text-[13px] font-mono font-medium text-slate-700 whitespace-pre leading-relaxed tracking-tight break-all">
-                              {resolvedGeneratedBoolean}
-                            </code>
+                            <textarea
+                              value={resolvedGeneratedBoolean}
+                              onChange={(e) => {
+                                setBooleanUserEdited(true);
+                                setGeneratedBoolean(e.target.value);
+                              }}
+                              rows={Math.min(8, Math.max(2, resolvedGeneratedBoolean.split("\n").length))}
+                              className="w-full resize-y text-[13px] font-mono font-medium text-slate-700 leading-relaxed tracking-tight bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30 focus:border-[#6366f1]"
+                              spellCheck={false}
+                            />
                           </div>
                         ) : (
                           <div className="p-4 bg-white border border-[#ddd6fe] rounded-xl overflow-x-auto shadow-inner flex items-center justify-center py-6 gap-3">
@@ -3659,9 +3783,32 @@ function NewJobPageContent() {
                   </h4>
                   <p className={`text-slate-500 text-[13px] font-medium tracking-tight transition-all ${isSearching ? 'animate-pulse text-[#6366f1]' : ''}`}>
                     {hasSearched ? (
-                        isSearching ? `Sourcing candidates... ${candidates.length} found so far` : `${candidates.length} candidates found`
+                        isSearching ? `Sourcing candidates... ${candidates.length} found so far` : `${candidates.length} candidates found${sourceFilter !== "all" ? ` · showing ${sortedCandidates.length}` : ""}`
                     ) : 'Run a search to find candidates.'}
                   </p>
+                  {candidates.length > 0 && (
+                    <div className="flex items-center gap-1.5 mt-3 flex-wrap">
+                      {([
+                        { id: "all", label: "All", count: candidates.length },
+                        { id: "jobdiva", label: "JobDiva", count: sourceCounts["jobdiva"] || 0 },
+                        { id: "linkedin-unipile", label: "LinkedIn-Unipile", count: sourceCounts["linkedin-unipile"] || 0 },
+                        { id: "linkedin-exa", label: "LinkedIn-Exa", count: sourceCounts["linkedin-exa"] || 0 },
+                        { id: "dice", label: "Dice", count: sourceCounts["dice"] || 0 }
+                      ] as const).map(pill => {
+                        if (pill.id !== "all" && pill.count === 0) return null;
+                        const active = sourceFilter === pill.id;
+                        return (
+                          <button
+                            key={pill.id}
+                            onClick={() => { setSourceFilter(pill.id as any); setCurrentPage(1); }}
+                            className={`px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider border transition-colors ${active ? 'bg-[#6366f1] text-white border-[#6366f1]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+                          >
+                            {pill.label} <span className={`ml-1 font-medium ${active ? 'text-white/80' : 'text-slate-400'}`}>{pill.count}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
                 {candidates.length > 0 && (
                   <div className="flex items-center gap-2">
