@@ -273,6 +273,9 @@ function NewJobPageContent() {
   const [botIntroduction, setBotIntroduction] = useState("");
   const [screenQuestions, setScreenQuestions] = useState<ScreenQuestion[]>([]);
   const [questionIdCounter, setQuestionIdCounter] = useState(1);
+  // Guard: true once questions have been initialised (either from DB or from rubric).
+  // Prevents re-generation when the recruiter adds/deletes a question or returns to Step 4.
+  const screenQuestionsInitializedRef = useRef(false);
 
   // Step 5 - Sourcing state
   const [searchSources, setSearchSources] = useState({
@@ -427,6 +430,8 @@ function NewJobPageContent() {
             if (rData.screen_questions?.length) {
               setScreenQuestions(rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1 })));
               setQuestionIdCounter(rData.screen_questions.length + 1);
+              // Mark as initialised so we don't overwrite with rubric defaults later
+              screenQuestionsInitializedRef.current = true;
             }
             if (rData.bot_introduction) {
               setBotIntroduction(rData.bot_introduction);
@@ -2277,6 +2282,8 @@ function NewJobPageContent() {
 
 
   const initializeScreenQuestionsFromRubric = () => {
+    // Skip if questions were already loaded from DB or the recruiter has already edited them
+    if (screenQuestionsInitializedRef.current) return;
     if (!jobData) return;
 
     const location = `${jobData.city || ""}, ${jobData.state || ""}`.trim().replace(/^, |, $/g, "");
@@ -2344,6 +2351,8 @@ function NewJobPageContent() {
 
     setScreenQuestions(mergedQuestions);
     setQuestionIdCounter(mergedQuestions.length + 1);
+    // Mark as initialised so subsequent adds/deletes or return visits don't overwrite
+    screenQuestionsInitializedRef.current = true;
   };
 
   const initializeSourceFromRubric = () => {
@@ -2510,7 +2519,9 @@ function NewJobPageContent() {
     if (currentStep !== 4) return;
 
     syncStepFourData();
-  }, [currentStep, rubricData, jobData, screenQuestions.length]);
+    // NOTE: screenQuestions.length intentionally omitted — adding/deleting a question
+    // must NOT re-trigger rubric initialisation and overwrite recruiter edits.
+  }, [currentStep, rubricData, jobData]);
 
   useEffect(() => {
     if (currentStep !== 5) return;
