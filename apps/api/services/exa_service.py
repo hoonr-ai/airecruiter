@@ -79,7 +79,7 @@ class ExaService:
                         "city": location, # We infer string from query
                         "state": "",
                         "title": title,
-                        "source": "Exa",
+                        "source": "LinkedIn-Exa",
                         "match_score": 0,
                         "profile_url": url,
                         "image_url": "",

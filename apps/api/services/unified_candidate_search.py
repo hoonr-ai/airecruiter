@@ -172,7 +172,8 @@ class UnifiedCandidateSearch:
                 async def _process_external_single(cand):
                     async with semaphore:
                         cand["source"] = source_type
-                        if source_type == "LinkedIn":
+                        is_linkedin = source_type.startswith("LinkedIn")
+                        if source_type == "LinkedIn-Unipile":
                             provider_id = cand.get("provider_id")
                             if provider_id:
                                 try:
@@ -187,7 +188,7 @@ class UnifiedCandidateSearch:
                             return {"status": "failed_filter"}
 
                         from services.sourced_candidates_storage import process_linkedin_candidate, process_dice_candidate
-                        if source_type == "LinkedIn":
+                        if is_linkedin:
                             enhanced = await process_linkedin_candidate(cand)
                         elif source_type == "Dice":
                             enhanced = await process_dice_candidate(cand)
@@ -1010,8 +1011,11 @@ class UnifiedCandidateSearch:
                     f"{dimension['label']}: matched {len(preferred_matches)}/{len(preferred_groups)} preferred"
                 )
 
-            if dimension["label"] == "Skills":
-                matched_required_skills.extend(required_matches)
+            dim_label = dimension["label"]
+            for item in required_matches + preferred_matches:
+                matched_required_skills.append(
+                    item if dim_label == "Skills" else f"{dim_label}: {item}"
+                )
 
         score = 0
         if weighted_max > 0:
@@ -1542,10 +1546,10 @@ class UnifiedCandidateSearch:
                 boolean_string=criteria.boolean_string or self._build_boolean_string(criteria)
             )
             
-            return {"candidates": candidates, "source_type": "LinkedIn"}
+            return {"candidates": candidates, "source_type": "LinkedIn-Unipile"}
         except Exception as e:
             logger.error(f"LinkedIn search failed: {e}")
-            return {"candidates": [], "source_type": "LinkedIn"}
+            return {"candidates": [], "source_type": "LinkedIn-Unipile"}
     
     def _extract_linkedin_profile_data(self, profile: Dict[str, Any]) -> Dict[str, Any]:
         """Extract detailed data from full LinkedIn profile for enrichment."""
@@ -1628,10 +1632,10 @@ class UnifiedCandidateSearch:
                 location=criteria.location,
                 limit=min(criteria.page_size, 20)
             )
-            return {"candidates": candidates, "source_type": "Exa"}
+            return {"candidates": candidates, "source_type": "LinkedIn-Exa"}
         except Exception as e:
             logger.error(f"Exa search failed: {e}")
-            return {"candidates": [], "source_type": "Exa"}
+            return {"candidates": [], "source_type": "LinkedIn-Exa"}
 
     def _deduplicate_candidates(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen = {}

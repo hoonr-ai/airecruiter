@@ -3786,16 +3786,16 @@ function NewJobPageContent() {
                             <div className="flex items-center justify-between gap-4">
                               <div className="flex items-center gap-3 min-w-0">
                                 <a
-                                  href={candidate.source === 'LinkedIn' ? candidate.profile_url || '#' : '#'}
-                                  target={candidate.source === 'LinkedIn' ? "_blank" : undefined}
-                                  rel={candidate.source === 'LinkedIn' ? "noopener noreferrer" : undefined}
+                                  href={candidate.source?.startsWith('LinkedIn') ? candidate.profile_url || '#' : '#'}
+                                  target={candidate.source?.startsWith('LinkedIn') ? "_blank" : undefined}
+                                  rel={candidate.source?.startsWith('LinkedIn') ? "noopener noreferrer" : undefined}
                                   className={`text-[17px] font-bold text-slate-900 flex items-center gap-3 transition-colors group/name ${
-                                    candidate.source === 'LinkedIn' ? 'hover:text-[#1d4ed8]' : 
+                                    candidate.source?.startsWith('LinkedIn') ? 'hover:text-[#1d4ed8]' : 
                                     candidate.source === 'JobDiva-TalentSearch' ? 'hover:text-[#c2410c]' : 
                                     'hover:text-[#6366f1]'
                                   }`}
                                   onClick={(e) => {
-                                    if (candidate.source !== 'LinkedIn') {
+                                    if (!candidate.source?.startsWith('LinkedIn')) {
                                       e.preventDefault();
                                       handleViewResume(candidate);
                                     }
@@ -3803,7 +3803,7 @@ function NewJobPageContent() {
                                 >
                                    <span className="flex items-center gap-2">
                                      <span className={`text-[17px] font-bold text-slate-900 transition-colors ${
-                                       candidate.source === 'LinkedIn' ? 'group-hover/name:text-[#1d4ed8]' : 
+                                       candidate.source?.startsWith('LinkedIn') ? 'group-hover/name:text-[#1d4ed8]' : 
                                        candidate.source === 'JobDiva-TalentSearch' ? 'group-hover/name:text-[#c2410c]' : 
                                        'group-hover/name:text-[#6366f1]'
                                      }`}>
@@ -3811,25 +3811,25 @@ function NewJobPageContent() {
                                      </span>
                                      <span 
                                        className={`h-7 w-7 flex items-center justify-center border border-slate-200 bg-white text-slate-400 rounded-lg shadow-sm transition-all ${
-                                         candidate.source === 'LinkedIn' 
+                                         candidate.source?.startsWith('LinkedIn') 
                                            ? 'group-hover/name:border-[#bfdbfe] group-hover/name:bg-[#eff6ff] group-hover/name:text-[#1d4ed8]' : 
                                          candidate.source === 'JobDiva-TalentSearch' 
                                            ? 'group-hover/name:border-[#fed7aa] group-hover/name:bg-[#fff7ed] group-hover/name:text-[#c2410c]' : 
                                          'group-hover/name:border-[#c7d2fe] group-hover/name:bg-[#f5f3ff] group-hover/name:text-[#6366f1]'
                                        }`}
-                                       title={candidate.source === 'LinkedIn' ? "View LinkedIn Profile" : "Click to view resume"}
+                                       title={candidate.source?.startsWith('LinkedIn') ? "View LinkedIn Profile" : "Click to view resume"}
                                      >
                                        <ExternalLink className="w-3.5 h-3.5" />
                                      </span>
                                    </span>
                                 </a>
-                                <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow-sm h-fit border ${candidate.source === 'LinkedIn'
+                                <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow-sm h-fit border ${candidate.source?.startsWith('LinkedIn')
                                     ? 'bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]'
                                     : candidate.source === 'JobDiva-TalentSearch'
                                       ? 'bg-[#fff7ed] text-[#c2410c] border-[#fed7aa]'
                                       : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]'
                                   }`}>
-                                  {candidate.source === 'LinkedIn' ? <Linkedin className="w-3 h-3 fill-current" /> : candidate.source === 'JobDiva-TalentSearch' ? <Zap className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
+                                  {candidate.source?.startsWith('LinkedIn') ? <Linkedin className="w-3 h-3 fill-current" /> : candidate.source === 'JobDiva-TalentSearch' ? <Zap className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
                                   {candidate.source || "JobDiva"}
                                 </span>
                               </div>
