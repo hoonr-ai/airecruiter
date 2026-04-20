@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useEffectEvent, Suspense } from "react";
+import { useState, useEffect, useEffectEvent, useRef, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -331,6 +331,7 @@ function NewJobPageContent() {
   const QUALIFIED_SCORE_THRESHOLD = 70;
   const QUALIFIED_TARGET_COUNT = 50;
   const [candidates, setCandidates] = useState<any[]>([]);
+  const seenCandidateIdsRef = useRef<Set<string>>(new Set());
   const [selectedCandidates, setSelectedCandidates] = useState<Set<string>>(new Set());
   const [searchStatus, setSearchStatus] = useState("Fetching applicants...");
 
@@ -2832,14 +2833,9 @@ function NewJobPageContent() {
     if (mode === "replace") {
       setCandidates([]);
       setCurrentPage(1);
+      seenCandidateIdsRef.current = new Set<string>();
     }
-    const seenIds = new Set<string>();
-    if (mode === "append") {
-      candidates.forEach(c => {
-        const id = String(c.candidate_id || c.id || "");
-        if (id) seenIds.add(id);
-      });
-    }
+    const seenIds = seenCandidateIdsRef.current;
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
