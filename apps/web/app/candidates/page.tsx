@@ -90,7 +90,7 @@ export default function CandidatesPage() {
           return 4;
         };
 
-        const sortedUnique = uniqueCandidates.sort((a, b) => {
+        const sortedUnique = uniqueCandidates.sort((a: any, b: any) => {
           const prioA = getSourcePriority(a.source);
           const prioB = getSourcePriority(b.source);
           if (prioA !== prioB) return prioA - prioB;
@@ -106,7 +106,7 @@ export default function CandidatesPage() {
         // Re-apply search filter if user is actively searching during live updates
         const currentQuery = searchQueryRef.current;
         if (currentQuery) {
-          setFilteredCandidates(sortedUnique.filter(c =>
+          setFilteredCandidates(sortedUnique.filter((c: any) =>
             c.name.toLowerCase().includes(currentQuery.toLowerCase()) ||
             c.job_title?.toLowerCase().includes(currentQuery.toLowerCase()) ||
             c.headline.toLowerCase().includes(currentQuery.toLowerCase()) ||
@@ -128,7 +128,7 @@ export default function CandidatesPage() {
 
   const handleSearch = (query: string) => {
     setSearchQuery(query);
-    const filtered = candidates.filter(c =>
+    const filtered = candidates.filter((c: any) =>
       c.name.toLowerCase().includes(query.toLowerCase()) ||
       c.job_title?.toLowerCase().includes(query.toLowerCase()) ||
       c.headline.toLowerCase().includes(query.toLowerCase()) ||
