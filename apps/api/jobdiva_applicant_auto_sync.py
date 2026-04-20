@@ -18,10 +18,10 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("sync_agent.log")
+        logging.FileHandler("jobdiva_applicant_auto_sync.log")
     ]
 )
-logger = logging.getLogger("SyncAgent")
+logger = logging.getLogger("JobDivaApplicantSync")
 
 def get_monitored_jobs():
     """Fetch all jobs that are not archived and have a jobdiva_id."""
