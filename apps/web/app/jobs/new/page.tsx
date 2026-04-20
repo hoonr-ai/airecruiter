@@ -4010,7 +4010,7 @@ function NewJobPageContent() {
 
                   try {
                     // Prepare candidates payload with proper structure
-                    const candidatesPayload = candidates.map(c => ({
+                    const candidatesPayload = candidates.map((c: any) => ({
                       candidate_id: String(c.candidate_id || c.id),  // Use candidate_id from API, fallback to id
                       name: c.name,
                       email: c.email || null,
@@ -4034,7 +4034,7 @@ function NewJobPageContent() {
                       enhanced_info: c.enhanced_info || null  // Include full enhanced info for reference
                     }));
 
-                    const selectedCount = candidatesPayload.filter(c => c.is_selected).length;
+                    const selectedCount = candidatesPayload.filter((c: any) => c.is_selected).length;
                     console.log(`🚀 Launching PAIR with ${selectedCount} selected candidates out of ${candidatesPayload.length} total`);
 
                     const apiUrl = process.env.NEXT_PUBLIC_API_URL;

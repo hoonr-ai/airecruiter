@@ -68,15 +68,18 @@ interface JobDetails {
 
 interface Candidate {
   id: number;
+  candidate_id?: string;
   name: string;
   email: string;
   phone?: string;
   location?: string;
   headline?: string;
+  job_title?: string;
   image_url?: string;
   profile_url?: string;
   source: string;
   match_score: number;
+  resume_match_percentage?: number;
   engage_score?: number;
   engage_status?: string;
   engage_completed_at?: string;
