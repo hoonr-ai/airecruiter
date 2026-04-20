@@ -324,7 +324,7 @@ class UnipileService:
                             "city": item.get("location", ""),
                             "state": "",
                             "title": item.get("headline", ""),
-                            "source": "LinkedIn",
+                            "source": "LinkedIn-Unipile",
                             "match_score": 0,
                             "profile_url": p_url,
                             "image_url": img_url,
