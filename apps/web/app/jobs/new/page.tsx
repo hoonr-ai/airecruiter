@@ -3558,8 +3558,18 @@ function NewJobPageContent() {
                 {sourceCompanies.length > 0 && (
                   <div className="flex flex-wrap gap-2.5 mt-3">
                     {sourceCompanies.map((company) => (
-                      <div key={company} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[12.5px] font-bold text-slate-700 shadow-sm">
-                        {company}
+                      <div key={company} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[12.5px] font-bold text-slate-700 shadow-sm group">
+                        <span 
+                          className="cursor-pointer border-b border-transparent hover:border-slate-400 transition-colors"
+                          onClick={() => {
+                            setSourceCompanies(prev => prev.filter(item => item !== company));
+                            setSourceCompanyInput(company);
+                            setGeneratedBoolean("");
+                          }}
+                          title="Click to edit"
+                        >
+                          {company}
+                        </span>
                         <button
                           className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-5 h-5 flex items-center justify-center rounded-md transition-all duration-200"
                           onClick={() => {
@@ -3584,20 +3594,6 @@ function NewJobPageContent() {
                 </div>
 
                 <div className="space-y-4">
-                  <div className="flex flex-wrap gap-2.5">
-                    {sourceKeywords.map((tag) => (
-                      <div key={tag} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[12.5px] font-bold text-slate-700 shadow-sm">
-                        {tag}
-                        <button
-                          className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-5 h-5 flex items-center justify-center rounded-md transition-all duration-200"
-                          onClick={() => setSourceKeywords(prev => prev.filter(t => t !== tag))}
-                        >
-                          <X className="w-3 h-3" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-
                   <div className="relative">
                     <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
                     <Input
@@ -3611,6 +3607,32 @@ function NewJobPageContent() {
                       className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f5f3ff] rounded-xl placeholder:italic font-medium"
                     />
                   </div>
+
+                  {sourceKeywords.length > 0 && (
+                    <div className="flex flex-wrap gap-2.5">
+                      {sourceKeywords.map((tag) => (
+                        <div key={tag} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[12.5px] font-bold text-slate-700 shadow-sm group">
+                          <span 
+                            className="cursor-pointer border-b border-transparent hover:border-slate-400 transition-colors"
+                            onClick={() => {
+                              setSourceKeywords(prev => prev.filter(t => t !== tag));
+                              setSourceKeywordInput(tag);
+                              setGeneratedBoolean("");
+                            }}
+                            title="Click to edit"
+                          >
+                            {tag}
+                          </span>
+                          <button
+                            className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-5 h-5 flex items-center justify-center rounded-md transition-all duration-200"
+                            onClick={() => setSourceKeywords(prev => prev.filter(t => t !== tag))}
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
 
                   <div className="bg-[#f5f3ff] border border-[#ddd6fe] rounded-xl overflow-hidden mt-3">
                     <button
