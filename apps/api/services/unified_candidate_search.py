@@ -107,26 +107,34 @@ class UnifiedCandidateSearch:
             try:
                 if not jobdiva_selected:
                     return
-                await queue.put({"type": "stage", "data": "Searching JobDiva applicants..."})
-                applicants_res = await self._search_jobdiva_applicants(criteria)
-                applicants = applicants_res.get("candidates", [])
-                summary["job_applicants_count"] = len(applicants)
+                # External jobs (negative job_id or EXT- ref) have no JobDiva applicants.
+                # Skip Applicants and go straight to Talent Search.
+                job_id_str = str(criteria.job_id or "")
+                is_external_job = job_id_str.startswith("-") or job_id_str.startswith("EXT-")
 
-                if applicants:
-                    self._log_stage("Applicants", f"Found {len(applicants)} applicants; starting resume screen...")
-                    self._attach_cached_enhanced_info(applicants)
-                    async for cand in self._enrich_filtered_jobdiva_candidates(applicants, criteria):
-                        assessment = self._filter_assessment(cand, criteria, enforce_years=True)
-                        if not assessment["passes"]:
-                            self._log_stage(
-                                "Applicants",
-                                f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
-                            )
-                        await emit_candidate(cand, assessment, "qualified_applicants")
+                if not is_external_job:
+                    await queue.put({"type": "stage", "data": "Searching JobDiva applicants..."})
+                    applicants_res = await self._search_jobdiva_applicants(criteria)
+                    applicants = applicants_res.get("candidates", [])
+                    summary["job_applicants_count"] = len(applicants)
+
+                    if applicants:
+                        self._log_stage("Applicants", f"Found {len(applicants)} applicants; starting resume screen...")
+                        self._attach_cached_enhanced_info(applicants)
+                        async for cand in self._enrich_filtered_jobdiva_candidates(applicants, criteria):
+                            assessment = self._filter_assessment(cand, criteria, enforce_years=True)
+                            if not assessment["passes"]:
+                                self._log_stage(
+                                    "Applicants",
+                                    f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
+                                )
+                            await emit_candidate(cand, assessment, "qualified_applicants")
+                    else:
+                        self._log_stage("Applicants", "No applicants found.")
                 else:
-                    self._log_stage("Applicants", "No applicants found.")
+                    self._log_stage("Applicants", f"External job {job_id_str} — skipping Applicants; running Talent Search only.")
 
-                if summary["qualified_applicants"] < 3:
+                if is_external_job or summary["qualified_applicants"] < 3:
                     await queue.put({"type": "stage", "data": "Searching JobDiva Talent Search..."})
                     reason = (
                         f"only {summary['qualified_applicants']} qualified applicants"
@@ -1604,7 +1612,21 @@ class UnifiedCandidateSearch:
         return extracted
 
     async def _search_dice(self, criteria: SearchCriteria) -> Dict[str, Any]:
-        return {"candidates": [], "source_type": "Dice"}
+        try:
+            skills_values = []
+            for s in criteria.skills:
+                val = s.get("value") if isinstance(s, dict) else s
+                if val:
+                    skills_values.append(str(val))
+            candidates = await self.exa_service.search_dice_candidates(
+                skills=skills_values,
+                location=criteria.location,
+                limit=min(criteria.page_size, 20),
+            )
+            return {"candidates": candidates, "source_type": "Dice"}
+        except Exception as e:
+            logger.error(f"Dice search failed: {e}")
+            return {"candidates": [], "source_type": "Dice"}
 
     async def _search_vetted(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:

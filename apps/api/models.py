@@ -316,3 +316,18 @@ class JobSkillsSummaryResponse(BaseModel):
     total_skills: int
     by_importance: Dict[str, int]  # {"required": 5, "preferred": 3}
     analysis_metadata: Dict[str, Any]
+
+
+# External (non-JobDiva) job flow models
+class ExternalJobCreateRequest(BaseModel):
+    title: str
+    description: str = ""
+    customer_name: str = ""
+    recruiter_notes: str = ""
+
+
+class ManualCandidateRequest(BaseModel):
+    name: str
+    email: Optional[str] = ""
+    phone: Optional[str] = ""
+    resume_text: str
