@@ -67,6 +67,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { ResumeModal } from "@/components/ResumeModal";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
+import { PasteResumeModal } from "@/components/jobs/PasteResumeModal";
+import { BulkUploadSection } from "@/components/jobs/BulkUploadSection";
 
 // Utility function to clean location_type values and filter out employment terms
 function cleanLocationType(locationType: string | null | undefined): string {
@@ -164,6 +166,26 @@ function NewJobPageContent() {
   const [jobData, setJobData] = useState<any>(null);
   const [isFetching, setIsFetching] = useState(false);
   const [isFetched, setIsFetched] = useState(false);
+
+  // External (non-JobDiva) requirement flow
+  const [isExternal, setIsExternal] = useState(false);
+  const [extTitle, setExtTitle] = useState("");
+  const [extCustomer, setExtCustomer] = useState("");
+  const [extDescription, setExtDescription] = useState("");
+  const [isCreatingExternal, setIsCreatingExternal] = useState(false);
+
+  // Paste-resume modal (sourced candidates step)
+  const [pasteResumeOpen, setPasteResumeOpen] = useState(false);
+  const [pasteName, setPasteName] = useState("");
+  const [pasteEmail, setPasteEmail] = useState("");
+  const [pasteResumeText, setPasteResumeText] = useState("");
+  const [isSavingPasteResume, setIsSavingPasteResume] = useState(false);
+
+  // Bulk resume upload state
+  const [bulkFiles, setBulkFiles] = useState<File[]>([]);
+  const [isUploadingBulk, setIsUploadingBulk] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState<{ processed: number; failed: number; total: number } | null>(null);
+  const bulkFileInputRef = useRef<HTMLInputElement | null>(null);
   const [recruiterNotes, setRecruiterNotes] = useState("");
   const [selectedEmpTypes, setSelectedEmpTypes] = useState<EmploymentType[]>([]);
   const [recruiterEmails, setRecruiterEmails] = useState<string[]>([]);
@@ -332,13 +354,14 @@ function NewJobPageContent() {
   const QUALIFIED_TARGET_COUNT = 50;
   const [candidates, setCandidates] = useState<any[]>([]);
   const seenCandidateIdsRef = useRef<Set<string>>(new Set());
+  const searchAbortRef = useRef<AbortController | null>(null);
   const [selectedCandidates, setSelectedCandidates] = useState<Set<string>>(new Set());
   const [searchStatus, setSearchStatus] = useState("Fetching applicants...");
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const [candidatesPerPage, setCandidatesPerPage] = useState(10);
-  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "linkedin-unipile" | "linkedin-exa" | "dice">("all");
+  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "linkedin-unipile" | "linkedin-exa" | "dice" | "upload-resume">("all");
 
   const matchesSourceFilter = (cand: any) => {
     const src = String(cand.source || "").toLowerCase();
@@ -348,6 +371,7 @@ function NewJobPageContent() {
       case "linkedin-unipile": return src === "linkedin-unipile" || src === "linkedin";
       case "linkedin-exa": return src === "linkedin-exa";
       case "dice": return src === "dice";
+      case "upload-resume": return src === "upload-resume";
       default: return true;
     }
   };
@@ -357,6 +381,7 @@ function NewJobPageContent() {
     else if (s === "linkedin-unipile" || s === "linkedin") acc["linkedin-unipile"] = (acc["linkedin-unipile"] || 0) + 1;
     else if (s === "linkedin-exa") acc["linkedin-exa"] = (acc["linkedin-exa"] || 0) + 1;
     else if (s === "dice") acc["dice"] = (acc["dice"] || 0) + 1;
+    else if (s === "upload-resume") acc["upload-resume"] = (acc["upload-resume"] || 0) + 1;
     return acc;
   }, {});
 
@@ -442,6 +467,9 @@ function NewJobPageContent() {
         if (details.jobdiva_id) {
           setJobdivaId(details.jobdiva_id);
         }
+        if (details.is_external || (details.jobdiva_id || "").startsWith("EXT-")) {
+          setIsExternal(true);
+        }
       }
 
       // 2. Restore specialized data for later steps (Rubric, Filters, etc.)
@@ -516,6 +544,181 @@ function NewJobPageContent() {
       console.error("Failed to load draft:", error);
     }
     return false;
+  };
+
+  const handleCreateExternal = async () => {
+    if (!extTitle.trim()) {
+      showToast("Please enter a job title", "info");
+      return;
+    }
+    if (!extDescription.trim()) {
+      showToast("Please paste the job description", "info");
+      return;
+    }
+    setIsCreatingExternal(true);
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const createRes = await fetch(`${apiUrl}/jobs/external/create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: extTitle.trim(),
+          description: extDescription.trim(),
+          customer_name: extCustomer.trim() || "External",
+        }),
+      });
+      if (!createRes.ok) {
+        showToast("Failed to create external requirement", "error");
+        return;
+      }
+      const created = await createRes.json();
+      const newJobId = String(created.job_id);
+      const newRef = String(created.jobdiva_id);
+
+      setNumericJobId(newJobId);
+      setJobdivaId(newRef);
+      setJobTitle(extTitle.trim());
+      setEnhancedTitle(extTitle.trim());
+      setJobPosting(extDescription.trim());
+      setJobData({
+        id: newJobId,
+        jobdiva_id: newRef,
+        title: extTitle.trim(),
+        customer_name: extCustomer.trim() || "External",
+        description: extDescription.trim(),
+        ai_description: extDescription.trim(),
+        is_external: true,
+      });
+      setIsFetched(true);
+      showToast("External requirement created. Extracting rubric…", "success");
+
+      // Fire rubric extraction in the background — same endpoint JobDiva flow uses.
+      try {
+        const rubricRes = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jobId: newJobId,
+            jobdivaId: newRef,
+            jobTitle: extTitle.trim(),
+            enhancedJobTitle: extTitle.trim(),
+            jobDescription: extDescription.trim(),
+            jobNotes: "",
+            customerName: extCustomer.trim() || "External",
+            originalDescription: extDescription.trim(),
+          }),
+        });
+        if (rubricRes.ok) {
+          const rubric = await rubricRes.json();
+          if (rubric && (rubric.titles?.length || rubric.skills?.length)) {
+            setRubricData(rubric);
+            showToast("Rubric ready", "success");
+          }
+        }
+      } catch (err) {
+        console.error("External rubric extraction failed:", err);
+      }
+    } catch (err) {
+      console.error("External create failed:", err);
+      showToast("Failed to create external requirement", "error");
+    } finally {
+      setIsCreatingExternal(false);
+    }
+  };
+
+  const handleSubmitPasteResume = async () => {
+    if (!pasteName.trim() || !pasteResumeText.trim()) {
+      showToast("Name and resume text are required", "info");
+      return;
+    }
+    const jobRef = numericJobId || jobdivaId;
+    if (!jobRef) {
+      showToast("No job context found", "error");
+      return;
+    }
+    setIsSavingPasteResume(true);
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const res = await fetch(`${apiUrl}/jobs/${encodeURIComponent(jobRef)}/manual-candidate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: pasteName.trim(),
+          email: pasteEmail.trim(),
+          resume_text: pasteResumeText,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || "Failed to save resume", "error");
+        return;
+      }
+      const result = await res.json();
+      const cand = result.candidate;
+      // Prepend so the user sees it immediately
+      setCandidates((prev: any[]) => [{
+        ...cand,
+        id: cand.candidate_id,
+        full_name: cand.name,
+      }, ...prev]);
+      setPasteResumeOpen(false);
+      setPasteName("");
+      setPasteEmail("");
+      setPasteResumeText("");
+      showToast(`Saved ${cand.name} (score ${cand.match_score ?? "—"})`, "success");
+    } catch (err) {
+      console.error("Paste resume failed:", err);
+      showToast("Failed to save resume", "error");
+    } finally {
+      setIsSavingPasteResume(false);
+    }
+  };
+
+  const handleBulkUpload = async () => {
+    if (!bulkFiles.length) {
+      showToast("Select one or more resume files first", "info");
+      return;
+    }
+    const jobRef = numericJobId || jobdivaId;
+    if (!jobRef) {
+      showToast("No job context found", "error");
+      return;
+    }
+    setIsUploadingBulk(true);
+    setBulkProgress({ processed: 0, failed: 0, total: bulkFiles.length });
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const formData = new FormData();
+      bulkFiles.forEach(f => formData.append("files", f));
+      const res = await fetch(`${apiUrl}/jobs/${encodeURIComponent(jobRef)}/bulk-resumes`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || "Bulk upload failed", "error");
+        return;
+      }
+      const result = await res.json();
+      const newCands = (result.candidates || []).map((c: any) => ({
+        ...c,
+        id: c.candidate_id,
+        full_name: c.name,
+      }));
+      setCandidates((prev: any[]) => [...newCands, ...prev]);
+      setBulkProgress({ processed: result.processed_count || 0, failed: result.failed_count || 0, total: bulkFiles.length });
+      setBulkFiles([]);
+      if (bulkFileInputRef.current) bulkFileInputRef.current.value = "";
+      const msg = result.failed_count
+        ? `Processed ${result.processed_count}, failed ${result.failed_count}`
+        : `Processed ${result.processed_count} resume${result.processed_count === 1 ? "" : "s"}`;
+      showToast(msg, result.failed_count ? "info" : "success");
+    } catch (err) {
+      console.error("Bulk upload failed:", err);
+      showToast("Bulk upload failed", "error");
+    } finally {
+      setIsUploadingBulk(false);
+    }
   };
 
   const handleFetchJob = async () => {
@@ -966,40 +1169,123 @@ function NewJobPageContent() {
       </div>
 
       <div className="p-7 space-y-7">
-        <div>
-          <label className="block text-[14px] font-medium text-slate-900 mb-3">JobDiva Job ID</label>
-          <div className="flex items-center gap-3">
-            <Input
-              placeholder="e.g. 26-08025"
-              value={jobdivaId}
-              onChange={(e) => setJobdivaId(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && jobdivaId.trim().includes("-") && handleFetchJob()}
-              className="max-w-[180px] h-[36px] bg-white border-slate-200 text-[13px]"
-            />
+        {/* Source toggle: JobDiva vs External */}
+        {!isFetched && (
+          <div className="flex items-center gap-2">
             <button
-              onClick={handleFetchJob}
-              disabled={!jobdivaId.trim().includes("-") || isFetching}
-              className={`h-[36px] px-3.5 rounded-lg flex items-center gap-2 text-[13px] font-medium transition-all text-white disabled:opacity-50 disabled:cursor-not-allowed ${isFetched ? "bg-[#16a34a]" : "bg-primary hover:bg-[#5b21b6]"}`}
+              type="button"
+              onClick={() => setIsExternal(false)}
+              className={`px-3 py-1.5 rounded-full text-[12px] font-semibold border transition-colors ${!isExternal ? 'bg-[#6366f1] text-white border-[#6366f1]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
             >
-              {isFetching ? (
-                <>
-                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Fetching...
-                </>
-              ) : isFetched ? (
-                <>
-                  <Check className="w-4 h-4" />
-                  Fetched
-                </>
-              ) : (
-                <>
-                  <CloudDownload className="w-4 h-4" />
-                  Fetch from JobDiva
-                </>
-              )}
+              JobDiva Requirement
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsExternal(true)}
+              className={`px-3 py-1.5 rounded-full text-[12px] font-semibold border transition-colors ${isExternal ? 'bg-[#6366f1] text-white border-[#6366f1]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+            >
+              External Requirement
             </button>
           </div>
-        </div>
+        )}
+
+        {!isExternal ? (
+          <div>
+            <label className="block text-[14px] font-medium text-slate-900 mb-3">JobDiva Job ID</label>
+            <div className="flex items-center gap-3">
+              <Input
+                placeholder="e.g. 26-08025"
+                value={jobdivaId}
+                onChange={(e) => setJobdivaId(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && jobdivaId.trim().includes("-") && handleFetchJob()}
+                className="max-w-[180px] h-[36px] bg-white border-slate-200 text-[13px]"
+              />
+              <button
+                onClick={handleFetchJob}
+                disabled={!jobdivaId.trim().includes("-") || isFetching}
+                className={`h-[36px] px-3.5 rounded-lg flex items-center gap-2 text-[13px] font-medium transition-all text-white disabled:opacity-50 disabled:cursor-not-allowed ${isFetched ? "bg-[#16a34a]" : "bg-primary hover:bg-[#5b21b6]"}`}
+              >
+                {isFetching ? (
+                  <>
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Fetching...
+                  </>
+                ) : isFetched ? (
+                  <>
+                    <Check className="w-4 h-4" />
+                    Fetched
+                  </>
+                ) : (
+                  <>
+                    <CloudDownload className="w-4 h-4" />
+                    Fetch from JobDiva
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        ) : !isFetched ? (
+          <div className="space-y-5">
+            <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-[13px] text-amber-800 leading-relaxed">
+              <strong className="font-semibold">External Requirement</strong> — not linked to JobDiva. Paste the job description; PAIR will extract skills and rubric. JobDiva-specific fields (applicant list, UDFs) will be skipped.
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[13px] font-medium text-slate-900 mb-2">Job Title *</label>
+                <Input
+                  placeholder="e.g. AI Agent Engineer"
+                  value={extTitle}
+                  onChange={(e) => setExtTitle(e.target.value)}
+                  className="h-[36px] bg-white border-slate-200 text-[13px]"
+                />
+              </div>
+              <div>
+                <label className="block text-[13px] font-medium text-slate-900 mb-2">Customer</label>
+                <Input
+                  placeholder="e.g. Accenture"
+                  value={extCustomer}
+                  onChange={(e) => setExtCustomer(e.target.value)}
+                  className="h-[36px] bg-white border-slate-200 text-[13px]"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-[13px] font-medium text-slate-900 mb-2">Job Description *</label>
+              <Textarea
+                placeholder="Paste the full JD (responsibilities, required skills, preferred experience, etc.)"
+                value={extDescription}
+                onChange={(e) => setExtDescription(e.target.value)}
+                rows={10}
+                className="bg-white border-slate-200 text-[13px] leading-relaxed"
+              />
+              <p className="text-[11px] text-slate-500 mt-2">PAIR will extract the rubric (titles, skills, education) from this text.</p>
+            </div>
+            <div>
+              <button
+                onClick={handleCreateExternal}
+                disabled={isCreatingExternal || !extTitle.trim() || !extDescription.trim()}
+                className="h-[36px] px-4 rounded-lg flex items-center gap-2 text-[13px] font-medium transition-all text-white disabled:opacity-50 disabled:cursor-not-allowed bg-primary hover:bg-[#5b21b6]"
+              >
+                {isCreatingExternal ? (
+                  <>
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Creating requirement…
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4" />
+                    Create External Requirement
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-3 text-[13px] text-emerald-800 flex items-center gap-2">
+            <Check className="w-4 h-4" />
+            External requirement <strong>{jobdivaId}</strong> created. You can now proceed through the rubric and sourcing steps.
+          </div>
+        )}
 
         {jobData && (
           <>
@@ -2820,11 +3106,23 @@ function NewJobPageContent() {
   const runSearchStream = async (booleanString: string, mode: "replace" | "append"): Promise<any[]> => {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL;
     const payload = buildSearchPayload(booleanString);
-    const response = await fetch(`${apiUrl}/candidates/search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
+    const controller = new AbortController();
+    searchAbortRef.current = controller;
+    let response: Response;
+    try {
+      response = await fetch(`${apiUrl}/candidates/search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+    } catch (e: any) {
+      if (e?.name === "AbortError") {
+        if (mode === "replace") setCandidates([]);
+        return [];
+      }
+      throw e;
+    }
     if (!response.ok || !response.body) {
       console.error("Search failed:", response.status);
       if (mode === "replace") setCandidates([]);
@@ -2840,35 +3138,51 @@ function NewJobPageContent() {
     const decoder = new TextDecoder();
     let buffer = "";
     let runList: any[] = [];
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const event = JSON.parse(line);
-          if (event.type === "candidate") {
-            const id = String(event.data.candidate_id || event.data.id || "");
-            if (id && seenIds.has(id)) continue;
-            if (id) seenIds.add(id);
-            runList.push(event.data);
-            setCandidates(prev => [...prev, event.data]);
-          } else if (event.type === "stage") {
-            setSearchStatus(event.data);
-          } else if (event.type === "summary") {
-            console.log("✅ Search stream complete:", event.data);
-          } else if (event.type === "error") {
-            console.error("❌ Stream error:", event.message);
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line);
+            if (event.type === "candidate") {
+              const id = String(event.data.candidate_id || event.data.id || "");
+              if (id && seenIds.has(id)) continue;
+              if (id) seenIds.add(id);
+              runList.push(event.data);
+              setCandidates(prev => [...prev, event.data]);
+            } else if (event.type === "stage") {
+              setSearchStatus(event.data);
+            } else if (event.type === "summary") {
+              console.log("Search stream complete:", event.data);
+            } else if (event.type === "error") {
+              console.error("Stream error:", event.message);
+            }
+          } catch (e) {
+            console.error("Failed to parse stream line:", line, e);
           }
-        } catch (e) {
-          console.error("Failed to parse stream line:", line, e);
         }
+      }
+    } catch (e: any) {
+      if (e?.name === "AbortError" || controller.signal.aborted) {
+        console.log("Search stream aborted by user");
+      } else {
+        throw e;
       }
     }
     return runList;
+  };
+
+  const handleStopSearch = () => {
+    if (searchAbortRef.current) {
+      searchAbortRef.current.abort();
+    }
+    setIsSearching(false);
+    setSearchStatus("Search stopped");
   };
 
   const handleRunSearch = async () => {
@@ -2885,6 +3199,7 @@ function NewJobPageContent() {
 
       let currentAttempts = attempts;
       while (currentAttempts.length < MAX_BOOLEAN_ATTEMPTS) {
+        if (searchAbortRef.current?.signal.aborted) break;
         const qualified = countQualified(accumulated);
         if (qualified >= QUALIFIED_TARGET_COUNT) break;
         const relaxed = relaxBooleanString(currentAttempts[currentAttempts.length - 1].query, currentAttempts.length);
@@ -3220,18 +3535,29 @@ function NewJobPageContent() {
                 <div className="bg-[#ede9fe] text-[#6366f1] text-[11px] font-bold px-3 py-1 rounded-lg border border-[#ddd6fe] flex items-center gap-2">
                   <Sparkles className="w-3.5 h-3.5" /> PAIR Pre-filled from Rubric
                 </div>
-                <Button
-                  className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
-                  onClick={handleRunSearch}
-                  disabled={isSearching}
-                >
-                  {isSearching ? (
-                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  ) : (
-                    <Rocket className="w-4 h-4 fill-white" />
+                <div className="flex items-center gap-2">
+                  {isSearching && (
+                    <Button
+                      className="bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
+                      onClick={handleStopSearch}
+                    >
+                      <Ban className="w-4 h-4" />
+                      Stop Search
+                    </Button>
                   )}
-                  Run Search
-                </Button>
+                  <Button
+                    className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
+                    onClick={handleRunSearch}
+                    disabled={isSearching}
+                  >
+                    {isSearching ? (
+                      <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    ) : (
+                      <Rocket className="w-4 h-4 fill-white" />
+                    )}
+                    Run Search
+                  </Button>
+                </div>
               </div>
 
               <section>
@@ -3789,7 +4115,8 @@ function NewJobPageContent() {
                         { id: "jobdiva", label: "JobDiva", count: sourceCounts["jobdiva"] || 0 },
                         { id: "linkedin-unipile", label: "LinkedIn-Unipile", count: sourceCounts["linkedin-unipile"] || 0 },
                         { id: "linkedin-exa", label: "LinkedIn-Exa", count: sourceCounts["linkedin-exa"] || 0 },
-                        { id: "dice", label: "Dice", count: sourceCounts["dice"] || 0 }
+                        { id: "dice", label: "Dice", count: sourceCounts["dice"] || 0 },
+                        { id: "upload-resume", label: "Upload-Resume", count: sourceCounts["upload-resume"] || 0 }
                       ] as const).map(pill => {
                         if (pill.id !== "all" && pill.count === 0) return null;
                         const active = sourceFilter === pill.id;
@@ -3873,6 +4200,16 @@ function NewJobPageContent() {
                       }
                     </Button>
                   </div>
+                )}
+                {isExternal && (
+                  <Button
+                    variant="outline"
+                    className="h-8 px-4 text-[13px] font-bold border-[#6366f1] text-[#6366f1] bg-white shadow-sm flex items-center gap-2 hover:bg-[#f5f3ff]"
+                    onClick={() => setPasteResumeOpen(true)}
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    Add via Resume
+                  </Button>
                 )}
               </div>
 
@@ -3986,6 +4323,18 @@ function NewJobPageContent() {
                                   }`}>
                                     {candidate.match_score}% Match
                                   </span>
+                                )}
+                                {!candidate.source?.startsWith('LinkedIn') && (
+                                  <Button
+                                    size="sm"
+                                    className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2"
+                                    onClick={() => handleViewResume({ ...candidate, firstName: displayName.split(" ")[0] || displayName, lastName: displayName.split(" ").slice(1).join(" ") })}
+                                    title="Open candidate resume"
+                                  >
+                                    <FileText className="w-3.5 h-3.5" />
+                                    Resume
+                                    <ExternalLink className="w-3 h-3 opacity-70" />
+                                  </Button>
                                 )}
                                 <Button
                                   size="sm"
@@ -4126,6 +4475,18 @@ function NewJobPageContent() {
               <div className="h-4 flex items-center justify-center opacity-0 mt-4">
               </div>
             )}
+
+            {/* Bulk Resume Upload */}
+            <BulkUploadSection
+              jobRef={numericJobId || jobdivaId}
+              bulkFiles={bulkFiles}
+              onBulkFilesChange={setBulkFiles}
+              onClearProgress={() => setBulkProgress(null)}
+              isUploadingBulk={isUploadingBulk}
+              bulkProgress={bulkProgress}
+              bulkFileInputRef={bulkFileInputRef}
+              onUpload={handleBulkUpload}
+            />
             </div>
 
             {/* Launch Footer */}
@@ -4412,6 +4773,20 @@ function NewJobPageContent() {
           }}
         />
       )}
+
+      {/* Paste Resume Modal (External requirement) */}
+      <PasteResumeModal
+        open={pasteResumeOpen}
+        onClose={() => setPasteResumeOpen(false)}
+        name={pasteName}
+        onNameChange={setPasteName}
+        email={pasteEmail}
+        onEmailChange={setPasteEmail}
+        resumeText={pasteResumeText}
+        onResumeTextChange={setPasteResumeText}
+        isSaving={isSavingPasteResume}
+        onSubmit={handleSubmitPasteResume}
+      />
 
       {selectedCandidateForDetails && (
         <CandidateDetailsModal

@@ -96,4 +96,72 @@ class ExaService:
             logger.error(f"Exa search failed: {e}")
             return []
 
+    async def search_dice_candidates(self, skills: List[str], location: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Search Dice (dice.com) profiles via Exa with domain filtering.
+        Dice hosts tech candidate profiles publicly indexable by Exa; we scope
+        the people-search to dice.com to pull those records.
+        """
+        if not self.exa:
+            logger.warning("Exa API key is not set. Skipping Dice search.")
+            return []
+
+        try:
+            import asyncio
+            skills_str = ", ".join(skills) if skills else ""
+            query = f"resume profile {skills_str}"
+            if location:
+                query += f" located in {location}"
+
+            logger.info(f"Executing Dice (via Exa) search for query: {query}")
+            loop = asyncio.get_event_loop()
+
+            def do_search():
+                return self.exa.search_and_contents(
+                    query,
+                    category="people",
+                    type="auto",
+                    num_results=limit,
+                    include_domains=["dice.com"],
+                    highlights={"max_characters": 4000},
+                )
+
+            response = await loop.run_in_executor(None, do_search)
+
+            results = []
+            if response and hasattr(response, "results"):
+                for idx, result in enumerate(response.results):
+                    title = getattr(result, "title", "Unknown Candidate")
+                    url = getattr(result, "url", "")
+                    name_parts = title.split(" - ")[0].split("|")[0].strip().split(" ")
+                    first_name = name_parts[0] if name_parts else "Unknown"
+                    last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else ""
+                    highlights_text = ""
+                    if getattr(result, "highlights", None):
+                        highlights_text = "\n".join(result.highlights)
+                    results.append({
+                        "id": f"dice_{idx}_{getattr(result, 'id', idx)}",
+                        "provider_id": getattr(result, "id", f"dice_{idx}"),
+                        "firstName": first_name,
+                        "lastName": last_name,
+                        "email": "",
+                        "city": location,
+                        "state": "",
+                        "title": title,
+                        "source": "Dice",
+                        "match_score": 0,
+                        "profile_url": url,
+                        "image_url": "",
+                        "open_to_work": False,
+                        "resume_text": highlights_text,
+                        "recruiter_candidate_id": None,
+                    })
+
+            logger.info(f"Dice-via-Exa returned {len(results)} candidates.")
+            return results
+
+        except Exception as e:
+            logger.error(f"Dice (via Exa) search failed: {e}")
+            return []
+
 exa_service = ExaService()
