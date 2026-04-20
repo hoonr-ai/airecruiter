@@ -2,12 +2,13 @@
 
 import { useState, useEffect } from "react";
 import Link from "next/link";
-import { Search, ExternalLink, User, MapPin, Briefcase, Linkedin, ShieldCheck, Mail, ArrowLeft } from "lucide-react";
+import { Search, ExternalLink, User, MapPin, Briefcase, Linkedin, ShieldCheck, Mail, ArrowLeft, Eye, Zap, Filter, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { ResumeModal } from "@/components/ResumeModal";
+import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import {
   Table,
   TableBody,
@@ -45,6 +46,8 @@ export default function CandidatesPage() {
   const [selectedCandidateForEmail, setSelectedCandidateForEmail] = useState<any>(null);
   const [resumeModalOpen, setResumeModalOpen] = useState(false);
   const [selectedCandidateForResume, setSelectedCandidateForResume] = useState<any>(null);
+  const [detailsModalOpen, setDetailsModalOpen] = useState(false);
+  const [selectedCandidateForDetails, setSelectedCandidateForDetails] = useState<any>(null);
 
   useEffect(() => {
     fetchCandidates();
@@ -146,6 +149,11 @@ export default function CandidatesPage() {
           />
         </div>
         <div className="flex items-center gap-3">
+          <Button variant="outline" className="h-11 px-4 border-slate-200 bg-white text-slate-600 font-bold rounded-xl shadow-sm hover:bg-slate-50 flex items-center gap-2">
+            <Filter className="w-4 h-4 text-slate-400" />
+            Filters
+            <ChevronDown className="w-3.5 h-3.5 text-slate-400 ml-1" />
+          </Button>
           <Badge variant="outline" className="px-4 py-1.5 h-11 flex items-center gap-2 border-slate-200 bg-white text-slate-600 font-bold rounded-xl shadow-sm">
              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
              {candidates.length} Total Sourced
@@ -178,19 +186,20 @@ export default function CandidatesPage() {
             <Table>
               <TableHeader className="bg-[#fcfdfd]">
                 <TableRow className="border-slate-100">
-                  <TableHead className="w-[64px] pl-8"></TableHead>
-                  <TableHead className="w-[200px] text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Candidate</TableHead>
-                  <TableHead className="text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Match</TableHead>
-                  <TableHead className="text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Applied For</TableHead>
-                  <TableHead className="text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Sourcing Details</TableHead>
-                  <TableHead className="text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Sourced On</TableHead>
-                  <TableHead className="text-right pr-8 text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Action</TableHead>
+                  <TableHead className="pl-10 w-[80px] h-14"></TableHead>
+                  <TableHead className="w-[240px] text-left text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Candidate Name</TableHead>
+                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Match</TableHead>
+                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Applied For</TableHead>
+                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Location</TableHead>
+                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Sourcing Details</TableHead>
+                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Sourced On</TableHead>
+                  <TableHead className="text-center pr-10 text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody className="divide-y divide-slate-100">
                 {filteredCandidates.map((candidate) => (
                   <TableRow key={candidate.id} className="hover:bg-slate-50/50 transition-colors group">
-                    <TableCell className="pl-8 py-6">
+                    <TableCell className="pl-10 py-6">
                       <Avatar className="h-12 w-12 border border-slate-200 shadow-sm transition-transform group-hover:scale-105">
                         <AvatarImage src={candidate.image_url} />
                         <AvatarFallback className="bg-slate-100 text-slate-400 text-[14px] font-bold">
@@ -198,24 +207,50 @@ export default function CandidatesPage() {
                         </AvatarFallback>
                       </Avatar>
                     </TableCell>
-                    <TableCell className="py-6 max-w-[200px]">
+                    <TableCell className="py-6 w-[240px] max-w-[240px]">
                       <div className="space-y-1">
-                        <p 
-                          className="text-[15px] font-bold text-slate-900 leading-tight truncate hover:text-purple-600 cursor-pointer transition-colors"
-                          onClick={() => {
-                            handleViewResume(candidate);
+                        <a
+                          href={candidate.source === 'LinkedIn' ? candidate.profile_url || '#' : '#'}
+                          target={candidate.source === 'LinkedIn' ? "_blank" : undefined}
+                          rel={candidate.source === 'LinkedIn' ? "noopener noreferrer" : undefined}
+                          className="group/name flex items-center gap-3"
+                          onClick={(e) => {
+                            if (candidate.source !== 'LinkedIn') {
+                              e.preventDefault();
+                              handleViewResume(candidate);
+                            }
                           }}
                         >
-                          {candidate.name}
-                        </p>
-                        <div className="flex items-center gap-1.5 opacity-70">
+                           <span className="flex items-center gap-2 max-w-full">
+                             <span className={`text-[15px] font-bold text-slate-900 transition-colors whitespace-normal break-words ${
+                               candidate.source === 'LinkedIn' ? 'group-hover/name:text-[#1d4ed8]' : 
+                               candidate.source === 'JobDiva-TalentSearch' ? 'group-hover/name:text-[#c2410c]' : 
+                               'group-hover/name:text-[#6366f1]'
+                             }`}>
+                               {candidate.name}
+                             </span>
+                             <span 
+                               className={`shrink-0 h-6 w-6 flex items-center justify-center border border-slate-200 bg-white text-slate-400 rounded-lg shadow-sm transition-all ${
+                                 candidate.source === 'LinkedIn' 
+                                   ? 'group-hover/name:border-[#bfdbfe] group-hover/name:bg-[#eff6ff] group-hover/name:text-[#1d4ed8]' : 
+                                 candidate.source === 'JobDiva-TalentSearch' 
+                                   ? 'group-hover/name:border-[#fed7aa] group-hover/name:bg-[#fff7ed] group-hover/name:text-[#c2410c]' : 
+                                 'group-hover/name:border-[#c7d2fe] group-hover/name:bg-[#f5f3ff] group-hover/name:text-[#6366f1]'
+                               }`}
+                               title={candidate.source === 'LinkedIn' ? "View LinkedIn Profile" : "Click to view resume"}
+                             >
+                               <ExternalLink className="w-3 h-3" />
+                             </span>
+                           </span>
+                        </a>
+                        <div className="flex items-center gap-1.5 opacity-70 mt-1" title={candidate.headline || ""}>
                           <Briefcase className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                          <p className="text-[13px] text-slate-600 font-medium line-clamp-1">{candidate.headline}</p>
+                          <p className="text-[13px] text-slate-600 font-medium truncate">{candidate.headline}</p>
                         </div>
                       </div>
                     </TableCell>
                     <TableCell className="py-6">
-                      <div className="flex items-center">
+                      <div className="flex items-center justify-center">
                         {(candidate as any).match_score || candidate.data?.match_score ? (
                           <span className={`px-2.5 py-1 rounded-full text-[12px] font-bold shadow-sm ${
                             ((candidate as any).match_score || candidate.data?.match_score) >= 80 ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' : 
@@ -230,68 +265,65 @@ export default function CandidatesPage() {
                       </div>
                     </TableCell>
                     <TableCell className="py-6">
-                      <div className="space-y-1">
-                        <p className="text-[13.5px] font-bold text-[#4f46e5] hover:underline cursor-pointer">
+                      <div className="space-y-1 text-center">
+                        <p className="text-[14px] font-medium text-slate-900">
                           {candidate.job_title || "Unknown Job"}
                         </p>
                         <p className="text-[11.5px] text-slate-400 font-medium">Ref: {candidate.jobdiva_id}</p>
                       </div>
                     </TableCell>
+                    <TableCell className="py-6 min-w-[140px]">
+                      {candidate.location ? (
+                         <div className="flex items-center justify-center gap-1.5 opacity-80">
+                           <MapPin className="w-3.5 h-3.5 text-slate-400" />
+                           <p className="text-[12px] text-slate-600 font-medium whitespace-nowrap leading-tight">{candidate.location}</p>
+                         </div>
+                      ) : (
+                         <div className="flex justify-center"><span className="text-[12px] text-slate-400 font-medium">N/A</span></div>
+                      )}
+                    </TableCell>
                     <TableCell className="py-6">
-                      <div className="space-y-2">
-                        <div className="flex items-center gap-2 px-2.5 py-1 rounded-full bg-slate-100 w-fit">
-                           {getSourceIcon(candidate.source)}
-                           <span className="text-[11.5px] font-bold text-slate-600 uppercase tracking-tight">{candidate.source}</span>
-                        </div>
-                        {candidate.location && (
-                           <div className="flex items-center gap-1.5 pl-1 opacity-60">
-                             <MapPin className="w-3 h-3 text-slate-400" />
-                             <p className="text-[12px] text-slate-500 font-medium">{candidate.location}</p>
-                           </div>
-                        )}
+                      <div className="space-y-2 flex justify-center">
+                        <span className={`px-2.5 w-fit py-0.5 rounded-lg text-[10.5px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow-sm h-fit border ${candidate.source === 'LinkedIn'
+                            ? 'bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]'
+                            : candidate.source === 'JobDiva-TalentSearch'
+                              ? 'bg-[#fff7ed] text-[#c2410c] border-[#fed7aa]'
+                              : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]'
+                          }`}>
+                          {candidate.source === 'LinkedIn' ? <Linkedin className="w-3 h-3 fill-current" /> : candidate.source === 'JobDiva-TalentSearch' ? <Zap className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
+                          {candidate.source || "JobDiva"}
+                        </span>
                       </div>
                     </TableCell>
-                    <TableCell className="py-6 whitespace-nowrap">
+                    <TableCell className="py-6 whitespace-nowrap text-center">
                        <p className="text-[13.5px] font-medium text-slate-600">
                          {new Date(candidate.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                        </p>
                     </TableCell>
-                    <TableCell className="text-right pr-8 py-6">
-                       <div className="flex items-center justify-end gap-2">
-                         {candidate.profile_url && (
-                           <Button
-                             variant="outline"
-                             size="sm"
-                             asChild
-                             className="h-8 w-8 p-0 border-slate-200 hover:bg-slate-50 text-slate-400 hover:text-[#6366f1]"
-                           >
-                             <a href={candidate.profile_url} target="_blank" rel="noopener noreferrer">
-                               <ExternalLink className="h-3.5 w-3.5" />
-                             </a>
-                           </Button>
-                         )}
-                         <Button 
-                            size="sm"
-                            className="h-8 px-3 bg-white border border-[#6366f1]/30 text-[#6366f1] hover:bg-[#6366f1]/5 font-medium text-[12px]"
-                            onClick={() => handleEmailCandidate(candidate)}
+                    <TableCell className="py-6 pr-10">
+                       <div className="flex items-center justify-center gap-2 shrink-0">
+                         <Button
+                           size="sm"
+                           className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 min-w-[70px]"
+                           onClick={() => handleEmailCandidate(candidate)}
                          >
-                            <Mail className="h-3.5 w-3.5 mr-1" />
-                            Email
+                           <Mail className="w-3.5 h-3.5" />
+                           {/* Add explicit span for text alignment if flex struggles */}
+                           <span>Email</span>
                          </Button>
-                         <Button 
-                            size="sm"
-                            variant="outline"
-                            className="h-8 px-3 opacity-50"
+                         <Button
+                           size="sm"
+                           className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 min-w-[70px]"
                          >
-                            Engage
+                           Engage
                          </Button>
-                         <Button 
-                            size="sm"
-                            variant="outline" 
-                            className="h-8 px-3 opacity-50"
+                         <Button
+                           size="sm"
+                           className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 min-w-[70px]"
                          >
-                            Assess
+                           Assess
                          </Button>
+
                        </div>
                     </TableCell>
                   </TableRow>
@@ -306,7 +338,7 @@ export default function CandidatesPage() {
       {selectedCandidateForEmail && (
         <CandidateMessageModal
           candidateName={selectedCandidateForEmail.name || `${selectedCandidateForEmail.firstName} ${selectedCandidateForEmail.lastName}`}
-          candidateEmail={selectedCandidateForEmail.email}
+          candidateEmail={selectedCandidateForEmail.email || selectedCandidateForEmail.data?.email || "Email not available"}
           isOpen={messageModalOpen}
           onClose={() => {
             setMessageModalOpen(false);
@@ -325,6 +357,29 @@ export default function CandidatesPage() {
             setResumeModalOpen(false);
             setSelectedCandidateForResume(null);
           }}
+        />
+      )}
+
+      {/* Details Modal */}
+      {selectedCandidateForDetails && (
+        <CandidateDetailsModal
+          isOpen={detailsModalOpen}
+          onClose={() => {
+            setDetailsModalOpen(false);
+            setSelectedCandidateForDetails(null);
+          }}
+          candidateName={selectedCandidateForDetails.name}
+          profileUrl={selectedCandidateForDetails.profileUrl}
+          imageUrl={selectedCandidateForDetails.imageUrl}
+          jobTitle={selectedCandidateForDetails.jobTitle}
+          location={selectedCandidateForDetails.location}
+          experienceYears={selectedCandidateForDetails.experienceYears}
+          tags={selectedCandidateForDetails.tags}
+          matchScore={selectedCandidateForDetails.matchScore}
+          missingSkills={selectedCandidateForDetails.missingSkills}
+          explainability={selectedCandidateForDetails.explainability}
+          matchScoreDetails={selectedCandidateForDetails.matchScoreDetails}
+          matchedSkills={selectedCandidateForDetails.matchedSkills}
         />
       )}
     </div>

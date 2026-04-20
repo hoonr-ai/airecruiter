@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, Query
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
 import asyncio
@@ -191,8 +192,9 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
         skills = []
         
         # Extract titles from various sources
-        if request.titles:
-            titles.extend([t.value for t in request.titles if t.match_type != 'exclude'])
+        combined_title_criteria = (request.title_criteria or []) + (request.titles or [])
+        if combined_title_criteria:
+            titles.extend([t.value for t in combined_title_criteria if t.match_type != 'exclude'])
         
         # Extract skills from various sources 
         if request.skill_criteria:
@@ -239,7 +241,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             job_id=request.job_id,
             titles=titles,
             skills=skills,
-            title_criteria=[t.dict() for t in request.titles],
+            title_criteria=[t.dict() for t in combined_title_criteria],
             skill_criteria=[s.dict() for s in request.skill_criteria],
             keywords=request.keywords or [],
             resume_match_filters=resume_match_filters,
@@ -252,21 +254,19 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             boolean_string=request.boolean_string or ""
         )
         
-        # Execute unified search
-        search_results = await unified_search_service.search_candidates(criteria)
-        
-        logger.info(f"✅ Unified search completed: {search_results['summary']}")
-        
-        return {
-            "candidates": search_results["candidates"],
-            "total": search_results["summary"]["total_candidates"],
-            "job_applicants": search_results["summary"]["job_applicants_count"],
-            "talent_pool": search_results["summary"]["talent_search_count"],
-            "cached_results": search_results["summary"]["cached_results"],
-            "new_extractions": search_results["summary"]["new_extractions"],
-            "search_criteria": search_results["search_criteria"],
-            "message": f"Found {search_results['summary']['total_candidates']} candidates using unified search"
-        }
+        # Execute unified search as a stream
+        async def stream_candidates():
+            try:
+                async for event in unified_search_service.search_candidates(criteria):
+                    yield json.dumps(event) + "\n"
+            except Exception as e:
+                logger.error(f"Error in search stream: {e}", exc_info=True)
+                yield json.dumps({"type": "error", "message": str(e)}) + "\n"
+
+        return StreamingResponse(
+            stream_candidates(),
+            media_type="application/x-ndjson"
+        )
         
     except Exception as e:
         logger.error(f"❌ Unified search failed: {e}")
@@ -664,11 +664,14 @@ async def save_candidates(request: CandidatesSaveRequest):
         print(f"✅ Successfully saved {saved_count} sourced candidates to database")
         enhanced_count = 0
         if processing_payloads:
-            from services.sourced_candidates_storage import process_jobdiva_candidate
+            from services.sourced_candidates_storage import process_jobdiva_candidate, process_linkedin_candidate
 
             for payload in processing_payloads:
                 try:
-                    if str(payload.get("source", "")).startswith("JobDiva") and not payload.get("resume_text"):
+                    source = str(payload.get("source", ""))
+                    
+                    # Handle JobDiva candidates
+                    if source.startswith("JobDiva") and not payload.get("resume_text"):
                         resume_data = await jobdiva_service.get_candidate_resume(
                             payload["candidate_id"],
                             resume_id=payload.get("resume_id"),
@@ -684,8 +687,13 @@ async def save_candidates(request: CandidatesSaveRequest):
                                 "location": payload.get("location") or (resume_data or {}).get("location"),
                             })
 
-                    if payload.get("resume_text"):
+                    # Process JobDiva candidates with resume text
+                    if payload.get("resume_text") and source.startswith("JobDiva"):
                         await process_jobdiva_candidate(payload)
+                        enhanced_count += 1
+                    # Process LinkedIn candidates
+                    elif source == "LinkedIn":
+                        await process_linkedin_candidate(payload)
                         enhanced_count += 1
                 except Exception as e:
                     print(f"⚠️ Enhanced processing failed for candidate {payload.get('candidate_id')}: {e}")

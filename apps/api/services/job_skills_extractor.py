@@ -164,12 +164,12 @@ Read the following job description and extract specific facts.
 
 4. OTHER REQUIREMENTS:
    - Extract Shift (Day/Night, Rotating), Work Authorization, or Travel %.
-   - MANDATORY: Use complete, professional sentences with proper punctuation (must end with a period/full stop).
-   - MANDATORY: Keep under 15 words per sentence.
+   - MANDATORY: Use concise, professional label-based formatting (e.g. "Label: Value").
+   - MANDATORY: Keep under 10 words per requirement.
    - EXAMPLES: 
-     * "Day and night shifts are required." (NOT "Day and night shifts required")
-     * "Must be authorized to work in the US." (NOT "US work authorization required")
-     * "Up to 25% travel is expected." (NOT "25% travel")
+     * "Shift: Day and night shifts required." (NOT "Day and night shifts are required.")
+     * "Work Authorization: Must be authorized to work in the US." (NOT "Candidate must be authorized to work in the United States.")
+     * "Travel: Up to 25% travel expected." (NOT "Up to 25% travel is expected for this role.")
    - DO NOT extract Location or years of experience.
 
 5. SKILLS (CRITICAL - Extract ALL explicit AND implied skills from JD):
@@ -547,7 +547,7 @@ IMPORTANT:
 
         # Final Location logic with cleanup
         if job_location:
-            other_requirements.append({"value": f"The work location for this role is {job_location}.", "required": "Required"})
+            other_requirements.append({"value": f"Location: {job_location}.", "required": "Required"})
 
         # Enforce maximum of 8 hard skills. Soft skills do not consume the hard-skill cap.
         total_hard_skills_before = len(grounded_hard_skills)

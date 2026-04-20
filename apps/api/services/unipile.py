@@ -38,6 +38,16 @@ class UnipileService:
         }
         if normalized in placeholders:
             return None
+            
+        # Alphanumeric ID detection: Reject long strings with no spaces that contain digits
+        # e.g. "Aemaaesrdj8Bputbeeugzft99J0Qcie7Kbhun5K"
+        if len(raw) > 15 and " " not in raw:
+            if any(c.isdigit() for c in raw):
+                return None
+            # Also reject if it has extremely suspicious character distribution (e.g. hashes)
+            if len(re.findall(r'[A-Z]', raw)) > 5 and len(re.findall(r'[a-z]', raw)) > 5:
+                return None
+
         return raw
 
     def _derive_name_from_profile_url(self, profile_url: Optional[str]) -> Optional[str]:
@@ -196,7 +206,7 @@ class UnipileService:
             
         return None
 
-    async def search_candidates(self, skills: List[Any], location: str, open_to_work: bool = True, limit: int = 25) -> List[Dict[str, Any]]:
+    async def search_candidates(self, skills: List[Any], location: str, open_to_work: bool = True, limit: int = 25, boolean_string: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Search LinkedIn via Unipile using the Recruiter API mode.
         """
@@ -233,28 +243,41 @@ class UnipileService:
         url = f"{self.api_url}/linkedin/search"
         params = {"account_id": account_id, "limit": limit}
         
-        # Prepare keywords for anything we couldn't resolve to an ID
-        unresolved_terms = []
-        for s in search_terms:
-            name = s.get("value") or s.get("name") if isinstance(s, dict) else getattr(s, "value", getattr(s, "name", str(s)))
-            # If not in skill_ids (which contains resolved IDs), add to keywords
-            if not any(sid.get("name_ref") == name for sid in skill_ids):
-                unresolved_terms.append(f'"{name}"')
-        
-        # If location didn't resolve, add to keywords
-        if location and not location_ids:
-             loc_term = location.split(",")[0].strip()
-             unresolved_terms.append(f'"{loc_term}"')
-
-        # Keywords fallback for remaining skills
-        if len(search_terms) < len(skills):
-            extra_skills = skills[len(search_terms):8] # Limit to avoid query too large
-            for s in extra_skills:
+        # Determine keywords
+        final_keywords = ""
+        if boolean_string:
+            final_keywords = boolean_string
+        else:
+            # Prepare keywords for anything we couldn't resolve to an ID
+            unresolved_terms = []
+            for s in search_terms:
                 name = s.get("value") or s.get("name") if isinstance(s, dict) else getattr(s, "value", getattr(s, "name", str(s)))
-                if name: unresolved_terms.append(f'"{name}"')
+                # If not in skill_ids (which contains resolved IDs), add to keywords
+                if not any(sid.get("name_ref") == name for sid in skill_ids):
+                    unresolved_terms.append(f'"{name}"')
+            
+            # If location didn't resolve, add to keywords
+            if location and not location_ids:
+                 loc_term = location.split(",")[0].strip()
+                 unresolved_terms.append(f'"{loc_term}"')
 
+            # Keywords fallback for remaining skills
+            if len(search_terms) < len(skills):
+                extra_skills = skills[len(search_terms):8] # Limit to avoid query too large
+                for s in extra_skills:
+                    name = s.get("value") or s.get("name") if isinstance(s, dict) else getattr(s, "value", getattr(s, "name", str(s)))
+                    if name: unresolved_terms.append(f'"{name}"')
+
+            if unresolved_terms:
+                final_keywords = " AND ".join(unresolved_terms)
+
+        # Handle Open to Work separately or append it
         if open_to_work:
-             unresolved_terms.append('("Open to Work" OR "Looking for opportunities")')
+            otw = '("Open to Work" OR "Looking for opportunities")'
+            if final_keywords:
+                final_keywords = f"({final_keywords}) AND {otw}"
+            else:
+                final_keywords = otw
 
         payload = {
             "api": "recruiter",
@@ -269,8 +292,8 @@ class UnipileService:
         if location_ids:
             payload["location"] = [{"id": lid, "priority": "MUST_HAVE"} for lid in location_ids]
         
-        if unresolved_terms:
-            payload["keywords"] = " AND ".join(unresolved_terms)
+        if final_keywords:
+            payload["keywords"] = final_keywords
 
         results = []
         try:

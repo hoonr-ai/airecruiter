@@ -42,6 +42,16 @@ def _clean_extracted_value(value: Any) -> Optional[str]:
     }
     if cleaned.lower() in invalid_markers:
         return None
+        
+    # Alphanumeric ID detection: Reject long strings (>15 chars) with no spaces that contain digits
+    # These are almost always internal IDs or hashes from external scrapers.
+    if len(cleaned) > 15 and " " not in cleaned:
+        if any(c.isdigit() for c in cleaned):
+            return None
+        # Also reject if it has high entropy (mix of many upper/lower case letters with no spaces)
+        if len(re.findall(r'[A-Z]', cleaned)) > 5 and len(re.findall(r'[a-z]', cleaned)) > 5:
+            return None
+            
     return cleaned
 
 
@@ -679,7 +689,7 @@ async def process_jobdiva_candidate(candidate: Dict[str, Any]):
     original_resume_text = candidate.get("resume_text", "")
     if not _has_real_resume_text(original_resume_text):
         logger.warning(f"⚠️ [Candidate:{candidate_id}] No usable resume text found, skipping processing")
-        return candidate
+        return {"candidate_id": candidate_id, "raw": {}, "skipped": True}
     
     logger.info(f"📄 [Candidate:{candidate_id}] Original resume text length: {len(original_resume_text)} characters")
     resume_contact_fallbacks = _extract_resume_contact_details(original_resume_text)
@@ -776,6 +786,256 @@ async def process_jobdiva_candidate(candidate: Dict[str, Any]):
     # Return merged/enriched data for API response
     return {
         "candidate_id": candidate["candidate_id"],
+        "name": enhanced_info.get("candidate_name"),
+        "current_title": enhanced_info.get("job_title"),
+        "location": enhanced_info.get("current_location"),
+        "years_experience": enhanced_info.get("years_of_experience"),
+        "skills": formatted_skills,
+        "company_experience": enhanced_info.get("company_experience", []),
+        "education": enhanced_info.get("candidate_education", []),
+        "certifications": enhanced_info.get("candidate_certification", []),
+        "urls": enhanced_info.get("urls", {}),
+        "raw": enhanced_info
+    }
+
+
+async def process_linkedin_candidate(candidate: Dict[str, Any]):
+    """Process LinkedIn candidate and save enhanced info to database."""
+    candidate_id = candidate.get("candidate_id", candidate.get("id", "unknown"))
+    candidate_name = candidate.get("name", "Unknown")
+    
+    logger.info(f"🔄 [LinkedIn Candidate:{candidate_id}] Starting profile processing for {candidate_name}")
+    
+    # Build a pseudo-resume from LinkedIn profile data for LLM extraction
+    profile_summary = candidate.get("summary", "")
+    headline = candidate.get("title", candidate.get("headline", ""))
+    location = candidate.get("location", candidate.get("city", ""))
+    company_exp = candidate.get("company_experience", [])
+    education = candidate.get("candidate_education", [])
+    certifications = candidate.get("candidate_certification", [])
+    skills = candidate.get("skills", [])
+    profile_url = candidate.get("profile_url", "")
+    
+    # Construct a text representation of the LinkedIn profile
+    linkedin_profile_text = f"""
+Name: {candidate_name}
+Headline: {headline}
+Location: {location}
+Profile URL: {profile_url}
+
+Summary:
+{profile_summary}
+
+Experience:
+"""
+    
+    for exp in company_exp:
+        linkedin_profile_text += f"- {exp.get('title', '')} at {exp.get('company', '')} ({exp.get('start_date', '')} to {exp.get('end_date', '')})\n"
+    
+    linkedin_profile_text += "\nEducation:\n"
+    for edu in education:
+        linkedin_profile_text += f"- {edu.get('degree', '')} from {edu.get('institution', '')} ({edu.get('year', '')})\n"
+    
+    linkedin_profile_text += "\nCertifications:\n"
+    for cert in certifications:
+        linkedin_profile_text += f"- {cert.get('name', '')} by {cert.get('issuer', '')} ({cert.get('year', '')})\n"
+    
+    linkedin_profile_text += "\nSkills:\n"
+    for skill in skills:
+        skill_name = skill.get("name", skill) if isinstance(skill, dict) else skill
+        linkedin_profile_text += f"- {skill_name}\n"
+    
+    # Check if we have meaningful profile data
+    if len(linkedin_profile_text.strip()) < 100:
+        logger.warning(f"⚠️ [LinkedIn Candidate:{candidate_id}] Insufficient profile data, skipping LLM processing")
+        return candidate
+    
+    logger.info(f"📄 [LinkedIn Candidate:{candidate_id}] Profile text length: {len(linkedin_profile_text)} characters")
+    
+    # Crisp the profile text for LLM extraction
+    logger.info(f"📄 [LinkedIn Candidate:{candidate_id}] Crisping profile for LLM extraction...")
+    crisped_profile_text = await crisp_resume_with_ai(linkedin_profile_text, max_length=12000)
+    logger.info(f"📄 [LinkedIn Candidate:{candidate_id}] Using crisped profile ({len(crisped_profile_text)} chars) for LLM extraction")
+    
+    # Run LLM extraction
+    logger.info(f"🧠 [LinkedIn Candidate:{candidate_id}] Calling LLM for enhanced info extraction...")
+    enhanced_info_result = await extract_enhanced_info_with_llm(crisped_profile_text)
+    
+    # Log LLM results
+    if enhanced_info_result.get("error"):
+        logger.error(f"❌ [LinkedIn Candidate:{candidate_id}] LLM error: {enhanced_info_result.get('error')}")
+        formatted_skills = []
+    else:
+        formatted_skills = _normalize_llm_skills(enhanced_info_result)
+    
+    # Extract job title with fallbacks
+    extracted_job_title = (
+        enhanced_info_result.get("job_title")
+        or enhanced_info_result.get("current_title")
+        or ((enhanced_info_result.get("company_experience") or [{}])[0].get("title") if isinstance(enhanced_info_result.get("company_experience"), list) and (enhanced_info_result.get("company_experience") or []) else None)
+        or headline
+    )
+    
+    # Validate LLM-extracted name
+    llm_name = _clean_extracted_value(enhanced_info_result.get("candidate_name"))
+    linkedin_name = _clean_extracted_value(candidate.get("name"))
+    
+    if llm_name:
+        final_name = llm_name
+    elif linkedin_name:
+        final_name = linkedin_name
+    else:
+        final_name = None
+    
+    logger.info(f"👤 [LinkedIn Candidate:{candidate_id}] Name selection: LLM='{llm_name}', LinkedIn='{linkedin_name}', Final='{final_name}'")
+    
+    # Build enhanced info
+    enhanced_info = {
+        "candidate_name": final_name,
+        "email": _clean_extracted_value(enhanced_info_result.get("email")) or _clean_extracted_value(candidate.get("email")),
+        "phone": _clean_extracted_value(enhanced_info_result.get("phone")) or _clean_extracted_value(candidate.get("phone")),
+        "job_title": _clean_extracted_value(extracted_job_title),
+        "years_of_experience": enhanced_info_result.get("years_of_experience"),
+        "current_location": _clean_extracted_value(enhanced_info_result.get("current_location")) or _clean_extracted_value(location),
+        
+        # Use LLM-extracted data with LinkedIn data as fallback
+        "company_experience": enhanced_info_result.get("company_experience", []) or company_exp,
+        "candidate_education": enhanced_info_result.get("candidate_education", []) or education,
+        "candidate_certification": enhanced_info_result.get("candidate_certification", []) or certifications,
+        "urls": _normalize_candidate_urls({
+            "linkedin": profile_url,
+            **(enhanced_info_result.get("urls") or {}),
+        }),
+        "structured_skills": formatted_skills or skills,
+        
+        # Metadata
+        "source": "LinkedIn",
+        "resume_extraction_status": "completed" if any([
+            final_name,
+            _clean_extracted_value(extracted_job_title),
+            formatted_skills,
+            enhanced_info_result.get("company_experience", []) or company_exp,
+            enhanced_info_result.get("candidate_education", []) or education,
+            _clean_extracted_value(enhanced_info_result.get("email")),
+            _clean_extracted_value(enhanced_info_result.get("current_location")),
+        ]) else "partial"
+    }
+    
+    _log_extraction_snapshot(candidate_id, enhanced_info)
+    
+    # Save to candidate_enhanced_info table
+    logger.info(f"💾 [LinkedIn Candidate:{candidate_id}] Saving to candidate_enhanced_info table...")
+    try:
+        save_candidate_enhanced_info(candidate_id, enhanced_info, linkedin_profile_text)
+        logger.info(f"✅ [LinkedIn Candidate:{candidate_id}] Successfully saved to candidate_enhanced_info")
+    except Exception as e:
+        logger.error(f"❌ [LinkedIn Candidate:{candidate_id}] Failed to save to candidate_enhanced_info: {e}")
+    
+    logger.info("[LinkedInExtract] candidate_id=%s persisted=%s source=LinkedIn", candidate_id, "yes")
+    
+    # Return merged/enriched data for API response
+    return {
+        "candidate_id": candidate_id,
+        "name": enhanced_info.get("candidate_name"),
+        "current_title": enhanced_info.get("job_title"),
+        "location": enhanced_info.get("current_location"),
+        "years_experience": enhanced_info.get("years_of_experience"),
+        "skills": formatted_skills,
+        "company_experience": enhanced_info.get("company_experience", []),
+        "education": enhanced_info.get("candidate_education", []),
+        "certifications": enhanced_info.get("candidate_certification", []),
+        "urls": enhanced_info.get("urls", {}),
+        "raw": enhanced_info
+    }
+    
+async def process_dice_candidate(candidate: Dict[str, Any]):
+    """Process Dice candidate and save enhanced info to database."""
+    candidate_id = candidate.get("candidate_id", candidate.get("id", "unknown"))
+    candidate_name = candidate.get("name", "Unknown")
+    
+    logger.info(f"🔄 [Dice Candidate:{candidate_id}] Starting profile processing for {candidate_name}")
+    
+    # Build a pseudo-resume from Dice candidate data for LLM extraction
+    headline = candidate.get("title", candidate.get("headline", ""))
+    location = candidate.get("location", candidate.get("city", ""))
+    # Dice candidates usually have resume_text already
+    resume_text = candidate.get("resume_text", "")
+    
+    if not _has_real_resume_text(resume_text):
+        # Construct summary from metadata if no resume
+        summary = f"""
+Name: {candidate_name}
+Title: {headline}
+Location: {location}
+"""
+        resume_text = summary
+    
+    # Check if we have meaningful data
+    if len(resume_text.strip()) < 50:
+        logger.warning(f"⚠️ [Dice Candidate:{candidate_id}] Insufficient profile data, skipping LLM processing")
+        return candidate
+    
+    logger.info(f"📄 [Dice Candidate:{candidate_id}] Profile text length: {len(resume_text)} characters")
+    
+    # Crisp the profile text for LLM extraction
+    logger.info(f"📄 [Dice Candidate:{candidate_id}] Crisping profile for LLM extraction...")
+    crisped_text = await crisp_resume_with_ai(resume_text, max_length=12000)
+    
+    # Run LLM extraction
+    logger.info(f"🧠 [Dice Candidate:{candidate_id}] Calling LLM for enhanced info extraction...")
+    enhanced_info_result = await extract_enhanced_info_with_llm(crisped_text)
+    
+    # Log LLM results
+    if enhanced_info_result.get("error"):
+        logger.error(f"❌ [Dice Candidate:{candidate_id}] LLM error: {enhanced_info_result.get('error')}")
+        formatted_skills = []
+    else:
+        formatted_skills = _normalize_llm_skills(enhanced_info_result)
+    
+    # Extract job title with fallbacks
+    extracted_job_title = (
+        enhanced_info_result.get("job_title")
+        or enhanced_info_result.get("current_title")
+        or headline
+    )
+    
+    # Build enhanced info
+    enhanced_info = {
+        "candidate_name": _clean_extracted_value(enhanced_info_result.get("candidate_name")) or candidate_name,
+        "email": _clean_extracted_value(enhanced_info_result.get("email")) or candidate.get("email"),
+        "phone": _clean_extracted_value(enhanced_info_result.get("phone")) or candidate.get("phone"),
+        "job_title": _clean_extracted_value(extracted_job_title),
+        "years_of_experience": enhanced_info_result.get("years_of_experience"),
+        "current_location": _clean_extracted_value(enhanced_info_result.get("current_location")) or location,
+        
+        "company_experience": enhanced_info_result.get("company_experience", []),
+        "candidate_education": enhanced_info_result.get("candidate_education", []),
+        "candidate_certification": enhanced_info_result.get("candidate_certification", []),
+        "urls": _normalize_candidate_urls({
+            **(enhanced_info_result.get("urls") or {}),
+        }),
+        "structured_skills": formatted_skills,
+        
+        # Metadata
+        "source": "Dice",
+        "resume_extraction_status": "completed" if any([
+            formatted_skills,
+            enhanced_info_result.get("company_experience", []),
+            _clean_extracted_value(enhanced_info_result.get("email")),
+        ]) else "partial"
+    }
+    
+    _log_extraction_snapshot(candidate_id, enhanced_info)
+    
+    # Save to candidate_enhanced_info table
+    try:
+        save_candidate_enhanced_info(candidate_id, enhanced_info, resume_text)
+    except Exception as e:
+        logger.error(f"❌ [Dice Candidate:{candidate_id}] Failed to save: {e}")
+    
+    # Return merged data
+    return {
+        "candidate_id": candidate_id,
         "name": enhanced_info.get("candidate_name"),
         "current_title": enhanced_info.get("job_title"),
         "location": enhanced_info.get("current_location"),
