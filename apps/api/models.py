@@ -117,11 +117,12 @@ class CandidateSearchRequest(BaseModel):
     skills: List[Skill] = []
     location: Optional[str] = None
     # Enhanced filtering criteria
-    titles: List[TitleCriterion] = []
+    titles: List[TitleCriterion] = [] # Keeping for compatibility
+    title_criteria: List[TitleCriterion] = [] # Added to match frontend
     skill_criteria: List[SkillCriterion] = []
     locations: List[LocationCriterion] = []
-    keywords: List[str] = []  # General keywords (UI only for now)
-    companies: List[str] = []  # Target companies (UI only for now)
+    keywords: List[str] = []  # General keywords
+    companies: List[str] = []  # Target companies
     resume_match_filters: List[ResumeMatchFilter] = []
     location_type: str = "Unspecified"
     sources: List[str] = ["JobDiva"]
@@ -149,11 +150,17 @@ class CandidateSaveRecord(BaseModel):
     image_url: Optional[str] = None
     resume_id: Optional[str] = None
     resume_text: Optional[str] = None
-    skills: List[str] = []
-    experience_years: int = 0
+    skills: List[Any] = []
+    experience_years: Any = 0
     source: str = "JobDiva"
-    match_score: float = 0.0
+    match_score: Any = 0.0
     is_selected: bool = False
+    # Additional enrichment fields sent by frontend
+    education: Optional[List[Any]] = None
+    certifications: Optional[List[Any]] = None
+    company_experience: Optional[List[Any]] = None
+    urls: Optional[Dict[str, Any]] = None
+    enhanced_info: Optional[Dict[str, Any]] = None
 
 class CandidatesSaveRequest(BaseModel):
     jobdiva_id: str
