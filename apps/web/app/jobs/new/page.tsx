@@ -249,7 +249,8 @@ function NewJobPageContent() {
     jobdiva: true,
     jobdiva_hotlist: true,
     linkedin: true,
-    dice: true
+    dice: true,
+    exa: true
   });
   const [sourceTitles, setSourceTitles] = useState<Array<{
     id: number;
@@ -2498,6 +2499,7 @@ function NewJobPageContent() {
                           if (k === 'jobdiva_hotlist') return 'JobDivaHotlist';
                           if (k === 'linkedin') return 'LinkedIn';
                           if (k === 'dice') return 'Dice';
+                          if (k === 'exa') return 'Exa';
                           return k;
                         });
 
@@ -2563,7 +2565,8 @@ function NewJobPageContent() {
                       { id: 'jobdiva', label: 'JobDiva', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false },
                       { id: 'jobdiva_hotlist', label: 'JobDiva Hotlist', icon: <Zap className="w-4 h-4 text-orange-500 fill-orange-500" />, disabled: false },
                       { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: false },
-                      { id: 'dice', label: 'Dice', icon: <Box className="w-4 h-4 text-slate-700" />, disabled: false }
+                      { id: 'dice', label: 'Dice', icon: <Box className="w-4 h-4 text-slate-700" />, disabled: false },
+                      { id: 'exa', label: 'Exa', icon: <Search className="w-4 h-4 text-pink-500" />, disabled: false }
                     ].map(source => (
                       <label key={source.id} className={`flex items-center gap-2 ${source.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer group'}`} title={source.disabled ? "Integration coming soon" : ""}>
                         <Checkbox

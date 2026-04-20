@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from services.jobdiva import JobDivaService
 from services.unipile import unipile_service
 from services.vetted import vetted_service
+from services.exa_service import exa_service
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ class SearchCriteria(BaseModel):
     within_miles: int = 25
     companies: List[str] = []
     page_size: int = 100
-    sources: List[str] = ["JobDiva", "LinkedIn"]
+    sources: List[str] = ["JobDiva", "LinkedIn", "Exa"]
     open_to_work: bool = True
 
 class UnifiedCandidateSearch:
@@ -28,6 +29,8 @@ class UnifiedCandidateSearch:
         self.jobdiva_service = JobDivaService()
         self.unipile_service = unipile_service
         self.vetted_service = vetted_service
+        self.exa_service = exa_service
+
 
     async def search_candidates(self, criteria: SearchCriteria) -> Dict[str, Any]:
         """
@@ -41,11 +44,17 @@ class UnifiedCandidateSearch:
         logger.info(f"⏱️  START TIME: {time.strftime('%H:%M:%S')}")
         logger.info("=" * 80)
         
-        # 1. First run JobDiva Applicants (Always included if job_id exists)
-        logger.info("📋 STEP 1: Fetching JobDiva Applicants...")
-        jobdiva_applicants_result = await self._search_jobdiva_applicants(criteria)
-        app_candidates = jobdiva_applicants_result.get("candidates", [])
-        logger.info(f"✅ STEP 1 COMPLETE: Found {len(app_candidates)} JobDiva applicants")
+        # 1. JobDiva sources
+        app_candidates = []
+        jobdiva_applicants_result = {}
+        
+        if "JobDiva" in criteria.sources:
+            logger.info("📋 STEP 1: Fetching JobDiva Applicants...")
+            jobdiva_applicants_result = await self._search_jobdiva_applicants(criteria)
+            app_candidates = jobdiva_applicants_result.get("candidates", [])
+            logger.info(f"✅ STEP 1 COMPLETE: Found {len(app_candidates)} JobDiva applicants")
+        else:
+            logger.info("📋 STEP 1: Skipping JobDiva Applicants (not in sources)...")
         
         tasks = []
         
@@ -59,12 +68,21 @@ class UnifiedCandidateSearch:
             logger.info("📋 STEP 2: Adding VettedDB search...")
             tasks.append(self._search_vetted(criteria))
             
-        # 4. JobDiva Talent Search - Only if less than 3 applicants were found
-        if len(app_candidates) < 3:
-            logger.info(f"📋 STEP 2: Only {len(app_candidates)} applicants found. Adding Talent Search fallback...")
-            tasks.append(self._search_jobdiva_talent(criteria))
-        else:
-            logger.info(f"📋 STEP 2: Skipping Talent Search (found {len(app_candidates)} applicants >= 3)")
+        # 4. Exa API
+        if "Exa" in criteria.sources:
+            logger.info("📋 STEP 2: Adding Exa search...")
+            tasks.append(self._search_exa(criteria))
+            
+        # 5. JobDiva Talent Search - Only if less than 3 applicants were found AND JobDiva is explicitly selected
+        if "JobDiva" in criteria.sources:
+            if len(app_candidates) < 3:
+                logger.info(f"📋 STEP 2: Only {len(app_candidates)} applicants found. Adding Talent Search fallback...")
+                tasks.append(self._search_jobdiva_talent(criteria))
+            else:
+                logger.info(f"📋 STEP 2: Skipping Talent Search (found {len(app_candidates)} applicants >= 3)")
+        elif "JobDiva Hotlist" in criteria.sources:
+            # Optionally implement Hotlist search or just ignore, for now we will just not run Talent Search
+            pass
 
         # Execute remaining searches concurrently
         logger.info("-" * 80)
@@ -75,7 +93,8 @@ class UnifiedCandidateSearch:
             logger.info(f"✅ Additional searches complete ({len(tasks)} sources)")
             
         # Add applicants result manually to the results list
-        results.append(jobdiva_applicants_result)
+        if jobdiva_applicants_result:
+            results.append(jobdiva_applicants_result)
         
         combined_candidates = []
         summary = {
@@ -83,6 +102,7 @@ class UnifiedCandidateSearch:
             "job_applicants_count": 0,
             "linkedin_count": 0,
             "vetted_count": 0,
+            "exa_count": 0,
             "talent_search_count": 0,
             "cached_results": 0,
             "new_extractions": 0
@@ -113,6 +133,8 @@ class UnifiedCandidateSearch:
                 summary["linkedin_count"] = len(source_candidates)
             elif source_type == "VettedDB":
                 summary["vetted_count"] = len(source_candidates)
+            elif source_type == "Exa":
+                summary["exa_count"] = len(source_candidates)
             elif source_type == "JobDiva-TalentSearch":
                 summary["talent_search_count"] = len(source_candidates)
 
@@ -207,6 +229,7 @@ class UnifiedCandidateSearch:
         logger.info(f"   - Talent Search: {summary['talent_search_count']}")
         logger.info(f"   - LinkedIn: {summary['linkedin_count']}")
         logger.info(f"   - VettedDB: {summary['vetted_count']}")
+        logger.info(f"   - Exa: {summary['exa_count']}")
         logger.info(f"   - Total Unique Candidates: {summary['total_candidates']}")
         logger.info(f"   - AI Extractions Completed: {summary['new_extractions']}")
         logger.info(f"   - Avg Time Per Candidate: {total_duration/max(summary['new_extractions'], 1):.1f}s")
@@ -273,6 +296,24 @@ class UnifiedCandidateSearch:
         except Exception as e:
             logger.error(f"VettedDB search failed: {e}")
             return {"candidates": [], "source_type": "VettedDB"}
+
+    async def _search_exa(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        try:
+            skills_values = []
+            for s in criteria.skills:
+                val = s.get("value") if isinstance(s, dict) else s
+                if val:
+                    skills_values.append(str(val))
+                    
+            candidates = await self.exa_service.search_candidates(
+                skills=skills_values,
+                location=criteria.location,
+                limit=min(criteria.page_size, 20)
+            )
+            return {"candidates": candidates, "source_type": "Exa"}
+        except Exception as e:
+            logger.error(f"Exa search failed: {e}")
+            return {"candidates": [], "source_type": "Exa"}
 
     def _deduplicate_candidates(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen = {}
