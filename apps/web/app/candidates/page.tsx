@@ -74,7 +74,7 @@ export default function CandidatesPage() {
       
       if (data.status === "success" && Array.isArray(data.candidates)) {
         const seen = new Set();
-        const uniqueCandidates = data.candidates.filter(c => {
+        const uniqueCandidates = data.candidates.filter((c: any) => {
           const id = c.candidate_id || c.id;
           if (!id) return true;
           if (seen.has(id)) return false;
