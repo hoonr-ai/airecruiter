@@ -27,6 +27,7 @@ class SearchCriteria(BaseModel):
     sources: List[str] = ["JobDiva"]
     open_to_work: bool = True
     boolean_string: str = ""
+    bypass_screening: bool = False
 
 class UnifiedCandidateSearch:
     def __init__(self):
@@ -73,24 +74,27 @@ class UnifiedCandidateSearch:
             return cand
 
         jobdiva_selected = "JobDiva" in criteria.sources
+        talent_search_selected = "JobDiva-TalentSearch" in criteria.sources
         hotlist_selected = "JobDiva Hotlist" in criteria.sources
 
-        # --- STEP 1: JOBDIVA APPLICANTS ---
+        # --- STEP 1: JOBDIVA APPLICANTS (legacy / backward-compat only) ---
+        # Triggered only when the old 'JobDiva' source key is explicitly used.
+        # The UI now maps the "JobDiva" checkbox → 'JobDiva-TalentSearch', so
+        # this path is reserved for programmatic / legacy callers.
         if jobdiva_selected:
             yield {"type": "stage", "data": "Searching JobDiva applicants..."}
             applicants_res = await self._search_jobdiva_applicants(criteria)
             applicants = applicants_res.get("candidates", [])
             summary["job_applicants_count"] = len(applicants)
-            
+
             if applicants:
                 self._log_stage("Applicants", f"Found {len(applicants)} applicants; starting resume screen...")
-                # Attach cached info first to speed up streaming
                 self._attach_cached_enhanced_info(applicants)
-                
+
                 async for cand in self._enrich_filtered_jobdiva_candidates(applicants, criteria):
-                    # Check for truly qualified
                     assessment = self._filter_assessment(cand, criteria, enforce_years=True)
-                    if assessment["passes"]:
+                    # Yield if it passes screening OR if bypass_screening is requested (e.g. auto-assign all applicants)
+                    if assessment["passes"] or criteria.bypass_screening:
                         cand["screening_summary"] = {
                             "matched": assessment["matched"][:10],
                             "missing": [],
@@ -100,28 +104,39 @@ class UnifiedCandidateSearch:
                         cid = str(cand.get("candidate_id") or cand.get("id"))
                         if cid not in seen_ids:
                             seen_ids.add(cid)
-                            summary["qualified_applicants"] += 1
+                            if assessment["passes"]:
+                                summary["qualified_applicants"] += 1
                             summary["total_candidates"] += 1
                             yield {"type": "candidate", "data": cand}
             else:
                 self._log_stage("Applicants", "No applicants found.")
 
-        # --- STEP 2: TIERED TALENT SEARCH ---
-        should_search_talent = jobdiva_selected and summary["qualified_applicants"] < 3
+        # --- STEP 2: JOBDIVA TALENT SEARCH ---
+        # Triggered when the recruiter explicitly selects "JobDiva" in the UI
+        # (which maps to 'JobDiva-TalentSearch'), OR as a tiered fallback when
+        # the legacy applicants path found fewer than 3 qualified candidates.
+        should_search_talent = (
+            talent_search_selected  # Direct: recruiter chose "JobDiva" in the UI
+            or (jobdiva_selected and not criteria.bypass_screening and summary["qualified_applicants"] < 3)  # Fallback
+        )
         if should_search_talent:
             yield {"type": "stage", "data": "Searching JobDiva Talent Search..."}
-            reason = f"only {summary['qualified_applicants']} qualified applicants" if summary["qualified_applicants"] > 0 else "no qualified applicants"
-            self._log_stage("TalentSearch", f"Triggering talent search: {reason}")
-            
+            if talent_search_selected:
+                self._log_stage("TalentSearch", "Direct talent search requested by recruiter.")
+            else:
+                reason = f"only {summary['qualified_applicants']} qualified applicants" if summary["qualified_applicants"] > 0 else "no qualified applicants"
+                self._log_stage("TalentSearch", f"Triggering talent search as fallback: {reason}")
+
             talent_res = await self._search_jobdiva_talent(criteria)
             talent_pool = talent_res.get("candidates", [])
             summary["talent_search_count"] = len(talent_pool)
-            
+
             if talent_pool:
                 self._attach_cached_enhanced_info(talent_pool)
                 async for cand in self._enrich_filtered_jobdiva_candidates(talent_pool, criteria):
                     assessment = self._filter_assessment(cand, criteria, enforce_years=True)
-                    if assessment["passes"]:
+                    # Yield if it passes screening OR if bypass_screening is requested
+                    if assessment["passes"] or criteria.bypass_screening:
                         cand["screening_summary"] = {
                             "matched": assessment["matched"][:10],
                             "missing": [],
@@ -131,7 +146,8 @@ class UnifiedCandidateSearch:
                         cid = str(cand.get("candidate_id") or cand.get("id"))
                         if cid not in seen_ids:
                             seen_ids.add(cid)
-                            summary["qualified_talent"] += 1
+                            if assessment["passes"]:
+                                summary["qualified_talent"] += 1
                             summary["total_candidates"] += 1
                             yield {"type": "candidate", "data": cand}
 

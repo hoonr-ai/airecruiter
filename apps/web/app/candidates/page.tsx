@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import Link from "next/link";
 import { Search, ExternalLink, User, MapPin, Briefcase, Linkedin, ShieldCheck, Mail, ArrowLeft, Eye, Zap, Filter, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -42,6 +42,7 @@ export default function CandidatesPage() {
   const [filteredCandidates, setFilteredCandidates] = useState<Candidate[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const searchQueryRef = useRef("");
   const [messageModalOpen, setMessageModalOpen] = useState(false);
   const [selectedCandidateForEmail, setSelectedCandidateForEmail] = useState<any>(null);
   const [resumeModalOpen, setResumeModalOpen] = useState(false);
@@ -50,25 +51,78 @@ export default function CandidatesPage() {
   const [selectedCandidateForDetails, setSelectedCandidateForDetails] = useState<any>(null);
 
   useEffect(() => {
-    fetchCandidates();
+    searchQueryRef.current = searchQuery;
+  }, [searchQuery]);
+
+  useEffect(() => {
+    fetchCandidates(false);
+
+    // Enable "live streaming" via background polling
+    const intervalId = setInterval(() => {
+      fetchCandidates(true);
+    }, 5000);
+
+    return () => clearInterval(intervalId);
   }, []);
 
-  const fetchCandidates = async () => {
-    setIsLoading(true);
+  const fetchCandidates = async (isBackground = false) => {
+    if (!isBackground) setIsLoading(true);
     try {
       const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates`);
       const data = await response.json();
-      console.log("📊 Fetched candidates data:", data);
-      if (data.status === "success") {
-        console.log(`✅ Found ${data.candidates.length} candidates in master pool`);
-        setCandidates(data.candidates);
-        setFilteredCandidates(data.candidates);
+      if (!isBackground) console.log("📊 Fetched candidates data:", data);
+      
+      if (data.status === "success" && Array.isArray(data.candidates)) {
+        const seen = new Set();
+        const uniqueCandidates = data.candidates.filter(c => {
+          const id = c.candidate_id || c.id;
+          if (!id) return true;
+          if (seen.has(id)) return false;
+          seen.add(id);
+          return true;
+        });
+
+        const getSourcePriority = (source: string) => {
+          const s = source.toLowerCase();
+          if (s.includes('applicants')) return 1;
+          if (s.includes('linkedin')) return 2;
+          if (s.includes('talentsearch') || s.includes('talent_search')) return 3;
+          return 4;
+        };
+
+        const sortedUnique = uniqueCandidates.sort((a, b) => {
+          const prioA = getSourcePriority(a.source);
+          const prioB = getSourcePriority(b.source);
+          if (prioA !== prioB) return prioA - prioB;
+          
+          const scoreA = a.match_score || (a as any).resume_match_percentage || 0;
+          const scoreB = b.match_score || (b as any).resume_match_percentage || 0;
+          return scoreB - scoreA;
+        });
+
+        if (!isBackground) console.log(`✅ Found ${data.candidates.length} tracking records, deduplicated and sorted to ${sortedUnique.length} unique candidates`);
+        setCandidates(sortedUnique);
+        
+        // Re-apply search filter if user is actively searching during live updates
+        const currentQuery = searchQueryRef.current;
+        if (currentQuery) {
+          setFilteredCandidates(sortedUnique.filter(c =>
+            c.name.toLowerCase().includes(currentQuery.toLowerCase()) ||
+            c.job_title?.toLowerCase().includes(currentQuery.toLowerCase()) ||
+            c.headline.toLowerCase().includes(currentQuery.toLowerCase()) ||
+            c.source.toLowerCase().includes(currentQuery.toLowerCase())
+          ));
+        } else {
+          setFilteredCandidates(sortedUnique);
+        }
       }
     } catch (error) {
       console.error("Error fetching candidates:", error);
     } finally {
-      setIsLoading(true);
-      setTimeout(() => setIsLoading(false), 500); // Small delay for aesthetic
+      if (!isBackground) {
+        setIsLoading(true);
+        setTimeout(() => setIsLoading(false), 500); // Small delay for aesthetic
+      }
     }
   };
 
@@ -182,24 +236,26 @@ export default function CandidatesPage() {
             </Button>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <Table>
+          <Table 
+            className="relative" 
+            containerClassName="overflow-x-auto overflow-y-auto max-h-[calc(100vh-220px)] border-b border-slate-100"
+          >
               <TableHeader className="bg-[#fcfdfd]">
                 <TableRow className="border-slate-100">
-                  <TableHead className="pl-10 w-[80px] h-14"></TableHead>
-                  <TableHead className="w-[240px] text-left text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Candidate Name</TableHead>
-                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Match</TableHead>
-                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Applied For</TableHead>
-                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Location</TableHead>
-                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Sourcing Details</TableHead>
-                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Sourced On</TableHead>
-                  <TableHead className="text-center pr-10 text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14">Actions</TableHead>
+                  <TableHead className="pl-10 sticky top-0 left-0 bg-[#fcfdfd] z-50 w-[110px] min-w-[110px] h-14 border-b border-slate-100"></TableHead>
+                  <TableHead className="w-[300px] min-w-[300px] text-left text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 left-[110px] bg-[#fcfdfd] z-50 border-r border-b border-slate-100 shadow-[4px_0_8px_-4px_rgba(0,0,0,0.1)]">Candidate Name</TableHead>
+                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100">Match</TableHead>
+                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100">Applied For</TableHead>
+                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100">Location</TableHead>
+                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100">Sourcing Details</TableHead>
+                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100">Sourced On</TableHead>
+                  <TableHead className="text-center pr-10 text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody className="divide-y divide-slate-100">
-                {filteredCandidates.map((candidate) => (
-                  <TableRow key={candidate.id} className="hover:bg-slate-50/50 transition-colors group">
-                    <TableCell className="pl-10 py-6">
+                {filteredCandidates.map((candidate, idx) => (
+                  <TableRow key={`${candidate.id || candidate.candidate_id}-${idx}`} className="hover:bg-slate-50/50 transition-colors group">
+                    <TableCell className="pl-10 py-6 sticky left-0 bg-white z-30 w-[110px] min-w-[110px] group-hover:bg-slate-50 transition-colors">
                       <Avatar className="h-12 w-12 border border-slate-200 shadow-sm transition-transform group-hover:scale-105">
                         <AvatarImage src={candidate.image_url} />
                         <AvatarFallback className="bg-slate-100 text-slate-400 text-[14px] font-bold">
@@ -207,8 +263,8 @@ export default function CandidatesPage() {
                         </AvatarFallback>
                       </Avatar>
                     </TableCell>
-                    <TableCell className="py-6 w-[240px] max-w-[240px]">
-                      <div className="space-y-1">
+                    <TableCell className="py-6 w-[300px] min-w-[300px] max-w-[300px] sticky left-[110px] bg-white z-30 border-r border-slate-100 shadow-[4px_0_8px_-4px_rgba(0,0,0,0.1)] group-hover:bg-slate-50 transition-colors overflow-hidden">
+                      <div className="space-y-1 relative z-10">
                         <a
                           href={candidate.source === 'LinkedIn' ? candidate.profile_url || '#' : '#'}
                           target={candidate.source === 'LinkedIn' ? "_blank" : undefined}
@@ -224,7 +280,7 @@ export default function CandidatesPage() {
                            <span className="flex items-center gap-2 max-w-full">
                              <span className={`text-[15px] font-bold text-slate-900 transition-colors whitespace-normal break-words ${
                                candidate.source === 'LinkedIn' ? 'group-hover/name:text-[#1d4ed8]' : 
-                               candidate.source === 'JobDiva-TalentSearch' ? 'group-hover/name:text-[#c2410c]' : 
+                               candidate.source === 'JobDiva-TalentSearch' ? 'group-hover/name:text-[#8B5A2B]' : 
                                'group-hover/name:text-[#6366f1]'
                              }`}>
                                {candidate.name}
@@ -234,7 +290,7 @@ export default function CandidatesPage() {
                                  candidate.source === 'LinkedIn' 
                                    ? 'group-hover/name:border-[#bfdbfe] group-hover/name:bg-[#eff6ff] group-hover/name:text-[#1d4ed8]' : 
                                  candidate.source === 'JobDiva-TalentSearch' 
-                                   ? 'group-hover/name:border-[#fed7aa] group-hover/name:bg-[#fff7ed] group-hover/name:text-[#c2410c]' : 
+                                   ? 'group-hover/name:border-[#D2B48C] group-hover/name:bg-[#FDF8F5] group-hover/name:text-[#8B5A2B]' : 
                                  'group-hover/name:border-[#c7d2fe] group-hover/name:bg-[#f5f3ff] group-hover/name:text-[#6366f1]'
                                }`}
                                title={candidate.source === 'LinkedIn' ? "View LinkedIn Profile" : "Click to view resume"}
@@ -287,7 +343,7 @@ export default function CandidatesPage() {
                         <span className={`px-2.5 w-fit py-0.5 rounded-lg text-[10.5px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow-sm h-fit border ${candidate.source === 'LinkedIn'
                             ? 'bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]'
                             : candidate.source === 'JobDiva-TalentSearch'
-                              ? 'bg-[#fff7ed] text-[#c2410c] border-[#fed7aa]'
+                              ? 'bg-[#FDF8F5] text-[#8B5A2B] border-[#D2B48C]'
                               : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]'
                           }`}>
                           {candidate.source === 'LinkedIn' ? <Linkedin className="w-3 h-3 fill-current" /> : candidate.source === 'JobDiva-TalentSearch' ? <Zap className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
@@ -330,7 +386,6 @@ export default function CandidatesPage() {
                 ))}
               </TableBody>
             </Table>
-          </div>
         )}
       </div>
       

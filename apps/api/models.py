@@ -166,6 +166,10 @@ class CandidatesSaveRequest(BaseModel):
     jobdiva_id: str
     candidates: List[CandidateSaveRecord]
 
+class JobSyncFiltersRequest(BaseModel):
+    sourcing_filters: Optional[Dict[str, Any]] = None
+    resume_match_filters: Optional[List[Dict[str, Any]]] = None
+
 # Job Criteria Models (Iterative Step 1)
 class JobCriterion(BaseModel):
     id: Optional[str] = None

@@ -153,11 +153,35 @@ export default function CandidateRankingsPage() {
       // Fetch candidates
       const candRes = await fetch(`${apiBase}/jobs/${jobId}/candidates`);
       const candData = await candRes.json();
-      if (candData.status === "success" && candData.candidates) {
-        // Sort by total fit score (match_score + engage_score) descending
-        const sorted = candData.candidates.sort((a: any, b: any) => {
-          const totalA = (a.match_score || 0) + (a.engage_score || 0);
-          const totalB = (b.match_score || 0) + (b.engage_score || 0);
+      if (candData.status === "success" && Array.isArray(candData.candidates)) {
+        // Deduplicate candidates by their JobDiva candidate ID.
+        // We keep the first occurrence since they are sorted by created_at DESC from the backend.
+        const seen = new Set();
+        const uniqueCandidates = candData.candidates.filter((c: any) => {
+          const id = c.candidate_id || c.id;
+          if (!id) return true;
+          if (seen.has(id)) return false;
+          seen.add(id);
+          return true;
+        });
+
+        const getSourcePriority = (source: string) => {
+          const s = (source || "").toLowerCase();
+          if (s.includes('applicants')) return 1;
+          if (s.includes('linkedin')) return 2;
+          if (s.includes('talentsearch') || s.includes('talent_search')) return 3;
+          return 4;
+        };
+
+        const sorted = uniqueCandidates.sort((a: any, b: any) => {
+          // 1. Primary sort by source priority
+          const prioA = getSourcePriority(a.source);
+          const prioB = getSourcePriority(b.source);
+          if (prioA !== prioB) return prioA - prioB;
+
+          // 2. Secondary sort by match percentage
+          const totalA = (a.match_score || a.resume_match_percentage || 0);
+          const totalB = (b.match_score || b.resume_match_percentage || 0);
           return totalB - totalA;
         });
         setCandidates(sorted);
@@ -439,7 +463,7 @@ export default function CandidateRankingsPage() {
                     const initials = candidate.name.split(' ').map(n => n[0]).join('');
 
                     return (
-                      <TableRow key={candidate.id} className="border-b border-[#e2e8f0] hover:bg-slate-50/80 transition-colors h-auto group text-center">
+                      <TableRow key={`${candidate.id || candidate.candidate_id}-${idx}`} className="border-b border-[#e2e8f0] hover:bg-slate-50/80 transition-colors h-auto group text-center">
                         <TableCell className="text-center font-semibold text-slate-500 text-[13px] border-r border-[#e2e8f0] w-[60px] py-4 align-top">
                           {idx + 1}
                         </TableCell>

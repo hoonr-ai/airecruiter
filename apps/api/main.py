@@ -43,7 +43,7 @@ from models import (
     CandidateAnalysisRequest, CandidateAnalysisResponse, JobCriterion, JobCriteriaResponse,
     JobCriteriaUpdate, JobDraftData, JobDraftRequirement, JobDraftRequirements, 
     JobDraftResponse, JobPublishRequest, JobBasicInfoUpdate, SkillsExtractionRequest, SkillsExtractionResponse,
-    JobSkillsSummaryResponse
+    JobSkillsSummaryResponse, JobSyncFiltersRequest
 )
 from matcher import mock_match_candidates
 from services.extractor import llm_extractor
@@ -524,17 +524,231 @@ async def message_candidate(request: CandidateMessageRequest):
         raise HTTPException(status_code=400, detail=f"Messaging not supported for source: {request.source}")
 
 @app.get("/jobs/{job_id}/candidates")
-async def get_job_candidates(job_id: str):
+async def get_job_candidates(job_id: str, background_tasks: BackgroundTasks):
     """
-    Fetches all sourced candidates tied to a specific job (by either job_id or jobdiva_id).
+    Fetches all sourced candidates tied to a specific job.
+    Also triggers a background sync to auto-assign any new organic JobDiva applicants.
     """
     try:
         from services.sourced_candidates_storage import sourced_candidates_storage
         candidates = sourced_candidates_storage.get_candidates_for_job(job_id)
+        
+        # Trigger an auto-sync for any new applicants who applied since the last check
+        # We reuse the logic from the auto-assign endpoint by invoking it internally.
+        # This gives us a seamless organic sync on view.
+        try:
+            # We must await the execution of the route handler to get its return dict,
+            # which adds the task to `background_tasks`.
+            await auto_assign_applicants(job_id, background_tasks)
+        except Exception as bg_err:
+            logger.warning(f"Failed to trigger auto-assign background task for job {job_id}: {bg_err}")
+
         return {"status": "success", "candidates": candidates}
     except Exception as e:
         logger.error(f"Error fetching candidates for job {job_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/jobs/{job_id}/auto-assign-applicants")
+async def auto_assign_applicants(job_id: str, background_tasks: BackgroundTasks):
+    """
+    Triggered after 'Launch PAIR'. Fetches all JobDiva applicants for this job,
+    scores them using the job's resume match filters, and upserts each one into
+    sourced_candidates with their match_score so they appear in the Rankings page.
+
+    Runs as a background task — returns immediately so the UI is not blocked.
+    """
+    async def _run_auto_assign(job_id: str):
+        try:
+            logger.info(f"🤖 [AutoAssign] Starting background applicant assignment for job {job_id}")
+
+            from services.unified_candidate_search import SearchCriteria
+            from services.unified_candidate_search import unified_search_service
+            import psycopg2
+            from core.config import DATABASE_URL
+
+            # 1. Load job rubric / resume_match_filters from DB
+            resume_match_filters = []
+            sourcing_filters = {}
+            jobdiva_numeric_id = None
+            
+            try:
+                conn_lookup = get_db_connection()
+                cur_lookup = conn_lookup.cursor()
+                cur_lookup.execute(
+                    "SELECT resume_match_filters, sourcing_filters, jobdiva_id FROM monitored_jobs "
+                    "WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
+                    (job_id, job_id)
+                )
+                row = cur_lookup.fetchone()
+                if row:
+                    resume_match_filters = row[0] if isinstance(row[0], list) else (json.loads(row[0]) if row[0] else [])
+                    sourcing_filters = row[1] if isinstance(row[1], dict) else (json.loads(row[1]) if row[1] else {})
+                    jobdiva_numeric_id = row[2]
+                cur_lookup.close()
+                conn_lookup.close()
+            except Exception as e:
+                logger.warning(f"[AutoAssign] Could not load rubric filters for job {job_id}: {e}")
+
+            # Use the resolved jobdiva_numeric_id if available, otherwise fallback to passed job_id
+            search_job_id = jobdiva_numeric_id if jobdiva_numeric_id else job_id
+            logger.info(f"🤖 [AutoAssign] Using JobDiva ID {search_job_id} for applicant search")
+
+            # 2. Build minimal SearchCriteria pointing ONLY at applicants pool
+            title_criteria = []
+            if sourcing_filters.get("titles"):
+                title_criteria = [
+                    {"value": t.get("value", ""), "match_type": t.get("matchType", "must"), "years": t.get("years", 0),
+                     "recent": t.get("recent", False), "similar_terms": t.get("selectedSimilarTitles") or []}
+                    for t in (sourcing_filters.get("titles") or [])
+                ]
+            
+            skill_criteria = []
+            if sourcing_filters.get("skills"):
+                skill_criteria = [
+                    {"value": s.get("value", ""), "match_type": s.get("matchType", "must"), "years": s.get("years", 0),
+                     "recent": s.get("recent", False), "similar_terms": s.get("selectedSimilarSkills") or []}
+                    for s in (sourcing_filters.get("skills") or [])
+                ]
+            
+            primary_location = ""
+            locs = sourcing_filters.get("locations") or []
+            if locs:
+                primary_location = locs[0].get("value", "")
+
+            criteria = SearchCriteria(
+                job_id=search_job_id,
+                title_criteria=title_criteria,
+                skill_criteria=skill_criteria,
+                keywords=sourcing_filters.get("keywords") or [],
+                companies=sourcing_filters.get("companies") or [],
+                resume_match_filters=resume_match_filters,
+                location=primary_location,
+                page_size=500,
+                sources=["JobDiva"],
+                bypass_screening=True,
+            )
+
+            # 3. Stream candidates through the unified search (applicants path)
+            total_assigned = 0
+            with psycopg2.connect(DATABASE_URL) as conn:
+                with conn.cursor() as cur:
+                    async for event in unified_search_service.search_candidates(criteria):
+                        if event.get("type") != "candidate":
+                            continue
+                        cand = event["data"]
+                        try:
+                            # Use the job_id (UUID) for DB linking to ensure it matches the monitored job
+                            db_job_id = job_id 
+                            candidate_id = str(cand.get("candidate_id") or cand.get("id") or "")
+                            
+                            candidate_data_json = json.dumps({
+                                "skills": cand.get("skills") or [],
+                                "experience_years": cand.get("experience_years") or 0,
+                                "education": cand.get("enhanced_info", {}).get("candidate_education") or [],
+                                "certifications": cand.get("enhanced_info", {}).get("candidate_certification") or [],
+                                "company_experience": cand.get("enhanced_info", {}).get("company_experience") or [],
+                                "urls": cand.get("enhanced_info", {}).get("urls") or {},
+                                "is_selected": True,
+                                "match_score": cand.get("match_score") or 0,
+                                "missing_skills": cand.get("missing_skills") or [],
+                                "matched_skills": cand.get("matched_skills") or [],
+                                "explainability": cand.get("explainability") or "",
+                                "match_score_details": cand.get("match_score_details") or {},
+                                "enhanced_info": cand.get("enhanced_info"),
+                                "auto_assigned": True,
+                            })
+                            
+                            cur.execute("""
+                                INSERT INTO sourced_candidates (
+                                    jobdiva_id, candidate_id, source, name, email, phone,
+                                    headline, location, resume_text, data, status,
+                                    resume_match_percentage, updated_at
+                                ) VALUES (
+                                    %s, %s, %s, %s, %s, %s,
+                                    %s, %s, %s, %s, %s,
+                                    %s, CURRENT_TIMESTAMP
+                                )
+                                ON CONFLICT (jobdiva_id, candidate_id, source) DO UPDATE SET
+                                    name       = EXCLUDED.name,
+                                    email      = EXCLUDED.email,
+                                    phone      = EXCLUDED.phone,
+                                    headline   = EXCLUDED.headline,
+                                    location   = EXCLUDED.location,
+                                    resume_text= EXCLUDED.resume_text,
+                                    data       = EXCLUDED.data,
+                                    status     = EXCLUDED.status,
+                                    resume_match_percentage= EXCLUDED.resume_match_percentage,
+                                    updated_at = CURRENT_TIMESTAMP
+                            """, (
+                                db_job_id,
+                                candidate_id,
+                                cand.get("source", "JobDiva-Applicants"),
+                                cand.get("name") or "",
+                                cand.get("email"),
+                                cand.get("phone"),
+                                cand.get("headline") or cand.get("title"),
+                                cand.get("location"),
+                                cand.get("resume_text"),
+                                candidate_data_json,
+                                "sourced",
+                                cand.get("match_score") or 0,
+                            ))
+                            total_assigned += 1
+                            # Commit per batch or periodically if needed, but here we do it after each row for safety in background
+                            conn.commit()
+                        except Exception as row_err:
+                            logger.warning(f"[AutoAssign] Failed to upsert candidate {cand.get('candidate_id')}: {row_err}")
+
+            logger.info(f"✅ [AutoAssign] Auto-assigned {total_assigned} applicants for job {job_id}")
+
+        except Exception as e:
+            logger.error(f"❌ [AutoAssign] Background task failed for job {job_id}: {e}", exc_info=True)
+
+    background_tasks.add_task(_run_auto_assign, job_id)
+    return {
+        "status": "accepted",
+        "message": f"Auto-assignment of JobDiva applicants started for job {job_id}",
+        "job_id": job_id,
+    }
+
+@app.post("/jobs/{job_id}/sync-filters")
+async def sync_job_filters(job_id: str, request: JobSyncFiltersRequest):
+    """
+    Called before 'Launch PAIR' or during search to ensure the database has the latest
+    rubric and sourcing filters. This allows background tasks to use the correct screening criteria.
+    """
+    try:
+        logger.info(f"🔄 Syncing filters for job {job_id}")
+        
+        with psycopg2.connect(DATABASE_URL) as conn:
+            with conn.cursor() as cur:
+                # Update monitored_jobs with provided filters
+                cur.execute("""
+                    UPDATE monitored_jobs 
+                    SET resume_match_filters = %s,
+                        sourcing_filters = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE job_id = %s OR jobdiva_id = %s
+                """, (
+                    json.dumps(request.resume_match_filters) if request.resume_match_filters is not None else None,
+                    json.dumps(request.sourcing_filters) if request.sourcing_filters is not None else None,
+                    job_id, job_id
+                ))
+                
+                if cur.rowcount == 0:
+                    logger.warning(f"⚠️ [SyncFilters] No job found to update for ID {job_id}")
+                else:
+                    logger.info(f"✅ [SyncFilters] Successfully updated filters for job {job_id}")
+                
+                conn.commit()
+                
+        return {"status": "success", "message": "Filters synced successfully"}
+    except Exception as e:
+        logger.error(f"❌ [SyncFilters] Failed to sync filters for job {job_id}: {e}")
+        return {"status": "error", "message": str(e)}
+
+
 
 @app.post("/candidates/save")
 async def save_candidates(request: CandidatesSaveRequest):
@@ -587,16 +801,19 @@ async def save_candidates(request: CandidatesSaveRequest):
                                 "match_score": getattr(c, 'match_score', 0),
                                 "enhanced_info": getattr(c, 'enhanced_info', None)  # Full LLM extraction data
                             }),
-                            "status": "sourced"
+                            "status": "sourced",
+                            "resume_match_percentage": getattr(c, 'match_score', 0)
                         }
                         
                         cur.execute("""
                             INSERT INTO sourced_candidates (
                                 jobdiva_id, candidate_id, source, name, email, phone, headline, location, 
-                                profile_url, image_url, resume_id, resume_text, data, status, updated_at
+                                profile_url, image_url, resume_id, resume_text, data, status, 
+                                resume_match_percentage, updated_at
                             ) VALUES (
                                 %(jobdiva_id)s, %(candidate_id)s, %(source)s, %(name)s, %(email)s, %(phone)s, %(headline)s, %(location)s,
-                                %(profile_url)s, %(image_url)s, %(resume_id)s, %(resume_text)s, %(data)s, %(status)s, CURRENT_TIMESTAMP
+                                %(profile_url)s, %(image_url)s, %(resume_id)s, %(resume_text)s, %(data)s, %(status)s, 
+                                %(resume_match_percentage)s, CURRENT_TIMESTAMP
                             )
                             ON CONFLICT (jobdiva_id, candidate_id, source) DO UPDATE SET
                                 name = EXCLUDED.name,
@@ -610,6 +827,7 @@ async def save_candidates(request: CandidatesSaveRequest):
                                 resume_text = EXCLUDED.resume_text,
                                 data = EXCLUDED.data,
                                 status = EXCLUDED.status,
+                                resume_match_percentage = EXCLUDED.resume_match_percentage,
                                 updated_at = CURRENT_TIMESTAMP
                         """, candidate_data)
                         
@@ -2366,12 +2584,12 @@ async def get_monitored_jobs(include_archived: bool = False):
                     sc.jobdiva_id AS sc_key,
                     COUNT(*) AS candidates_sourced,
                     COUNT(*) FILTER (
-                        WHERE (sc.data->>'match_score') IS NOT NULL
-                          AND (sc.data->>'match_score')::numeric >= 70
+                        WHERE (sc.resume_match_percentage) IS NOT NULL
+                          AND (sc.resume_match_percentage)::numeric >= 70
                     ) AS resumes_shortlisted,
                     COUNT(*) FILTER (
-                        WHERE (sc.data->>'match_score') IS NOT NULL
-                          AND (sc.data->>'match_score')::numeric >= 70
+                        WHERE (sc.resume_match_percentage) IS NOT NULL
+                          AND (sc.resume_match_percentage)::numeric >= 70
                     ) AS pass_submissions,
                     COUNT(*) FILTER (
                         WHERE sc.data->>'engage_status' IS NOT NULL

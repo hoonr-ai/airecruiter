@@ -213,6 +213,7 @@ class SourcedCandidatesStorage:
             conn.execute(text("ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS resume_id TEXT"))
             conn.execute(text("ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS resume_text TEXT"))
             conn.execute(text("ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"))
+            conn.execute(text("ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS resume_match_percentage NUMERIC"))
             conn.commit()
         except Exception as e:
             pass  # Column might already exist
@@ -358,11 +359,12 @@ class SourcedCandidatesStorage:
             # Robust query that handles the mapping logic in SQL
             # Same logic as get_all_candidates but filtered by job_id
             query = """
-                SELECT sc.* 
+                SELECT DISTINCT ON (sc.candidate_id) sc.*, 
+                       sc.resume_match_percentage AS match_score
                 FROM sourced_candidates sc
                 LEFT JOIN monitored_jobs mj ON (sc.jobdiva_id = mj.job_id OR sc.jobdiva_id = mj.jobdiva_id)
                 WHERE mj.job_id = %s OR mj.jobdiva_id = %s OR sc.jobdiva_id = %s
-                ORDER BY sc.created_at DESC
+                ORDER BY sc.candidate_id, sc.created_at DESC
             """
             
             cur.execute(query, (jobdiva_id, jobdiva_id, jobdiva_id))
@@ -415,10 +417,10 @@ class SourcedCandidatesStorage:
             # Join with monitored_jobs to get job title
             # Try matching by jobdiva_id with the monitored jobs
             cur.execute("""
-                SELECT sc.*, mj.title as job_title 
+                SELECT DISTINCT ON (sc.candidate_id) sc.*, mj.title as job_title 
                 FROM sourced_candidates sc
                 LEFT JOIN monitored_jobs mj ON (sc.jobdiva_id = mj.job_id OR sc.jobdiva_id = mj.jobdiva_id)
-                ORDER BY sc.created_at DESC
+                ORDER BY sc.candidate_id, sc.created_at DESC
                 LIMIT %s
             """, (limit,))
             
