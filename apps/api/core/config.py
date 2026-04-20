@@ -63,3 +63,6 @@ ENCRYPTION_SALT = os.getenv("ENCRYPTION_SALT")
 AZURE_AI_PROJECT_ENDPOINT = os.getenv("AZURE_AI_PROJECT_ENDPOINT", "")
 AZURE_OPENAI_API_KEY      = os.getenv("AZURE_OPENAI_API_KEY", "")
 AZURE_AI_AGENT_NAME       = os.getenv("AZURE_AI_AGENT_NAME", "skill-role-extractor")
+
+# ---- Exa API ----
+EXA_API_KEY = get_env_with_default("EXA_API_KEY", "")

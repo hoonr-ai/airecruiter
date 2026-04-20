@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from services.jobdiva import JobDivaService
 from services.unipile import unipile_service
 from services.vetted import vetted_service
+from services.exa_service import exa_service
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ class SearchCriteria(BaseModel):
     within_miles: int = 25
     companies: List[str] = []
     page_size: int = 100
-    sources: List[str] = ["JobDiva"]
+    sources: List[str] = ["JobDiva", "LinkedIn", "Exa"]
     open_to_work: bool = True
     boolean_string: str = ""
 
@@ -33,6 +34,8 @@ class UnifiedCandidateSearch:
         self.jobdiva_service = JobDivaService()
         self.unipile_service = unipile_service
         self.vetted_service = vetted_service
+        self.exa_service = exa_service
+
 
     def _log_stage(self, stage: str, message: str) -> None:
         logger.info("[CandidateSearch] %s | %s", stage, message)
@@ -52,6 +55,7 @@ class UnifiedCandidateSearch:
             "linkedin_count": 0,
             "dice_count": 0,
             "vetted_count": 0,
+            "exa_count": 0,
             "talent_search_count": 0,
             "new_extractions": 0,
             "qualified_applicants": 0,
@@ -141,10 +145,14 @@ class UnifiedCandidateSearch:
             # Placeholder for Hotlist logic
             self._log_stage("Hotlist", "Hotlist search requested but not yet implemented.")
 
-        # --- STEP 4 & 5: EXTERNAL SOURCES (LinkedIn, Dice) ---
+        # --- STEP 4 & 5: EXTERNAL SOURCES (LinkedIn, Dice, Exa) ---
         # Refactored to be SEQUENTIAL for clear UI status updates
-        external_order = [("LinkedIn", self._search_linkedin), ("Dice", self._search_dice)]
-        
+        external_order = [
+            ("LinkedIn", self._search_linkedin),
+            ("Dice", self._search_dice),
+            ("Exa", self._search_exa),
+        ]
+
         for name, search_method in external_order:
             if name in criteria.sources:
                 yield {"type": "stage", "data": f"Searching {name}..."}
@@ -1595,6 +1603,24 @@ class UnifiedCandidateSearch:
         except Exception as e:
             logger.error(f"VettedDB search failed: {e}")
             return {"candidates": [], "source_type": "VettedDB"}
+
+    async def _search_exa(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        try:
+            skills_values = []
+            for s in criteria.skills:
+                val = s.get("value") if isinstance(s, dict) else s
+                if val:
+                    skills_values.append(str(val))
+                    
+            candidates = await self.exa_service.search_candidates(
+                skills=skills_values,
+                location=criteria.location,
+                limit=min(criteria.page_size, 20)
+            )
+            return {"candidates": candidates, "source_type": "Exa"}
+        except Exception as e:
+            logger.error(f"Exa search failed: {e}")
+            return {"candidates": [], "source_type": "Exa"}
 
     def _deduplicate_candidates(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen = {}

@@ -117,7 +117,7 @@ async def get_boolean_agent_context(job_id: str):
             if job_base.get('city') and job_base.get('state'):
                 locations.append({"value": f"{job_base['city']}, {job_base['state']}", "radius": "within 25 mi"})
             
-            sources = ["JobDiva", "JobDiva Hotlist", "LinkedIn", "Dice"]
+            sources = ["JobDiva", "JobDiva Hotlist", "LinkedIn", "Dice", "Exa"]
             keywords = []
             companies = []
 
