@@ -1350,7 +1350,7 @@ class JobDivaService:
 
                 return result
         except Exception as e:
-            logger.error(f"SearchJob Error: {e}")
+            logger.exception(f"❌ SearchJob Error for job_id {job_id}: {e}")
             return None
 
 
