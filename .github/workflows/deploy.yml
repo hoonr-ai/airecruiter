@@ -3,8 +3,8 @@ name: Deploy Pair Application
 on:
   push:
     branches:
-      - feature/job-diva-sync
       - develop
+      - main
 
 jobs:
 
@@ -12,7 +12,7 @@ jobs:
   # QA DEPLOYMENT
   # ----------------------
   deploy-qa:
-    if: github.ref_name == 'feature/job-diva-sync'
+    if: github.ref_name == 'develop'
     runs-on: ubuntu-latest
 
     environment:
@@ -53,8 +53,8 @@ jobs:
   # PRODUCTION DEPLOYMENT
   # ----------------------
   deploy-prod:
-    if: github.ref_name == 'develop'
-    #if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+    if: github.ref_name == 'main'
+    #if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
 
     environment:
