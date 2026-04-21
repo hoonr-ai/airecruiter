@@ -11,3 +11,7 @@ pg8000
 sqlalchemy
 cryptography
 apscheduler
+exa_py
+pypdf
+python-docx
+python-multipart

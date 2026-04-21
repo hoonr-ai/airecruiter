@@ -113,12 +113,12 @@ class ChatResponse(BaseModel):
     
 class CandidateSearchRequest(BaseModel):
     job_id: Optional[str] = None
-    # Legacy fields for backward compatibility
-    skills: List[Skill] = []
     location: Optional[str] = None
-    # Enhanced filtering criteria
-    titles: List[TitleCriterion] = [] # Keeping for compatibility
-    title_criteria: List[TitleCriterion] = [] # Added to match frontend
+    # Enhanced filtering criteria — single source of truth for titles/skills.
+    # Legacy flat `titles: List[TitleCriterion]` and `skills: List[Skill]`
+    # fields were removed (2026-04) in favor of `title_criteria` /
+    # `skill_criteria`. Callers should build the rich criterion shape.
+    title_criteria: List[TitleCriterion] = []
     skill_criteria: List[SkillCriterion] = []
     locations: List[LocationCriterion] = []
     keywords: List[str] = []  # General keywords
@@ -320,3 +320,18 @@ class JobSkillsSummaryResponse(BaseModel):
     total_skills: int
     by_importance: Dict[str, int]  # {"required": 5, "preferred": 3}
     analysis_metadata: Dict[str, Any]
+
+
+# External (non-JobDiva) job flow models
+class ExternalJobCreateRequest(BaseModel):
+    title: str
+    description: str = ""
+    customer_name: str = ""
+    recruiter_notes: str = ""
+
+
+class ManualCandidateRequest(BaseModel):
+    name: str
+    email: Optional[str] = ""
+    phone: Optional[str] = ""
+    resume_text: str

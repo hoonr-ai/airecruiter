@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useEffectEvent, Suspense, useRef } from "react";
+import { useState, useEffect, useEffectEvent, useRef, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -67,6 +67,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { ResumeModal } from "@/components/ResumeModal";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
+import { PasteResumeModal } from "@/components/jobs/PasteResumeModal";
+import { BulkUploadSection } from "@/components/jobs/BulkUploadSection";
 
 // Utility function to clean location_type values and filter out employment terms
 function cleanLocationType(locationType: string | null | undefined): string {
@@ -118,6 +120,13 @@ const STEP_DESCRIPTIONS: Record<Step, string> = {
   5: "Launch sourcing and begin candidate collection."
 };
 
+// Stable handle tying a rubric item to its Step-4 resume_match filter.
+// Replaces the earlier "value.split('—')[0]" fragility: Step-5 sourcing
+// derivation now matches by this key rather than by re-parsing the
+// user-visible filter string.
+const rubricKeyFor = (category: string, baseValue: string): string =>
+  `${category}|${(baseValue || "").trim()}`;
+
 const getCandidateDisplayName = (candidate: {
   name?: string;
   firstName?: string;
@@ -164,6 +173,26 @@ function NewJobPageContent() {
   const [jobData, setJobData] = useState<any>(null);
   const [isFetching, setIsFetching] = useState(false);
   const [isFetched, setIsFetched] = useState(false);
+
+  // External (non-JobDiva) requirement flow
+  const [isExternal, setIsExternal] = useState(false);
+  const [extTitle, setExtTitle] = useState("");
+  const [extCustomer, setExtCustomer] = useState("");
+  const [extDescription, setExtDescription] = useState("");
+  const [isCreatingExternal, setIsCreatingExternal] = useState(false);
+
+  // Paste-resume modal (sourced candidates step)
+  const [pasteResumeOpen, setPasteResumeOpen] = useState(false);
+  const [pasteName, setPasteName] = useState("");
+  const [pasteEmail, setPasteEmail] = useState("");
+  const [pasteResumeText, setPasteResumeText] = useState("");
+  const [isSavingPasteResume, setIsSavingPasteResume] = useState(false);
+
+  // Bulk resume upload state
+  const [bulkFiles, setBulkFiles] = useState<File[]>([]);
+  const [isUploadingBulk, setIsUploadingBulk] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState<{ processed: number; failed: number; total: number } | null>(null);
+  const bulkFileInputRef = useRef<HTMLInputElement | null>(null);
   const [recruiterNotes, setRecruiterNotes] = useState("");
   const [selectedEmpTypes, setSelectedEmpTypes] = useState<EmploymentType[]>([]);
   const [recruiterEmails, setRecruiterEmails] = useState<string[]>([]);
@@ -267,6 +296,10 @@ function NewJobPageContent() {
     active: boolean;
     ai: boolean;
     fromRubric: boolean;
+    // Stable handle for rubric-derived items. Lets Step-5 sourcing derivation
+    // match up to Step-4 filters without string-parsing the user-facing value
+    // (which carries formatted suffixes like "— 3+ yrs, Similar match").
+    rubricKey?: string;
   }>>([]);
   const [filterIdCounter, setFilterIdCounter] = useState(1);
   // Step 4 - Phone Screen state
@@ -282,7 +315,8 @@ function NewJobPageContent() {
     jobdiva: true,
     jobdiva_hotlist: true,
     linkedin: true,
-    dice: true
+    dice: true,
+    exa: true
   });
   const [sourceTitles, setSourceTitles] = useState<Array<{
     id: number;
@@ -328,18 +362,51 @@ function NewJobPageContent() {
   const [booleanStringOpen, setBooleanStringOpen] = useState(false);
   const [generatedBoolean, setGeneratedBoolean] = useState("");
   const [isRefreshingBoolean, setIsRefreshingBoolean] = useState(false);
+  const [booleanUserEdited, setBooleanUserEdited] = useState(false);
+  const [booleanAttempts, setBooleanAttempts] = useState<{ query: string; label: string }[]>([]);
+  const MAX_BOOLEAN_ATTEMPTS = 4;
+  const QUALIFIED_SCORE_THRESHOLD = 70;
+  const QUALIFIED_TARGET_COUNT = 50;
   const [candidates, setCandidates] = useState<any[]>([]);
+  const seenCandidateIdsRef = useRef<Set<string>>(new Set());
+  const searchAbortRef = useRef<AbortController | null>(null);
   const [selectedCandidates, setSelectedCandidates] = useState<Set<string>>(new Set());
   const [searchStatus, setSearchStatus] = useState("Fetching applicants...");
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const [candidatesPerPage, setCandidatesPerPage] = useState(10);
-  const sortedCandidates = [...candidates].sort((a, b) => {
-    const scoreA = a.match_score || 0;
-    const scoreB = b.match_score || 0;
-    return scoreB - scoreA;
-  });
+  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "linkedin-unipile" | "linkedin-exa" | "dice" | "upload-resume">("all");
+
+  const matchesSourceFilter = (cand: any) => {
+    const src = String(cand.source || "").toLowerCase();
+    switch (sourceFilter) {
+      case "all": return true;
+      case "jobdiva": return src.startsWith("jobdiva");
+      case "linkedin-unipile": return src === "linkedin-unipile" || src === "linkedin";
+      case "linkedin-exa": return src === "linkedin-exa";
+      case "dice": return src === "dice";
+      case "upload-resume": return src === "upload-resume";
+      default: return true;
+    }
+  };
+  const sourceCounts = candidates.reduce((acc: Record<string, number>, c) => {
+    const s = String(c.source || "").toLowerCase();
+    if (s.startsWith("jobdiva")) acc["jobdiva"] = (acc["jobdiva"] || 0) + 1;
+    else if (s === "linkedin-unipile" || s === "linkedin") acc["linkedin-unipile"] = (acc["linkedin-unipile"] || 0) + 1;
+    else if (s === "linkedin-exa") acc["linkedin-exa"] = (acc["linkedin-exa"] || 0) + 1;
+    else if (s === "dice") acc["dice"] = (acc["dice"] || 0) + 1;
+    else if (s === "upload-resume") acc["upload-resume"] = (acc["upload-resume"] || 0) + 1;
+    return acc;
+  }, {});
+
+  const sortedCandidates = [...candidates]
+    .filter(matchesSourceFilter)
+    .sort((a, b) => {
+      const scoreA = a.match_score || 0;
+      const scoreB = b.match_score || 0;
+      return scoreB - scoreA;
+    });
 
   const totalPages = Math.max(1, Math.ceil(sortedCandidates.length / candidatesPerPage));
   const paginatedCandidates = sortedCandidates.slice(
@@ -414,6 +481,9 @@ function NewJobPageContent() {
         setJobData(details);
         if (details.jobdiva_id) {
           setJobdivaId(details.jobdiva_id);
+        }
+        if (details.is_external || (details.jobdiva_id || "").startsWith("EXT-")) {
+          setIsExternal(true);
         }
       }
 
@@ -491,6 +561,181 @@ function NewJobPageContent() {
       console.error("Failed to load draft:", error);
     }
     return false;
+  };
+
+  const handleCreateExternal = async () => {
+    if (!extTitle.trim()) {
+      showToast("Please enter a job title", "info");
+      return;
+    }
+    if (!extDescription.trim()) {
+      showToast("Please paste the job description", "info");
+      return;
+    }
+    setIsCreatingExternal(true);
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const createRes = await fetch(`${apiUrl}/jobs/external/create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: extTitle.trim(),
+          description: extDescription.trim(),
+          customer_name: extCustomer.trim() || "External",
+        }),
+      });
+      if (!createRes.ok) {
+        showToast("Failed to create external requirement", "error");
+        return;
+      }
+      const created = await createRes.json();
+      const newJobId = String(created.job_id);
+      const newRef = String(created.jobdiva_id);
+
+      setNumericJobId(newJobId);
+      setJobdivaId(newRef);
+      setJobTitle(extTitle.trim());
+      setEnhancedTitle(extTitle.trim());
+      setJobPosting(extDescription.trim());
+      setJobData({
+        id: newJobId,
+        jobdiva_id: newRef,
+        title: extTitle.trim(),
+        customer_name: extCustomer.trim() || "External",
+        description: extDescription.trim(),
+        ai_description: extDescription.trim(),
+        is_external: true,
+      });
+      setIsFetched(true);
+      showToast("External requirement created. Extracting rubric…", "success");
+
+      // Fire rubric extraction in the background — same endpoint JobDiva flow uses.
+      try {
+        const rubricRes = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jobId: newJobId,
+            jobdivaId: newRef,
+            jobTitle: extTitle.trim(),
+            enhancedJobTitle: extTitle.trim(),
+            jobDescription: extDescription.trim(),
+            jobNotes: "",
+            customerName: extCustomer.trim() || "External",
+            originalDescription: extDescription.trim(),
+          }),
+        });
+        if (rubricRes.ok) {
+          const rubric = await rubricRes.json();
+          if (rubric && (rubric.titles?.length || rubric.skills?.length)) {
+            setRubricData(rubric);
+            showToast("Rubric ready", "success");
+          }
+        }
+      } catch (err) {
+        console.error("External rubric extraction failed:", err);
+      }
+    } catch (err) {
+      console.error("External create failed:", err);
+      showToast("Failed to create external requirement", "error");
+    } finally {
+      setIsCreatingExternal(false);
+    }
+  };
+
+  const handleSubmitPasteResume = async () => {
+    if (!pasteName.trim() || !pasteResumeText.trim()) {
+      showToast("Name and resume text are required", "info");
+      return;
+    }
+    const jobRef = numericJobId || jobdivaId;
+    if (!jobRef) {
+      showToast("No job context found", "error");
+      return;
+    }
+    setIsSavingPasteResume(true);
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const res = await fetch(`${apiUrl}/jobs/${encodeURIComponent(jobRef)}/manual-candidate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: pasteName.trim(),
+          email: pasteEmail.trim(),
+          resume_text: pasteResumeText,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || "Failed to save resume", "error");
+        return;
+      }
+      const result = await res.json();
+      const cand = result.candidate;
+      // Prepend so the user sees it immediately
+      setCandidates((prev: any[]) => [{
+        ...cand,
+        id: cand.candidate_id,
+        full_name: cand.name,
+      }, ...prev]);
+      setPasteResumeOpen(false);
+      setPasteName("");
+      setPasteEmail("");
+      setPasteResumeText("");
+      showToast(`Saved ${cand.name} (score ${cand.match_score ?? "—"})`, "success");
+    } catch (err) {
+      console.error("Paste resume failed:", err);
+      showToast("Failed to save resume", "error");
+    } finally {
+      setIsSavingPasteResume(false);
+    }
+  };
+
+  const handleBulkUpload = async () => {
+    if (!bulkFiles.length) {
+      showToast("Select one or more resume files first", "info");
+      return;
+    }
+    const jobRef = numericJobId || jobdivaId;
+    if (!jobRef) {
+      showToast("No job context found", "error");
+      return;
+    }
+    setIsUploadingBulk(true);
+    setBulkProgress({ processed: 0, failed: 0, total: bulkFiles.length });
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const formData = new FormData();
+      bulkFiles.forEach(f => formData.append("files", f));
+      const res = await fetch(`${apiUrl}/jobs/${encodeURIComponent(jobRef)}/bulk-resumes`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || "Bulk upload failed", "error");
+        return;
+      }
+      const result = await res.json();
+      const newCands = (result.candidates || []).map((c: any) => ({
+        ...c,
+        id: c.candidate_id,
+        full_name: c.name,
+      }));
+      setCandidates((prev: any[]) => [...newCands, ...prev]);
+      setBulkProgress({ processed: result.processed_count || 0, failed: result.failed_count || 0, total: bulkFiles.length });
+      setBulkFiles([]);
+      if (bulkFileInputRef.current) bulkFileInputRef.current.value = "";
+      const msg = result.failed_count
+        ? `Processed ${result.processed_count}, failed ${result.failed_count}`
+        : `Processed ${result.processed_count} resume${result.processed_count === 1 ? "" : "s"}`;
+      showToast(msg, result.failed_count ? "info" : "success");
+    } catch (err) {
+      console.error("Bulk upload failed:", err);
+      showToast("Bulk upload failed", "error");
+    } finally {
+      setIsUploadingBulk(false);
+    }
   };
 
   const handleFetchJob = async () => {
@@ -941,40 +1186,123 @@ function NewJobPageContent() {
       </div>
 
       <div className="p-7 space-y-7">
-        <div>
-          <label className="block text-[14px] font-medium text-slate-900 mb-3">JobDiva Job ID</label>
-          <div className="flex items-center gap-3">
-            <Input
-              placeholder="e.g. 26-08025"
-              value={jobdivaId}
-              onChange={(e) => setJobdivaId(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && jobdivaId.trim().includes("-") && handleFetchJob()}
-              className="max-w-[180px] h-[36px] bg-white border-slate-200 text-[13px]"
-            />
+        {/* Source toggle: JobDiva vs External */}
+        {!isFetched && (
+          <div className="flex items-center gap-2">
             <button
-              onClick={handleFetchJob}
-              disabled={!jobdivaId.trim().includes("-") || isFetching}
-              className={`h-[36px] px-3.5 rounded-lg flex items-center gap-2 text-[13px] font-medium transition-all text-white disabled:opacity-50 disabled:cursor-not-allowed ${isFetched ? "bg-[#16a34a]" : "bg-primary hover:bg-[#5b21b6]"}`}
+              type="button"
+              onClick={() => setIsExternal(false)}
+              className={`px-3 py-1.5 rounded-full text-[12px] font-semibold border transition-colors ${!isExternal ? 'bg-[#6366f1] text-white border-[#6366f1]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
             >
-              {isFetching ? (
-                <>
-                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Fetching...
-                </>
-              ) : isFetched ? (
-                <>
-                  <Check className="w-4 h-4" />
-                  Fetched
-                </>
-              ) : (
-                <>
-                  <CloudDownload className="w-4 h-4" />
-                  Fetch from JobDiva
-                </>
-              )}
+              JobDiva Requirement
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsExternal(true)}
+              className={`px-3 py-1.5 rounded-full text-[12px] font-semibold border transition-colors ${isExternal ? 'bg-[#6366f1] text-white border-[#6366f1]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+            >
+              External Requirement
             </button>
           </div>
-        </div>
+        )}
+
+        {!isExternal ? (
+          <div>
+            <label className="block text-[14px] font-medium text-slate-900 mb-3">JobDiva Job ID</label>
+            <div className="flex items-center gap-3">
+              <Input
+                placeholder="e.g. 26-08025"
+                value={jobdivaId}
+                onChange={(e) => setJobdivaId(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && jobdivaId.trim().includes("-") && handleFetchJob()}
+                className="max-w-[180px] h-[36px] bg-white border-slate-200 text-[13px]"
+              />
+              <button
+                onClick={handleFetchJob}
+                disabled={!jobdivaId.trim().includes("-") || isFetching}
+                className={`h-[36px] px-3.5 rounded-lg flex items-center gap-2 text-[13px] font-medium transition-all text-white disabled:opacity-50 disabled:cursor-not-allowed ${isFetched ? "bg-[#16a34a]" : "bg-primary hover:bg-[#5b21b6]"}`}
+              >
+                {isFetching ? (
+                  <>
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Fetching...
+                  </>
+                ) : isFetched ? (
+                  <>
+                    <Check className="w-4 h-4" />
+                    Fetched
+                  </>
+                ) : (
+                  <>
+                    <CloudDownload className="w-4 h-4" />
+                    Fetch from JobDiva
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        ) : !isFetched ? (
+          <div className="space-y-5">
+            <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-[13px] text-amber-800 leading-relaxed">
+              <strong className="font-semibold">External Requirement</strong> — not linked to JobDiva. Paste the job description; PAIR will extract skills and rubric. JobDiva-specific fields (applicant list, UDFs) will be skipped.
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[13px] font-medium text-slate-900 mb-2">Job Title *</label>
+                <Input
+                  placeholder="e.g. AI Agent Engineer"
+                  value={extTitle}
+                  onChange={(e) => setExtTitle(e.target.value)}
+                  className="h-[36px] bg-white border-slate-200 text-[13px]"
+                />
+              </div>
+              <div>
+                <label className="block text-[13px] font-medium text-slate-900 mb-2">Customer</label>
+                <Input
+                  placeholder="e.g. Accenture"
+                  value={extCustomer}
+                  onChange={(e) => setExtCustomer(e.target.value)}
+                  className="h-[36px] bg-white border-slate-200 text-[13px]"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-[13px] font-medium text-slate-900 mb-2">Job Description *</label>
+              <Textarea
+                placeholder="Paste the full JD (responsibilities, required skills, preferred experience, etc.)"
+                value={extDescription}
+                onChange={(e) => setExtDescription(e.target.value)}
+                rows={10}
+                className="bg-white border-slate-200 text-[13px] leading-relaxed"
+              />
+              <p className="text-[11px] text-slate-500 mt-2">PAIR will extract the rubric (titles, skills, education) from this text.</p>
+            </div>
+            <div>
+              <button
+                onClick={handleCreateExternal}
+                disabled={isCreatingExternal || !extTitle.trim() || !extDescription.trim()}
+                className="h-[36px] px-4 rounded-lg flex items-center gap-2 text-[13px] font-medium transition-all text-white disabled:opacity-50 disabled:cursor-not-allowed bg-primary hover:bg-[#5b21b6]"
+              >
+                {isCreatingExternal ? (
+                  <>
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Creating requirement…
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4" />
+                    Create External Requirement
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-3 text-[13px] text-emerald-800 flex items-center gap-2">
+            <Check className="w-4 h-4" />
+            External requirement <strong>{jobdivaId}</strong> created. You can now proceed through the rubric and sourcing steps.
+          </div>
+        )}
 
         {jobData && (
           <>
@@ -2143,90 +2471,79 @@ function NewJobPageContent() {
       active: boolean;
       ai: boolean;
       fromRubric: boolean;
+      rubricKey?: string;
     }> = [];
 
     let idCounter = 1;
 
-    // Preserve user's active/inactive preferences for existing filters
+    // Preserve user's active/inactive preferences for existing filters.
+    // Key on the stable rubricKey (when present) or derive one from the
+    // filter's base value. No more splitting on "—" — that was fragile and
+    // broke if we ever changed the formatting of the display string.
     const existingFilterPrefs = new Map<string, boolean>();
     resumeMatchFilters.forEach(f => {
-      // Create a key from category + base value (without minYears/matchType which may change)
-      const baseValue = f.value.split('—')[0].trim();
-      existingFilterPrefs.set(`${f.category}|${baseValue}`, f.active);
+      const key = f.rubricKey || rubricKeyFor(f.category, f.value.split("—")[0]);
+      existingFilterPrefs.set(key, f.active);
     });
+
+    const pushRubricFilter = (
+      category: string,
+      baseValue: string,
+      displayValue: string,
+      defaultActive: boolean
+    ) => {
+      const key = rubricKeyFor(category, baseValue);
+      const active = existingFilterPrefs.has(key)
+        ? (existingFilterPrefs.get(key) ?? defaultActive)
+        : defaultActive;
+      filters.push({
+        id: idCounter++,
+        category,
+        value: displayValue,
+        active,
+        ai: true,
+        fromRubric: true,
+        rubricKey: key,
+      });
+    };
 
     // 1. Titles
     if (rubricData.titles) {
       rubricData.titles.forEach((title: any) => {
-        const filterKey = `Required Title|${title.value}`;
-        const wasActive = existingFilterPrefs.has(filterKey) ? (existingFilterPrefs.get(filterKey) ?? true) : true;
-        filters.push({
-          id: idCounter++,
-          category: 'Required Title',
-          value: `${title.value} — ${title.minYears}+ yrs, ${title.matchType} match`,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+        pushRubricFilter(
+          "Required Title",
+          title.value || "",
+          `${title.value} — ${title.minYears}+ yrs, ${title.matchType} match`,
+          true
+        );
       });
     }
 
     // 2. Skills
     if (rubricData.skills) {
       rubricData.skills.forEach((skill: any) => {
-        const category = skill.required === 'Required' ? 'Required Skill' : 'Preferred Skill';
-        const filterKey = `${category}|${skill.value}`;
-        // Active if explicitly "Required" or if it was previously active.
-        const wasActive = existingFilterPrefs.has(filterKey)
-          ? (existingFilterPrefs.get(filterKey) ?? (skill.required === 'Required'))
-          : (skill.required === 'Required');
-
-        filters.push({
-          id: idCounter++,
+        const category = skill.required === "Required" ? "Required Skill" : "Preferred Skill";
+        pushRubricFilter(
           category,
-          value: `${skill.value} — ${skill.minYears}+ yrs, ${skill.matchType} match`,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+          skill.value || "",
+          `${skill.value} — ${skill.minYears}+ yrs, ${skill.matchType} match`,
+          skill.required === "Required"
+        );
       });
     }
 
     // 3. Education
     if (rubricData.education) {
       rubricData.education.forEach((edu: any) => {
-        const filterKey = `Education|${edu.degree}${edu.field ? ` in ${edu.field}` : ''}`;
-        const wasActive = existingFilterPrefs.has(filterKey)
-          ? (existingFilterPrefs.get(filterKey) ?? (edu.required === 'Required'))
-          : (edu.required === 'Required');
-
-        filters.push({
-          id: idCounter++,
-          category: 'Education',
-          value: `${edu.degree}${edu.field ? ` in ${edu.field}` : ''}`,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+        const display = `${edu.degree}${edu.field ? ` in ${edu.field}` : ""}`;
+        pushRubricFilter("Education", display, display, edu.required === "Required");
       });
     }
 
     // 4. Domain Experience
     if (rubricData.domain) {
       rubricData.domain.forEach((dom: any) => {
-        const filterKey = `Domain|${dom.value}`;
-        const wasActive = existingFilterPrefs.has(filterKey)
-          ? (existingFilterPrefs.get(filterKey) ?? (dom.required === 'Required'))
-          : (dom.required === 'Required');
-
-        filters.push({
-          id: idCounter++,
-          category: 'Domain',
-          value: dom.value,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+        pushRubricFilter("Domain", dom.value || "", dom.value || "", dom.required === "Required");
       });
     }
 
@@ -2234,17 +2551,8 @@ function NewJobPageContent() {
     if (rubricData.customer_requirements) {
       rubricData.customer_requirements.forEach((req: any) => {
         if (!req.value) return;
-        const filterKey = `Customer Req.|${req.type}: ${req.value}`;
-        const wasActive = existingFilterPrefs.has(filterKey) ? (existingFilterPrefs.get(filterKey) ?? true) : true;
-
-        filters.push({
-          id: idCounter++,
-          category: 'Customer Req.',
-          value: `${req.type}: ${req.value}`,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+        const display = `${req.type}: ${req.value}`;
+        pushRubricFilter("Customer Req.", display, display, true);
       });
     }
 
@@ -2252,19 +2560,7 @@ function NewJobPageContent() {
     if (rubricData.other_requirements) {
       rubricData.other_requirements.forEach((req: any) => {
         if (!req.value) return;
-        const filterKey = `Requirement|${req.value}`;
-        const wasActive = existingFilterPrefs.has(filterKey)
-          ? (existingFilterPrefs.get(filterKey) ?? (req.required === 'Required'))
-          : (req.required === 'Required');
-
-        filters.push({
-          id: idCounter++,
-          category: 'Requirement',
-          value: req.value,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+        pushRubricFilter("Requirement", req.value, req.value, req.required === "Required");
       });
     }
 
@@ -2363,18 +2659,18 @@ function NewJobPageContent() {
       return isRubricItemRequired(item) ? "must" : "can";
     };
 
+    // Use the stable rubricKey planted in Step 4 rather than re-parsing the
+    // formatted filter value. If no rubric filter is active yet (initial
+    // page load), fall back to including every rubric item.
     const activeRubricFilterKeys = new Set(
       resumeMatchFilters
-        .filter(filter => filter.fromRubric && filter.active)
-        .map(filter => {
-          const baseValue = filter.value.split("—")[0].trim();
-          return `${filter.category}|${baseValue}`;
-        })
+        .filter(filter => filter.fromRubric && filter.active && filter.rubricKey)
+        .map(filter => filter.rubricKey as string)
     );
 
     const shouldIncludeRubricItem = (category: string, value: string) => {
       if (activeRubricFilterKeys.size === 0) return true;
-      return activeRubricFilterKeys.has(`${category}|${value.trim()}`);
+      return activeRubricFilterKeys.has(rubricKeyFor(category, value));
     };
 
     // 1. Titles
@@ -2699,6 +2995,7 @@ function NewJobPageContent() {
   const resolvedGeneratedBoolean = generatedBoolean || buildGeneratedBooleanString();
 
   useEffect(() => {
+    if (booleanUserEdited) return;
     setIsRefreshingBoolean(true);
     const timeoutId = window.setTimeout(() => {
       setGeneratedBoolean(buildGeneratedBooleanString());
@@ -2706,7 +3003,279 @@ function NewJobPageContent() {
     }, 150);
 
     return () => window.clearTimeout(timeoutId);
-  }, [sourceTitles, sourceSkills, sourceLocations, sourceCompanies, sourceKeywords, resumeMatchFilters, jobTitle]);
+  }, [sourceTitles, sourceSkills, sourceLocations, sourceCompanies, sourceKeywords, resumeMatchFilters, jobTitle, booleanUserEdited]);
+
+  // Item F: mirror the boolean-string relaxation into the structured search
+  // payload. Tier 1/2 widen radius — also bump `within_miles` so LinkedIn /
+  // Dice / Exa (which don't read the boolean's `within N mi`) benefit too.
+  // Tier 3 drops NOT(...) from the boolean — deactivate exclude-category
+  // resume_match_filters so scoring doesn't penalize the same candidates
+  // whose "excluded" terms we just allowed through at sourcing time.
+  const relaxStructuralOverrides = (
+    tier: number,
+    baseWithinMiles: number,
+    currentFilters: typeof resumeMatchFilters
+  ): { withinMilesOverride?: number; resumeMatchFiltersOverride?: typeof resumeMatchFilters } => {
+    if (tier === 1) {
+      return { withinMilesOverride: Math.max(50, baseWithinMiles * 2) };
+    }
+    if (tier === 2) {
+      return { withinMilesOverride: Math.max(100, baseWithinMiles * 2) };
+    }
+    // tier >= 3: also deactivate Exclude-category filters for scoring.
+    return {
+      withinMilesOverride: Math.max(100, baseWithinMiles * 2),
+      resumeMatchFiltersOverride: currentFilters.map(f =>
+        (f.category || "").toLowerCase().includes("exclude")
+          ? { ...f, active: false }
+          : f
+      ),
+    };
+  };
+
+  const relaxBooleanString = (input: string, tier: number): { query: string; label: string } => {
+    let query = input;
+    let label = "";
+    if (tier === 1) {
+      query = query.replace(/within\s+(\d+)\s+mi/gi, (_m, n) => `within ${Math.max(50, Number(n) * 2)} mi`);
+      query = query.replace(/\s+AND\s+"\d+\+\s*years?"/gi, "");
+      label = "Widened radius · dropped year thresholds";
+    } else if (tier === 2) {
+      query = query.replace(/within\s+(\d+)\s+mi/gi, (_m, n) => `within ${Math.max(100, Number(n) * 2)} mi`);
+      query = query.replace(/\(([^()]+?)\)/g, (_m, inner) => {
+        const parts = String(inner).split(/\s+AND\s+/i).map((p: string) => p.trim()).filter(Boolean);
+        return parts.length > 1 ? `(${parts.join(" OR ")})` : `(${inner})`;
+      });
+      query = query.replace(/\s+AND\s+recent/gi, "");
+      label = "Radius widened further · required clauses OR-joined";
+    } else {
+      query = query.replace(/\s+NOT\s+\([^)]*\)/gi, "");
+      const andParts = query.split(/\s+AND\s+/i).map(p => p.trim()).filter(Boolean);
+      const locationPart = andParts.find(p => /within\s+\d+\s+mi/i.test(p));
+      const rolePart = andParts.find(p => !/within\s+\d+\s+mi/i.test(p) && !/"\d+\+\s*years?"/i.test(p));
+      const keep = [rolePart, locationPart].filter(Boolean) as string[];
+      query = keep.length ? keep.join(" AND ") : andParts[0] || query;
+      label = "Kept only role + location";
+    }
+    return { query: query.replace(/\s+/g, " ").trim(), label };
+  };
+
+  const countQualified = (list: any[]) =>
+    list.filter(c => (c.match_score || 0) >= QUALIFIED_SCORE_THRESHOLD).length;
+
+  const buildSearchPayload = (booleanString: string, overrides?: { withinMilesOverride?: number; resumeMatchFiltersOverride?: typeof resumeMatchFilters }) => {
+    const titleCriteria = sourceTitles.map(t => ({
+      value: t.value || "Title",
+      match_type: t.matchType || "must",
+      years: t.years || 0,
+      recent: t.recent || false,
+      similar_terms: t.selectedSimilarTitles || []
+    }));
+    const skillCriteria = sourceSkills.map(s => ({
+      value: s.value || "Skill",
+      match_type: s.matchType || "must",
+      years: s.years || 0,
+      recent: s.recent || false,
+      similar_terms: s.selectedSimilarSkills || []
+    }));
+    // Degrade gracefully: if nothing was configured, inject the job title as
+    // a preferred title so the search isn't totally empty. Backend sources
+    // that only accept a flat skills list (LinkedIn/Dice/Exa) derive their
+    // list from title_criteria + skill_criteria server-side.
+    if (titleCriteria.length === 0 && skillCriteria.length === 0 && jobTitle) {
+      titleCriteria.push({
+        value: jobTitle,
+        match_type: "can",
+        years: 0,
+        recent: false,
+        similar_terms: []
+      });
+    }
+    const primaryLocation = sourceLocations[0];
+    const parsedRadius = primaryLocation?.radius?.match(/(\d+)/)?.[1]
+      ? Number(primaryLocation.radius.match(/(\d+)/)?.[1])
+      : 25;
+    const withinMiles = overrides?.withinMilesOverride ?? parsedRadius;
+    const activeResumeFilters = (overrides?.resumeMatchFiltersOverride ?? resumeMatchFilters)
+      .filter(f => f.active)
+      .map(f => ({ category: f.category, value: f.value, active: f.active }));
+    const selectedSourcesArray = Object.keys(searchSources)
+      .filter(k => (searchSources as any)[k])
+      .map(k => {
+        if (k === 'jobdiva') return 'JobDiva';
+        if (k === 'jobdiva_hotlist') return 'JobDivaHotlist';
+        if (k === 'linkedin') return 'LinkedIn';
+        if (k === 'dice') return 'Dice';
+        if (k === 'exa') return 'Exa';
+        return k;
+      });
+    return {
+      job_id: numericJobId || jobdivaId,
+      title_criteria: titleCriteria,
+      skill_criteria: skillCriteria,
+      keywords: sourceKeywords,
+      companies: sourceCompanies,
+      resume_match_filters: activeResumeFilters,
+      location: primaryLocation?.value || "",
+      within_miles: withinMiles,
+      sources: selectedSourcesArray,
+      boolean_string: booleanString,
+      page: 1,
+      page_size: 100
+    };
+  };
+
+  const runSearchStream = async (
+    booleanString: string,
+    mode: "replace" | "append",
+    overrides?: { withinMilesOverride?: number; resumeMatchFiltersOverride?: typeof resumeMatchFilters }
+  ): Promise<any[]> => {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+    const payload = buildSearchPayload(booleanString, overrides);
+    const controller = new AbortController();
+    searchAbortRef.current = controller;
+    let response: Response;
+    try {
+      response = await fetch(`${apiUrl}/candidates/search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+    } catch (e: any) {
+      if (e?.name === "AbortError") {
+        if (mode === "replace") setCandidates([]);
+        return [];
+      }
+      throw e;
+    }
+    if (!response.ok || !response.body) {
+      console.error("Search failed:", response.status);
+      if (mode === "replace") setCandidates([]);
+      return [];
+    }
+    if (mode === "replace") {
+      setCandidates([]);
+      setCurrentPage(1);
+      seenCandidateIdsRef.current = new Set<string>();
+    }
+    const seenIds = seenCandidateIdsRef.current;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let runList: any[] = [];
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line);
+            if (event.type === "candidate") {
+              const id = String(event.data.candidate_id || event.data.id || "");
+              if (id && seenIds.has(id)) continue;
+              if (id) seenIds.add(id);
+              runList.push(event.data);
+              setCandidates(prev => [...prev, event.data]);
+            } else if (event.type === "stage") {
+              setSearchStatus(event.data);
+            } else if (event.type === "summary") {
+              console.log("Search stream complete:", event.data);
+            } else if (event.type === "error") {
+              console.error("Stream error:", event.message);
+            }
+          } catch (e) {
+            console.error("Failed to parse stream line:", line, e);
+          }
+        }
+      }
+    } catch (e: any) {
+      if (e?.name === "AbortError" || controller.signal.aborted) {
+        console.log("Search stream aborted by user");
+      } else {
+        throw e;
+      }
+    }
+    return runList;
+  };
+
+  const handleStopSearch = () => {
+    if (searchAbortRef.current) {
+      searchAbortRef.current.abort();
+    }
+    setIsSearching(false);
+    setSearchStatus("Search stopped");
+  };
+
+  const handleRunSearch = async () => {
+    setIsSearching(true);
+    setHasSearched(true);
+    try {
+      const initial = resolvedGeneratedBoolean;
+      setGeneratedBoolean(initial);
+      const attempts: { query: string; label: string }[] = [{ query: initial, label: "PAIR generated" }];
+      setBooleanAttempts(attempts);
+      setSearchStatus("Searching candidates...");
+      const firstRun = await runSearchStream(initial, "replace");
+      let accumulated = [...firstRun];
+
+      const baseWithinMiles = (() => {
+        const m = sourceLocations[0]?.radius?.match(/(\d+)/)?.[1];
+        return m ? Number(m) : 25;
+      })();
+      let currentAttempts = attempts;
+      while (currentAttempts.length < MAX_BOOLEAN_ATTEMPTS) {
+        if (searchAbortRef.current?.signal.aborted) break;
+        const qualified = countQualified(accumulated);
+        if (qualified >= QUALIFIED_TARGET_COUNT) break;
+        const tier = currentAttempts.length; // 1, 2, 3 as attempts grow
+        const relaxed = relaxBooleanString(currentAttempts[currentAttempts.length - 1].query, tier);
+        if (relaxed.query === currentAttempts[currentAttempts.length - 1].query) break;
+        const structuralOverrides = relaxStructuralOverrides(tier, baseWithinMiles, resumeMatchFilters);
+        currentAttempts = [...currentAttempts, { query: relaxed.query, label: relaxed.label }];
+        setBooleanAttempts(currentAttempts);
+        setGeneratedBoolean(relaxed.query);
+        setSearchStatus(`Only ${qualified}/${QUALIFIED_TARGET_COUNT} strong matches — relaxing boolean (attempt ${currentAttempts.length}/${MAX_BOOLEAN_ATTEMPTS})...`);
+        const nextRun = await runSearchStream(relaxed.query, "append", structuralOverrides);
+        accumulated = [...accumulated, ...nextRun];
+      }
+    } catch (error) {
+      console.error("Failed to search candidates:", error);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const handleExtendBoolean = async () => {
+    if (isSearching) return;
+    if (booleanAttempts.length >= MAX_BOOLEAN_ATTEMPTS) return;
+    const base = resolvedGeneratedBoolean;
+    const tier = Math.max(1, booleanAttempts.length);
+    const relaxed = relaxBooleanString(base, tier);
+    const nextAttempts = booleanAttempts.length
+      ? [...booleanAttempts, { query: relaxed.query, label: relaxed.label }]
+      : [{ query: base, label: "PAIR generated" }, { query: relaxed.query, label: relaxed.label }];
+    setBooleanAttempts(nextAttempts);
+    setGeneratedBoolean(relaxed.query);
+    setBooleanUserEdited(true);
+    setIsSearching(true);
+    setHasSearched(true);
+    try {
+      const baseWithinMiles = (() => {
+        const m = sourceLocations[0]?.radius?.match(/(\d+)/)?.[1];
+        return m ? Number(m) : 25;
+      })();
+      const structuralOverrides = relaxStructuralOverrides(tier, baseWithinMiles, resumeMatchFilters);
+      setSearchStatus(`Extending search with more lenient boolean (attempt ${nextAttempts.length}/${MAX_BOOLEAN_ATTEMPTS})...`);
+      await runSearchStream(relaxed.query, "append", structuralOverrides);
+    } finally {
+      setIsSearching(false);
+    }
+  };
 
   const addScreenQuestion = () => {
     const newQuestion: ScreenQuestion = {
@@ -3004,177 +3573,29 @@ function NewJobPageContent() {
                 <div className="bg-[#ede9fe] text-[#6366f1] text-[11px] font-bold px-3 py-1 rounded-lg border border-[#ddd6fe] flex items-center gap-2">
                   <Sparkles className="w-3.5 h-3.5" /> PAIR Pre-filled from Rubric
                 </div>
-                <Button
-                  className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
-                  onClick={async () => {
-                    setIsSearching(true);
-                    setHasSearched(true);
-
-                    try {
-                      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-
-                      // Enhanced format: separate criteria arrays
-                      const titleCriteria = sourceTitles
-                        .map(t => ({
-                          value: t.value || "Title",
-                          match_type: t.matchType || "must",
-                          years: t.years || 0,
-                          recent: t.recent || false,
-                          similar_terms: t.selectedSimilarTitles || []
-                        }));
-
-                      const skillCriteria = sourceSkills
-                        .map(s => ({
-                          value: s.value || "Skill",
-                          match_type: s.matchType || "must",
-                          years: s.years || 0,
-                          recent: s.recent || false,
-                          similar_terms: s.selectedSimilarSkills || []
-                        }));
-
-                      const primaryLocation = sourceLocations[0];
-                      const withinMiles = primaryLocation?.radius?.match(/(\d+)/)?.[1]
-                        ? Number(primaryLocation.radius.match(/(\d+)/)?.[1])
-                        : 25;
-
-                      // Legacy format fallback (for compatibility)
-                      const skillsToSearch = [];
-                      sourceTitles.forEach(t => {
-                        if (t.matchType !== 'exclude') {
-                          skillsToSearch.push({
-                            value: t.value || "Title",
-                            priority: t.matchType === 'must' ? 'Must Have' : 'Flexible',
-                            years_experience: t.years || 0
-                          });
-                        }
-                      });
-
-                      sourceSkills.forEach(s => {
-                        if (s.matchType !== 'exclude') {
-                          skillsToSearch.push({
-                            value: s.value || "Skill",
-                            priority: s.matchType === 'must' ? 'Must Have' : 'Flexible',
-                            years_experience: s.years || 0
-                          });
-                        }
-                      });
-
-                      // Ensure we search something
-                      if (titleCriteria.length === 0 && skillCriteria.length === 0 && skillsToSearch.length === 0) {
-                        skillsToSearch.push({ value: jobTitle || "Role", priority: "Flexible", years_experience: 0 });
-                      }
-
-                      const selectedSourcesArray = Object.keys(searchSources)
-                        .filter(k => (searchSources as any)[k])
-                        .map(k => {
-                          // "JobDiva" checkbox → always queries Talent Search pool.
-                          // JobDiva Applicants are auto-assigned after Launch PAIR.
-                          if (k === 'jobdiva') return 'JobDiva-TalentSearch';
-                          if (k === 'jobdiva_hotlist') return 'JobDivaHotlist';
-                          if (k === 'linkedin') return 'LinkedIn';
-                          if (k === 'dice') return 'Dice';
-                          return k;
-                        });
-
-                      const booleanString = buildGeneratedBooleanString();
-                      setGeneratedBoolean(booleanString);
-                      setSearchStatus("Searching JobDiva applicants, then Talent Search if fewer than 3 match...");
-
-                      const searchPayload = {
-                        job_id: numericJobId || jobdivaId,
-                        // Enhanced criteria (new format)
-                        title_criteria: titleCriteria,
-                        skill_criteria: skillCriteria,
-                        keywords: sourceKeywords,
-                        companies: sourceCompanies,
-                        resume_match_filters: resumeMatchFilters
-                          .filter(filter => filter.active)
-                          .map(filter => ({
-                            category: filter.category,
-                            value: filter.value,
-                            active: filter.active
-                          })),
-                        // Legacy compatibility  
-                        skills: skillsToSearch,
-                        location: primaryLocation?.value || "",
-                        within_miles: withinMiles,
-                        sources: selectedSourcesArray,
-                        boolean_string: booleanString,
-                        page: 1,
-                        page_size: 100
-                      };
-
-                      console.log("🚀 Enhanced search payload:", searchPayload);
-
-                      if (searchAbortControllerRef.current) {
-                        searchAbortControllerRef.current.abort();
-                      }
-                      searchAbortControllerRef.current = new AbortController();
-
-                      const response = await fetch(`${apiUrl}/candidates/search`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(searchPayload),
-                        signal: searchAbortControllerRef.current.signal
-                      });
-
-                      if (response.ok && response.body) {
-                        const reader = response.body.getReader();
-                        const decoder = new TextDecoder();
-                        let buffer = "";
-                        setCandidates([]); // Clear existing results for new search
-                        setCurrentPage(1); // Reset to first page
-
-                        while (true) {
-                          const { done, value } = await reader.read();
-                          if (done) break;
-
-                          buffer += decoder.decode(value, { stream: true });
-                          const lines = buffer.split("\n");
-                          buffer = lines.pop() || "";
-
-                          for (const line of lines) {
-                            if (!line.trim()) continue;
-                            try {
-                              const event = JSON.parse(line);
-                              if (event.type === "candidate") {
-                                setCandidates(prev => [...prev, event.data]);
-                              } else if (event.type === "stage") {
-                                setSearchStatus(event.data);
-                              } else if (event.type === "summary") {
-                                console.log("✅ Search stream complete:", event.data);
-                              } else if (event.type === "error") {
-                                console.error("❌ Stream error:", event.message);
-                              }
-                            } catch (e) {
-                              console.error("Failed to parse stream line:", line, e);
-                            }
-                          }
-                        }
-                      } else {
-                        setCandidates([]);
-                        console.error("❌ Search failed:", response.status);
-                      }
-                    } catch (error: any) {
-                      if (error.name === 'AbortError') {
-                        console.log("⏹️ Search stream aborted by user");
-                      } else {
-                        console.error("Failed to search candidates:", error);
-                        setCandidates([]);
-                      }
-                    } finally {
-                      setIsSearching(false);
-                    }
-                  }}
-                  disabled={isSearching}
-                >
-                  {isSearching ? (
-                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  ) : (
-                    <Rocket className="w-4 h-4 fill-white" />
+                <div className="flex items-center gap-2">
+                  {isSearching && (
+                    <Button
+                      className="bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
+                      onClick={handleStopSearch}
+                    >
+                      <Ban className="w-4 h-4" />
+                      Stop Search
+                    </Button>
                   )}
-                  Run Search
-                </Button>
+                  <Button
+                    className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
+                    onClick={handleRunSearch}
+                    disabled={isSearching}
+                  >
+                    {isSearching ? (
+                      <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    ) : (
+                      <Rocket className="w-4 h-4 fill-white" />
+                    )}
+                    Run Search
+                  </Button>
+                </div>
               </div>
 
               <section>
@@ -3186,7 +3607,8 @@ function NewJobPageContent() {
                       { id: 'jobdiva', label: 'JobDiva', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false },
                       { id: 'jobdiva_hotlist', label: 'JobDiva Hotlist', icon: <Zap className="w-4 h-4 text-orange-500 fill-orange-500" />, disabled: false },
                       { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: false },
-                      { id: 'dice', label: 'Dice', icon: <Box className="w-4 h-4 text-slate-700" />, disabled: false }
+                      { id: 'dice', label: 'Dice', icon: <Box className="w-4 h-4 text-slate-700" />, disabled: false },
+                      { id: 'exa', label: 'Exa', icon: <Search className="w-4 h-4 text-pink-500" />, disabled: false }
                     ].map(source => (
                       <label key={source.id} className={`flex items-center gap-2 ${source.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer group'}`} title={source.disabled ? "Integration coming soon" : ""}>
                         <Checkbox
@@ -3662,15 +4084,55 @@ function NewJobPageContent() {
                     {booleanStringOpen && (
                       <div className="px-6 pb-6 pt-1 animate-in fade-in slide-in-from-top-1">
                         {!isRefreshingBoolean ? (
-                          <div className="p-4 bg-white border border-slate-200 rounded-xl overflow-x-auto shadow-inner">
-                            <div className="flex items-center justify-between mb-2">
-                              <span className="text-[11px] font-bold uppercase tracking-widest text-[#5b21b6] bg-[#f5f3ff] px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">
-                                PAIR Generated
-                              </span>
+                          <div className="p-4 bg-white border border-slate-200 rounded-xl shadow-inner">
+                            <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-[11px] font-bold uppercase tracking-widest text-[#5b21b6] bg-[#f5f3ff] px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">
+                                  {booleanUserEdited ? "Edited" : "PAIR Generated"}
+                                </span>
+                                {booleanAttempts.length > 0 && (
+                                  <span className="text-[11px] font-bold uppercase tracking-widest text-slate-500 bg-slate-50 px-2.5 py-0.5 rounded-full border border-slate-200">
+                                    Attempt {booleanAttempts.length}/{MAX_BOOLEAN_ATTEMPTS}
+                                  </span>
+                                )}
+                                {booleanAttempts.length > 1 && (
+                                  <span className="text-[11px] font-medium text-slate-500">
+                                    {booleanAttempts[booleanAttempts.length - 1].label}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-2">
+                                {booleanUserEdited && (
+                                  <button
+                                    onClick={() => {
+                                      setBooleanUserEdited(false);
+                                      setGeneratedBoolean(buildGeneratedBooleanString());
+                                    }}
+                                    className="text-[11px] font-bold text-slate-500 hover:text-[#6366f1] px-2.5 py-1 rounded-md border border-slate-200 bg-white hover:bg-slate-50 transition-colors"
+                                  >
+                                    Reset
+                                  </button>
+                                )}
+                                <button
+                                  onClick={handleExtendBoolean}
+                                  disabled={isSearching || booleanAttempts.length >= MAX_BOOLEAN_ATTEMPTS}
+                                  className="text-[11px] font-bold text-[#6366f1] hover:text-white hover:bg-[#6366f1] px-2.5 py-1 rounded-md border border-[#ddd6fe] bg-[#f5f3ff] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                  title="Relax the boolean string and search again, appending new candidates"
+                                >
+                                  Make more lenient
+                                </button>
+                              </div>
                             </div>
-                            <code className="text-[13px] font-mono font-medium text-slate-700 whitespace-pre leading-relaxed tracking-tight break-all">
-                              {resolvedGeneratedBoolean}
-                            </code>
+                            <textarea
+                              value={resolvedGeneratedBoolean}
+                              onChange={(e) => {
+                                setBooleanUserEdited(true);
+                                setGeneratedBoolean(e.target.value);
+                              }}
+                              rows={Math.min(8, Math.max(2, resolvedGeneratedBoolean.split("\n").length))}
+                              className="w-full resize-y text-[13px] font-mono font-medium text-slate-700 leading-relaxed tracking-tight bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30 focus:border-[#6366f1]"
+                              spellCheck={false}
+                            />
                           </div>
                         ) : (
                           <div className="p-4 bg-white border border-[#ddd6fe] rounded-xl overflow-x-auto shadow-inner flex items-center justify-center py-6 gap-3">
@@ -3703,9 +4165,33 @@ function NewJobPageContent() {
                   </h4>
                   <p className={`text-slate-500 text-[13px] font-medium tracking-tight transition-all ${isSearching ? 'animate-pulse text-[#6366f1]' : ''}`}>
                     {hasSearched ? (
-                      isSearching ? `Sourcing candidates... ${candidates.length} found so far` : `${candidates.length} candidates found`
+                        isSearching ? `Sourcing candidates... ${candidates.length} found so far` : `${candidates.length} candidates found${sourceFilter !== "all" ? ` · showing ${sortedCandidates.length}` : ""}`
                     ) : 'Run a search to find candidates.'}
                   </p>
+                  {candidates.length > 0 && (
+                    <div className="flex items-center gap-1.5 mt-3 flex-wrap">
+                      {([
+                        { id: "all", label: "All", count: candidates.length },
+                        { id: "jobdiva", label: "JobDiva", count: sourceCounts["jobdiva"] || 0 },
+                        { id: "linkedin-unipile", label: "LinkedIn-Unipile", count: sourceCounts["linkedin-unipile"] || 0 },
+                        { id: "linkedin-exa", label: "LinkedIn-Exa", count: sourceCounts["linkedin-exa"] || 0 },
+                        { id: "dice", label: "Dice", count: sourceCounts["dice"] || 0 },
+                        { id: "upload-resume", label: "Upload-Resume", count: sourceCounts["upload-resume"] || 0 }
+                      ] as const).map(pill => {
+                        if (pill.id !== "all" && pill.count === 0) return null;
+                        const active = sourceFilter === pill.id;
+                        return (
+                          <button
+                            key={pill.id}
+                            onClick={() => { setSourceFilter(pill.id as any); setCurrentPage(1); }}
+                            className={`px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider border transition-colors ${active ? 'bg-[#6366f1] text-white border-[#6366f1]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+                          >
+                            {pill.label} <span className={`ml-1 font-medium ${active ? 'text-white/80' : 'text-slate-400'}`}>{pill.count}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
                 {candidates.length > 0 && (
                   <div className="flex items-center gap-2">
@@ -3775,6 +4261,16 @@ function NewJobPageContent() {
                     </Button>
                   </div>
                 )}
+                {isExternal && (
+                  <Button
+                    variant="outline"
+                    className="h-8 px-4 text-[13px] font-bold border-[#6366f1] text-[#6366f1] bg-white shadow-sm flex items-center gap-2 hover:bg-[#f5f3ff]"
+                    onClick={() => setPasteResumeOpen(true)}
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    Add via Resume
+                  </Button>
+                )}
               </div>
 
               {hasSearched ? (
@@ -3808,110 +4304,123 @@ function NewJobPageContent() {
                           sourceLocations[0]?.value ? `Local to ${sourceLocations[0].value}` : null
                         ].filter(Boolean);
 
-                        return (
-                          <div key={`${candidate.candidate_id || candidate.id}-${idx}`} className="p-5 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-purple-200 hover:shadow-md transition-all flex items-center gap-4">
-                            <Checkbox
-                              className="w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600"
-                              checked={selectedCandidates.has(candidate.candidate_id || candidate.id)}
-                              onCheckedChange={(checked) => {
-                                setSelectedCandidates(prev => {
-                                  const next = new Set(prev);
-                                  const id = candidate.candidate_id || candidate.id;
-                                  if (checked) next.add(id);
-                                  else next.delete(id);
-                                  return next;
-                                });
-                              }}
-                            />
-                            <div className="flex-1 min-w-0">
-                              {(() => {
-                                const displayName = getCandidateDisplayName(candidate);
-                                return (
-                                  <div className="flex items-center justify-between gap-4">
-                                    <div className="flex items-center gap-3 min-w-0">
-                                      <a
-                                        href={candidate.source === 'LinkedIn' ? candidate.profile_url || '#' : '#'}
-                                        target={candidate.source === 'LinkedIn' ? "_blank" : undefined}
-                                        rel={candidate.source === 'LinkedIn' ? "noopener noreferrer" : undefined}
-                                        className={`text-[17px] font-bold text-slate-900 flex items-center gap-3 transition-colors group/name ${candidate.source === 'LinkedIn' ? 'hover:text-[#1d4ed8]' :
-                                            candidate.source === 'JobDiva-TalentSearch' ? 'hover:text-[#8B5A2B]' :
-                                              'hover:text-[#6366f1]'
-                                          }`}
-                                        onClick={(e) => {
-                                          if (candidate.source !== 'LinkedIn') {
-                                            e.preventDefault();
-                                            handleViewResume(candidate);
-                                          }
-                                        }}
-                                      >
-                                        <span className="flex items-center gap-2">
-                                          <span className={`text-[17px] font-bold text-slate-900 transition-colors ${candidate.source === 'LinkedIn' ? 'group-hover/name:text-[#1d4ed8]' :
-                                              candidate.source === 'JobDiva-TalentSearch' ? 'group-hover/name:text-[#8B5A2B]' :
-                                                'group-hover/name:text-[#6366f1]'
-                                            }`}>
-                                            {displayName}
-                                          </span>
-                                          <span
-                                            className={`h-7 w-7 flex items-center justify-center border border-slate-200 bg-white text-slate-400 rounded-lg shadow-sm transition-all ${candidate.source === 'LinkedIn'
-                                                ? 'group-hover/name:border-[#bfdbfe] group-hover/name:bg-[#eff6ff] group-hover/name:text-[#1d4ed8]' :
-                                                candidate.source === 'JobDiva-TalentSearch'
-                                                  ? 'group-hover/name:border-[#D2B48C] group-hover/name:bg-[#FDF8F5] group-hover/name:text-[#8B5A2B]' :
-                                                  'group-hover/name:border-[#c7d2fe] group-hover/name:bg-[#f5f3ff] group-hover/name:text-[#6366f1]'
-                                              }`}
-                                            title={candidate.source === 'LinkedIn' ? "View LinkedIn Profile" : "Click to view resume"}
-                                          >
-                                            <ExternalLink className="w-3.5 h-3.5" />
-                                          </span>
-                                        </span>
-                                      </a>
-                                      <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow-sm h-fit border ${candidate.source === 'LinkedIn'
-                                        ? 'bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]'
-                                        : candidate.source === 'JobDiva-TalentSearch'
-                                          ? 'bg-[#FDF8F5] text-[#8B5A2B] border-[#D2B48C]'
-                                          : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]'
-                                        }`}>
-                                        {candidate.source === 'LinkedIn' ? <Linkedin className="w-3 h-3 fill-current" /> : candidate.source === 'JobDiva-TalentSearch' ? <Zap className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
-                                        {candidate.source || "JobDiva"}
-                                      </span>
-                                    </div>
+                      return (
+                        <div key={`${candidate.candidate_id || candidate.id}-${idx}`} className="p-5 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-purple-200 hover:shadow-md transition-all flex items-center gap-4">
+                          <Checkbox
+                            className="w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600"
+                            checked={selectedCandidates.has(candidate.candidate_id || candidate.id)}
+                            onCheckedChange={(checked) => {
+                              setSelectedCandidates(prev => {
+                                const next = new Set(prev);
+                                const id = candidate.candidate_id || candidate.id;
+                                if (checked) next.add(id);
+                                else next.delete(id);
+                                return next;
+                              });
+                            }}
+                          />
+                        <div className="flex-1 min-w-0">
+                          {(() => {
+                            const displayName = getCandidateDisplayName(candidate);
+                            return (
+                            <div className="flex items-center justify-between gap-4">
+                              <div className="flex items-center gap-3 min-w-0">
+                                <a
+                                  href={candidate.source?.startsWith('LinkedIn') ? candidate.profile_url || '#' : '#'}
+                                  target={candidate.source?.startsWith('LinkedIn') ? "_blank" : undefined}
+                                  rel={candidate.source?.startsWith('LinkedIn') ? "noopener noreferrer" : undefined}
+                                  className={`text-[17px] font-bold text-slate-900 flex items-center gap-3 transition-colors group/name ${
+                                    candidate.source?.startsWith('LinkedIn') ? 'hover:text-[#1d4ed8]' : 
+                                    candidate.source === 'JobDiva-TalentSearch' ? 'hover:text-[#c2410c]' : 
+                                    'hover:text-[#6366f1]'
+                                  }`}
+                                  onClick={(e) => {
+                                    if (!candidate.source?.startsWith('LinkedIn')) {
+                                      e.preventDefault();
+                                      handleViewResume(candidate);
+                                    }
+                                  }}
+                                >
+                                   <span className="flex items-center gap-2">
+                                     <span className={`text-[17px] font-bold text-slate-900 transition-colors ${
+                                       candidate.source?.startsWith('LinkedIn') ? 'group-hover/name:text-[#1d4ed8]' : 
+                                       candidate.source === 'JobDiva-TalentSearch' ? 'group-hover/name:text-[#c2410c]' : 
+                                       'group-hover/name:text-[#6366f1]'
+                                     }`}>
+                                       {displayName}
+                                     </span>
+                                     <span 
+                                       className={`h-7 w-7 flex items-center justify-center border border-slate-200 bg-white text-slate-400 rounded-lg shadow-sm transition-all ${
+                                         candidate.source?.startsWith('LinkedIn') 
+                                           ? 'group-hover/name:border-[#bfdbfe] group-hover/name:bg-[#eff6ff] group-hover/name:text-[#1d4ed8]' : 
+                                         candidate.source === 'JobDiva-TalentSearch' 
+                                           ? 'group-hover/name:border-[#fed7aa] group-hover/name:bg-[#fff7ed] group-hover/name:text-[#c2410c]' : 
+                                         'group-hover/name:border-[#c7d2fe] group-hover/name:bg-[#f5f3ff] group-hover/name:text-[#6366f1]'
+                                       }`}
+                                       title={candidate.source?.startsWith('LinkedIn') ? "View LinkedIn Profile" : "Click to view resume"}
+                                     >
+                                       <ExternalLink className="w-3.5 h-3.5" />
+                                     </span>
+                                   </span>
+                                </a>
+                                <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow-sm h-fit border ${candidate.source?.startsWith('LinkedIn')
+                                    ? 'bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]'
+                                    : candidate.source === 'JobDiva-TalentSearch'
+                                      ? 'bg-[#fff7ed] text-[#c2410c] border-[#fed7aa]'
+                                      : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]'
+                                  }`}>
+                                  {candidate.source?.startsWith('LinkedIn') ? <Linkedin className="w-3 h-3 fill-current" /> : candidate.source === 'JobDiva-TalentSearch' ? <Zap className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
+                                  {candidate.source || "JobDiva"}
+                                </span>
+                              </div>
 
-                                    <div className="flex items-center gap-3 shrink-0">
-                                      {candidate.match_score !== undefined && (
-                                        <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center shadow-sm h-fit border ${candidate.match_score >= 80 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
-                                            candidate.match_score >= 60 ? 'bg-amber-50 text-amber-700 border-amber-200' :
-                                              'bg-rose-50 text-rose-700 border-rose-200'
-                                          }`}>
-                                          {candidate.match_score}% Match
-                                        </span>
-                                      )}
-                                      <Button
-                                        size="sm"
-                                        className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 min-w-[70px]"
-                                        onClick={() => {
-                                          setSelectedCandidateForDetails({
-                                            name: displayName,
-                                            profileUrl: candidate.profile_url,
-                                            imageUrl: candidate.image_url,
-                                            jobTitle: candidate.title || candidate.headline || "",
-                                            location: candidate.location || (candidate.city ? `${candidate.city}, ${candidate.state}` : ""),
-                                            experienceYears: candidate.experience_years || candidate.yearsExtracted || candidate.enhanced_info?.years_of_experience || null,
-                                            tags: badgeOptions,
-                                            matchScore: candidate.match_score,
-                                            missingSkills: candidate.missing_skills,
-                                            explainability: candidate.explainability,
-                                            matchScoreDetails: candidate.match_score_details,
-                                            matchedSkills: candidate.matched_skills,
-                                          });
-                                          setDetailsModalOpen(true);
-                                        }}
-                                      >
-                                        <Eye className="w-3.5 h-3.5" />
-                                        View
-                                      </Button>
-                                    </div>
-                                  </div>
-                                );
-                              })()}
+                              <div className="flex items-center gap-3 shrink-0">
+                                {candidate.match_score !== undefined && (
+                                  <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center shadow-sm h-fit border ${
+                                    candidate.match_score >= 80 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 
+                                    candidate.match_score >= 60 ? 'bg-amber-50 text-amber-700 border-amber-200' : 
+                                    'bg-rose-50 text-rose-700 border-rose-200'
+                                  }`}>
+                                    {candidate.match_score}% Match
+                                  </span>
+                                )}
+                                {!candidate.source?.startsWith('LinkedIn') && (
+                                  <Button
+                                    size="sm"
+                                    className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2"
+                                    onClick={() => handleViewResume({ ...candidate, firstName: displayName.split(" ")[0] || displayName, lastName: displayName.split(" ").slice(1).join(" ") })}
+                                    title="Open candidate resume"
+                                  >
+                                    <FileText className="w-3.5 h-3.5" />
+                                    Resume
+                                    <ExternalLink className="w-3 h-3 opacity-70" />
+                                  </Button>
+                                )}
+                                <Button
+                                  size="sm"
+                                  className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 min-w-[70px]"
+                                  onClick={() => {
+                                    setSelectedCandidateForDetails({
+                                      name: displayName,
+                                      profileUrl: candidate.profile_url,
+                                      imageUrl: candidate.image_url,
+                                      jobTitle: candidate.title || candidate.headline || "",
+                                      location: candidate.location || (candidate.city ? `${candidate.city}, ${candidate.state}` : ""),
+                                      experienceYears: candidate.experience_years || candidate.yearsExtracted || candidate.enhanced_info?.years_of_experience || null,
+                                      tags: badgeOptions,
+                                      matchScore: candidate.match_score,
+                                      missingSkills: candidate.missing_skills,
+                                      explainability: candidate.explainability,
+                                      matchScoreDetails: candidate.match_score_details,
+                                      matchedSkills: candidate.matched_skills,
+                                    });
+                                    setDetailsModalOpen(true);
+                                  }}
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                  View
+                                </Button>
+                              </div>
                             </div>
                           </div>
                         )
@@ -4016,12 +4525,24 @@ function NewJobPageContent() {
                         </Button>
                       </div>
                     </div>
-                  )}
-                </>
-              ) : (
-                <div className="h-4 flex items-center justify-center opacity-0 mt-4">
-                </div>
-              )}
+                )}
+              </>
+            ) : (
+              <div className="h-4 flex items-center justify-center opacity-0 mt-4">
+              </div>
+            )}
+
+            {/* Bulk Resume Upload */}
+            <BulkUploadSection
+              jobRef={numericJobId || jobdivaId}
+              bulkFiles={bulkFiles}
+              onBulkFilesChange={setBulkFiles}
+              onClearProgress={() => setBulkProgress(null)}
+              isUploadingBulk={isUploadingBulk}
+              bulkProgress={bulkProgress}
+              bulkFileInputRef={bulkFileInputRef}
+              onUpload={handleBulkUpload}
+            />
             </div>
 
             {/* Launch Footer */}
@@ -4344,6 +4865,20 @@ function NewJobPageContent() {
           }}
         />
       )}
+
+      {/* Paste Resume Modal (External requirement) */}
+      <PasteResumeModal
+        open={pasteResumeOpen}
+        onClose={() => setPasteResumeOpen(false)}
+        name={pasteName}
+        onNameChange={setPasteName}
+        email={pasteEmail}
+        onEmailChange={setPasteEmail}
+        resumeText={pasteResumeText}
+        onResumeTextChange={setPasteResumeText}
+        isSaving={isSavingPasteResume}
+        onSubmit={handleSubmitPasteResume}
+      />
 
       {selectedCandidateForDetails && (
         <CandidateDetailsModal
