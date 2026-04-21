@@ -1,9 +1,34 @@
 import logging
+import re
 from typing import List, Dict, Any
 from core.config import EXA_API_KEY
 from exa_py import Exa
 
 logger = logging.getLogger(__name__)
+
+
+def _exa_query_from_boolean(boolean_string: str, skills: List[str], location: str, role_hint: str = "") -> str:
+    """Build an Exa-friendly query.
+
+    Exa's `type="auto"` handles a raw boolean string as free text reasonably
+    well — AND/OR/NOT survive as word tokens and quoted phrases still bias
+    matches. When no boolean is provided, fall back to the skills+location
+    heuristic that Dice/LinkedIn-Exa used previously.
+    """
+    bs = (boolean_string or "").strip()
+    if bs:
+        # Drop ` within N mi` radius hints — Exa can't act on them and they
+        # introduce noise. Location (if present) still appears as a quoted
+        # phrase elsewhere in the boolean.
+        cleaned = re.sub(r'\s+within\s+\d+\s*mi\b', '', bs, flags=re.IGNORECASE)
+        return cleaned.strip()
+
+    skills_str = ", ".join(skills) if skills else ""
+    prefix = role_hint or "candidate"
+    query = f"{prefix} {skills_str}".strip()
+    if location:
+        query += f" located in {location}"
+    return query
 
 class ExaService:
     def __init__(self):
@@ -15,22 +40,16 @@ class ExaService:
             except Exception as e:
                 logger.error(f"Failed to initialize Exa SDK: {e}")
 
-    async def search_candidates(self, skills: List[str], location: str, limit: int = 10) -> List[Dict[str, Any]]:
+    async def search_candidates(self, skills: List[str], location: str, limit: int = 10, boolean_string: str = "") -> List[Dict[str, Any]]:
         if not self.exa:
             logger.warning("Exa API key is not set. Skipping Exa search.")
             return []
 
         try:
-            # Construct a comprehensive search query
-            # We want to find people with these skills in this location
-            # Note: category="people" is optimized for finding individuals based on role/skills.
-            
-            # Combine skills into a single comma-separated string
-            skills_str = ", ".join(skills) if skills else ""
-            
-            query = f"software engineer OR developer {skills_str}"
-            if location:
-                query += f" located in {location}"
+            query = _exa_query_from_boolean(
+                boolean_string, skills, location,
+                role_hint="software engineer OR developer",
+            )
 
             logger.info(f"Executing Exa people search for query: {query}")
             
@@ -96,7 +115,7 @@ class ExaService:
             logger.error(f"Exa search failed: {e}")
             return []
 
-    async def search_dice_candidates(self, skills: List[str], location: str, limit: int = 10) -> List[Dict[str, Any]]:
+    async def search_dice_candidates(self, skills: List[str], location: str, limit: int = 10, boolean_string: str = "") -> List[Dict[str, Any]]:
         """
         Search Dice (dice.com) profiles via Exa with domain filtering.
         Dice hosts tech candidate profiles publicly indexable by Exa; we scope
@@ -108,10 +127,10 @@ class ExaService:
 
         try:
             import asyncio
-            skills_str = ", ".join(skills) if skills else ""
-            query = f"resume profile {skills_str}"
-            if location:
-                query += f" located in {location}"
+            query = _exa_query_from_boolean(
+                boolean_string, skills, location,
+                role_hint="resume profile",
+            )
 
             logger.info(f"Executing Dice (via Exa) search for query: {query}")
             loop = asyncio.get_event_loop()

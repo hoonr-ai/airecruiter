@@ -120,6 +120,13 @@ const STEP_DESCRIPTIONS: Record<Step, string> = {
   5: "Launch sourcing and begin candidate collection."
 };
 
+// Stable handle tying a rubric item to its Step-4 resume_match filter.
+// Replaces the earlier "value.split('—')[0]" fragility: Step-5 sourcing
+// derivation now matches by this key rather than by re-parsing the
+// user-visible filter string.
+const rubricKeyFor = (category: string, baseValue: string): string =>
+  `${category}|${(baseValue || "").trim()}`;
+
 const getCandidateDisplayName = (candidate: {
   name?: string;
   firstName?: string;
@@ -289,6 +296,10 @@ function NewJobPageContent() {
     active: boolean;
     ai: boolean;
     fromRubric: boolean;
+    // Stable handle for rubric-derived items. Lets Step-5 sourcing derivation
+    // match up to Step-4 filters without string-parsing the user-facing value
+    // (which carries formatted suffixes like "— 3+ yrs, Similar match").
+    rubricKey?: string;
   }>>([]);
   const [filterIdCounter, setFilterIdCounter] = useState(1);
   // Step 4 - Phone Screen state
@@ -2453,90 +2464,79 @@ function NewJobPageContent() {
       active: boolean;
       ai: boolean;
       fromRubric: boolean;
+      rubricKey?: string;
     }> = [];
 
     let idCounter = 1;
 
-    // Preserve user's active/inactive preferences for existing filters
+    // Preserve user's active/inactive preferences for existing filters.
+    // Key on the stable rubricKey (when present) or derive one from the
+    // filter's base value. No more splitting on "—" — that was fragile and
+    // broke if we ever changed the formatting of the display string.
     const existingFilterPrefs = new Map<string, boolean>();
     resumeMatchFilters.forEach(f => {
-      // Create a key from category + base value (without minYears/matchType which may change)
-      const baseValue = f.value.split('—')[0].trim();
-      existingFilterPrefs.set(`${f.category}|${baseValue}`, f.active);
+      const key = f.rubricKey || rubricKeyFor(f.category, f.value.split("—")[0]);
+      existingFilterPrefs.set(key, f.active);
     });
+
+    const pushRubricFilter = (
+      category: string,
+      baseValue: string,
+      displayValue: string,
+      defaultActive: boolean
+    ) => {
+      const key = rubricKeyFor(category, baseValue);
+      const active = existingFilterPrefs.has(key)
+        ? (existingFilterPrefs.get(key) ?? defaultActive)
+        : defaultActive;
+      filters.push({
+        id: idCounter++,
+        category,
+        value: displayValue,
+        active,
+        ai: true,
+        fromRubric: true,
+        rubricKey: key,
+      });
+    };
 
     // 1. Titles
     if (rubricData.titles) {
       rubricData.titles.forEach((title: any) => {
-        const filterKey = `Required Title|${title.value}`;
-        const wasActive = existingFilterPrefs.has(filterKey) ? (existingFilterPrefs.get(filterKey) ?? true) : true;
-        filters.push({
-          id: idCounter++,
-          category: 'Required Title',
-          value: `${title.value} — ${title.minYears}+ yrs, ${title.matchType} match`,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+        pushRubricFilter(
+          "Required Title",
+          title.value || "",
+          `${title.value} — ${title.minYears}+ yrs, ${title.matchType} match`,
+          true
+        );
       });
     }
 
     // 2. Skills
     if (rubricData.skills) {
       rubricData.skills.forEach((skill: any) => {
-        const category = skill.required === 'Required' ? 'Required Skill' : 'Preferred Skill';
-        const filterKey = `${category}|${skill.value}`;
-        // Active if explicitly "Required" or if it was previously active.
-        const wasActive = existingFilterPrefs.has(filterKey) 
-          ? (existingFilterPrefs.get(filterKey) ?? (skill.required === 'Required')) 
-          : (skill.required === 'Required');
-          
-        filters.push({
-          id: idCounter++,
+        const category = skill.required === "Required" ? "Required Skill" : "Preferred Skill";
+        pushRubricFilter(
           category,
-          value: `${skill.value} — ${skill.minYears}+ yrs, ${skill.matchType} match`,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+          skill.value || "",
+          `${skill.value} — ${skill.minYears}+ yrs, ${skill.matchType} match`,
+          skill.required === "Required"
+        );
       });
     }
 
     // 3. Education
     if (rubricData.education) {
       rubricData.education.forEach((edu: any) => {
-        const filterKey = `Education|${edu.degree}${edu.field ? ` in ${edu.field}` : ''}`;
-        const wasActive = existingFilterPrefs.has(filterKey) 
-          ? (existingFilterPrefs.get(filterKey) ?? (edu.required === 'Required')) 
-          : (edu.required === 'Required');
-
-        filters.push({
-          id: idCounter++,
-          category: 'Education',
-          value: `${edu.degree}${edu.field ? ` in ${edu.field}` : ''}`,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+        const display = `${edu.degree}${edu.field ? ` in ${edu.field}` : ""}`;
+        pushRubricFilter("Education", display, display, edu.required === "Required");
       });
     }
 
     // 4. Domain Experience
     if (rubricData.domain) {
       rubricData.domain.forEach((dom: any) => {
-        const filterKey = `Domain|${dom.value}`;
-        const wasActive = existingFilterPrefs.has(filterKey) 
-          ? (existingFilterPrefs.get(filterKey) ?? (dom.required === 'Required')) 
-          : (dom.required === 'Required');
-
-        filters.push({
-          id: idCounter++,
-          category: 'Domain',
-          value: dom.value,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+        pushRubricFilter("Domain", dom.value || "", dom.value || "", dom.required === "Required");
       });
     }
 
@@ -2544,17 +2544,8 @@ function NewJobPageContent() {
     if (rubricData.customer_requirements) {
       rubricData.customer_requirements.forEach((req: any) => {
         if (!req.value) return;
-        const filterKey = `Customer Req.|${req.type}: ${req.value}`;
-        const wasActive = existingFilterPrefs.has(filterKey) ? (existingFilterPrefs.get(filterKey) ?? true) : true;
-        
-        filters.push({
-          id: idCounter++,
-          category: 'Customer Req.',
-          value: `${req.type}: ${req.value}`,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+        const display = `${req.type}: ${req.value}`;
+        pushRubricFilter("Customer Req.", display, display, true);
       });
     }
 
@@ -2562,19 +2553,7 @@ function NewJobPageContent() {
     if (rubricData.other_requirements) {
       rubricData.other_requirements.forEach((req: any) => {
         if (!req.value) return;
-        const filterKey = `Requirement|${req.value}`;
-        const wasActive = existingFilterPrefs.has(filterKey) 
-          ? (existingFilterPrefs.get(filterKey) ?? (req.required === 'Required')) 
-          : (req.required === 'Required');
-
-        filters.push({
-          id: idCounter++,
-          category: 'Requirement',
-          value: req.value,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+        pushRubricFilter("Requirement", req.value, req.value, req.required === "Required");
       });
     }
 
@@ -2669,18 +2648,18 @@ function NewJobPageContent() {
       return isRubricItemRequired(item) ? "must" : "can";
     };
 
+    // Use the stable rubricKey planted in Step 4 rather than re-parsing the
+    // formatted filter value. If no rubric filter is active yet (initial
+    // page load), fall back to including every rubric item.
     const activeRubricFilterKeys = new Set(
       resumeMatchFilters
-        .filter(filter => filter.fromRubric && filter.active)
-        .map(filter => {
-          const baseValue = filter.value.split("—")[0].trim();
-          return `${filter.category}|${baseValue}`;
-        })
+        .filter(filter => filter.fromRubric && filter.active && filter.rubricKey)
+        .map(filter => filter.rubricKey as string)
     );
 
     const shouldIncludeRubricItem = (category: string, value: string) => {
       if (activeRubricFilterKeys.size === 0) return true;
-      return activeRubricFilterKeys.has(`${category}|${value.trim()}`);
+      return activeRubricFilterKeys.has(rubricKeyFor(category, value));
     };
 
     // 1. Titles
@@ -3013,6 +2992,34 @@ function NewJobPageContent() {
     return () => window.clearTimeout(timeoutId);
   }, [sourceTitles, sourceSkills, sourceLocations, sourceCompanies, sourceKeywords, resumeMatchFilters, jobTitle, booleanUserEdited]);
 
+  // Item F: mirror the boolean-string relaxation into the structured search
+  // payload. Tier 1/2 widen radius — also bump `within_miles` so LinkedIn /
+  // Dice / Exa (which don't read the boolean's `within N mi`) benefit too.
+  // Tier 3 drops NOT(...) from the boolean — deactivate exclude-category
+  // resume_match_filters so scoring doesn't penalize the same candidates
+  // whose "excluded" terms we just allowed through at sourcing time.
+  const relaxStructuralOverrides = (
+    tier: number,
+    baseWithinMiles: number,
+    currentFilters: typeof resumeMatchFilters
+  ): { withinMilesOverride?: number; resumeMatchFiltersOverride?: typeof resumeMatchFilters } => {
+    if (tier === 1) {
+      return { withinMilesOverride: Math.max(50, baseWithinMiles * 2) };
+    }
+    if (tier === 2) {
+      return { withinMilesOverride: Math.max(100, baseWithinMiles * 2) };
+    }
+    // tier >= 3: also deactivate Exclude-category filters for scoring.
+    return {
+      withinMilesOverride: Math.max(100, baseWithinMiles * 2),
+      resumeMatchFiltersOverride: currentFilters.map(f =>
+        (f.category || "").toLowerCase().includes("exclude")
+          ? { ...f, active: false }
+          : f
+      ),
+    };
+  };
+
   const relaxBooleanString = (input: string, tier: number): { query: string; label: string } => {
     let query = input;
     let label = "";
@@ -3043,7 +3050,7 @@ function NewJobPageContent() {
   const countQualified = (list: any[]) =>
     list.filter(c => (c.match_score || 0) >= QUALIFIED_SCORE_THRESHOLD).length;
 
-  const buildSearchPayload = (booleanString: string) => {
+  const buildSearchPayload = (booleanString: string, overrides?: { withinMilesOverride?: number; resumeMatchFiltersOverride?: typeof resumeMatchFilters }) => {
     const titleCriteria = sourceTitles.map(t => ({
       value: t.value || "Title",
       match_type: t.matchType || "must",
@@ -3058,24 +3065,27 @@ function NewJobPageContent() {
       recent: s.recent || false,
       similar_terms: s.selectedSimilarSkills || []
     }));
+    // Degrade gracefully: if nothing was configured, inject the job title as
+    // a preferred title so the search isn't totally empty. Backend sources
+    // that only accept a flat skills list (LinkedIn/Dice/Exa) derive their
+    // list from title_criteria + skill_criteria server-side.
+    if (titleCriteria.length === 0 && skillCriteria.length === 0 && jobTitle) {
+      titleCriteria.push({
+        value: jobTitle,
+        match_type: "can",
+        years: 0,
+        recent: false,
+        similar_terms: []
+      });
+    }
     const primaryLocation = sourceLocations[0];
-    const withinMiles = primaryLocation?.radius?.match(/(\d+)/)?.[1]
+    const parsedRadius = primaryLocation?.radius?.match(/(\d+)/)?.[1]
       ? Number(primaryLocation.radius.match(/(\d+)/)?.[1])
       : 25;
-    const skillsToSearch: any[] = [];
-    sourceTitles.forEach(t => {
-      if (t.matchType !== 'exclude') {
-        skillsToSearch.push({ value: t.value || "Title", priority: t.matchType === 'must' ? 'Must Have' : 'Flexible', years_experience: t.years || 0 });
-      }
-    });
-    sourceSkills.forEach(s => {
-      if (s.matchType !== 'exclude') {
-        skillsToSearch.push({ value: s.value || "Skill", priority: s.matchType === 'must' ? 'Must Have' : 'Flexible', years_experience: s.years || 0 });
-      }
-    });
-    if (titleCriteria.length === 0 && skillCriteria.length === 0 && skillsToSearch.length === 0) {
-      skillsToSearch.push({ value: jobTitle || "Role", priority: "Flexible", years_experience: 0 });
-    }
+    const withinMiles = overrides?.withinMilesOverride ?? parsedRadius;
+    const activeResumeFilters = (overrides?.resumeMatchFiltersOverride ?? resumeMatchFilters)
+      .filter(f => f.active)
+      .map(f => ({ category: f.category, value: f.value, active: f.active }));
     const selectedSourcesArray = Object.keys(searchSources)
       .filter(k => (searchSources as any)[k])
       .map(k => {
@@ -3092,8 +3102,7 @@ function NewJobPageContent() {
       skill_criteria: skillCriteria,
       keywords: sourceKeywords,
       companies: sourceCompanies,
-      resume_match_filters: resumeMatchFilters.filter(f => f.active).map(f => ({ category: f.category, value: f.value, active: f.active })),
-      skills: skillsToSearch,
+      resume_match_filters: activeResumeFilters,
       location: primaryLocation?.value || "",
       within_miles: withinMiles,
       sources: selectedSourcesArray,
@@ -3103,9 +3112,13 @@ function NewJobPageContent() {
     };
   };
 
-  const runSearchStream = async (booleanString: string, mode: "replace" | "append"): Promise<any[]> => {
+  const runSearchStream = async (
+    booleanString: string,
+    mode: "replace" | "append",
+    overrides?: { withinMilesOverride?: number; resumeMatchFiltersOverride?: typeof resumeMatchFilters }
+  ): Promise<any[]> => {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-    const payload = buildSearchPayload(booleanString);
+    const payload = buildSearchPayload(booleanString, overrides);
     const controller = new AbortController();
     searchAbortRef.current = controller;
     let response: Response;
@@ -3197,18 +3210,24 @@ function NewJobPageContent() {
       const firstRun = await runSearchStream(initial, "replace");
       let accumulated = [...firstRun];
 
+      const baseWithinMiles = (() => {
+        const m = sourceLocations[0]?.radius?.match(/(\d+)/)?.[1];
+        return m ? Number(m) : 25;
+      })();
       let currentAttempts = attempts;
       while (currentAttempts.length < MAX_BOOLEAN_ATTEMPTS) {
         if (searchAbortRef.current?.signal.aborted) break;
         const qualified = countQualified(accumulated);
         if (qualified >= QUALIFIED_TARGET_COUNT) break;
-        const relaxed = relaxBooleanString(currentAttempts[currentAttempts.length - 1].query, currentAttempts.length);
+        const tier = currentAttempts.length; // 1, 2, 3 as attempts grow
+        const relaxed = relaxBooleanString(currentAttempts[currentAttempts.length - 1].query, tier);
         if (relaxed.query === currentAttempts[currentAttempts.length - 1].query) break;
+        const structuralOverrides = relaxStructuralOverrides(tier, baseWithinMiles, resumeMatchFilters);
         currentAttempts = [...currentAttempts, { query: relaxed.query, label: relaxed.label }];
         setBooleanAttempts(currentAttempts);
         setGeneratedBoolean(relaxed.query);
         setSearchStatus(`Only ${qualified}/${QUALIFIED_TARGET_COUNT} strong matches — relaxing boolean (attempt ${currentAttempts.length}/${MAX_BOOLEAN_ATTEMPTS})...`);
-        const nextRun = await runSearchStream(relaxed.query, "append");
+        const nextRun = await runSearchStream(relaxed.query, "append", structuralOverrides);
         accumulated = [...accumulated, ...nextRun];
       }
     } catch (error) {
@@ -3222,7 +3241,8 @@ function NewJobPageContent() {
     if (isSearching) return;
     if (booleanAttempts.length >= MAX_BOOLEAN_ATTEMPTS) return;
     const base = resolvedGeneratedBoolean;
-    const relaxed = relaxBooleanString(base, Math.max(1, booleanAttempts.length));
+    const tier = Math.max(1, booleanAttempts.length);
+    const relaxed = relaxBooleanString(base, tier);
     const nextAttempts = booleanAttempts.length
       ? [...booleanAttempts, { query: relaxed.query, label: relaxed.label }]
       : [{ query: base, label: "PAIR generated" }, { query: relaxed.query, label: relaxed.label }];
@@ -3232,8 +3252,13 @@ function NewJobPageContent() {
     setIsSearching(true);
     setHasSearched(true);
     try {
+      const baseWithinMiles = (() => {
+        const m = sourceLocations[0]?.radius?.match(/(\d+)/)?.[1];
+        return m ? Number(m) : 25;
+      })();
+      const structuralOverrides = relaxStructuralOverrides(tier, baseWithinMiles, resumeMatchFilters);
       setSearchStatus(`Extending search with more lenient boolean (attempt ${nextAttempts.length}/${MAX_BOOLEAN_ATTEMPTS})...`);
-      await runSearchStream(relaxed.query, "append");
+      await runSearchStream(relaxed.query, "append", structuralOverrides);
     } finally {
       setIsSearching(false);
     }

@@ -113,12 +113,12 @@ class ChatResponse(BaseModel):
     
 class CandidateSearchRequest(BaseModel):
     job_id: Optional[str] = None
-    # Legacy fields for backward compatibility
-    skills: List[Skill] = []
     location: Optional[str] = None
-    # Enhanced filtering criteria
-    titles: List[TitleCriterion] = [] # Keeping for compatibility
-    title_criteria: List[TitleCriterion] = [] # Added to match frontend
+    # Enhanced filtering criteria — single source of truth for titles/skills.
+    # Legacy flat `titles: List[TitleCriterion]` and `skills: List[Skill]`
+    # fields were removed (2026-04) in favor of `title_criteria` /
+    # `skill_criteria`. Callers should build the rich criterion shape.
+    title_criteria: List[TitleCriterion] = []
     skill_criteria: List[SkillCriterion] = []
     locations: List[LocationCriterion] = []
     keywords: List[str] = []  # General keywords
