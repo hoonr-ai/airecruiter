@@ -15,8 +15,6 @@ logger = logging.getLogger(__name__)
 
 class SearchCriteria(BaseModel):
     job_id: str
-    titles: List[str] = []
-    skills: List[str] = []
     title_criteria: List[Dict[str, Any]] = []
     skill_criteria: List[Dict[str, Any]] = []
     keywords: List[str] = []
@@ -28,6 +26,27 @@ class SearchCriteria(BaseModel):
     sources: List[str] = ["JobDiva", "LinkedIn", "Exa"]
     open_to_work: bool = True
     boolean_string: str = ""
+
+    def sourcing_skill_values(self) -> List[str]:
+        """Flat skill-like strings for sources that only accept a plain list
+        (LinkedIn-Unipile, Exa, Dice, Vetted). Pulls from skill_criteria +
+        title_criteria, skipping excludes and empty values."""
+        values: List[str] = []
+        seen = set()
+        for item in (self.skill_criteria or []) + (self.title_criteria or []):
+            if not isinstance(item, dict):
+                continue
+            if item.get("match_type") == "exclude":
+                continue
+            value = str(item.get("value", "")).strip()
+            if not value:
+                continue
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            values.append(value)
+        return values
 
 class UnifiedCandidateSearch:
     def __init__(self):
@@ -1544,8 +1563,11 @@ class UnifiedCandidateSearch:
 
     async def _search_linkedin(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
-            # Unipile expects skills as a list of dicts or strings
-            skills = [{"value": s, "priority": "Must Have"} for s in criteria.skills]
+            # Unipile expects skills as a list of dicts or strings. Derive from
+            # skill_criteria + title_criteria so callers don't have to send a
+            # redundant flat list.
+            skill_values = criteria.sourcing_skill_values()
+            skills = [{"value": s, "priority": "Must Have"} for s in skill_values]
             candidates = await self.unipile_service.search_candidates(
                 skills=skills,
                 location=criteria.location,
@@ -1553,7 +1575,7 @@ class UnifiedCandidateSearch:
                 limit=criteria.page_size,
                 boolean_string=criteria.boolean_string or self._build_boolean_string(criteria)
             )
-            
+
             return {"candidates": candidates, "source_type": "LinkedIn-Unipile"}
         except Exception as e:
             logger.error(f"LinkedIn search failed: {e}")
@@ -1613,15 +1635,13 @@ class UnifiedCandidateSearch:
 
     async def _search_dice(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
-            skills_values = []
-            for s in criteria.skills:
-                val = s.get("value") if isinstance(s, dict) else s
-                if val:
-                    skills_values.append(str(val))
+            skills_values = criteria.sourcing_skill_values()
+            boolean_string = criteria.boolean_string or self._build_boolean_string(criteria)
             candidates = await self.exa_service.search_dice_candidates(
                 skills=skills_values,
                 location=criteria.location,
                 limit=min(criteria.page_size, 20),
+                boolean_string=boolean_string,
             )
             return {"candidates": candidates, "source_type": "Dice"}
         except Exception as e:
@@ -1630,9 +1650,8 @@ class UnifiedCandidateSearch:
 
     async def _search_vetted(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
-            # Simple vetted search
             candidates = await self.vetted_service.search_candidates(
-                skills=criteria.skills,
+                skills=criteria.sourcing_skill_values(),
                 location=criteria.location,
                 limit=criteria.page_size
             )
@@ -1643,16 +1662,13 @@ class UnifiedCandidateSearch:
 
     async def _search_exa(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
-            skills_values = []
-            for s in criteria.skills:
-                val = s.get("value") if isinstance(s, dict) else s
-                if val:
-                    skills_values.append(str(val))
-                    
+            skills_values = criteria.sourcing_skill_values()
+            boolean_string = criteria.boolean_string or self._build_boolean_string(criteria)
             candidates = await self.exa_service.search_candidates(
                 skills=skills_values,
                 location=criteria.location,
-                limit=min(criteria.page_size, 20)
+                limit=min(criteria.page_size, 20),
+                boolean_string=boolean_string,
             )
             return {"candidates": candidates, "source_type": "LinkedIn-Exa"}
         except Exception as e:

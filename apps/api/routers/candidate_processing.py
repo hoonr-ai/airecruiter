@@ -178,39 +178,39 @@ async def talent_search(request: CandidateSearchRequest) -> Dict[str, Any]:
     Search JobDiva talent pool based on skills and criteria (not job-specific).
     """
     try:
-        logger.info(f"Talent search - skills: {len(request.skills)}, location: {request.location}")
-        
+        logger.info(
+            f"Talent search - skill_criteria: {len(request.skill_criteria)}, "
+            f"title_criteria: {len(request.title_criteria)}, location: {request.location}"
+        )
+
         # Validation
-        if not request.skills and not request.skill_criteria and not request.titles:
+        if not request.skill_criteria and not request.title_criteria:
             raise HTTPException(
-                status_code=400, 
-                detail="At least one search criterion must be provided (skills, skill_criteria, or titles)"
+                status_code=400,
+                detail="At least one search criterion must be provided (skill_criteria or title_criteria)"
             )
-        
+
         jobdiva_service = JobDivaService()
-        
-        # Convert various criteria to JobDiva skill format
+
+        # Convert criteria to JobDiva skill format. Skips exclude match_type so
+        # negative clauses don't get searched as required terms.
         search_skills = []
-        
-        # Add legacy skills
-        for skill in request.skills:
-            search_skills.append({
-                "value": skill.value,
-                "priority": skill.priority,
-                "years_experience": skill.years_experience or 0
-            })
-            
-        # Add skill criteria
+
         for skill_crit in request.skill_criteria:
+            if skill_crit.match_type == "exclude":
+                continue
             priority = "Must Have" if skill_crit.match_type == "must" else "Flexible"
             search_skills.append({
                 "value": skill_crit.value,
                 "priority": priority,
                 "years_experience": skill_crit.years or 0
             })
-            
-        # Add title criteria as skills (JobDiva treats titles as searchable skills)
-        for title_crit in request.titles:
+
+        # Title criteria also get fanned out as skill-like tokens — JobDiva
+        # talent search treats titles as searchable text.
+        for title_crit in request.title_criteria:
+            if title_crit.match_type == "exclude":
+                continue
             priority = "Must Have" if title_crit.match_type == "must" else "Flexible"
             search_skills.append({
                 "value": title_crit.value,

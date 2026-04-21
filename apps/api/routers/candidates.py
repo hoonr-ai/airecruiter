@@ -39,20 +39,9 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
     try:
         from services.unified_candidate_search import unified_search_service, SearchCriteria
 
-        # Convert request to search criteria
-        titles = []
-        skills = []
-
-        # Extract titles from various sources
-        combined_title_criteria = (request.title_criteria or []) + (request.titles or [])
-        if combined_title_criteria:
-            titles.extend([t.value for t in combined_title_criteria if t.match_type != 'exclude'])
-
-        # Extract skills from various sources
-        if request.skill_criteria:
-            skills.extend([s.value for s in request.skill_criteria if s.match_type != 'exclude'])
-        if request.skills:
-            skills.extend([s.value for s in request.skills])
+        # `title_criteria` is now the single source of truth — the legacy flat
+        # `titles`/`skills` fields were removed from CandidateSearchRequest.
+        combined_title_criteria = request.title_criteria or []
 
         # Extract location
         location = ""
@@ -61,17 +50,22 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
         elif request.location:
             location = request.location
 
-        # Extract companies
+        # Resolve per-location radius if provided (fallback 25 miles).
+        within_miles = 25
+        if request.locations:
+            radius_match = str(request.locations[0].radius or "")
+            digits = "".join(ch for ch in radius_match if ch.isdigit())
+            if digits:
+                within_miles = int(digits)
+
         companies = request.companies or []
 
         # Load resume match filters from database if not provided in request
         resume_match_filters = []
         if request.resume_match_filters and len(request.resume_match_filters) > 0:
-            # Use filters from request if provided
             resume_match_filters = [f.dict() for f in request.resume_match_filters]
             logger.info(f"Using {len(resume_match_filters)} resume match filters from request")
         else:
-            # Load from database
             try:
                 conn = get_db_connection()
                 cursor = conn.cursor()
@@ -88,17 +82,17 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             except Exception as e:
                 logger.warning(f"Failed to load resume match filters from database: {e}")
 
-        # Build search criteria
+        # Build search criteria — no more flat `titles`/`skills` duplication;
+        # per-source search methods derive what they need via
+        # SearchCriteria.sourcing_skill_values().
         criteria = SearchCriteria(
             job_id=request.job_id,
-            titles=titles,
-            skills=skills,
             title_criteria=[t.dict() for t in combined_title_criteria],
-            skill_criteria=[s.dict() for s in request.skill_criteria],
+            skill_criteria=[s.dict() for s in (request.skill_criteria or [])],
             keywords=request.keywords or [],
             resume_match_filters=resume_match_filters,
             location=location,
-            within_miles=25,  # Default radius
+            within_miles=within_miles,
             companies=companies,
             page_size=request.limit or 100,
             sources=request.sources or ["JobDiva"],
@@ -171,28 +165,35 @@ async def search_jobdiva_candidates_legacy(request: CandidateSearchRequest):
         applicant_count = 0
         talent_pool_count = 0
 
-        # Parse filtering criteria - support both legacy and enhanced formats
+        # Parse filtering criteria from the rich title/skill/location shapes.
+        # Legacy flat `titles`/`skills` lists were dropped from the request
+        # model; `legacy_skills` stays as a name here purely to preserve the
+        # downstream JobDiva service signature (which still expects a flat list
+        # of {value, priority, years_experience}).
         title_filters = []
         skill_filters = []
         location_filters = []
+        legacy_skills = []
 
-        # Enhanced format: separate title, skill, location criteria
-        if request.titles:
-            title_filters = [t for t in request.titles if t.match_type != 'exclude']
+        if request.title_criteria:
+            title_filters = [t for t in request.title_criteria if t.match_type != 'exclude']
         if request.skill_criteria:
             skill_filters = [s for s in request.skill_criteria if s.match_type != 'exclude']
         if request.locations:
-            location_filters = [l for l in request.locations]
+            location_filters = list(request.locations)
 
-        # Legacy format: extract from skills array (for backward compatibility)
-        legacy_skills = []
-        if request.skills:
-            for skill in request.skills:
-                legacy_skills.append({
-                    "value": skill.value,
-                    "priority": skill.priority,
-                    "years_experience": skill.years_experience or 0
-                })
+        # Derive the flat "legacy_skills" shape from skill_criteria so the old
+        # JobDiva service call still works without requiring callers to send
+        # the deprecated format.
+        for skill in (request.skill_criteria or []):
+            if skill.match_type == 'exclude':
+                continue
+            priority = "Must Have" if skill.match_type == 'must' else "Flexible"
+            legacy_skills.append({
+                "value": skill.value,
+                "priority": priority,
+                "years_experience": skill.years or 0,
+            })
 
         # Use location from either enhanced or legacy format
         primary_location = ""
@@ -246,7 +247,7 @@ async def search_jobdiva_candidates_legacy(request: CandidateSearchRequest):
             # Fallback to legacy search if enhanced search fails
             try:
                 applicants = await jobdiva_service.search_candidates(
-                    skills=request.skills or legacy_skills,
+                    skills=legacy_skills,
                     location=primary_location,
                     job_id=request.job_id
                 )
@@ -289,7 +290,7 @@ async def search_jobdiva_candidates_legacy(request: CandidateSearchRequest):
                 # Fallback to legacy talent search
                 try:
                     talent_pool = await jobdiva_service.search_candidates(
-                        skills=request.skills or legacy_skills,
+                        skills=legacy_skills,
                         location=primary_location,
                         page=request.page,
                         limit=remaining_limit if remaining_limit > 0 else request.limit,
