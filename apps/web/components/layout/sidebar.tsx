@@ -5,6 +5,7 @@ import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { LayoutDashboard, Briefcase, Users, Settings, Bot } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { AzureLoginButton } from "@/components/auth/AzureLoginButton";
 
 export function Sidebar() {
     const pathname = usePathname();
@@ -50,6 +51,8 @@ export function Sidebar() {
                     })}
                 </ul>
             </nav>
+
+            <AzureLoginButton />
         </div>
     );
 }

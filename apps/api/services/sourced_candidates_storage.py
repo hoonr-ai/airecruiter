@@ -14,6 +14,7 @@ from core.config import (
 )
 import httpx
 from models import SourcedCandidate
+from services.candidate_profiles_db import candidate_profiles_db
 
 logger = logging.getLogger(__name__)
 
@@ -1138,6 +1139,16 @@ def save_candidate_enhanced_info(candidate_id: str, enhanced_info: Dict[str, Any
                 "source": enhanced_info.get("source", "JobDiva")
             })
             conn.commit()
+            
+            # --- Propagate strictly to the newly normalized relations ---
+            try:
+                candidate_profiles_db.upsert_candidate(
+                    jobdiva_id="", # We may not have jobdiva_id locally here but it operates as intended
+                    candidate=enhanced_info,
+                    source=enhanced_info.get("source", "JobDiva")
+                )
+            except Exception as e_norm:
+                logger.error(f"❌ Normalized persistence failed for {candidate_id}: {e_norm}")
     except Exception as e:
         print(f"Error saving candidate_enhanced_info for {candidate_id}: {e}")
 
