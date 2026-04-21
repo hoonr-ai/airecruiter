@@ -26,7 +26,6 @@ class SearchCriteria(BaseModel):
     sources: List[str] = ["JobDiva", "LinkedIn", "Exa"]
     open_to_work: bool = True
     boolean_string: str = ""
-    bypass_screening: bool = False
 
     def sourcing_skill_values(self) -> List[str]:
         """Flat skill-like strings for sources that only accept a plain list
@@ -97,7 +96,6 @@ class UnifiedCandidateSearch:
             return cand
 
         jobdiva_selected = "JobDiva" in criteria.sources
-        talent_search_selected = "JobDiva-TalentSearch" in criteria.sources
         hotlist_selected = "JobDiva Hotlist" in criteria.sources
 
         queue: asyncio.Queue = asyncio.Queue()
