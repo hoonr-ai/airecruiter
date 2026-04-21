@@ -169,6 +169,39 @@ else
     print_status "Nginx configuration already exists (skipping update)"
 fi
 
+# Install certbot for SSL certificates
+echo -e "${BLUE}🔒 Installing Certbot for SSL certificates...${NC}"
+sudo apt install -y certbot python3-certbot-nginx
+print_status "Certbot installed"
+
+# Check if SSL certificate already exists
+if [ -f /etc/letsencrypt/live/pairqa.hoonr.ai/fullchain.pem ]; then
+    echo -e "${BLUE}🔐 SSL certificate already exists for pairqa.hoonr.ai${NC}"
+    print_status "Using existing SSL certificate"
+    # Ensure nginx config has SSL settings
+    sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
+    print_status "Nginx SSL configuration updated"
+else
+    # Obtain SSL certificate from Let's Encrypt
+    echo -e "${BLUE}🔐 Obtaining SSL certificate for pairqa.hoonr.ai...${NC}"
+    if sudo certbot --nginx -d pairqa.hoonr.ai --non-interactive --agree-tos --email Pragati.Raj@celsiortech.com; then
+        print_status "SSL certificate obtained and configured successfully"
+    else
+        print_warning "Certbot failed to configure SSL automatically, applying manual configuration..."
+        # Force update nginx config with SSL settings
+        sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
+        print_status "Nginx SSL configuration updated manually"
+    fi
+fi
+
+# Test and reload nginx configuration after SSL setup
+if sudo nginx -t; then
+    sudo systemctl reload nginx
+    print_status "Nginx configuration reloaded with SSL"
+else
+    print_error "Nginx configuration test failed after SSL setup"
+fi
+
 # Create systemd services
 echo -e "${BLUE}🔧 Setting up systemd services...${NC}"
 
@@ -269,20 +302,22 @@ echo -e "${YELLOW}📋 Deployment Summary:${NC}"
 echo -e "✅ Database: Azure PostgreSQL (job-diva-db.postgres.database.azure.com)"
 echo -e "✅ API Service: Running on port 8000 (systemd managed)"
 echo -e "✅ Web Service: Running on port 3000 (systemd managed)"
-echo -e "✅ Nginx: Reverse proxy configured"
+echo -e "✅ Nginx: Reverse proxy configured with SSL"
+echo -e "✅ SSL Certificate: Let's Encrypt for pairqa.hoonr.ai"
 echo -e "✅ Firewall: Configured with ports open"
 echo -e "✅ Auto-start: Services enabled for automatic restart"
 echo ""
 echo -e "${BLUE}🌐 Access URLs:${NC}"
-echo -e "- Web App: http://20.57.137.251"
-echo -e "- API Docs: http://20.57.137.251/api/docs"
-echo -e "- Direct API: http://20.57.137.251:8000/docs"
-echo -e "- Direct Web: http://20.57.137.251:3000"
+echo -e "- Web App: https://pairqa.hoonr.ai"
+echo -e "- API Docs: https://pairqa.hoonr.ai/api/docs"
+echo -e "- Direct API: http://20.57.137.251:8000/docs (HTTP only)"
+echo -e "- Direct Web: http://20.57.137.251:3000 (HTTP only)"
 echo ""
 echo -e "${YELLOW}⚙️ Optional Configuration:${NC}"
 echo -e "1. Update API keys in: $API_DIR/.env"
 echo -e "   - OPENAI_API_KEY, UNIPILE_API_KEY, UNIPILE_ACCOUNT_ID"
 echo -e "2. Setup custom domain: ./setup-production.sh yourdomain.com"
+echo -e "3. Ensure DNS A record for pairqa.hoonr.ai points to 20.57.137.251"
 echo ""
 echo -e "${BLUE}🛠️ Management Commands:${NC}"
 echo -e "- Quick redeploy:   ./manage.sh deploy"
