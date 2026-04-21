@@ -266,9 +266,9 @@ export default function CandidatesPage() {
                     <TableCell className="py-6 w-[300px] min-w-[300px] max-w-[300px] sticky left-[110px] bg-white z-30 border-r border-slate-100 shadow-[4px_0_8px_-4px_rgba(0,0,0,0.1)] group-hover:bg-slate-50 transition-colors overflow-hidden">
                       <div className="space-y-1 relative z-10">
                         <a
-                          href={candidate.source === 'LinkedIn' ? candidate.profile_url || '#' : '#'}
-                          target={candidate.source === 'LinkedIn' ? "_blank" : undefined}
-                          rel={candidate.source === 'LinkedIn' ? "noopener noreferrer" : undefined}
+                          href={candidate.source?.startsWith('LinkedIn') ? candidate.profile_url || '#' : '#'}
+                          target={candidate.source?.startsWith('LinkedIn') ? "_blank" : undefined}
+                          rel={candidate.source?.startsWith('LinkedIn') ? "noopener noreferrer" : undefined}
                           className="group/name flex items-center gap-3"
                           onClick={(e) => {
                             if (candidate.source !== 'LinkedIn') {
@@ -279,21 +279,21 @@ export default function CandidatesPage() {
                         >
                            <span className="flex items-center gap-2 max-w-full">
                              <span className={`text-[15px] font-bold text-slate-900 transition-colors whitespace-normal break-words ${
-                               candidate.source === 'LinkedIn' ? 'group-hover/name:text-[#1d4ed8]' : 
-                               candidate.source === 'JobDiva-TalentSearch' ? 'group-hover/name:text-[#8B5A2B]' : 
+                               candidate.source?.startsWith('LinkedIn') ? 'group-hover/name:text-[#1d4ed8]' : 
+                               candidate.source === 'JobDiva-TalentSearch' ? 'group-hover/name:text-[#c2410c]' : 
                                'group-hover/name:text-[#6366f1]'
                              }`}>
                                {candidate.name}
                              </span>
                              <span 
                                className={`shrink-0 h-6 w-6 flex items-center justify-center border border-slate-200 bg-white text-slate-400 rounded-lg shadow-sm transition-all ${
-                                 candidate.source === 'LinkedIn' 
+                                 candidate.source?.startsWith('LinkedIn') 
                                    ? 'group-hover/name:border-[#bfdbfe] group-hover/name:bg-[#eff6ff] group-hover/name:text-[#1d4ed8]' : 
                                  candidate.source === 'JobDiva-TalentSearch' 
                                    ? 'group-hover/name:border-[#D2B48C] group-hover/name:bg-[#FDF8F5] group-hover/name:text-[#8B5A2B]' : 
                                  'group-hover/name:border-[#c7d2fe] group-hover/name:bg-[#f5f3ff] group-hover/name:text-[#6366f1]'
                                }`}
-                               title={candidate.source === 'LinkedIn' ? "View LinkedIn Profile" : "Click to view resume"}
+                               title={candidate.source?.startsWith('LinkedIn') ? "View LinkedIn Profile" : "Click to view resume"}
                              >
                                <ExternalLink className="w-3 h-3" />
                              </span>
@@ -340,13 +340,13 @@ export default function CandidatesPage() {
                     </TableCell>
                     <TableCell className="py-6">
                       <div className="space-y-2 flex justify-center">
-                        <span className={`px-2.5 w-fit py-0.5 rounded-lg text-[10.5px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow-sm h-fit border ${candidate.source === 'LinkedIn'
+                        <span className={`px-2.5 w-fit py-0.5 rounded-lg text-[10.5px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow-sm h-fit border ${candidate.source?.startsWith('LinkedIn')
                             ? 'bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]'
                             : candidate.source === 'JobDiva-TalentSearch'
                               ? 'bg-[#FDF8F5] text-[#8B5A2B] border-[#D2B48C]'
                               : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]'
                           }`}>
-                          {candidate.source === 'LinkedIn' ? <Linkedin className="w-3 h-3 fill-current" /> : candidate.source === 'JobDiva-TalentSearch' ? <Zap className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
+                          {candidate.source?.startsWith('LinkedIn') ? <Linkedin className="w-3 h-3 fill-current" /> : candidate.source === 'JobDiva-TalentSearch' ? <Zap className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
                           {candidate.source || "JobDiva"}
                         </span>
                       </div>

@@ -206,6 +206,62 @@ class UnipileService:
             
         return None
 
+    def _sanitize_linkedin_keywords(
+        self,
+        boolean_string: str,
+        resolved_skill_names: List[str],
+        has_location_id: bool,
+    ) -> str:
+        s = boolean_string or ""
+        # Drop years-of-experience phrases — LinkedIn profiles rarely contain the exact "10+ years" literal
+        s = re.sub(r'"\d+\+\s*years?"', "", s, flags=re.IGNORECASE)
+        s = re.sub(r'\s+AND\s+recent', "", s, flags=re.IGNORECASE)
+        # Drop location radius clauses when we've already resolved the location to an ID
+        if has_location_id:
+            s = re.sub(r'"[^"]+"\s+within\s+\d+\s+mi', "", s, flags=re.IGNORECASE)
+            s = re.sub(r'within\s+\d+\s+mi', "", s, flags=re.IGNORECASE)
+        # Drop quoted skill terms we've already resolved to IDs
+        for name in resolved_skill_names:
+            escaped = re.escape(name)
+            s = re.sub(rf'"{escaped}"', "", s, flags=re.IGNORECASE)
+        # Clean up leftover connectives / empty parens
+        for _ in range(6):
+            s = re.sub(r'\(\s*\)', "", s)
+            s = re.sub(r'\(\s*(AND|OR|NOT)\s+', "(", s, flags=re.IGNORECASE)
+            s = re.sub(r'\s+(AND|OR|NOT)\s*\)', ")", s, flags=re.IGNORECASE)
+            s = re.sub(r'\s+(AND|OR)\s+(AND|OR)\s+', r" \1 ", s, flags=re.IGNORECASE)
+            s = re.sub(r'^\s*(AND|OR|NOT)\s+', "", s, flags=re.IGNORECASE)
+            s = re.sub(r'\s+(AND|OR|NOT)\s*$', "", s, flags=re.IGNORECASE)
+        s = re.sub(r'\s+', " ", s).strip()
+        # Balance parentheses: drop any ')' without a matching '(', append missing closers
+        balanced = []
+        depth = 0
+        for ch in s:
+            if ch == ')':
+                if depth == 0:
+                    continue
+                depth -= 1
+            elif ch == '(':
+                depth += 1
+            balanced.append(ch)
+        s = "".join(balanced) + (")" * depth)
+        s = re.sub(r'\s+', " ", s).strip()
+        # Unwrap a single outer parenthesis only if the opening '(' truly matches the closing ')'
+        if s.startswith("(") and s.endswith(")"):
+            depth = 0
+            wraps_all = True
+            for i, ch in enumerate(s):
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                if depth == 0 and i < len(s) - 1:
+                    wraps_all = False
+                    break
+            if wraps_all:
+                s = s[1:-1].strip()
+        return s
+
     async def search_candidates(self, skills: List[Any], location: str, open_to_work: bool = True, limit: int = 25, boolean_string: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Search LinkedIn via Unipile using the Recruiter API mode.
@@ -246,7 +302,12 @@ class UnipileService:
         # Determine keywords
         final_keywords = ""
         if boolean_string:
-            final_keywords = boolean_string
+            final_keywords = self._sanitize_linkedin_keywords(
+                boolean_string,
+                resolved_skill_names=[s["name_ref"].lower() for s in skill_ids if s.get("name_ref")],
+                has_location_id=bool(location_ids),
+            )
+            logger.info(f"Unipile keywords sanitized: '{boolean_string[:120]}...' -> '{final_keywords[:120]}...'")
         else:
             # Prepare keywords for anything we couldn't resolve to an ID
             unresolved_terms = []
@@ -324,7 +385,7 @@ class UnipileService:
                             "city": item.get("location", ""),
                             "state": "",
                             "title": item.get("headline", ""),
-                            "source": "LinkedIn",
+                            "source": "LinkedIn-Unipile",
                             "match_score": 0,
                             "profile_url": p_url,
                             "image_url": img_url,
