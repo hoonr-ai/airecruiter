@@ -282,7 +282,7 @@ function NewJobPageContent() {
   const [isEditingJD, setIsEditingJD] = useState(false);
   const [selectedJobBoards, setSelectedJobBoards] = useState<string[]>([]);
   const [screeningLevel, setScreeningLevel] = useState<ScreeningLevel>("L1.5");
-  const [toast, setToast] = useState<{ message: string; type: "success" | "info" | "error" } | null>(null);
+  const [toast, setToast] = useState<{ message: string; type: "success" | "info" | "error"} | null>(null);
   const [pageSubtitle, setPageSubtitle] = useState(STEP_DESCRIPTIONS[1]);
   const [rubricData, setRubricData] = useState<any>(null);
   const [isGeneratingRubric, setIsGeneratingRubric] = useState(false);
@@ -306,9 +306,6 @@ function NewJobPageContent() {
   const [botIntroduction, setBotIntroduction] = useState("");
   const [screenQuestions, setScreenQuestions] = useState<ScreenQuestion[]>([]);
   const [questionIdCounter, setQuestionIdCounter] = useState(1);
-  // Guard: true once questions have been initialised (either from DB or from rubric).
-  // Prevents re-generation when the recruiter adds/deletes a question or returns to Step 4.
-  const screenQuestionsInitializedRef = useRef(false);
 
   // Step 5 - Sourcing state
   const [searchSources, setSearchSources] = useState({
@@ -357,7 +354,6 @@ function NewJobPageContent() {
   const [sourceCompanyInput, setSourceCompanyInput] = useState("");
   const [sourceKeywordInput, setSourceKeywordInput] = useState("");
   const [isSearching, setIsSearching] = useState(false);
-  const searchAbortControllerRef = useRef<AbortController | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
   const [booleanStringOpen, setBooleanStringOpen] = useState(false);
   const [generatedBoolean, setGeneratedBoolean] = useState("");
@@ -415,7 +411,7 @@ function NewJobPageContent() {
   );
 
   const visiblePages = (() => {
-    if (totalPages <= 5) return Array.from({ length: totalPages }, (_, i) => i + 1);
+    if (totalPages <= 5) return Array.from({length: totalPages}, (_, i) => i + 1);
     if (currentPage <= 3) return [1, 2, 3, 4, "...", totalPages];
     if (currentPage >= totalPages - 2) return [1, "...", totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
     return [1, "...", currentPage - 1, currentPage, currentPage + 1, "...", totalPages];
@@ -500,8 +496,6 @@ function NewJobPageContent() {
             if (rData.screen_questions?.length) {
               setScreenQuestions(rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1 })));
               setQuestionIdCounter(rData.screen_questions.length + 1);
-              // Mark as initialised so we don't overwrite with rubric defaults later
-              screenQuestionsInitializedRef.current = true;
             }
             if (rData.bot_introduction) {
               setBotIntroduction(rData.bot_introduction);
@@ -1911,95 +1905,94 @@ function NewJobPageContent() {
                 const title = getNormalizedTitleItem(rawTitle);
 
                 return (
-                  <div key={idx} className="flex items-center gap-2.5 py-2 border-b border-slate-200 last:border-b-0">
-                    <div className="flex-1 min-w-0 flex items-center gap-2">
-                      <input
-                        type="text"
-                        value={title.value}
-                        onChange={(e) => updateRubricItem('titles', idx, 'value', e.target.value)}
-                        className="flex-1 min-w-0 text-[13px] font-normal text-slate-700 bg-transparent border border-transparent rounded px-2 py-1.5 outline-none focus:border-slate-200 focus:bg-white transition-all"
-                      />
-                      <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap">PAIR</span>
-                    </div>
-                    <div className="w-[110px] flex-shrink-0 flex items-center gap-1.5">
-                      <input
-                        type="number"
-                        min={0}
-                        value={title.minYears}
-                        onChange={(e) => updateRubricItem('titles', idx, 'minYears', Math.max(0, parseInt(e.target.value) || 0))}
-                        className="w-12 border border-slate-200 rounded px-1.5 py-1 text-[13px] text-center outline-none focus:border-[#818cf8]"
-                      />
-                      <span className="text-[12px] text-slate-500">{title.minYears === 0 ? '—' : 'yrs'}</span>
-                    </div>
-                    <div className="w-[70px] flex-shrink-0 flex items-center justify-center">
-                      <Checkbox checked={title.recent} onCheckedChange={(checked) => updateRubricItem('titles', idx, 'recent', !!checked)} className="border-slate-300 rounded-[4px] data-[state=checked]:bg-[#6d28d9] data-[state=checked]:border-[#6d28d9] text-white w-[16px] h-[16px] hover:border-[#6d28d9] transition-all" />
-                    </div>
-                    <div className="w-[170px] flex-shrink-0">
-                      <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[118px] bg-white cursor-pointer select-none">
-                        <button
-                          onClick={() => updateRubricItem('titles', idx, 'matchType', 'Exact')}
-                          disabled
-                          className="flex-1 py-[3px] rounded-full transition-all text-slate-500 cursor-not-allowed"
-                        >
-                          Exact
-                        </button>
-                        <button
-                          onClick={() => updateRubricItem('titles', idx, 'matchType', 'Similar')}
-                          className={`flex-1 py-[3px] rounded-full transition-all ${title.matchType === 'Similar' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}
-                        >
-                          Similar
-                        </button>
-                      </div>
-                    </div>
-                    <div className="w-[190px] flex-shrink-0 flex items-center justify-center">
-                      <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[135px] bg-white cursor-pointer select-none">
-                        <button
-                          onClick={() => updateRubricItem('titles', idx, 'required', 'Required')}
-                          className={`flex-1 py-[3px] rounded-full transition-all ${title.required === 'Required' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}
-                        >
-                          Required
-                        </button>
-                        <button
-                          onClick={() => updateRubricItem('titles', idx, 'required', 'Preferred')}
-                          disabled={isDirectResumeTitle(title)}
-                          className={`flex-1 py-[3px] rounded-full transition-all ${title.required === 'Preferred' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'} ${isDirectResumeTitle(title) ? 'opacity-40 cursor-not-allowed' : ''}`}
-                        >
-                          Preferred
-                        </button>
-                      </div>
-                    </div>
-                    <div className="w-[70px] flex-shrink-0 flex flex-col gap-1 items-center">
+                <div key={idx} className="flex items-center gap-2.5 py-2 border-b border-slate-200 last:border-b-0">
+                  <div className="flex-1 min-w-0 flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={title.value}
+                      onChange={(e) => updateRubricItem('titles', idx, 'value', e.target.value)}
+                      className="flex-1 min-w-0 text-[13px] font-normal text-slate-700 bg-transparent border border-transparent rounded px-2 py-1.5 outline-none focus:border-slate-200 focus:bg-white transition-all"
+                    />
+                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap">PAIR</span>
+                  </div>
+                  <div className="w-[110px] flex-shrink-0 flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      min={0}
+                      value={title.minYears}
+                      onChange={(e) => updateRubricItem('titles', idx, 'minYears', Math.max(0, parseInt(e.target.value) || 0))}
+                      className="w-12 border border-slate-200 rounded px-1.5 py-1 text-[13px] text-center outline-none focus:border-[#818cf8]"
+                    />
+                    <span className="text-[12px] text-slate-500">{title.minYears === 0 ? '—' : 'yrs'}</span>
+                  </div>
+                  <div className="w-[70px] flex-shrink-0 flex items-center justify-center">
+                    <Checkbox checked={title.recent} onCheckedChange={(checked) => updateRubricItem('titles', idx, 'recent', !!checked)} className="border-slate-300 rounded-[4px] data-[state=checked]:bg-[#6d28d9] data-[state=checked]:border-[#6d28d9] text-white w-[16px] h-[16px] hover:border-[#6d28d9] transition-all" />
+                  </div>
+                  <div className="w-[170px] flex-shrink-0">
+                    <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[118px] bg-white cursor-pointer select-none">
                       <button
-                        disabled={idx === 0}
-                        onClick={() => moveRubricItem('titles', idx, idx - 1)}
-                        className="w-[22px] h-[22px] flex items-center justify-center border border-slate-200 rounded-[4px] bg-white text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-20 disabled:pointer-events-none"
+                        onClick={() => updateRubricItem('titles', idx, 'matchType', 'Exact')}
+                        disabled
+                        className="flex-1 py-[3px] rounded-full transition-all text-slate-500 cursor-not-allowed"
                       >
-                        <ChevronUp className="w-3.5 h-3.5" />
+                        Exact
                       </button>
                       <button
-                        disabled={idx === (rubricData.titles?.length - 1)}
-                        onClick={() => moveRubricItem('titles', idx, idx + 1)}
-                        className="w-[22px] h-[22px] flex items-center justify-center border border-slate-200 rounded-[4px] bg-white text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-20 disabled:pointer-events-none"
+                        onClick={() => updateRubricItem('titles', idx, 'matchType', 'Similar')}
+                        className={`flex-1 py-[3px] rounded-full transition-all ${title.matchType === 'Similar' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}
                       >
-                        <ChevronDown className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                    <div className="w-[36px] flex-shrink-0 text-center">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          removeRubricItem('titles', idx);
-                        }}
-                        className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
-                        title="Remove"
-                      >
-                        <X className="w-4 h-4" />
+                        Similar
                       </button>
                     </div>
                   </div>
-                )
-              })}
+                  <div className="w-[190px] flex-shrink-0 flex items-center justify-center">
+                    <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[135px] bg-white cursor-pointer select-none">
+                      <button
+                        onClick={() => updateRubricItem('titles', idx, 'required', 'Required')}
+                        className={`flex-1 py-[3px] rounded-full transition-all ${title.required === 'Required' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}
+                      >
+                        Required
+                      </button>
+                      <button
+                        onClick={() => updateRubricItem('titles', idx, 'required', 'Preferred')}
+                        disabled={isDirectResumeTitle(title)}
+                        className={`flex-1 py-[3px] rounded-full transition-all ${title.required === 'Preferred' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'} ${isDirectResumeTitle(title) ? 'opacity-40 cursor-not-allowed' : ''}`}
+                      >
+                        Preferred
+                      </button>
+                    </div>
+                  </div>
+                  <div className="w-[70px] flex-shrink-0 flex flex-col gap-1 items-center">
+                    <button
+                      disabled={idx === 0}
+                      onClick={() => moveRubricItem('titles', idx, idx - 1)}
+                      className="w-[22px] h-[22px] flex items-center justify-center border border-slate-200 rounded-[4px] bg-white text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-20 disabled:pointer-events-none"
+                    >
+                      <ChevronUp className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      disabled={idx === (rubricData.titles?.length - 1)}
+                      onClick={() => moveRubricItem('titles', idx, idx + 1)}
+                      className="w-[22px] h-[22px] flex items-center justify-center border border-slate-200 rounded-[4px] bg-white text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-20 disabled:pointer-events-none"
+                    >
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <div className="w-[36px] flex-shrink-0 text-center">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeRubricItem('titles', idx);
+                      }}
+                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
+                      title="Remove"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              )})}
 
               <div className="mt-3">
                 <Button
@@ -2578,8 +2571,6 @@ function NewJobPageContent() {
 
 
   const initializeScreenQuestionsFromRubric = () => {
-    // Skip if questions were already loaded from DB or the recruiter has already edited them
-    if (screenQuestionsInitializedRef.current) return;
     if (!jobData) return;
 
     const location = `${jobData.city || ""}, ${jobData.state || ""}`.trim().replace(/^, |, $/g, "");
@@ -2647,8 +2638,6 @@ function NewJobPageContent() {
 
     setScreenQuestions(mergedQuestions);
     setQuestionIdCounter(mergedQuestions.length + 1);
-    // Mark as initialised so subsequent adds/deletes or return visits don't overwrite
-    screenQuestionsInitializedRef.current = true;
   };
 
   const initializeSourceFromRubric = () => {
@@ -2681,23 +2670,23 @@ function NewJobPageContent() {
         const rubricTitles = rubricData.titles
           .filter((title: any) => shouldIncludeRubricItem("Required Title", title.value || ""))
           .map((title: any, index: number) => {
-            const existing = existingByValue.get(title.value || "");
+          const existing = existingByValue.get(title.value || "");
 
-            return {
-              id: existing?.id ?? index + 1,
-              value: title.value || "",
-              matchType: getRubricDrivenMatchType(title, existing?.matchType),
-              years: title.minYears || 0,
-              recent: existing?.recent ?? !!title.recent,
-              similarCount: `${(title.similar_titles || []).length}/${(title.similar_titles || []).length} similar`,
-              similarTitles: title.similar_titles || [],
-              selectedSimilarTitles: existing?.selectedSimilarTitles?.filter((item: string) =>
-                (title.similar_titles || []).includes(item)
-              ) ?? (title.similar_titles || []),
-              similarExpanded: existing?.similarExpanded ?? false,
-              fromRubric: true
-            };
-          });
+          return {
+            id: existing?.id ?? index + 1,
+            value: title.value || "",
+            matchType: getRubricDrivenMatchType(title, existing?.matchType),
+            years: title.minYears || 0,
+            recent: existing?.recent ?? !!title.recent,
+            similarCount: `${(title.similar_titles || []).length}/${(title.similar_titles || []).length} similar`,
+            similarTitles: title.similar_titles || [],
+            selectedSimilarTitles: existing?.selectedSimilarTitles?.filter((item: string) =>
+              (title.similar_titles || []).includes(item)
+            ) ?? (title.similar_titles || []),
+            similarExpanded: existing?.similarExpanded ?? false,
+            fromRubric: true
+          };
+        });
 
         return [...rubricTitles, ...manualTitles];
       });
@@ -2714,23 +2703,23 @@ function NewJobPageContent() {
             skill.value || ""
           ))
           .map((skill: any, index: number) => {
-            const existing = existingByValue.get(skill.value || "");
+          const existing = existingByValue.get(skill.value || "");
 
-            return {
-              id: existing?.id ?? index + 1001,
-              value: skill.value || "",
-              matchType: getRubricDrivenMatchType(skill, existing?.matchType),
-              years: skill.minYears || 0,
-              recent: existing?.recent ?? !!skill.recent,
-              similarCount: `${(skill.similar_skills || []).length}/${(skill.similar_skills || []).length} similar`,
-              similarSkills: skill.similar_skills || [],
-              selectedSimilarSkills: existing?.selectedSimilarSkills?.filter((item: string) =>
-                (skill.similar_skills || []).includes(item)
-              ) ?? (skill.similar_skills || []),
-              similarExpanded: existing?.similarExpanded ?? false,
-              fromRubric: true
-            };
-          });
+          return {
+            id: existing?.id ?? index + 1001,
+            value: skill.value || "",
+            matchType: getRubricDrivenMatchType(skill, existing?.matchType),
+            years: skill.minYears || 0,
+            recent: existing?.recent ?? !!skill.recent,
+            similarCount: `${(skill.similar_skills || []).length}/${(skill.similar_skills || []).length} similar`,
+            similarSkills: skill.similar_skills || [],
+            selectedSimilarSkills: existing?.selectedSimilarSkills?.filter((item: string) =>
+              (skill.similar_skills || []).includes(item)
+            ) ?? (skill.similar_skills || []),
+            similarExpanded: existing?.similarExpanded ?? false,
+            fromRubric: true
+          };
+        });
 
         return [...rubricSkills, ...manualSkills];
       });
@@ -2815,9 +2804,7 @@ function NewJobPageContent() {
     if (currentStep !== 4) return;
 
     syncStepFourData();
-    // NOTE: screenQuestions.length intentionally omitted — adding/deleting a question
-    // must NOT re-trigger rubric initialisation and overwrite recruiter edits.
-  }, [currentStep, rubricData, jobData]);
+  }, [currentStep, rubricData, jobData, screenQuestions.length]);
 
   useEffect(() => {
     if (currentStep !== 5) return;
@@ -3716,8 +3703,8 @@ function NewJobPageContent() {
                               <label key={i} className="flex items-center gap-2 cursor-pointer group">
                                 <div
                                   className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 border transition-all ${(title.selectedSimilarTitles || []).includes(st)
-                                    ? 'bg-[#6366f1] border-[#6366f1]'
-                                    : 'bg-white border-slate-300 group-hover:border-[#6366f1]'
+                                      ? 'bg-[#6366f1] border-[#6366f1]'
+                                      : 'bg-white border-slate-300 group-hover:border-[#6366f1]'
                                     }`}
                                   onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? {
                                     ...t,
@@ -3846,8 +3833,8 @@ function NewJobPageContent() {
                               <label key={i} className="flex items-center gap-2 cursor-pointer group">
                                 <div
                                   className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 border transition-all ${(skill.selectedSimilarSkills || []).includes(ss)
-                                    ? 'bg-[#6366f1] border-[#6366f1]'
-                                    : 'bg-white border-slate-300 group-hover:border-[#6366f1]'
+                                      ? 'bg-[#6366f1] border-[#6366f1]'
+                                      : 'bg-white border-slate-300 group-hover:border-[#6366f1]'
                                     }`}
                                   onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? {
                                     ...s,
@@ -3980,18 +3967,8 @@ function NewJobPageContent() {
                 {sourceCompanies.length > 0 && (
                   <div className="flex flex-wrap gap-2.5 mt-3">
                     {sourceCompanies.map((company) => (
-                      <div key={company} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[12.5px] font-bold text-slate-700 shadow-sm group">
-                        <span 
-                          className="cursor-pointer border-b border-transparent hover:border-slate-400 transition-colors"
-                          onClick={() => {
-                            setSourceCompanies(prev => prev.filter(item => item !== company));
-                            setSourceCompanyInput(company);
-                            setGeneratedBoolean("");
-                          }}
-                          title="Click to edit"
-                        >
-                          {company}
-                        </span>
+                      <div key={company} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[12.5px] font-bold text-slate-700 shadow-sm">
+                        {company}
                         <button
                           className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-5 h-5 flex items-center justify-center rounded-md transition-all duration-200"
                           onClick={() => {
@@ -4016,6 +3993,20 @@ function NewJobPageContent() {
                 </div>
 
                 <div className="space-y-4">
+                  <div className="flex flex-wrap gap-2.5">
+                    {sourceKeywords.map((tag) => (
+                      <div key={tag} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[12.5px] font-bold text-slate-700 shadow-sm">
+                        {tag}
+                        <button
+                          className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-5 h-5 flex items-center justify-center rounded-md transition-all duration-200"
+                          onClick={() => setSourceKeywords(prev => prev.filter(t => t !== tag))}
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
                   <div className="relative">
                     <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
                     <Input
@@ -4029,32 +4020,6 @@ function NewJobPageContent() {
                       className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f5f3ff] rounded-xl placeholder:italic font-medium"
                     />
                   </div>
-
-                  {sourceKeywords.length > 0 && (
-                    <div className="flex flex-wrap gap-2.5">
-                      {sourceKeywords.map((tag) => (
-                        <div key={tag} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[12.5px] font-bold text-slate-700 shadow-sm group">
-                          <span 
-                            className="cursor-pointer border-b border-transparent hover:border-slate-400 transition-colors"
-                            onClick={() => {
-                              setSourceKeywords(prev => prev.filter(t => t !== tag));
-                              setSourceKeywordInput(tag);
-                              setGeneratedBoolean("");
-                            }}
-                            title="Click to edit"
-                          >
-                            {tag}
-                          </span>
-                          <button
-                            className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-5 h-5 flex items-center justify-center rounded-md transition-all duration-200"
-                            onClick={() => setSourceKeywords(prev => prev.filter(t => t !== tag))}
-                          >
-                            <X className="w-3 h-3" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
 
                   <div className="bg-[#f5f3ff] border border-[#ddd6fe] rounded-xl overflow-hidden mt-3">
                     <button
@@ -4295,14 +4260,14 @@ function NewJobPageContent() {
 
                   {candidates.length > 0 ? (
                     <div className="space-y-4">
-                      {paginatedCandidates.map((candidate, idx) => {
-                        // Select random badges to show matching elements
-                        const badgeOptions = [
-                          sourceTitles[0]?.value,
-                          sourceSkills[0]?.value ? `${sourceSkills[0]?.value} certified` : null,
-                          sourceSkills[1]?.value,
-                          sourceLocations[0]?.value ? `Local to ${sourceLocations[0].value}` : null
-                        ].filter(Boolean);
+                    {paginatedCandidates.map((candidate, idx) => {
+                      // Select random badges to show matching elements
+                      const badgeOptions = [
+                        sourceTitles[0]?.value,
+                        sourceSkills[0]?.value ? `${sourceSkills[0]?.value} certified` : null,
+                        sourceSkills[1]?.value,
+                        sourceLocations[0]?.value ? `Local to ${sourceLocations[0].value}` : null
+                      ].filter(Boolean);
 
                       return (
                         <div key={`${candidate.candidate_id || candidate.id}-${idx}`} className="p-5 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-purple-200 hover:shadow-md transition-all flex items-center gap-4">
@@ -4422,33 +4387,36 @@ function NewJobPageContent() {
                                 </Button>
                               </div>
                             </div>
+                            );
+                          })()}
                           </div>
-                        )
-                      })}
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : isSearching ? (
+                  <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-pulse mt-4">
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="w-12 h-12 border-4 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-2" />
+                      <p className="text-slate-600 text-sm font-bold animate-pulse">{searchStatus}</p>
+                      <p className="text-slate-400 text-[12px] font-medium italic">Retrieving candidate records associated with Job ID {numericJobId || jobdivaId}...</p>
                     </div>
-                  ) : isSearching ? (
-                    <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-pulse mt-4">
-                      <div className="flex flex-col items-center gap-3">
-                        <div className="w-12 h-12 border-4 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-2" />
-                        <p className="text-slate-600 text-sm font-bold animate-pulse">{searchStatus}</p>
-                        <p className="text-slate-400 text-[12px] font-medium italic">Retrieving candidate records associated with Job ID {numericJobId || jobdivaId}...</p>
-                      </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
+                    <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-6 shadow-inner">
+                      <Users className="w-8 h-8 text-slate-300" />
                     </div>
-                  ) : (
-                    <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
-                      <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-6 shadow-inner">
-                        <Users className="w-8 h-8 text-slate-300" />
-                      </div>
-                      <p className="text-slate-600 text-base font-bold">No candidates found with the current filters.</p>
-                      <p className="text-slate-400 text-[13px] mt-2 font-medium">Try broadening your criteria or adding more titles/skills.</p>
-                    </div>
-                  )}
+                    <p className="text-slate-600 text-base font-bold">No candidates found with the current filters.</p>
+                    <p className="text-slate-400 text-[13px] mt-2 font-medium">Try broadening your criteria or adding more titles/skills.</p>
+                  </div>
+                )}
 
-                  {/* Pagination Controls */}
-                  {/* Pagination Controls */}
-                  {candidates.length > 0 && (
+                {/* Pagination Controls */}
+                {/* Pagination Controls */}
+                {candidates.length > 0 && (
                     <div className="mt-8 flex items-center justify-between bg-white/70 backdrop-blur-xl p-3.5 px-5 rounded-2xl border border-slate-200/60 shadow-[0_8px_30px_rgb(0,0,0,0.04)] animate-in fade-in slide-in-from-bottom-2 duration-500 sticky bottom-6 z-10">
-
+                      
                       {/* Context & Rows Selection */}
                       <div className="flex items-center gap-4">
                         <div className="flex items-center gap-2 text-[13px]">
@@ -4460,9 +4428,9 @@ function NewJobPageContent() {
                             of {candidates.length} {isSearching ? <span className="italic text-slate-400 font-normal ml-0.5">(sourcing...)</span> : 'candidates'}
                           </span>
                         </div>
-
+                        
                         <div className="h-4 w-[1px] bg-slate-200/80"></div>
-
+                        
                         <select
                           value={candidatesPerPage}
                           onChange={(e) => {
@@ -4490,7 +4458,7 @@ function NewJobPageContent() {
                           <ChevronLeft className="w-4 h-4 shrink-0" />
                           <span className="sr-only">Previous</span>
                         </Button>
-
+                        
                         <div className="flex items-center gap-1 mx-0.5">
                           {visiblePages.map((pageNum, idx) => (
                             pageNum === "..." ? (
@@ -4502,10 +4470,11 @@ function NewJobPageContent() {
                                 key={`page-${pageNum}`}
                                 disabled={currentPage === pageNum}
                                 onClick={() => setCurrentPage(pageNum as number)}
-                                className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[13px] transition-all duration-200 ${currentPage === pageNum
-                                    ? 'bg-[#6366f1] text-white shadow-md transform scale-105 cursor-default'
+                                className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[13px] transition-all duration-200 ${
+                                  currentPage === pageNum 
+                                    ? 'bg-[#6366f1] text-white shadow-md transform scale-105 cursor-default' 
                                     : 'text-slate-600 hover:bg-slate-100/80 cursor-pointer'
-                                  }`}
+                                }`}
                               >
                                 {pageNum}
                               </button>
@@ -4548,23 +4517,16 @@ function NewJobPageContent() {
             {/* Launch Footer */}
             <div className="border-t border-slate-200 pt-6 mt-2 flex items-center justify-between">
               <span className="text-[13px] font-medium text-slate-400">
-                {hasSearched ? `${selectedCandidates.size} candidates selected` : ''}
+                {hasSearched && !isSearching ? `${selectedCandidates.size} candidates selected` : ''}
               </span>
               <Button
                 className={`h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group ${candidates.length > 0 && selectedCandidates.size > 0 ? "bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98]" : "bg-slate-300 cursor-not-allowed"}`}
                 onClick={async () => {
                   if (selectedCandidates.size === 0) return;
 
-                  // Stop the live search stream immediately if running
-                  if (isSearching && searchAbortControllerRef.current) {
-                    console.log("🛑 Launch PAIR triggered - aborting live search stream...");
-                    searchAbortControllerRef.current.abort();
-                    setIsSearching(false);
-                  }
-
                   try {
                     // Prepare candidates payload with proper structure
-                    const candidatesPayload = candidates.map((c: any) => ({
+                    const candidatesPayload = candidates.map(c => ({
                       candidate_id: String(c.candidate_id || c.id),  // Use candidate_id from API, fallback to id
                       name: c.name,
                       email: c.email || null,
@@ -4588,7 +4550,7 @@ function NewJobPageContent() {
                       enhanced_info: c.enhanced_info || null  // Include full enhanced info for reference
                     }));
 
-                    const selectedCount = candidatesPayload.filter((c: any) => c.is_selected).length;
+                    const selectedCount = candidatesPayload.filter(c => c.is_selected).length;
                     console.log(`🚀 Launching PAIR with ${selectedCount} selected candidates out of ${candidatesPayload.length} total`);
 
                     const apiUrl = process.env.NEXT_PUBLIC_API_URL;
@@ -4606,35 +4568,6 @@ function NewJobPageContent() {
                     if (response.ok && result.status === 'success') {
                       const saved = result.saved_count || selectedCount;
                       showToast(`${saved} candidates saved to Master Pool — redirecting...`, "success");
-                      
-                      // NEW: Sync filters first to ensure background task has the latest criteria
-                      try {
-                        const syncPayload = {
-                          resume_match_filters: resumeMatchFilters,
-                          sourcing_filters: {
-                            titles: sourceTitles,
-                            skills: sourceSkills,
-                            keywords: sourceKeywords,
-                            locations: sourceLocations,
-                            companies: sourceCompanies
-                          }
-                        };
-                        
-                        await fetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/sync-filters`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify(syncPayload)
-                        });
-                        console.log("✅ Job filters synced for auto-assignment");
-                      } catch (syncErr) {
-                        console.error("❌ Failed to sync filters before auto-assign:", syncErr);
-                      }
-
-                      // Background: trigger auto-assign for all applicants
-                      fetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/auto-assign-applicants`, {
-                        method: "POST"
-                      }).catch(err => console.error("Auto-assign trigger failed:", err));
-
                       setTimeout(() => {
                         router.push(`/candidates`);
                       }, 1500);
@@ -4647,7 +4580,7 @@ function NewJobPageContent() {
                     showToast("Failed to save candidates. Please try again.", "error");
                   }
                 }}
-                disabled={!hasSearched || selectedCandidates.size === 0}
+                disabled={!hasSearched || isSearching || selectedCandidates.size === 0}
               >
                 <Rocket className="w-4 h-4 fill-white" />
                 Launch PAIR
