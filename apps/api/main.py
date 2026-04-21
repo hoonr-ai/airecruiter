@@ -151,6 +151,7 @@ app.include_router(voice_agent.router, prefix="/api/v1/voice")
 app.include_router(boolean_agent.router, prefix="/api/v1/boolean")
 app.include_router(candidate_processing.router, prefix="/api/v1/candidates")
 app.include_router(job_archive.router)
+app.include_router(engagement.router, prefix="/api/v1/engagement")
 
 app.add_middleware(
     CORSMiddleware,
