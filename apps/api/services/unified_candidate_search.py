@@ -674,30 +674,60 @@ class UnifiedCandidateSearch:
             candidate.get("headline", ""),
         ])
 
+        # Fix 1 (Path A / A′): when enhanced_info is missing or the LLM
+        # extraction returned an empty shell (error case), fall back to
+        # source-native candidate fields. LinkedIn/Unipile and certain JobDiva
+        # paths already populate these at the candidate root, so we give them a
+        # non-zero profile even when LLM extraction silently degraded.
+        company_sources: List[Any] = [
+            enhanced.get("company_experience") or [],
+            candidate.get("company_experience") or [],
+            candidate.get("experience") or [],
+            candidate.get("work_experience") or [],
+        ]
         company_terms: List[str] = []
-        for item in enhanced.get("company_experience", []) or []:
-            if isinstance(item, dict):
-                for key in ["company", "company_name", "employer", "name"]:
-                    if item.get(key):
-                        company_terms.append(str(item.get(key)))
+        for source in company_sources:
+            if not isinstance(source, list):
+                continue
+            for item in source:
+                if isinstance(item, dict):
+                    for key in ["company", "company_name", "employer", "name"]:
+                        if item.get(key):
+                            company_terms.append(str(item.get(key)))
+                elif isinstance(item, str):
+                    company_terms.append(item)
 
+        education_sources: List[Any] = [
+            enhanced.get("candidate_education") or [],
+            candidate.get("education") or [],
+        ]
         education_terms: List[str] = []
-        for item in enhanced.get("candidate_education", []) or []:
-            if isinstance(item, dict):
-                for key in ["degree", "field", "institution", "school", "specialization"]:
-                    if item.get(key):
-                        education_terms.append(str(item.get(key)))
-            elif isinstance(item, str):
-                education_terms.append(item)
+        for source in education_sources:
+            if not isinstance(source, list):
+                continue
+            for item in source:
+                if isinstance(item, dict):
+                    for key in ["degree", "field", "institution", "school", "specialization"]:
+                        if item.get(key):
+                            education_terms.append(str(item.get(key)))
+                elif isinstance(item, str):
+                    education_terms.append(item)
 
+        certification_sources: List[Any] = [
+            enhanced.get("candidate_certification") or [],
+            candidate.get("certifications") or [],
+        ]
         certification_terms: List[str] = []
-        for item in enhanced.get("candidate_certification", []) or []:
-            if isinstance(item, dict):
-                for key in ["name", "certification", "title", "issuer"]:
-                    if item.get(key):
-                        certification_terms.append(str(item.get(key)))
-            elif isinstance(item, str):
-                certification_terms.append(item)
+        for source in certification_sources:
+            if not isinstance(source, list):
+                continue
+            for item in source:
+                if isinstance(item, dict):
+                    for key in ["name", "certification", "title", "issuer"]:
+                        if item.get(key):
+                            certification_terms.append(str(item.get(key)))
+                elif isinstance(item, str):
+                    certification_terms.append(item)
 
         location_terms = unique_terms([
             enhanced.get("current_location", ""),
@@ -1347,7 +1377,7 @@ class UnifiedCandidateSearch:
         self._log_stage("ResumeScreen", f"checking {len(jobdiva_candidates)} JobDiva candidate resume(s) before LLM")
 
         semaphore = asyncio.Semaphore(5)
-        counters = {"screened": 0, "skipped": 0, "no_resume": 0, "failed_filter": 0}
+        counters = {"screened": 0, "skipped": 0, "no_resume": 0, "failed_filter": 0, "llm_extraction_errors": 0}
 
         async def _process_single(candidate, index):
             async with semaphore:
@@ -1406,10 +1436,25 @@ class UnifiedCandidateSearch:
                     self._log_stage("LLM", f"STARTING LLM extraction for candidate_id={candidate_id}, resume_id={candidate.get('resume_id') or 'unknown'}")
                     
                     enhanced = await process_jobdiva_candidate(candidate)
+                    # Fix 2: detect silent LLM extraction failures and surface
+                    # them via a dedicated counter + stage log, so operators can
+                    # tell "LLM failed on N candidates" from "valid empty
+                    # profile".
+                    extraction_error = (
+                        enhanced.get("_extraction_error")
+                        if isinstance(enhanced, dict) else None
+                    )
+                    if extraction_error:
+                        logger.warning(
+                            "LLM extraction degraded for candidate_id=%s (%s); scoring from resume_text + source-native fields only",
+                            candidate_id, extraction_error,
+                        )
                     if isinstance(enhanced, dict) and enhanced is not candidate:
                         candidate["enhanced_info"] = enhanced.get("raw", enhanced)
                     else:
                         candidate["enhanced_info"] = {}
+                    if extraction_error and isinstance(candidate.get("enhanced_info"), dict):
+                        candidate["enhanced_info"]["_extraction_error"] = extraction_error
                         
                     candidate["enhanced_info_status"] = "completed"
                     candidate["name"] = candidate["enhanced_info"].get("candidate_name") or candidate.get("name")
@@ -1439,7 +1484,11 @@ class UnifiedCandidateSearch:
             status = result["status"]
             if status == "success":
                 counters["screened"] += 1
-                yield result["candidate"]
+                cand = result["candidate"]
+                if isinstance(cand, dict) and isinstance(cand.get("enhanced_info"), dict) \
+                        and cand["enhanced_info"].get("_extraction_error"):
+                    counters["llm_extraction_errors"] += 1
+                yield cand
             elif status == "no_resume":
                 counters["no_resume"] += 1
                 counters["skipped"] += 1
@@ -1451,12 +1500,13 @@ class UnifiedCandidateSearch:
 
         self._log_stage(
             "ResumeScreen",
-            "RESULTS: kept %s of %s JobDiva candidate(s); skipped %s total (no_resume=%s, failed_filter=%s)" % (
+            "RESULTS: kept %s of %s JobDiva candidate(s); skipped %s total (no_resume=%s, failed_filter=%s, llm_extraction_errors=%s)" % (
                 counters["screened"],
                 len(jobdiva_candidates),
                 counters["skipped"],
                 counters["no_resume"],
                 counters["failed_filter"],
+                counters["llm_extraction_errors"],
             ),
         )
 
