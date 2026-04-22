@@ -39,7 +39,7 @@ jobs:
             git fetch --all
             git reset --hard origin/${{ github.ref_name }}
             export DOMAIN_NAME="$DOMAIN_NAME"
-            bash deploy-azure.sh && bash setup-ssl.sh
+            bash deploy-azure.sh && export DOMAIN_NAME="$DOMAIN_NAME" && bash setup-ssl.sh
           EOF
 
       - name: Deployment Info
@@ -84,7 +84,7 @@ jobs:
             git fetch --all
             git reset --hard origin/${{ github.ref_name }}
             export DOMAIN_NAME="$DOMAIN_NAME"
-            bash deploy-azure.sh && bash setup-ssl.sh
+            bash deploy-azure.sh && export DOMAIN_NAME="$DOMAIN_NAME" && bash setup-ssl.sh
           EOF
 
       - name: Deployment Info
