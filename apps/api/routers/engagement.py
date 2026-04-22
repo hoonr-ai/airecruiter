@@ -389,7 +389,7 @@ async def get_latest_interview(candidate_id: str):
             SELECT interview_id, candidate_name, candidate_email, job_id, status, created_at
             FROM engage_interview_audit
             WHERE candidate_id = %s AND interview_id IS NOT NULL AND interview_id::text != ''
-            ORDER BY created_at DESC
+            ORDER BY id DESC
             LIMIT 1
         """, (candidate_id,))
 

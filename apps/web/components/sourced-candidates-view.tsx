@@ -4,15 +4,9 @@ import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Textarea } from "@/components/ui/textarea";
+import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { AssessModal } from "@/components/AssessModal";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from "@/components/ui/dialog";
+
 import { 
   ArrowLeft,
   Linkedin,
@@ -184,20 +178,21 @@ export function SourcedCandidatesView({
     }
   };
 
-  const handleSendEngagePayload = async () => {
+  const handleSendEngagePayload = async (payloadOverride?: string) => {
     setEngageLoading(true);
     setEngageError(null);
     setEngageApiResponse(null);
+    const payloadToSend = payloadOverride ?? engagePayload;
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
-      try { JSON.parse(engagePayload); } catch (e) {
+      try { JSON.parse(payloadToSend); } catch (e) {
         throw new Error('Invalid JSON format in payload');
       }
       const response = await fetch(`${apiUrl}/api/v1/engagement/engage/send-bulk-interview`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          payload: engagePayload,
+          payload: payloadToSend,
           real_candidate_ids: engageCandidateIds
         })
       });
@@ -428,47 +423,19 @@ export function SourcedCandidatesView({
         </div>
       )}
 
-      {/* Engage Modal */}
-      <Dialog open={isEngageModalOpen} onOpenChange={setIsEngageModalOpen}>
-        <DialogContent className="sm:max-w-[640px] max-h-[85vh] flex flex-col">
-          <DialogHeader>
-            <DialogTitle className="text-lg font-bold text-slate-900">Preview & Edit Engage Payload</DialogTitle>
-          </DialogHeader>
-          <div className="flex-1 overflow-hidden">
-            <Textarea
-              value={engagePayload}
-              onChange={(e) => setEngagePayload(e.target.value)}
-              className="font-mono text-[12px] leading-relaxed bg-slate-50 border-slate-200 h-[400px] max-h-[400px] resize-none overflow-auto"
-            />
-          </div>
-          {engageError && (
-            <div className="text-[13px] text-red-500 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-              {engageError}
-            </div>
-          )}
-          {engageApiResponse?.success && (
-            <div className="text-[13px] text-emerald-600 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
-              ✅ Interview sent successfully! Interview ID: {engageApiResponse.data?.[0]?.interview_id || 'N/A'}
-            </div>
-          )}
-          <DialogFooter className="gap-2">
-            <Button
-              variant="secondary"
-              onClick={() => setIsEngageModalOpen(false)}
-              className="font-bold"
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={handleSendEngagePayload}
-              disabled={engageLoading}
-              className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold"
-            >
-              {engageLoading ? 'Sending...' : 'Send Interview'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <EngageWizardModal
+        open={isEngageModalOpen}
+        onClose={() => setIsEngageModalOpen(false)}
+        initialPayload={engagePayload}
+        candidateIds={engageCandidateIds}
+        onSend={async (payload) => {
+          setEngagePayload(payload);
+          await handleSendEngagePayload(payload);
+        }}
+        loading={engageLoading}
+        error={engageError}
+        successData={engageApiResponse}
+      />
 
       {/* Assess Modal */}
       <AssessModal

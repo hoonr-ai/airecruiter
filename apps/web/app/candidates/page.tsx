@@ -6,18 +6,12 @@ import { Search, ExternalLink, User, MapPin, Briefcase, Linkedin, ShieldCheck, M
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { ResumeModal } from "@/components/ResumeModal";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { AssessModal } from "@/components/AssessModal";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from "@/components/ui/dialog";
+
 import {
   Table,
   TableBody,
@@ -248,15 +242,16 @@ export default function CandidatesPage() {
     }
   };
 
-  const handleScheduleCall = async () => {
+  const handleScheduleCall = async (payloadOverride?: string) => {
     setEngageLoading(true);
     setEngageError(null);
     setApiResponse(null);
+    const payloadToSend = payloadOverride ?? engagePayload;
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
       // Validate JSON
       try {
-        JSON.parse(engagePayload);
+        JSON.parse(payloadToSend);
       } catch (e) {
         throw new Error('Invalid JSON format in payload');
       }
@@ -264,7 +259,7 @@ export default function CandidatesPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          payload: engagePayload,
+          payload: payloadToSend,
           real_candidate_ids: selectedCandidateIds
         })
       });
@@ -588,47 +583,20 @@ export default function CandidatesPage() {
         />
       )}
 
-      {/* Engage Modal */}
-      <Dialog open={isEngageModalOpen} onOpenChange={setIsEngageModalOpen}>
-        <DialogContent className="sm:max-w-[640px] max-h-[85vh] flex flex-col">
-          <DialogHeader>
-            <DialogTitle className="text-lg font-bold text-slate-900">Preview & Edit Engage Payload</DialogTitle>
-          </DialogHeader>
-          <div className="flex-1 overflow-hidden">
-            <Textarea
-              value={engagePayload}
-              onChange={(e) => setEngagePayload(e.target.value)}
-              className="font-mono text-[12px] leading-relaxed bg-slate-50 border-slate-200 h-[400px] max-h-[400px] resize-none overflow-auto"
-            />
-          </div>
-          {engageError && (
-            <div className="text-[13px] text-red-500 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-              {engageError}
-            </div>
-          )}
-          {apiResponse?.success && (
-            <div className="text-[13px] text-emerald-600 bg-emerald-50 border border-emerald-200 rounded-lg px-3 py-2">
-              ✅ Interview sent successfully! Interview ID: {apiResponse.data?.[0]?.interview_id || 'N/A'}
-            </div>
-          )}
-          <DialogFooter className="gap-2 shrink-0">
-            <Button
-              variant="secondary"
-              onClick={() => setIsEngageModalOpen(false)}
-              className="font-bold"
-            >
-              Cancel
-            </Button>
-            <Button
-              onClick={handleScheduleCall}
-              disabled={engageLoading}
-              className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold"
-            >
-              {engageLoading ? 'Sending...' : 'Send Interview'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Engage Wizard Modal */}
+      <EngageWizardModal
+        open={isEngageModalOpen}
+        onClose={() => setIsEngageModalOpen(false)}
+        initialPayload={engagePayload}
+        candidateIds={selectedCandidateIds}
+        onSend={async (payload) => {
+          setEngagePayload(payload);
+          await handleScheduleCall(payload);
+        }}
+        loading={engageLoading}
+        error={engageError}
+        successData={apiResponse}
+      />
 
       {/* Assess Modal */}
       <AssessModal
