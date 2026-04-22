@@ -141,7 +141,7 @@ class CandidateMessageRequest(BaseModel):
 
 class CandidateSaveRecord(BaseModel):
     candidate_id: str
-    name: str
+    name: str = "Unknown Candidate"
     email: Optional[str] = None
     phone: Optional[str] = None
     headline: Optional[str] = None
@@ -150,17 +150,17 @@ class CandidateSaveRecord(BaseModel):
     image_url: Optional[str] = None
     resume_id: Optional[str] = None
     resume_text: Optional[str] = None
-    skills: List[Any] = []
+    skills: Any = []
     experience_years: Any = 0
     source: str = "JobDiva"
     match_score: Any = 0.0
     is_selected: bool = False
     # Additional enrichment fields sent by frontend
-    education: Optional[List[Any]] = None
-    certifications: Optional[List[Any]] = None
-    company_experience: Optional[List[Any]] = None
-    urls: Optional[Dict[str, Any]] = None
-    enhanced_info: Optional[Dict[str, Any]] = None
+    education: Optional[Any] = None
+    certifications: Optional[Any] = None
+    company_experience: Optional[Any] = None
+    urls: Optional[Any] = None
+    enhanced_info: Optional[Any] = None
 
 class CandidatesSaveRequest(BaseModel):
     jobdiva_id: str
