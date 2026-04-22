@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { LayoutDashboard, Briefcase, Users, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -17,17 +16,19 @@ export function Sidebar() {
 
     return (
         <div className="w-[260px] border-r border-slate-200 bg-white h-screen flex flex-col fixed left-0 top-0 p-6">
-            <div className="brand flex items-baseline gap-1 mb-10" aria-label="Hoonr.Curate">
-                <Image
-                    src="/hoonr-logo.png"
-                    alt=""
-                    width={110}
-                    height={28}
-                    priority
-                    className="object-contain"
-                />
-                <span className="text-[22px] font-semibold tracking-tight text-slate-900 font-outfit leading-none">
-                    .Curate
+            {/* Brand wordmark — stacked "Hoonr." / "Curate" rendered as styled
+                text so there's no image asset to fetch or ship. Matches the
+                design: heavy Outfit weight, dark navy, tight tracking,
+                two-line stack. */}
+            <div
+                className="brand flex flex-col items-start mb-10 font-outfit select-none"
+                aria-label="Hoonr.Curate"
+            >
+                <span className="text-[32px] font-black tracking-tight text-[#2d2a4a] leading-none">
+                    Hoonr.
+                </span>
+                <span className="text-[32px] font-black tracking-tight text-[#2d2a4a] leading-none mt-0.5">
+                    Curate
                 </span>
             </div>
 
