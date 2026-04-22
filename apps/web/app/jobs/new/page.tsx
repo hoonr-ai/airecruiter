@@ -312,6 +312,9 @@ function NewJobPageContent() {
     // match up to Step-4 filters without string-parsing the user-facing value
     // (which carries formatted suffixes like "— 3+ yrs, Similar match").
     rubricKey?: string;
+    // Per-filter weightage (default 1.0) applied inside the backend scoring
+    // ratio. Clamped to [0.1, 5] at the input layer.
+    weight?: number;
   }>>([]);
   const [filterIdCounter, setFilterIdCounter] = useState(1);
   // Step 4 - Phone Screen state
@@ -535,7 +538,13 @@ function NewJobPageContent() {
 
       // Restore resume match filters if they exist
       if (draft.resume_match_filters && draft.resume_match_filters.length > 0) {
-        setResumeMatchFilters(draft.resume_match_filters);
+        // Backfill weight=1 for legacy drafts that pre-date the per-filter
+        // weightage control. New drafts persist the user-set weight.
+        const normalized = draft.resume_match_filters.map((f: any) => ({
+          ...f,
+          weight: typeof f.weight === 'number' && isFinite(f.weight) ? f.weight : 1,
+        }));
+        setResumeMatchFilters(normalized);
         const maxId = Math.max(...draft.resume_match_filters.map((f: any) => f.id));
         setFilterIdCounter(maxId + 1);
         console.log(`✅ Restored ${draft.resume_match_filters.length} resume match filters from database`);
@@ -2473,7 +2482,8 @@ function NewJobPageContent() {
         value: value.trim(),
         active: true,
         ai: false,
-        fromRubric: false
+        fromRubric: false,
+        weight: 1
       }
     ]);
     setFilterIdCounter(prev => prev + 1);
@@ -2492,18 +2502,21 @@ function NewJobPageContent() {
       ai: boolean;
       fromRubric: boolean;
       rubricKey?: string;
+      weight?: number;
     }> = [];
 
     let idCounter = 1;
 
-    // Preserve user's active/inactive preferences for existing filters.
-    // Key on the stable rubricKey (when present) or derive one from the
-    // filter's base value. No more splitting on "—" — that was fragile and
-    // broke if we ever changed the formatting of the display string.
-    const existingFilterPrefs = new Map<string, boolean>();
+    // Preserve user's active/inactive preferences AND custom weight for
+    // existing filters across rubric re-inits. Key on the stable rubricKey
+    // (when present) or derive one from the filter's base value.
+    const existingFilterPrefs = new Map<string, { active: boolean; weight: number }>();
     resumeMatchFilters.forEach(f => {
       const key = f.rubricKey || rubricKeyFor(f.category, f.value.split("—")[0]);
-      existingFilterPrefs.set(key, f.active);
+      existingFilterPrefs.set(key, {
+        active: f.active,
+        weight: typeof f.weight === 'number' && isFinite(f.weight) ? f.weight : 1,
+      });
     });
 
     const pushRubricFilter = (
@@ -2513,9 +2526,9 @@ function NewJobPageContent() {
       defaultActive: boolean
     ) => {
       const key = rubricKeyFor(category, baseValue);
-      const active = existingFilterPrefs.has(key)
-        ? (existingFilterPrefs.get(key) ?? defaultActive)
-        : defaultActive;
+      const existing = existingFilterPrefs.get(key);
+      const active = existing ? existing.active : defaultActive;
+      const weight = existing ? existing.weight : 1;
       filters.push({
         id: idCounter++,
         category,
@@ -2524,6 +2537,7 @@ function NewJobPageContent() {
         ai: true,
         fromRubric: true,
         rubricKey: key,
+        weight,
       });
     };
 
@@ -3161,7 +3175,12 @@ function NewJobPageContent() {
     const withinMiles = overrides?.withinMilesOverride ?? parsedRadius;
     const activeResumeFilters = (overrides?.resumeMatchFiltersOverride ?? resumeMatchFilters)
       .filter(f => f.active)
-      .map(f => ({ category: f.category, value: f.value, active: f.active }));
+      .map(f => ({
+        category: f.category,
+        value: f.value,
+        active: f.active,
+        weight: typeof f.weight === 'number' && isFinite(f.weight) ? f.weight : 1,
+      }));
     const selectedSourcesArray = Object.keys(searchSources)
       .filter(k => (searchSources as any)[k])
       .map(k => {
@@ -3390,6 +3409,7 @@ function NewJobPageContent() {
             <div className="w-[44px] flex-shrink-0"></div>
             <div className="w-[110px] flex-shrink-0">Category</div>
             <div className="flex-1">Value</div>
+            <div className="w-[72px] flex-shrink-0 text-center" title="Relative weight for scoring. 1 = default, 2 = counts double, 0.5 = half.">Weight</div>
             <div className="w-[100px] flex-shrink-0"></div>
           </div>
 
@@ -3418,6 +3438,32 @@ function NewJobPageContent() {
                       value={filter.value}
                       onChange={(e) => updateResumeFilter(filter.id, e.target.value)}
                       className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium"
+                    />
+                  </div>
+                  <div className="w-[72px] flex-shrink-0 flex items-center justify-center">
+                    <input
+                      type="number"
+                      min={0.1}
+                      max={5}
+                      step={0.1}
+                      value={filter.weight ?? 1}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        const parsed = raw === "" ? 1 : parseFloat(raw);
+                        const next = isFinite(parsed) ? parsed : 1;
+                        setResumeMatchFilters(prev =>
+                          prev.map(f => f.id === filter.id ? { ...f, weight: next } : f)
+                        );
+                      }}
+                      onBlur={(e) => {
+                        const parsed = parseFloat(e.target.value);
+                        const clamped = isFinite(parsed) ? Math.max(0.1, Math.min(5, parsed)) : 1;
+                        setResumeMatchFilters(prev =>
+                          prev.map(f => f.id === filter.id ? { ...f, weight: clamped } : f)
+                        );
+                      }}
+                      className="w-14 text-[13px] text-center bg-slate-50 border border-slate-200 rounded-md px-1 py-1 text-slate-900 font-semibold focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30 focus:border-[#6366f1]"
+                      title="Relative weight. 1 = default, 2 = counts double, 0.5 = half."
                     />
                   </div>
                   <div className="w-[100px] flex-shrink-0 flex items-center justify-end gap-2">
@@ -3473,6 +3519,11 @@ function NewJobPageContent() {
                       onChange={(e) => updateResumeFilter(filter.id, e.target.value)}
                       className="w-full text-[13px] bg-transparent border-none outline-none text-slate-500 font-medium"
                     />
+                  </div>
+                  <div className="w-[72px] flex-shrink-0 flex items-center justify-center">
+                    <span className="text-[12px] text-slate-400 font-semibold">
+                      {(filter.weight ?? 1).toFixed(1)}×
+                    </span>
                   </div>
                   <div className="w-[100px] flex-shrink-0 flex items-center justify-end gap-2">
                     {filter.ai && (

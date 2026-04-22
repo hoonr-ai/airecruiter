@@ -17,15 +17,18 @@ export function Sidebar() {
 
     return (
         <div className="w-[260px] border-r border-slate-200 bg-white h-screen flex flex-col fixed left-0 top-0 p-6">
-            <div className="brand flex items-center gap-3 mb-10">
+            <div className="brand flex items-baseline gap-1 mb-10" aria-label="Hoonr.Curate">
                 <Image
                     src="/hoonr-logo.png"
-                    alt="Hoonr.Curate"
-                    width={160}
-                    height={36}
+                    alt=""
+                    width={110}
+                    height={28}
                     priority
                     className="object-contain"
                 />
+                <span className="text-[22px] font-semibold tracking-tight text-slate-900 font-outfit leading-none">
+                    .Curate
+                </span>
             </div>
 
             <nav>

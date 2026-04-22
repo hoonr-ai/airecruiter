@@ -80,3 +80,29 @@ AZURE_AI_AGENT_NAME       = os.getenv("AZURE_AI_AGENT_NAME", "skill-role-extract
 
 # ---- Exa API ----
 EXA_API_KEY = get_env_with_default("EXA_API_KEY", "")
+
+# ---- Candidate Scoring Calibration ----
+# These knobs tune how harsh the match_score curve is. Defaults were calibrated
+# after observing that no candidate scored above ~60% in real searches. Lower
+# the cosmetic severity by rebalancing required vs preferred and softening the
+# year/recent/exclusion multipliers. All values are multiplicative ratios
+# applied inside `_score_candidate` / `_term_group_score` in
+# services/unified_candidate_search.py.
+
+# T1: required-vs-preferred split inside a dimension that has both groups.
+# Sum should be 1.0. Old values were 0.75 / 0.25.
+SCORING_REQUIRED_WEIGHT = float(get_env_with_default("SCORING_REQUIRED_WEIGHT", "0.60"))
+SCORING_PREFERRED_WEIGHT = float(get_env_with_default("SCORING_PREFERRED_WEIGHT", "0.40"))
+
+# T2: per-group multipliers inside `_term_group_score`.
+#  - _UNKNOWN_MULT: applied when min_years > 0 but years_of_experience didn't parse.
+#  - _FLOOR:        applied as `max(FLOOR, years/min_years)` when years < min_years.
+#  - _RECENT_PENALTY: applied when a group is marked "recent" but term not in recent_text.
+SCORING_YEARS_UNKNOWN_MULT = float(get_env_with_default("SCORING_YEARS_UNKNOWN_MULT", "0.90"))
+SCORING_YEARS_FLOOR = float(get_env_with_default("SCORING_YEARS_FLOOR", "0.55"))
+SCORING_RECENT_PENALTY = float(get_env_with_default("SCORING_RECENT_PENALTY", "0.92"))
+
+# T3: exclusion penalty cap.
+#   penalty = min(total_weight * _CAP, N_hits * max(4.0, total_weight * _PER_HIT))
+SCORING_EXCLUSION_CAP = float(get_env_with_default("SCORING_EXCLUSION_CAP", "0.35"))
+SCORING_EXCLUSION_PER_HIT = float(get_env_with_default("SCORING_EXCLUSION_PER_HIT", "0.15"))
