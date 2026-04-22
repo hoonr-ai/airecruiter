@@ -132,7 +132,7 @@ fi
 # Install Next.js dependencies and create environment
 echo -e "${BLUE}⚛️ Installing Next.js dependencies and configuring...${NC}"
 cd "$WEB_DIR"
-npm install
+npm install --legacy-peer-deps
 
 # Check if .env.local exists
 if [ -f "$WEB_DIR/.env.local" ]; then
