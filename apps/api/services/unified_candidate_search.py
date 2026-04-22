@@ -18,6 +18,10 @@ from core.config import (
     SCORING_RECENT_PENALTY,
     SCORING_EXCLUSION_CAP,
     SCORING_EXCLUSION_PER_HIT,
+    SCORING_UNMATCHED_REQUIRED_FLOOR,
+    SCORING_UNMATCHED_PREFERRED_FLOOR,
+    SCORING_PARSING_GAP_FLOOR,
+    SCORING_COVERAGE_BLEND_THRESHOLD,
 )
 
 logger = logging.getLogger(__name__)
@@ -1048,18 +1052,54 @@ class UnifiedCandidateSearch:
             # Part 3: weighted mean across groups so recruiters can flag
             # individual filters as 2x or 0.5x in the UI. Default weight is
             # 1.0, which reproduces the previous arithmetic-mean formula.
-            def _weighted_ratio(groups):
+            # L4: unmatched groups floor at SCORING_UNMATCHED_*_FLOOR instead
+            # of 0 — many "misses" are really synonym/parsing artifacts (the
+            # rubric may list "CS degree" and "Engineering degree" as two
+            # groups even though either satisfies the recruiter), and strong
+            # candidates shouldn't be zeroed on every such item.
+            # L5: Coverage-based quality lift. When the candidate hits at
+            # least SCORING_COVERAGE_BLEND_THRESHOLD of the groups at decent
+            # quality, blend toward the hits-only mean. A candidate who
+            # nails 7 of 10 required items at ~0.9 each shouldn't be
+            # dragged to ~0.7 by three misses — especially when those
+            # misses are rubric redundancies. Weak coverage (< threshold)
+            # falls through to the ordinary floored mean, preserving
+            # "weak fit = weak score" ordering.
+            def _weighted_ratio(groups, is_required: bool):
                 if not groups:
                     return 1.0
-                total_w = sum(float(g.get("weight") or 1.0) for g in groups) or float(len(groups))
-                return sum(
-                    self._term_group_score(profile, g, dimension["collections"])
-                    * float(g.get("weight") or 1.0)
-                    for g in groups
+                floor = (
+                    SCORING_UNMATCHED_REQUIRED_FLOOR if is_required
+                    else SCORING_UNMATCHED_PREFERRED_FLOOR
+                )
+                collections_for_group = dimension["collections"]
+                tuples: List[tuple] = []
+                for g in groups:
+                    raw = self._term_group_score(profile, g, collections_for_group)
+                    w = float(g.get("weight") or 1.0)
+                    tuples.append((raw, w))
+
+                total_w = sum(w for _, w in tuples) or float(len(tuples))
+                floored_mean = sum(
+                    (raw if raw > 0 else floor) * w for raw, w in tuples
                 ) / total_w
 
-            required_ratio = _weighted_ratio(required_groups) if required_groups else 1.0
-            preferred_ratio = _weighted_ratio(preferred_groups) if preferred_groups else 1.0
+                # Hits = groups that match decently (matches the
+                # _term_group_matches threshold of > 0.5).
+                hits = [(raw, w) for raw, w in tuples if raw > 0.5]
+                if hits and len(hits) / len(tuples) >= SCORING_COVERAGE_BLEND_THRESHOLD:
+                    hit_w = sum(w for _, w in hits) or 1.0
+                    hit_mean = sum(raw * w for raw, w in hits) / hit_w
+                    coverage = len(hits) / len(tuples)
+                    # Higher coverage → lean harder on hit_mean. Full
+                    # coverage collapses to hit_mean; half coverage is a
+                    # 50/50 blend. Never drop below floored_mean.
+                    blend = (1.0 - coverage) * floored_mean + coverage * hit_mean
+                    return max(floored_mean, blend)
+                return floored_mean
+
+            required_ratio = _weighted_ratio(required_groups, True) if required_groups else 1.0
+            preferred_ratio = _weighted_ratio(preferred_groups, False) if preferred_groups else 1.0
             base_ratio = 0.0
             if required_groups and preferred_groups:
                 # T1: rebalance required-vs-preferred (was 0.75/0.25, softened via env).
@@ -1068,6 +1108,19 @@ class UnifiedCandidateSearch:
                 base_ratio = required_ratio
             elif preferred_groups:
                 base_ratio = preferred_ratio
+
+            # L4: Parsing-gap rescue. If the structured collections this
+            # dimension scores against are entirely empty on the profile
+            # (classic LinkedIn/JobDiva parsing gap — e.g. no `companies`
+            # extracted), but the candidate does have resume_text, floor
+            # base_ratio so a single missing field can't torpedo the score.
+            # Clear non-fits (candidate with real data that still doesn't
+            # match) are unaffected because they'll have something in the
+            # collection even if it's wrong.
+            collections = dimension["collections"]
+            has_structured_data = any(profile.get(c) for c in collections)
+            if not has_structured_data and profile.get("text"):
+                base_ratio = max(base_ratio, SCORING_PARSING_GAP_FLOOR)
 
             dimension_score = total_weight * base_ratio
             weighted_scores.append(dimension_score)
