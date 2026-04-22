@@ -19,7 +19,21 @@ def get_env_with_default(var_name: str, default: str) -> str:
 ALLOWED_ORIGINS = get_env_with_default("ALLOWED_ORIGINS", "*").split(",")
 
 # AI Models (Configurable for deployment flexibility)
-OPENAI_MODEL = get_env_with_default("OPENAI_MODEL", "gpt-4-turbo-preview")
+# Default to gpt-4o-mini: ~16× cheaper than gpt-4o on input/output tokens with
+# comparable quality for structured resume extraction. Override via env if a
+# larger model is needed for a specific deployment.
+OPENAI_MODEL = get_env_with_default("OPENAI_MODEL", "gpt-4o-mini")
+
+# ---- LLM Runtime Tuning ----
+# Maximum concurrent outbound LLM calls (crisp + extract). The previous default
+# of 2 was set to dodge 429s under gpt-4-turbo; gpt-4o-mini tier comfortably
+# handles 5-8 concurrent. Raise via env for higher-tier accounts.
+LLM_CONCURRENCY = int(get_env_with_default("LLM_CONCURRENCY", "5"))
+
+# When true, skip LLM extraction for candidates that already have structured
+# skills + company history + title from the source API (e.g. LinkedIn/Unipile).
+# Set to "false" to always run LLM extraction.
+SKIP_LLM_IF_STRUCTURED = get_env_with_default("SKIP_LLM_IF_STRUCTURED", "false").lower() == "true"
 
 # Debugging
 DEBUG_LOG_PATH = os.getenv("DEBUG_LOG_PATH")

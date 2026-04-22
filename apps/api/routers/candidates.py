@@ -119,6 +119,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
         # Fallback to original search logic
         try:
             from services.jobdiva import JobDivaService
+            from services.unified_candidate_search import unified_search_service, SearchCriteria
             jobdiva_service = JobDivaService()
 
             # Lightweight fallback: do not hydrate every applicant during search.
@@ -130,6 +131,52 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             ) if token else []
             for candidate in candidates:
                 candidate["source"] = "JobDiva-Applicants"
+
+            # Fix 3 (Path C): score fallback candidates so the UI doesn't render
+            # every applicant at 0%. We rebuild SearchCriteria from the request
+            # inline because the outer try block may have failed before
+            # `criteria` was constructed.
+            try:
+                fallback_location = ""
+                if request.locations:
+                    fallback_location = request.locations[0].value
+                elif request.location:
+                    fallback_location = request.location
+
+                fallback_resume_match_filters = (
+                    [f.dict() for f in request.resume_match_filters]
+                    if request.resume_match_filters else []
+                )
+
+                fallback_criteria = SearchCriteria(
+                    job_id=request.job_id,
+                    title_criteria=[t.dict() for t in (request.title_criteria or [])],
+                    skill_criteria=[s.dict() for s in (request.skill_criteria or [])],
+                    keywords=request.keywords or [],
+                    resume_match_filters=fallback_resume_match_filters,
+                    location=fallback_location,
+                    companies=request.companies or [],
+                    page_size=request.limit or 100,
+                    sources=request.sources or ["JobDiva"],
+                    open_to_work=request.open_to_work,
+                    boolean_string=request.boolean_string or "",
+                )
+
+                for candidate in candidates:
+                    try:
+                        scored = unified_search_service._score_candidate(candidate, fallback_criteria)
+                        if isinstance(scored, dict):
+                            score = scored.get("match_score", scored.get("score"))
+                            if score is not None:
+                                candidate["match_score"] = score
+                            if scored.get("explainability"):
+                                candidate["explainability"] = scored["explainability"]
+                            if scored.get("matched_skills"):
+                                candidate["matched_skills"] = scored["matched_skills"]
+                    except Exception as score_err:
+                        logger.debug(f"Fallback scoring skipped for one candidate: {score_err}")
+            except Exception as score_setup_err:
+                logger.warning(f"Fallback scoring setup failed, returning unscored: {score_setup_err}")
 
             return {
                 "candidates": candidates[:request.limit or 100],
