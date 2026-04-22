@@ -30,13 +30,16 @@ jobs:
           ssh-keyscan -H ${{ secrets.AZURE_JOB_DIVA_HOST_QA }} >> ~/.ssh/known_hosts
 
       - name: Deploy to QA VM
+        env:
+          DOMAIN_NAME: qacurate.hoonr.ai
         run: |
           ssh -i ~/.ssh/id_ed25519 ubuntu@${{ secrets.AZURE_JOB_DIVA_HOST_QA }} << 'EOF'
             set -e
             cd ~/codebase/airecruiter
             git fetch --all
             git reset --hard origin/${{ github.ref_name }}
-            bash deploy-azure.sh
+            export DOMAIN_NAME="$DOMAIN_NAME"
+            bash deploy-azure.sh && bash setup-ssl.sh
           EOF
 
       - name: Deployment Info
@@ -72,13 +75,16 @@ jobs:
           ssh-keyscan -H ${{ secrets.AZURE_JOB_DIVA_HOST_PROD }} >> ~/.ssh/known_hosts
 
       - name: Deploy to PROD VM
+        env:
+          DOMAIN_NAME: curate.hoonr.ai
         run: |
           ssh -i ~/.ssh/id_ed25519 ubuntu@${{ secrets.AZURE_JOB_DIVA_HOST_PROD }} << 'EOF'
             set -e
             cd ~/codebase/airecruiter
             git fetch --all
             git reset --hard origin/${{ github.ref_name }}
-            bash deploy-azure.sh
+            export DOMAIN_NAME="$DOMAIN_NAME"
+            bash deploy-azure.sh && bash setup-ssl.sh
           EOF
 
       - name: Deployment Info
