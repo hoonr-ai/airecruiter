@@ -1,7 +1,6 @@
 "use client";
 
 import Link from "next/link";
-import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { LayoutDashboard, Briefcase, Users, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -18,15 +17,17 @@ export function Sidebar() {
     return (
         <div className="w-[260px] border-r border-slate-200 bg-white h-screen flex flex-col fixed left-0 top-0 p-6">
             {/* Brand wordmark — stacked "Hoonr./Curate" with the arrow
-                flourishes baked into the PNG. Source: apps/web/public/hoonr-curate-logo.png. */}
-            <div className="brand flex items-center mb-10">
-                <Image
+                flourishes baked into the PNG. Source: apps/web/public/hoonr-curate-logo.png.
+                `unoptimized` skips Next's image pipeline since the source PNG is oversized
+                (2730×1536, 4MB) and we just want the raw asset rendered by the browser. */}
+            <div className="brand flex items-center justify-center mb-10">
+                <img
                     src="/hoonr-curate-logo.png"
                     alt="Hoonr.Curate"
                     width={200}
                     height={112}
-                    priority
                     className="object-contain"
+                    style={{ width: 200, height: "auto" }}
                 />
             </div>
 

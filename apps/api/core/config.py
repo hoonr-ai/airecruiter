@@ -90,9 +90,37 @@ EXA_API_KEY = get_env_with_default("EXA_API_KEY", "")
 # services/unified_candidate_search.py.
 
 # T1: required-vs-preferred split inside a dimension that has both groups.
-# Sum should be 1.0. Old values were 0.75 / 0.25.
-SCORING_REQUIRED_WEIGHT = float(get_env_with_default("SCORING_REQUIRED_WEIGHT", "0.60"))
-SCORING_PREFERRED_WEIGHT = float(get_env_with_default("SCORING_PREFERRED_WEIGHT", "0.40"))
+# Sum should be 1.0. Old values were 0.75 / 0.25, then 0.60 / 0.40.
+# Rebalanced again after observing strong candidates (82% on Skills) getting
+# dragged to ~63% overall by arithmetic-mean penalties on Education/Keywords.
+SCORING_REQUIRED_WEIGHT = float(get_env_with_default("SCORING_REQUIRED_WEIGHT", "0.55"))
+SCORING_PREFERRED_WEIGHT = float(get_env_with_default("SCORING_PREFERRED_WEIGHT", "0.45"))
+
+# L4: Floor for unmatched groups inside the weighted-mean ratio.
+# Previously a required group that didn't match contributed 0 to the numerator,
+# which turned "matched 3 of 5 strong rubric items" into a 60% ratio. The floor
+# says: even a miss is worth *something*, because many "misses" are either
+# synonym-matching failures (e.g. the rubric had "CS degree" and "Engineering
+# degree" as separate items and the candidate has one) or parsing gaps.
+# Required floor kept conservative so clear non-fits still read as non-fits.
+SCORING_UNMATCHED_REQUIRED_FLOOR = float(get_env_with_default("SCORING_UNMATCHED_REQUIRED_FLOOR", "0.35"))
+SCORING_UNMATCHED_PREFERRED_FLOOR = float(get_env_with_default("SCORING_UNMATCHED_PREFERRED_FLOOR", "0.25"))
+
+# L4: Parsing-gap rescue. When the structured collections for a dimension are
+# entirely empty on the candidate profile (e.g. LinkedIn extraction never
+# populated `companies`) but the candidate has resume_text, the dimension's
+# base_ratio floors at this value. This stops "couldn't parse their companies"
+# from torpedoing a 45-weight dimension.
+SCORING_PARSING_GAP_FLOOR = float(get_env_with_default("SCORING_PARSING_GAP_FLOOR", "0.65"))
+
+# L5: Coverage-based quality lift. When a candidate hits at least this fraction
+# of the groups in a dimension with good quality (fuzzy >= 0.5), the ratio
+# blends toward the mean of hits-only — so a strong partial matcher isn't
+# dragged down by misses that are often rubric redundancies (e.g. "CS degree"
+# + "Engineering degree" listed as two separate required items when either
+# satisfies the recruiter). Candidates with weak coverage fall through to the
+# ordinary floored-mean, so weak fits still read as weak.
+SCORING_COVERAGE_BLEND_THRESHOLD = float(get_env_with_default("SCORING_COVERAGE_BLEND_THRESHOLD", "0.5"))
 
 # T2: per-group multipliers inside `_term_group_score`.
 #  - _UNKNOWN_MULT: applied when min_years > 0 but years_of_experience didn't parse.
