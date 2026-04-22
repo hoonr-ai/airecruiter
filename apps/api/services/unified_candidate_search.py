@@ -325,14 +325,22 @@ class UnifiedCandidateSearch:
 
         # Drain the queue until every producer emits its SENTINEL
         active = len(producers)
-        while active > 0:
-            event = await queue.get()
-            if event is SENTINEL:
-                active -= 1
-                continue
-            yield event
-
-        await asyncio.gather(*producers, return_exceptions=True)
+        try:
+            while active > 0:
+                event = await queue.get()
+                if event is SENTINEL:
+                    active -= 1
+                    continue
+                yield event
+        finally:
+            # If the generator is closed (e.g. client disconnect), cancel all background producers
+            for task in producers:
+                if not task.done():
+                    task.cancel()
+            
+            if producers:
+                # Wait for tasks to acknowledge cancellation (optional but good practice)
+                await asyncio.gather(*producers, return_exceptions=True)
 
         duration = time.time() - start_time
         yield {

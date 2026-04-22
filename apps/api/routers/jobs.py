@@ -1229,10 +1229,10 @@ async def get_monitored_job_data(job_id: str):
             SELECT job_id, title, enhanced_title, ai_description, selected_job_boards,
                    recruiter_notes, recruiter_emails, selected_employment_types,
                    work_authorization, screening_level, current_step, processing_status,
-                   job_requirements, ai_enhanced, created_at, updated_at
+                   job_requirements, ai_enhanced, created_at, updated_at, jobdiva_id
             FROM monitored_jobs 
-            WHERE job_id = %s
-        """, (job_id,))
+            WHERE job_id = %s OR jobdiva_id = %s
+        """, (job_id, job_id))
         
         row = cursor.fetchone()
         cursor.close()
@@ -1245,7 +1245,7 @@ async def get_monitored_job_data(job_id: str):
         columns = ["job_id", "title", "enhanced_title", "ai_description", "selected_job_boards",
                    "recruiter_notes", "recruiter_emails", "selected_employment_types", 
                    "work_authorization", "screening_level", "current_step", "processing_status",
-                   "job_requirements", "ai_enhanced", "created_at", "updated_at"]
+                   "job_requirements", "ai_enhanced", "created_at", "updated_at", "jobdiva_id"]
         
         data = dict(zip(columns, row))
         

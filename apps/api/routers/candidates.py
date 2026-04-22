@@ -143,7 +143,10 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                     yield json.dumps(event) + "\n"
                     if event.get("type") == "candidate":
                         cand = event.get("data") or {}
-                        if cand.get("candidate_id") or cand.get("id"):
+                        # Only auto-persist if it's an applicant. TalentSearch candidates
+                        # should only be saved if explicitly selected via the /candidates/save endpoint.
+                        source = str(cand.get("source") or "")
+                        if (cand.get("candidate_id") or cand.get("id")) and "Applicants" in source:
                             try:
                                 row = _candidate_to_persist_row(str(request.job_id), cand)
                                 task = asyncio.create_task(
@@ -507,41 +510,53 @@ async def message_candidate(request: CandidateMessageRequest):
     else:
         raise HTTPException(status_code=400, detail=f"Messaging not supported for source: {request.source}")
 
-@router.get("/jobs/{jobdiva_id}/candidates")
-async def get_job_candidates(jobdiva_id: str):
+@router.get("/jobs/{job_id_or_ref}/candidates")
+async def get_job_candidates(job_id_or_ref: str):
     """
     Fetches all sourced candidates tied to a specific job.
+    Supports both numeric job_id and reference jobdiva_id.
     """
     try:
         from core.config import DATABASE_URL
         import psycopg2
         from psycopg2.extras import RealDictCursor
 
-        # Convert job_id to jobdiva_id
-        jobdiva_id = None
+        # Resolve the numeric job_id if a reference was passed
+        resolved_job_id = job_id_or_ref
         with psycopg2.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s", (job_id,))
+                cur.execute("""
+                    SELECT job_id FROM monitored_jobs 
+                    WHERE job_id = %s OR jobdiva_id = %s 
+                    LIMIT 1
+                """, (job_id_or_ref, job_id_or_ref))
                 result = cur.fetchone()
                 if result:
-                    jobdiva_id = result[0]
+                    resolved_job_id = result[0]
 
-        if not jobdiva_id:
-            return {"candidates": [], "message": f"No JobDiva ID found for job {jobdiva_id}"}
-
+        # Query sourced_candidates using the resolved numeric ID
         with psycopg2.connect(DATABASE_URL) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT id, jobdiva_id, candidate_id, name, email, skills,
-                           experience_years, source, match_score, is_selected, created_at
+                    SELECT id, jobdiva_id, candidate_id, name, email, phone, headline, location,
+                           source, resume_match_percentage as match_score, created_at, data
                     FROM sourced_candidates
                     WHERE jobdiva_id = %s
                     ORDER BY created_at DESC;
-                """, (jobdiva_id,))
+                """, (resolved_job_id,))
                 candidates = cur.fetchall()
+
+        # Handle the data field (it might be a string or a dict)
+        for cand in candidates:
+            if cand.get("data") and isinstance(cand["data"], str):
+                try:
+                    cand["data"] = json.loads(cand["data"])
+                except:
+                    pass
 
         return {"status": "success", "candidates": candidates}
     except Exception as e:
+        logger.error(f"Error fetching job candidates: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/candidates/save")
