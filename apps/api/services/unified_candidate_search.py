@@ -39,6 +39,7 @@ class SearchCriteria(BaseModel):
     sources: List[str] = ["JobDiva", "LinkedIn", "Exa"]
     open_to_work: bool = True
     boolean_string: str = ""
+    bypass_screening: bool = False
 
     def sourcing_skill_values(self) -> List[str]:
         """Flat skill-like strings for sources that only accept a plain list
@@ -100,6 +101,14 @@ class UnifiedCandidateSearch:
             if cand.get("name"):
                 cand["name"] = str(cand["name"]).title()
             
+            if criteria.bypass_screening:
+                cand["match_score"] = 0
+                cand["missing_skills"] = []
+                cand["matched_skills"] = []
+                cand["explainability"] = ["Scoring skipped (auto-assignment)"]
+                cand["match_score_details"] = {}
+                return cand
+
             score_result = self._score_candidate(cand, criteria)
             cand["match_score"] = score_result["score"]
             cand["missing_skills"] = score_result["missing_skills"]
@@ -178,6 +187,16 @@ class UnifiedCandidateSearch:
                 )
                 self._attach_cached_enhanced_info(applicants)
                 async for cand in self._enrich_filtered_jobdiva_candidates(applicants, criteria):
+                    # From feature/job-diva-sync-optimization (2c287a1): in
+                    # bypass_screening mode (auto-assign sync), skip the
+                    # filter assessment — scoring is already short-circuited
+                    # upstream in finalize_candidate, so every applicant
+                    # should flow through unaltered.
+                    if criteria.bypass_screening:
+                        assessment = {"passes": True, "matched": [], "missing": [], "excluded": []}
+                        await emit_candidate(cand, assessment, "qualified_applicants")
+                        continue
+
                     assessment = self._filter_assessment(cand, criteria, enforce_years=True)
                     if not assessment["passes"]:
                         self._log_stage(
@@ -1539,6 +1558,14 @@ class UnifiedCandidateSearch:
                     if not candidate.get("resume_text"):
                         self._log_stage("ResumeScreen", f"skipped candidate_id={candidate_id}; no resume text available")
                         return {"status": "no_resume", "candidate": None}
+
+                    if criteria.bypass_screening:
+                        self._log_stage("ResumeScreen", f"Bypassing LLM extraction for candidate_id={candidate_id} (auto-sync mode)")
+                        # In bypass mode, we still ensure name/title/location are basic-hydrated
+                        # even without LLM if JobDiva already has them.
+                        candidate["enhanced_info"] = {}
+                        candidate["enhanced_info_status"] = "skipped"
+                        return {"status": "success", "candidate": candidate}
 
                     self._log_stage("ResumeScreen", f"running quick filter for candidate_id={candidate_id}")
                     assessment = self._filter_assessment(candidate, criteria, enforce_years=False)
