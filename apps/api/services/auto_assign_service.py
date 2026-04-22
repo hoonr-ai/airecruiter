@@ -4,6 +4,7 @@ import psycopg2
 from typing import Dict, Any, List
 from core.config import DATABASE_URL
 from services.unified_candidate_search import SearchCriteria, unified_search_service
+from services.candidate_profiles_db import candidate_profiles_db
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,12 @@ class AutoAssignService:
                             ))
                             total_assigned += 1
                             conn.commit()
+
+                            # Populate normalized tables
+                            try:
+                                candidate_profiles_db.upsert_candidate(job_id, cand, cand.get("source", "JobDiva-Applicants"))
+                            except Exception as norm_err:
+                                logger.warning(f"[AutoAssignService] Failed normalized upsert for {candidate_id}: {norm_err}")
                         except Exception as row_err:
                             logger.warning(f"[AutoAssignService] Failed upsert for {cand.get('candidate_id')}: {row_err}")
 
