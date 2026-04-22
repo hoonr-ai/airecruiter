@@ -184,20 +184,35 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         """, (request.job_id, request.job_id))
         job_row = cur.fetchone()
 
+        # ----- Fetch pre-screen questions from job_screen_questions table -----
+        # Match by job_id first, then fall back to jobdiva_id if needed
+        pre_screen_questions = []
+        if job_row:
+            jobdiva_id_for_lookup = job_row.get("jobdiva_id") or ""
+            job_id_for_lookup = job_row.get("job_id") or request.job_id
+            cur.execute("""
+                SELECT question_text, pass_criteria, is_default, category, order_index
+                FROM job_screen_questions
+                WHERE jobdiva_id = %s OR jobdiva_id = %s
+                ORDER BY order_index
+            """, (jobdiva_id_for_lookup, job_id_for_lookup))
+            rows = cur.fetchall()
+            pre_screen_questions = [
+                {
+                    "question_text": r["question_text"],
+                    "pass_criteria": r["pass_criteria"],
+                    "is_default": r["is_default"],
+                    "category": r["category"],
+                }
+                for r in rows
+            ]
+
         cur.close()
         conn.close()
 
         # Build JD section — must match pairbotqa expected structure:
         # { title, jobdiva_description, pre_screen_questions, job_id, jobdiva_id }
-        pre_screen_questions = []
-
         if job_row:
-            sq = job_row.get("screen_questions")
-            if sq:
-                if isinstance(sq, str):
-                    sq = json.loads(sq)
-                pre_screen_questions = sq
-
             jd = {
                 "job_id": job_row.get("job_id", request.job_id),
                 "jobdiva_id": job_row.get("jobdiva_id", ""),
