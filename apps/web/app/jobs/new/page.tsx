@@ -4654,47 +4654,49 @@ function NewJobPageContent() {
                   if (selectedCandidates.size === 0) return;
 
                   try {
-                    // Prepare candidates payload with proper structure
-                    const candidatesPayload = candidates.map(c => {
-                      // Ensure name is never null or undefined for Pydantic validation
-                      const displayName = getCandidateDisplayName(c);
-                      
-                      // Ensure skills is always a list
-                      let skillList = [];
-                      if (Array.isArray(c.skills)) {
-                        skillList = c.skills;
-                      } else if (typeof c.skills === 'string' && c.skills.trim()) {
-                        try {
-                          const parsed = JSON.parse(c.skills);
-                          skillList = Array.isArray(parsed) ? parsed : [c.skills];
-                        } catch (e) {
-                          skillList = [c.skills];
+                    // Prepare candidates payload only for SELECTED candidates
+                    const candidatesPayload = candidates
+                      .filter(c => selectedCandidates.has(c.candidate_id || c.id))
+                      .map(c => {
+                        // Ensure name is never null or undefined for Pydantic validation
+                        const displayName = getCandidateDisplayName(c);
+                        
+                        // Ensure skills is always a list
+                        let skillList = [];
+                        if (Array.isArray(c.skills)) {
+                          skillList = c.skills;
+                        } else if (typeof c.skills === 'string' && c.skills.trim()) {
+                          try {
+                            const parsed = JSON.parse(c.skills);
+                            skillList = Array.isArray(parsed) ? parsed : [c.skills];
+                          } catch (e) {
+                            skillList = [c.skills];
+                          }
                         }
-                      }
 
-                      return {
-                        candidate_id: String(c.candidate_id || c.id || "unknown"),
-                        name: displayName || "Unnamed Candidate",
-                        email: c.email || null,
-                        phone: c.phone || null,
-                        skills: skillList,
-                        experience_years: c.yearsExtracted || c.experience_years || 0,
-                        source: c.source || "JobDiva-Applicants",
-                        headline: c.title || c.headline || "",
-                        location: c.location || "",
-                        profile_url: c.profile_url || null,
-                        image_url: c.image_url || null,
-                        resume_text: c.resume_text || c.resumeText || "",
-                        resume_id: String(c.resumeId || c.resume_id || ""),
-                        is_selected: selectedCandidates.has(c.candidate_id || c.id),
-                        education: Array.isArray(c.education || c.candidate_education) ? (c.education || c.candidate_education) : [],
-                        certifications: Array.isArray(c.certifications || c.candidate_certification) ? (c.certifications || c.candidate_certification) : [],
-                        company_experience: Array.isArray(c.company_experience || c.enhanced_info?.company_experience) ? (c.company_experience || c.enhanced_info?.company_experience) : [],
-                        urls: (c.urls && typeof c.urls === 'object' && !Array.isArray(c.urls)) ? c.urls : (c.enhanced_info?.urls || {}),
-                        match_score: typeof c.match_score === 'number' ? c.match_score : 0,
-                        enhanced_info: (c.enhanced_info && typeof c.enhanced_info === 'object' && !Array.isArray(c.enhanced_info)) ? c.enhanced_info : null
-                      };
-                    });
+                        return {
+                          candidate_id: String(c.candidate_id || c.id || "unknown"),
+                          name: displayName || "Unnamed Candidate",
+                          email: c.email || null,
+                          phone: c.phone || null,
+                          skills: skillList,
+                          experience_years: c.yearsExtracted || c.experience_years || 0,
+                          source: c.source || "JobDiva-Applicants",
+                          headline: c.title || c.headline || "",
+                          location: c.location || "",
+                          profile_url: c.profile_url || null,
+                          image_url: c.image_url || null,
+                          resume_text: c.resume_text || c.resumeText || "",
+                          resume_id: String(c.resumeId || c.resume_id || ""),
+                          is_selected: true,
+                          education: Array.isArray(c.education || c.candidate_education) ? (c.education || c.candidate_education) : [],
+                          certifications: Array.isArray(c.certifications || c.candidate_certification) ? (c.certifications || c.candidate_certification) : [],
+                          company_experience: Array.isArray(c.company_experience || c.enhanced_info?.company_experience) ? (c.company_experience || c.enhanced_info?.company_experience) : [],
+                          urls: (c.urls && typeof c.urls === 'object' && !Array.isArray(c.urls)) ? c.urls : (c.enhanced_info?.urls || {}),
+                          match_score: typeof c.match_score === 'number' ? c.match_score : 0,
+                          enhanced_info: (c.enhanced_info && typeof c.enhanced_info === 'object' && !Array.isArray(c.enhanced_info)) ? c.enhanced_info : null
+                        };
+                      });
 
                     const selectedCount = candidatesPayload.filter(c => c.is_selected).length;
                     console.log(`🚀 Launching Hoonr-Curate with ${selectedCount} selected candidates out of ${candidatesPayload.length} total`);
@@ -4704,7 +4706,8 @@ function NewJobPageContent() {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({
-                        jobdiva_id: numericJobId || jobdivaId,
+                        // Always send the ALPHANUMERIC jobdiva_id (e.g. '26-05172'), not the numeric job_id PK.
+                        jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId,
                         candidates: candidatesPayload
                       })
                     });
