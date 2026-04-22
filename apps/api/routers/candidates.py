@@ -143,25 +143,10 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                     yield json.dumps(event) + "\n"
                     if event.get("type") == "candidate":
                         cand = event.get("data") or {}
-                        # Only auto-persist if it's an applicant. TalentSearch candidates
-                        # should only be saved if explicitly selected via the /candidates/save endpoint.
-                        source = str(cand.get("source") or "")
-                        if (cand.get("candidate_id") or cand.get("id")) and "Applicants" in source:
-                            try:
-                                row = _candidate_to_persist_row(str(request.job_id), cand)
-                                task = asyncio.create_task(
-                                    asyncio.to_thread(
-                                        sourced_candidates_storage.save_enhanced_candidate,
-                                        str(request.job_id),
-                                        row,
-                                    )
-                                )
-                                persist_tasks.append(task)
-                            except Exception as persist_err:
-                                logger.warning(
-                                    f"Persist skipped for candidate "
-                                    f"{cand.get('candidate_id')}: {persist_err}"
-                                )
+                        # Auto-persistence of applicants has been disabled to ensure 
+                        # only explicitly selected candidates (via Launch PAIR) are 
+                        # saved to the database/Master Pool.
+                        pass
             except Exception as e:
                 logger.error(f"Error in search stream: {e}", exc_info=True)
                 yield json.dumps({"type": "error", "message": str(e)}) + "\n"
@@ -521,20 +506,22 @@ async def get_job_candidates(job_id_or_ref: str):
         import psycopg2
         from psycopg2.extras import RealDictCursor
 
-        # Resolve the numeric job_id if a reference was passed
-        resolved_job_id = job_id_or_ref
+        # Resolve the alphanumeric jobdiva_id (e.g. '26-05172') from monitored_jobs.
+        # sourced_candidates.jobdiva_id must always store the alphanumeric ref, NOT the numeric PK.
+        resolved_jobdiva_id = job_id_or_ref  # fallback: use whatever was passed
         with psycopg2.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT job_id FROM monitored_jobs 
+                    SELECT jobdiva_id, job_id FROM monitored_jobs 
                     WHERE job_id = %s OR jobdiva_id = %s 
                     LIMIT 1
                 """, (job_id_or_ref, job_id_or_ref))
                 result = cur.fetchone()
                 if result:
-                    resolved_job_id = result[0]
+                    # Prefer the alphanumeric jobdiva_id; fall back to job_id if jobdiva_id is NULL
+                    resolved_jobdiva_id = result[0] or result[1]
 
-        # Query sourced_candidates using the resolved numeric ID
+        # Query sourced_candidates using the resolved alphanumeric jobdiva_id
         with psycopg2.connect(DATABASE_URL) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
@@ -543,7 +530,7 @@ async def get_job_candidates(job_id_or_ref: str):
                     FROM sourced_candidates
                     WHERE jobdiva_id = %s
                     ORDER BY created_at DESC;
-                """, (resolved_job_id,))
+                """, (resolved_jobdiva_id,))
                 candidates = cur.fetchall()
 
         # Handle the data field (it might be a string or a dict)
@@ -563,9 +550,32 @@ async def get_job_candidates(job_id_or_ref: str):
 async def save_candidates(request: CandidatesSaveRequest):
     """
     Saves a batch of candidates to the sourced_candidates table.
+    Always stores the alphanumeric jobdiva_id (e.g. '26-05172'), never the numeric job_id PK.
     """
     try:
         print(f"🔄 Saving {len(request.candidates)} candidates for job: {request.jobdiva_id}")
+
+        # Resolve the true alphanumeric jobdiva_id from monitored_jobs.
+        # The frontend may send the numeric job_id; we always normalise to the alphanumeric ref.
+        import psycopg2 as _psycopg2
+        from core.config import DATABASE_URL as _DB_URL
+        resolved_jobdiva_id = request.jobdiva_id  # safe fallback
+        try:
+            with _psycopg2.connect(_DB_URL) as _conn:
+                with _conn.cursor() as _cur:
+                    _cur.execute("""
+                        SELECT jobdiva_id, job_id FROM monitored_jobs
+                        WHERE job_id = %s OR jobdiva_id = %s
+                        LIMIT 1
+                    """, (request.jobdiva_id, request.jobdiva_id))
+                    _row = _cur.fetchone()
+                    if _row:
+                        # jobdiva_id (alphanumeric) preferred; fall back to job_id if NULL
+                        resolved_jobdiva_id = _row[0] or _row[1]
+        except Exception as _resolve_err:
+            print(f"⚠️ Could not resolve jobdiva_id, using as-is: {_resolve_err}")
+
+        print(f"✅ Resolved jobdiva_id: {request.jobdiva_id!r} → {resolved_jobdiva_id!r}")
 
         # Filter only selected candidates for saving
         selected_candidates = [c for c in request.candidates if c.is_selected]
@@ -587,7 +597,7 @@ async def save_candidates(request: CandidatesSaveRequest):
                     try:
                         # Prepare candidate data with clean schema
                         candidate_data = {
-                            "jobdiva_id": request.jobdiva_id,
+                            "jobdiva_id": resolved_jobdiva_id,
                             "candidate_id": c.candidate_id,
                             "source": c.source,
                             "name": c.name,
