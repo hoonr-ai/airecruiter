@@ -1257,11 +1257,13 @@ async def get_monitored_job_data(job_id: str):
                 except:
                     pass
         
-        # Convert datetime objects to strings
-        if data.get("created_at"):
-            data["created_at"] = data["created_at"].isoformat()
-        if data.get("updated_at"):
-            data["updated_at"] = data["updated_at"].isoformat()
+        # Convert datetime objects to strings if they aren't already strings
+        for date_field in ["created_at", "updated_at"]:
+            if data.get(date_field) and not isinstance(data[date_field], str):
+                try:
+                    data[date_field] = data[date_field].isoformat()
+                except:
+                    data[date_field] = str(data[date_field])
         
         logger.info(f"📊 Retrieved monitored_jobs data for {job_id}")
         return {
