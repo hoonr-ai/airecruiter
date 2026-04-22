@@ -167,7 +167,19 @@ export default function NewJobPage() {
 function NewJobPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [currentStep, setCurrentStep] = useState<Step>(1);
+  const [currentStep, setCurrentStepState] = useState<Step>(1);
+  // Track the highest step the user has ever reached so the pipeline/stepper
+  // at the top allows jumping back to any step they've visited, not just
+  // current-1 and current+1. Without this, stepping backward from step 4 to
+  // step 1 forced the user to click Next three more times to return.
+  const [maxStepReached, setMaxStepReached] = useState<Step>(1);
+  const setCurrentStep = (next: Step | ((prev: Step) => Step)) => {
+    setCurrentStepState(prev => {
+      const resolved = typeof next === "function" ? (next as (p: Step) => Step)(prev) : next;
+      setMaxStepReached(current => (resolved > current ? resolved : current));
+      return resolved;
+    });
+  };
   const [numericJobId, setNumericJobId] = useState("");
   const [jobdivaId, setJobdivaId] = useState("");
   const [jobData, setJobData] = useState<any>(null);
@@ -310,7 +322,6 @@ function NewJobPageContent() {
   // Step 5 - Sourcing state
   const [searchSources, setSearchSources] = useState({
     jobdiva: true,
-    jobdiva_hotlist: true,
     linkedin: true,
     dice: true,
     exa: true
@@ -532,7 +543,12 @@ function NewJobPageContent() {
       // Restore sourcing filters if they exist
       if (draft.sourcing_filters) {
         const sf = draft.sourcing_filters;
-        if (sf.sources) setSearchSources(sf.sources);
+        if (sf.sources) {
+          // Strip the retired jobdiva_hotlist flag from persisted drafts so
+          // saved jobs don't resurrect the removed checkbox.
+          const { jobdiva_hotlist: _removed, ...cleanSources } = sf.sources as Record<string, boolean>;
+          setSearchSources(prev => ({ ...prev, ...cleanSources }));
+        }
         if (sf.titles) setSourceTitles(sf.titles);
         if (sf.skills) setSourceSkills(sf.skills);
         if (sf.locations) setSourceLocations(sf.locations);
@@ -545,6 +561,9 @@ function NewJobPageContent() {
       if (draft.current_step) {
         const savedStep = draft.current_step as Step;
         setCurrentStep(savedStep);
+        // Treat the saved step as previously-reached so the pipeline allows
+        // hopping back to it (and any earlier step) without re-clicking Next.
+        setMaxStepReached(prev => (savedStep > prev ? savedStep : prev));
         setPageSubtitle(STEP_DESCRIPTIONS[savedStep]);
         setIsFetched(true);
         setNumericJobId(jobIdToLoad);
@@ -1064,7 +1083,14 @@ function NewJobPageContent() {
         const stepNumber = parseInt(step) as Step;
         const isActive = stepNumber === currentStep;
         const isCompleted = stepNumber < currentStep;
-        const isClickable = stepNumber <= currentStep || (stepNumber === currentStep + 1 && !!jobData);
+        // A step is clickable when the user has already reached it before
+        // (anywhere <= maxStepReached) OR it's the immediate next step and the
+        // current step is unlocked (jobData present). This lets users bounce
+        // back and forth in the pipeline without re-clicking Next on every
+        // intermediate step.
+        const isClickable =
+          stepNumber <= maxStepReached ||
+          (stepNumber === currentStep + 1 && !!jobData);
         const isLast = index === Object.keys(STEP_LABELS).length - 1;
 
         return (
@@ -2501,13 +2527,20 @@ function NewJobPageContent() {
     };
 
     // 1. Titles
+    // Preserve Required vs Preferred flag set on Step 3 — previously every
+    // title was hard-coded as "Required Title" + active=true, which made
+    // Preferred titles appear as hard filters on Step 4. Now the category
+    // pill and the default On/Off state both track the rubric's
+    // `title.required` value, mirroring how skills are handled below.
     if (rubricData.titles) {
       rubricData.titles.forEach((title: any) => {
+        const isRequired = title.required === "Required";
+        const category = isRequired ? "Required Title" : "Preferred Title";
         pushRubricFilter(
-          "Required Title",
+          category,
           title.value || "",
           `${title.value} — ${title.minYears}+ yrs, ${title.matchType} match`,
-          true
+          isRequired
         );
       });
     }
@@ -2583,8 +2616,15 @@ function NewJobPageContent() {
     );
 
     // 1. Bot Introduction
-    const intro = `Hi {{candidate name}}, I'm Nova, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${jobTitle || "role"} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
-    setBotIntroduction(intro);
+    // Prefer the AI-enhanced title from Step 2 (cleaned / recruiter-friendly)
+    // over the raw Step 1 title, falling back to the raw title if the user
+    // never ran the enhancement.
+    const introTitle = (enhancedTitle || jobTitle || "role").trim();
+    const intro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+    // Only seed the intro if the user hasn't written their own yet. Without
+    // this guard, every re-entry to Step 4 (including after Save & Exit
+    // reload) clobbered the recruiter's manual edits with the template.
+    setBotIntroduction(prev => (prev && prev.trim().length > 0 ? prev : intro));
 
     // 2. Default Questions
     const defaultQs = [
@@ -2799,6 +2839,41 @@ function NewJobPageContent() {
       };
     });
   }, [rubricData?.skills]);
+
+  // Inject the Step 1 work-authorization value (e.g. "W2 only", "US Citizen /
+  // GC") into Step 3's "Other Requirements" list so recruiters don't have to
+  // re-enter it. We only inject once per rubric+workAuth pair — if the user
+  // deletes the item we don't re-add it on the same rubric. Tracked via a
+  // ref so state churn in other rubric fields doesn't re-trigger injection.
+  const injectedWorkAuthRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!rubricData) return;
+    const authValue = (workAuthorization || jobData?.work_authorization || "").trim();
+    if (!authValue) return;
+    // Don't re-inject the same value we already inserted on this rubric.
+    if (injectedWorkAuthRef.current === authValue) return;
+
+    setRubricData((prev: any) => {
+      if (!prev) return prev;
+      const existing: any[] = Array.isArray(prev.other_requirements) ? prev.other_requirements : [];
+      const already = existing.some(
+        (item: any) => typeof item?.value === "string" &&
+          item.value.trim().toLowerCase() === authValue.toLowerCase()
+      );
+      if (already) {
+        injectedWorkAuthRef.current = authValue;
+        return prev;
+      }
+      injectedWorkAuthRef.current = authValue;
+      return {
+        ...prev,
+        other_requirements: [
+          { value: authValue, required: "Required", source: "Step1" },
+          ...existing,
+        ],
+      };
+    });
+  }, [rubricData, workAuthorization, jobData?.work_authorization]);
 
   useEffect(() => {
     if (currentStep !== 4) return;
@@ -3090,7 +3165,6 @@ function NewJobPageContent() {
       .filter(k => (searchSources as any)[k])
       .map(k => {
         if (k === 'jobdiva') return 'JobDiva';
-        if (k === 'jobdiva_hotlist') return 'JobDivaHotlist';
         if (k === 'linkedin') return 'LinkedIn';
         if (k === 'dice') return 'Dice';
         if (k === 'exa') return 'Exa';
@@ -3592,7 +3666,8 @@ function NewJobPageContent() {
                   <div className="flex items-center gap-5 ml-1">
                     {[
                       { id: 'jobdiva', label: 'JobDiva', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false },
-                      { id: 'jobdiva_hotlist', label: 'JobDiva Hotlist', icon: <Zap className="w-4 h-4 text-orange-500 fill-orange-500" />, disabled: false },
+                      // JobDiva Hotlist removed — the integration wasn't
+                      // functional and the checkbox was misleading.
                       { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: false },
                       { id: 'dice', label: 'Dice', icon: <Box className="w-4 h-4 text-slate-700" />, disabled: false },
                       { id: 'exa', label: 'Exa', icon: <Search className="w-4 h-4 text-pink-500" />, disabled: false }
