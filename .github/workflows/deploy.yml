@@ -33,7 +33,7 @@ jobs:
         env:
           DOMAIN_NAME: qacurate.hoonr.ai
         run: |
-          ssh -i ~/.ssh/id_ed25519 ubuntu@${{ secrets.AZURE_JOB_DIVA_HOST_QA }} << 'EOF'
+          ssh -i ~/.ssh/id_ed25519 ubuntu@${{ secrets.AZURE_JOB_DIVA_HOST_QA }} << EOF
             set -e
             cd ~/codebase/airecruiter
             git fetch --all
@@ -78,7 +78,7 @@ jobs:
         env:
           DOMAIN_NAME: curate.hoonr.ai
         run: |
-          ssh -i ~/.ssh/id_ed25519 ubuntu@${{ secrets.AZURE_JOB_DIVA_HOST_PROD }} << 'EOF'
+          ssh -i ~/.ssh/id_ed25519 ubuntu@${{ secrets.AZURE_JOB_DIVA_HOST_PROD }} << EOF
             set -e
             cd ~/codebase/airecruiter
             git fetch --all
