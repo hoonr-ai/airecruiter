@@ -26,6 +26,7 @@ import {
   FileJson,
   ChevronRight,
   ChevronLeft,
+  ChevronDown,
   Plus,
   Trash2,
   X,
@@ -33,6 +34,11 @@ import {
   Check,
   Send,
   Loader2,
+  Mail,
+  Phone,
+  MapPin,
+  Clock,
+  Code2,
 } from "lucide-react";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -215,16 +221,15 @@ function StepIndicator({ current }: { current: number }) {
               <div className="flex items-center w-full relative">
                 {/* Left connector */}
                 <div className={`flex-1 h-0.5 ${idx === 0 ? 'bg-transparent' : isDone || isActive ? 'bg-indigo-300' : 'bg-slate-200'}`} />
-                
+
                 {/* Circle */}
                 <div
-                  className={`w-9 h-9 shrink-0 rounded-full flex items-center justify-center border-2 transition-all duration-200 z-10 ${
-                    isActive
+                  className={`w-9 h-9 shrink-0 rounded-full flex items-center justify-center border-2 transition-all duration-200 z-10 ${isActive
                       ? "bg-indigo-600 border-indigo-600 text-white shadow-md shadow-indigo-200"
                       : isDone
-                      ? "bg-indigo-100 border-indigo-300 text-indigo-600"
-                      : "bg-slate-50 border-slate-200 text-slate-400"
-                  }`}
+                        ? "bg-indigo-100 border-indigo-300 text-indigo-600"
+                        : "bg-slate-50 border-slate-200 text-slate-400"
+                    }`}
                 >
                   <Icon className="w-4 h-4" />
                 </div>
@@ -232,16 +237,15 @@ function StepIndicator({ current }: { current: number }) {
                 {/* Right connector */}
                 <div className={`flex-1 h-0.5 ${idx === STEPS.length - 1 ? 'bg-transparent' : isDone ? 'bg-indigo-300' : 'bg-slate-200'}`} />
               </div>
-              
+
               {/* Label */}
               <span
-                className={`text-[11px] font-medium whitespace-nowrap mt-1 ${
-                  isActive
+                className={`text-[11px] font-medium whitespace-nowrap mt-1 ${isActive
                     ? "text-indigo-700"
                     : isDone
-                    ? "text-indigo-500"
-                    : "text-slate-400"
-                }`}
+                      ? "text-indigo-500"
+                      : "text-slate-400"
+                  }`}
               >
                 {step.label}
               </span>
@@ -425,9 +429,8 @@ function Step3Questions({
       {questions.map((q, idx) => (
         <div
           key={idx}
-          className={`border-l-4 ${
-            CATEGORY_BORDER[q.category] || CATEGORY_BORDER.default
-          } bg-white border border-slate-200 rounded-lg p-4 space-y-3 shadow-sm`}
+          className={`border-l-4 ${CATEGORY_BORDER[q.category] || CATEGORY_BORDER.default
+            } bg-white border border-slate-200 rounded-lg p-4 space-y-3 shadow-sm`}
         >
           <div className="flex items-start justify-between gap-2">
             <div className="flex items-center gap-2 flex-wrap">
@@ -448,11 +451,10 @@ function Step3Questions({
               </Select>
               <button
                 onClick={() => update(idx, { is_default: !q.is_default })}
-                className={`text-[11px] px-2.5 py-1 rounded-full border font-medium transition-colors ${
-                  q.is_default
+                className={`text-[11px] px-2.5 py-1 rounded-full border font-medium transition-colors ${q.is_default
                     ? "bg-indigo-100 text-indigo-700 border-indigo-200"
                     : "bg-slate-100 text-slate-500 border-slate-200"
-                }`}
+                  }`}
               >
                 {q.is_default ? "Default ✓" : "Not Default"}
               </button>
@@ -497,12 +499,15 @@ function Step4Review({
   json,
   loading,
   error,
+  wizardState,
 }: {
   json: string;
   loading: boolean;
   error: string | null;
+  wizardState: WizardState;
 }) {
   const [copied, setCopied] = useState(false);
+  const [showJson, setShowJson] = useState(false);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(json);
@@ -510,31 +515,139 @@ function Step4Review({
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const { candidate, job, questions } = wizardState;
+  const locationParts = [job.city, job.state].filter(Boolean).join(", ");
+
   return (
-    <div className="space-y-3">
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-slate-500">
-          Review the final payload before sending the interview.
-        </p>
-        <Button variant="ghost" size="sm" onClick={handleCopy} className="gap-1.5 text-slate-500 h-8">
-          {copied ? (
-            <><Check className="w-3.5 h-3.5 text-emerald-500" /> Copied</>
-          ) : (
-            <><Copy className="w-3.5 h-3.5" /> Copy JSON</>
-          )}
-        </Button>
+    <div className="space-y-4">
+      {/* ── Candidate Summary Card ── */}
+      <div className="bg-gradient-to-br from-indigo-50 to-slate-50 border border-indigo-100 rounded-xl p-4">
+        <div className="flex items-center gap-2 mb-3">
+          <div className="w-7 h-7 rounded-full bg-indigo-100 flex items-center justify-center">
+            <User className="w-3.5 h-3.5 text-indigo-600" />
+          </div>
+          <h4 className="text-[13px] font-bold text-slate-800">Candidate</h4>
+        </div>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+          <div className="flex items-center gap-2">
+            <User className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+            <span className="text-[13px] text-slate-800 font-medium truncate">{candidate.name || "—"}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+            <span className="text-[13px] text-slate-600 truncate">{candidate.email || "—"}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Phone className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+            <span className="text-[13px] text-slate-600">{candidate.phone || "—"}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+            <span className="text-[13px] text-slate-600">{candidate.experience || "—"}</span>
+          </div>
+        </div>
+        {candidate.summary && (
+          <p className="text-[12px] text-slate-500 mt-2 line-clamp-2 border-t border-indigo-100 pt-2">
+            {candidate.summary}
+          </p>
+        )}
       </div>
 
-      <div className="relative rounded-lg overflow-hidden border border-slate-800">
-        <div className="absolute top-0 left-0 right-0 h-7 bg-slate-800 flex items-center px-3 gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-red-400" />
-          <span className="w-2.5 h-2.5 rounded-full bg-amber-400" />
-          <span className="w-2.5 h-2.5 rounded-full bg-emerald-400" />
-          <span className="text-[11px] text-slate-400 ml-2 font-mono">payload.json</span>
+      {/* ── Job Summary Card ── */}
+      <div className="bg-gradient-to-br from-emerald-50 to-slate-50 border border-emerald-100 rounded-xl p-4">
+        <div className="flex items-center gap-2 mb-3">
+          <div className="w-7 h-7 rounded-full bg-emerald-100 flex items-center justify-center">
+            <Briefcase className="w-3.5 h-3.5 text-emerald-600" />
+          </div>
+          <h4 className="text-[13px] font-bold text-slate-800">Job Details</h4>
         </div>
-        <pre className="text-[11px] font-mono bg-slate-900 text-slate-200 overflow-auto max-h-[280px] p-4 pt-10 leading-relaxed whitespace-pre-wrap">
-          {json}
-        </pre>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-2">
+          <div>
+            <span className="text-[11px] text-slate-400 uppercase tracking-wide">Title</span>
+            <p className="text-[13px] text-slate-800 font-medium truncate">{job.title || "—"}</p>
+          </div>
+          <div>
+            <span className="text-[11px] text-slate-400 uppercase tracking-wide">Company</span>
+            <p className="text-[13px] text-slate-600 truncate">{job.customer_name || "—"}</p>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
+            <span className="text-[12px] text-slate-500">{locationParts || "—"} · {job.location_type || "—"}</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <Clock className="w-3 h-3 text-slate-400 shrink-0" />
+            <span className="text-[12px] text-slate-500">{job.interview_duration ? `${job.interview_duration} min` : "—"}</span>
+          </div>
+        </div>
+        <div className="flex items-center gap-3 mt-2 pt-2 border-t border-emerald-100">
+          <span className="text-[11px] font-mono text-slate-400">ID: {job.job_id || "—"}</span>
+          <span className="text-[11px] text-slate-300">|</span>
+          <span className="text-[11px] font-mono text-slate-400">JD: {job.jobdiva_id || "—"}</span>
+        </div>
+      </div>
+
+      {/* ── Questions Summary ── */}
+      <div className="bg-gradient-to-br from-amber-50 to-slate-50 border border-amber-100 rounded-xl p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <div className="w-7 h-7 rounded-full bg-amber-100 flex items-center justify-center">
+              <HelpCircle className="w-3.5 h-3.5 text-amber-600" />
+            </div>
+            <h4 className="text-[13px] font-bold text-slate-800">Pre-Screen Questions</h4>
+          </div>
+          <span className="text-[12px] font-medium text-amber-600 bg-amber-100 px-2 py-0.5 rounded-full">
+            {questions.length} question{questions.length !== 1 ? "s" : ""}
+          </span>
+        </div>
+        {questions.length > 0 ? (
+          <div className="space-y-1.5 max-h-[120px] overflow-y-auto pr-1">
+            {questions.map((q, idx) => (
+              <div key={idx} className="flex items-start gap-2">
+                <span className="text-[11px] font-bold text-slate-400 mt-0.5 shrink-0 w-4 text-right">{idx + 1}.</span>
+                <p className="text-[12px] text-slate-600 leading-relaxed line-clamp-1">{q.question_text}</p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-[12px] text-slate-400 italic">No questions configured.</p>
+        )}
+      </div>
+
+      {/* ── Raw JSON (collapsible) ── */}
+      <div className="border border-slate-200 rounded-xl overflow-hidden">
+        <div
+          onClick={() => setShowJson(!showJson)}
+          className="w-full flex items-center justify-between px-4 py-2.5 bg-slate-50 hover:bg-slate-100 transition-colors text-left cursor-pointer"
+          role="button"
+        >
+          <div className="flex items-center gap-2">
+            <Code2 className="w-3.5 h-3.5 text-slate-400" />
+            <span className="text-[12px] font-medium text-slate-600">Raw JSON Payload</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); handleCopy(); }} className="gap-1.5 text-slate-400 h-6 text-[11px] px-2 hover:text-slate-700">
+              {copied ? (
+                <><Check className="w-3 h-3 text-emerald-500" /> Copied</>
+              ) : (
+                <><Copy className="w-3 h-3" /> Copy</>
+              )}
+            </Button>
+            <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform duration-200 ${showJson ? "rotate-180" : ""}`} />
+          </div>
+        </div>
+        {showJson && (
+          <div className="relative">
+            <div className="absolute top-0 left-0 right-0 h-7 bg-slate-800 flex items-center px-3 gap-1.5">
+              <span className="w-2 h-2 rounded-full bg-red-400" />
+              <span className="w-2 h-2 rounded-full bg-amber-400" />
+              <span className="w-2 h-2 rounded-full bg-emerald-400" />
+              <span className="text-[10px] text-slate-500 ml-2 font-mono">payload.json</span>
+            </div>
+            <pre className="text-[11px] font-mono bg-slate-900 text-slate-300 overflow-auto max-h-[200px] p-4 pt-10 leading-relaxed whitespace-pre-wrap">
+              {json}
+            </pre>
+          </div>
+        )}
       </div>
 
       {error && (
@@ -659,11 +772,12 @@ export function EngageWizardModal({
               onChange={(q) => setWizardState({ ...wizardState, questions: q })}
             />
           )}
-          {step === 4 && (
+          {step === 4 && wizardState && (
             <Step4Review
               json={finalJson}
               loading={loading}
               error={error}
+              wizardState={wizardState}
             />
           )}
         </div>
