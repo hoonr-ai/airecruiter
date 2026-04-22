@@ -10,6 +10,15 @@ from services.jobdiva import JobDivaService
 from services.unipile import unipile_service
 from services.vetted import vetted_service
 from services.exa_service import exa_service
+from core.config import (
+    SCORING_REQUIRED_WEIGHT,
+    SCORING_PREFERRED_WEIGHT,
+    SCORING_YEARS_UNKNOWN_MULT,
+    SCORING_YEARS_FLOOR,
+    SCORING_RECENT_PENALTY,
+    SCORING_EXCLUSION_CAP,
+    SCORING_EXCLUSION_PER_HIT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -911,15 +920,18 @@ class UnifiedCandidateSearch:
         if min_years > 0:
             years = float(profile.get("years_of_experience") or 0)
             if years <= 0:
-                score *= 0.75
+                # T2: years-unknown multiplier (was 0.75, softened via env).
+                score *= SCORING_YEARS_UNKNOWN_MULT
             elif years < min_years:
-                score *= max(0.35, years / min_years)
+                # T2: years-below-min floor (was 0.35, softened via env).
+                score *= max(SCORING_YEARS_FLOOR, years / min_years)
 
         if self._group_recent(group):
             terms = self._group_terms(group)
             recent_text = profile.get("recent_text", "")
             if terms and not any(term in recent_text for term in terms):
-                score *= 0.85
+                # T2: not-recent penalty (was 0.85, softened via env).
+                score *= SCORING_RECENT_PENALTY
 
         return score
 
@@ -1033,17 +1045,25 @@ class UnifiedCandidateSearch:
             preferred_matches = self._matched_term_groups(profile, preferred_groups, dimension["collections"])
             excluded_matches = self._matched_term_groups(profile, excluded_groups, dimension["collections"])
 
-            required_ratio = (
-                sum(self._term_group_score(profile, group, dimension["collections"]) for group in required_groups)
-                / len(required_groups)
-            ) if required_groups else 1.0
-            preferred_ratio = (
-                sum(self._term_group_score(profile, group, dimension["collections"]) for group in preferred_groups)
-                / len(preferred_groups)
-            ) if preferred_groups else 1.0
+            # Part 3: weighted mean across groups so recruiters can flag
+            # individual filters as 2x or 0.5x in the UI. Default weight is
+            # 1.0, which reproduces the previous arithmetic-mean formula.
+            def _weighted_ratio(groups):
+                if not groups:
+                    return 1.0
+                total_w = sum(float(g.get("weight") or 1.0) for g in groups) or float(len(groups))
+                return sum(
+                    self._term_group_score(profile, g, dimension["collections"])
+                    * float(g.get("weight") or 1.0)
+                    for g in groups
+                ) / total_w
+
+            required_ratio = _weighted_ratio(required_groups) if required_groups else 1.0
+            preferred_ratio = _weighted_ratio(preferred_groups) if preferred_groups else 1.0
             base_ratio = 0.0
             if required_groups and preferred_groups:
-                base_ratio = (required_ratio * 0.75) + (preferred_ratio * 0.25)
+                # T1: rebalance required-vs-preferred (was 0.75/0.25, softened via env).
+                base_ratio = (required_ratio * SCORING_REQUIRED_WEIGHT) + (preferred_ratio * SCORING_PREFERRED_WEIGHT)
             elif required_groups:
                 base_ratio = required_ratio
             elif preferred_groups:
@@ -1062,7 +1082,11 @@ class UnifiedCandidateSearch:
             }
 
             if excluded_matches:
-                penalty = min(total_weight * 0.6, len(excluded_matches) * max(4.0, total_weight * 0.25))
+                # T3: cap exclusion penalty (was 0.6 / 0.25, softened via env).
+                penalty = min(
+                    total_weight * SCORING_EXCLUSION_CAP,
+                    len(excluded_matches) * max(4.0, total_weight * SCORING_EXCLUSION_PER_HIT),
+                )
                 weighted_scores.append(-penalty)
                 score_details[dimension["label"]]["exclusion_penalty"] = round(penalty, 2)
                 explainability.append(
@@ -1319,6 +1343,7 @@ class UnifiedCandidateSearch:
             label: str = "",
             years: int = 0,
             recent: bool = False,
+            weight: float = 1.0,
         ) -> None:
             clean_values = [value for value in values if str(value).strip()]
             if not clean_values:
@@ -1329,17 +1354,32 @@ class UnifiedCandidateSearch:
                 target = "excluded"
             elif match_type in {"can", "preferred", "nice to have", "nice-to-have"}:
                 target = "preferred"
-            
-            # Avoid duplicate identical groups in the same dimension
+
+            # Clamp weight to the same [0.1, 5] band the UI enforces, with a
+            # 1.0 default so legacy payloads behave identically to before.
+            try:
+                w = float(weight)
+            except (TypeError, ValueError):
+                w = 1.0
+            w = max(0.1, min(5.0, w)) if w > 0 else 1.0
+
+            # Avoid duplicate identical groups in the same dimension. If the
+            # same term re-enters with a different weight (e.g. once via the
+            # sourcing criteria at weight 1.0, once via a resume-match filter
+            # at weight 2.0), keep the higher weight — recruiter intent.
             existing_groups = dimensions[bucket][f"{target}_groups"]
-            if any(set(g["terms"]) == set(clean_values) and g["label"] == (label or clean_values[0]) for g in existing_groups):
-                return
+            for g in existing_groups:
+                if set(g["terms"]) == set(clean_values) and g["label"] == (label or clean_values[0]):
+                    if w > float(g.get("weight") or 1.0):
+                        g["weight"] = w
+                    return
 
             dimensions[bucket][f"{target}_groups"].append({
                 "terms": clean_values,
                 "label": label or clean_values[0],
                 "years": years or 0,
                 "recent": recent,
+                "weight": w,
             })
 
         # 1. Include Page 5 Sourcing Criteria (as baseline relevance)
@@ -1357,7 +1397,7 @@ class UnifiedCandidateSearch:
         for filter_item in criteria.resume_match_filters:
             if not filter_item.get("active", True):
                 continue
-                
+
             category = str(filter_item.get("category", "")).lower()
             raw_value = str(filter_item.get("value", "")).strip()
             if not raw_value:
@@ -1367,23 +1407,30 @@ class UnifiedCandidateSearch:
             if not term:
                 continue
 
+            # Part 3: per-filter weight from the Step-5 UI. Default 1.0 preserves
+            # the pre-weight behaviour for legacy payloads.
+            try:
+                fw = float(filter_item.get("weight") if filter_item.get("weight") is not None else 1.0)
+            except (TypeError, ValueError):
+                fw = 1.0
+
             if "customer" in category or raw_value.lower().startswith("must not"):
-                add_terms("companies", "exclude", [term])
+                add_terms("companies", "exclude", [term], weight=fw)
             elif "title" in category:
-                add_terms("titles", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term])
+                add_terms("titles", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
             elif "skill" in category:
-                add_terms("skills", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term])
+                add_terms("skills", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
             elif "edu" in category:
-                add_terms("education", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term])
+                add_terms("education", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
             elif "cert" in category or "license" in category:
-                add_terms("certifications", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term])
+                add_terms("certifications", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
             elif "domain" in category:
-                add_terms("companies", "can", [term])
-                add_terms("keywords", "can", [term])
+                add_terms("companies", "can", [term], weight=fw)
+                add_terms("keywords", "can", [term], weight=fw)
             elif "local" in term.lower() or "location" in category:
-                add_terms("location", "must", [term])
+                add_terms("location", "must", [term], weight=fw)
             else:
-                add_terms("keywords", "must", [term])
+                add_terms("keywords", "must", [term], weight=fw)
 
         return list(dimensions.values())
 
