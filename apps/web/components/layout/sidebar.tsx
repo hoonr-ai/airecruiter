@@ -3,7 +3,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Briefcase, Users, Settings, Bot } from "lucide-react";
+import { LayoutDashboard, Briefcase, Users, Settings } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function Sidebar() {
@@ -18,8 +18,14 @@ export function Sidebar() {
     return (
         <div className="w-[260px] border-r border-slate-200 bg-white h-screen flex flex-col fixed left-0 top-0 p-6">
             <div className="brand flex items-center gap-3 mb-10">
-                <Bot className="w-8 h-8 text-primary" strokeWidth={2.5} />
-                <span className="text-2xl font-bold tracking-tight text-primary font-outfit">PAIR</span>
+                <Image
+                    src="/hoonr-logo.png"
+                    alt="Hoonr.Curate"
+                    width={160}
+                    height={36}
+                    priority
+                    className="object-contain"
+                />
             </div>
 
             <nav>
