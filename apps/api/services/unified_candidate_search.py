@@ -95,8 +95,17 @@ class UnifiedCandidateSearch:
             cand["match_score_details"] = score_result.get("score_details", {})
             return cand
 
-        jobdiva_selected = "JobDiva" in criteria.sources
-        hotlist_selected = "JobDiva Hotlist" in criteria.sources
+        # JobDiva is now two independent sources that run in parallel:
+        #   - "JobDiva Applicants": all people who applied to this job_id (no boolean)
+        #   - "JobDiva": talent-pool boolean search
+        # Back-compat: if only "JobDiva" is selected, we still run Applicants too
+        # (the previous behaviour — Applicants first, Talent only if <3 qualified —
+        # has been replaced with unconditional parallel execution of both).
+        applicants_selected = (
+            "JobDiva Applicants" in criteria.sources
+            or "JobDiva" in criteria.sources
+        )
+        talent_selected = "JobDiva" in criteria.sources
 
         queue: asyncio.Queue = asyncio.Queue()
         SENTINEL = object()
@@ -122,64 +131,79 @@ class UnifiedCandidateSearch:
             summary["total_candidates"] += 1
             await queue.put({"type": "candidate", "data": cand})
 
-        async def produce_jobdiva():
+        async def produce_jobdiva_applicants():
+            """
+            Fetch every candidate who has applied to this job_id in JobDiva
+            (no boolean string). Emitted under source=JobDiva-Applicants.
+            Skipped for external jobs (negative job_id / EXT-), which have
+            no JobDiva applicants.
+            """
             try:
-                if not jobdiva_selected:
+                if not applicants_selected:
                     return
-                # External jobs (negative job_id or EXT- ref) have no JobDiva applicants.
-                # Skip Applicants and go straight to Talent Search.
                 job_id_str = str(criteria.job_id or "")
                 is_external_job = job_id_str.startswith("-") or job_id_str.startswith("EXT-")
-
-                if not is_external_job:
-                    await queue.put({"type": "stage", "data": "Searching JobDiva applicants..."})
-                    applicants_res = await self._search_jobdiva_applicants(criteria)
-                    applicants = applicants_res.get("candidates", [])
-                    summary["job_applicants_count"] = len(applicants)
-
-                    if applicants:
-                        self._log_stage("Applicants", f"Found {len(applicants)} applicants; starting resume screen...")
-                        self._attach_cached_enhanced_info(applicants)
-                        async for cand in self._enrich_filtered_jobdiva_candidates(applicants, criteria):
-                            assessment = self._filter_assessment(cand, criteria, enforce_years=True)
-                            if not assessment["passes"]:
-                                self._log_stage(
-                                    "Applicants",
-                                    f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
-                                )
-                            await emit_candidate(cand, assessment, "qualified_applicants")
-                    else:
-                        self._log_stage("Applicants", "No applicants found.")
-                else:
-                    self._log_stage("Applicants", f"External job {job_id_str} — skipping Applicants; running Talent Search only.")
-
-                if is_external_job or summary["qualified_applicants"] < 3:
-                    await queue.put({"type": "stage", "data": "Searching JobDiva Talent Search..."})
-                    reason = (
-                        f"only {summary['qualified_applicants']} qualified applicants"
-                        if summary["qualified_applicants"] > 0
-                        else "no qualified applicants"
+                if is_external_job:
+                    self._log_stage(
+                        "Applicants",
+                        f"External job {job_id_str} — no JobDiva applicants to fetch.",
                     )
-                    self._log_stage("TalentSearch", f"Triggering talent search: {reason}")
-                    talent_res = await self._search_jobdiva_talent(criteria)
-                    talent_pool = talent_res.get("candidates", [])
-                    summary["talent_search_count"] = len(talent_pool)
-                    if talent_pool:
-                        self._attach_cached_enhanced_info(talent_pool)
-                        async for cand in self._enrich_filtered_jobdiva_candidates(talent_pool, criteria):
-                            assessment = self._filter_assessment(cand, criteria, enforce_years=True)
-                            if not assessment["passes"]:
-                                self._log_stage(
-                                    "TalentSearch",
-                                    f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
-                                )
-                            await emit_candidate(cand, assessment, "qualified_talent")
+                    return
 
-                if hotlist_selected:
-                    await queue.put({"type": "stage", "data": "Searching JobDiva Hotlist..."})
-                    self._log_stage("Hotlist", "Hotlist search requested but not yet implemented.")
+                await queue.put({"type": "stage", "data": "Searching JobDiva applicants..."})
+                applicants_res = await self._search_jobdiva_applicants(criteria)
+                applicants = applicants_res.get("candidates", [])
+                summary["job_applicants_count"] = len(applicants)
+
+                if not applicants:
+                    self._log_stage("Applicants", "No applicants found.")
+                    return
+
+                self._log_stage(
+                    "Applicants",
+                    f"Found {len(applicants)} applicants; starting resume screen...",
+                )
+                self._attach_cached_enhanced_info(applicants)
+                async for cand in self._enrich_filtered_jobdiva_candidates(applicants, criteria):
+                    assessment = self._filter_assessment(cand, criteria, enforce_years=True)
+                    if not assessment["passes"]:
+                        self._log_stage(
+                            "Applicants",
+                            f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
+                        )
+                    await emit_candidate(cand, assessment, "qualified_applicants")
             except Exception as e:
-                logger.error(f"JobDiva search stage failed: {e}", exc_info=True)
+                logger.error(f"JobDiva Applicants stage failed: {e}", exc_info=True)
+            finally:
+                await queue.put(SENTINEL)
+
+        async def produce_jobdiva_talent():
+            """
+            Run the boolean-string Talent Search against the JobDiva talent pool.
+            Independent of Applicants — runs whenever "JobDiva" is in sources.
+            """
+            try:
+                if not talent_selected:
+                    return
+                await queue.put({"type": "stage", "data": "Searching JobDiva Talent Search..."})
+                self._log_stage("TalentSearch", "Running JobDiva Talent boolean search...")
+                talent_res = await self._search_jobdiva_talent(criteria)
+                talent_pool = talent_res.get("candidates", [])
+                summary["talent_search_count"] = len(talent_pool)
+                if not talent_pool:
+                    self._log_stage("TalentSearch", "No talent-pool candidates returned.")
+                    return
+                self._attach_cached_enhanced_info(talent_pool)
+                async for cand in self._enrich_filtered_jobdiva_candidates(talent_pool, criteria):
+                    assessment = self._filter_assessment(cand, criteria, enforce_years=True)
+                    if not assessment["passes"]:
+                        self._log_stage(
+                            "TalentSearch",
+                            f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
+                        )
+                    await emit_candidate(cand, assessment, "qualified_talent")
+            except Exception as e:
+                logger.error(f"JobDiva Talent stage failed: {e}", exc_info=True)
             finally:
                 await queue.put(SENTINEL)
 
@@ -249,10 +273,14 @@ class UnifiedCandidateSearch:
             finally:
                 await queue.put(SENTINEL)
 
-        # Build producer tasks for all selected sources — run in parallel
+        # Build producer tasks for all selected sources — run in parallel.
+        # JobDiva Applicants and JobDiva Talent are now independent producers,
+        # each with its own SENTINEL, so they stream concurrently alongside Exa/Unipile/Dice.
         producers = []
-        if jobdiva_selected or hotlist_selected:
-            producers.append(asyncio.create_task(produce_jobdiva()))
+        if applicants_selected:
+            producers.append(asyncio.create_task(produce_jobdiva_applicants()))
+        if talent_selected:
+            producers.append(asyncio.create_task(produce_jobdiva_talent()))
 
         external_order = [
             ("LinkedIn", self._search_linkedin),
