@@ -2,6 +2,7 @@
 import json
 import re
 import time
+import hashlib
 import asyncio
 import logging
 from typing import List, Optional, Dict, Any
@@ -10,7 +11,8 @@ from sqlalchemy import text
 from core.config import (
     DATABASE_URL, SUPABASE_DB_URL,
     AZURE_OPENAI_API_KEY,
-    OPENAI_API_KEY, OPENAI_MODEL
+    OPENAI_API_KEY, OPENAI_MODEL,
+    LLM_CONCURRENCY,
 )
 import httpx
 from models import SourcedCandidate
@@ -448,7 +450,84 @@ sourced_candidates_storage = SourcedCandidatesStorage()
 
 
 # Concurrency controls to prevent 429 Too Many Requests for LLM enrichment.
-_llm_semaphore = asyncio.Semaphore(2)  # Reduced to 2 to avoid rate limits
+# Width configurable via LLM_CONCURRENCY env (default 5). Previous hard-coded 2
+# serialized crisp+extract behind a 2-wide gate, adding wall-time cost even
+# when the upstream API could handle more.
+_llm_semaphore = asyncio.Semaphore(max(1, LLM_CONCURRENCY))
+
+
+def _resume_text_hash(resume_text: str) -> Optional[str]:
+    """SHA256 over normalized resume text for extraction-cache lookups.
+
+    Returns None when the input is too short to meaningfully cache against
+    (mirrors the ``min_text_length=50`` gate in ``_process_candidate_common``).
+    """
+    if not resume_text:
+        return None
+    normalized = re.sub(r"\s+", " ", resume_text).strip()
+    if len(normalized) < 50:
+        return None
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _lookup_cached_enhanced_info_by_resume_hash(resume_hash: str) -> Optional[Dict[str, Any]]:
+    """Return a reusable enhanced_info payload for a resume we've already
+    LLM-parsed. Keyed on resume_text SHA256 so the same resume content parsed
+    against a different candidate_id (JobDiva re-ingestion, duplicate
+    applicants) doesn't trigger a second LLM pass.
+
+    Returns None on miss or any DB error (callers treat None as "go parse").
+    """
+    if not resume_hash:
+        return None
+    try:
+        engine = sqlalchemy.create_engine(DATABASE_URL)
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT candidate_name, email, phone, job_title, current_location,
+                       years_of_experience, key_skills, company_experience,
+                       candidate_education, candidate_certification, urls, source,
+                       resume_extraction_status
+                FROM candidate_enhanced_info
+                WHERE resume_hash = :h
+                  AND resume_extraction_status = 'completed'
+                ORDER BY extracted_at DESC
+                LIMIT 1
+            """), {"h": resume_hash}).fetchone()
+            if not row:
+                return None
+            row_map = row._mapping if hasattr(row, "_mapping") else dict(row)
+
+            def _j(value):
+                if value is None:
+                    return []
+                if isinstance(value, (list, dict)):
+                    return value
+                try:
+                    return json.loads(value)
+                except Exception:
+                    return []
+
+            return {
+                "candidate_name": row_map.get("candidate_name"),
+                "email": row_map.get("email"),
+                "phone": row_map.get("phone"),
+                "job_title": row_map.get("job_title"),
+                "current_location": row_map.get("current_location"),
+                "years_of_experience": row_map.get("years_of_experience"),
+                "structured_skills": _j(row_map.get("key_skills")),
+                "key_skills": _j(row_map.get("key_skills")),
+                "company_experience": _j(row_map.get("company_experience")),
+                "candidate_education": _j(row_map.get("candidate_education")),
+                "candidate_certification": _j(row_map.get("candidate_certification")),
+                "urls": _j(row_map.get("urls")) if row_map.get("urls") else {},
+                "source": row_map.get("source"),
+                "resume_extraction_status": row_map.get("resume_extraction_status"),
+                "_cache_hit": "resume_hash",
+            }
+    except Exception as exc:
+        logger.debug(f"resume_hash cache lookup failed (soft miss): {exc}")
+        return None
 
 async def crisp_resume_with_ai(resume_text: str, max_length: int = 7500) -> str:
     """
@@ -718,14 +797,38 @@ async def _process_candidate_common(
         return candidate
 
     logger.info(f"📄 [{source} Candidate:{candidate_id}] Text length: {len(resume_text_for_llm)} characters")
-    crisped = await crisp_resume_with_ai(resume_text_for_llm, max_length=12000)
-    logger.info(f"📄 [{source} Candidate:{candidate_id}] Crisped to {len(crisped)} chars")
 
-    enhanced_info_result = await extract_enhanced_info_with_llm(crisped)
+    # Resume-hash cache: the same resume parsed once costs money; look up by
+    # SHA256 of the resume text before calling crisp+extract. On hit we skip
+    # both LLM calls entirely.
+    resume_hash = _resume_text_hash(resume_text_to_save or resume_text_for_llm)
+    enhanced_info_result: Optional[Dict[str, Any]] = None
+    if resume_hash:
+        cached = _lookup_cached_enhanced_info_by_resume_hash(resume_hash)
+        if cached:
+            logger.info(
+                f"💾 [{source} Candidate:{candidate_id}] resume_hash cache HIT, "
+                f"skipping crisp+LLM"
+            )
+            enhanced_info_result = cached
 
+    if enhanced_info_result is None:
+        crisped = await crisp_resume_with_ai(resume_text_for_llm, max_length=12000)
+        logger.info(f"📄 [{source} Candidate:{candidate_id}] Crisped to {len(crisped)} chars")
+        enhanced_info_result = await extract_enhanced_info_with_llm(crisped)
+
+    extraction_error: Optional[str] = None
     if enhanced_info_result.get("error"):
-        logger.error(f"❌ [{source} Candidate:{candidate_id}] LLM error: {enhanced_info_result.get('error')}")
+        extraction_error = str(enhanced_info_result.get("error"))
+        logger.error(f"❌ [{source} Candidate:{candidate_id}] LLM error: {extraction_error}")
         formatted_skills = []
+    elif enhanced_info_result.get("_cache_hit"):
+        # Cached payload already stores skills in the final structured shape
+        # ({"skill": ..., "similar_skills": [...]}) under "structured_skills".
+        cached_skills = enhanced_info_result.get("structured_skills") or []
+        formatted_skills = [
+            s for s in cached_skills if isinstance(s, dict) and s.get("skill")
+        ]
     else:
         formatted_skills = _normalize_llm_skills(enhanced_info_result)
 
@@ -776,6 +879,12 @@ async def _process_candidate_common(
         ]) else "partial"
     }
 
+    # Fix 2 (Path A′ observability): stamp LLM-extraction error onto the
+    # enhanced_info so downstream scoring and the streamed stage event can
+    # tell a silent degradation apart from a clean empty extraction.
+    if extraction_error:
+        enhanced_info["_extraction_error"] = extraction_error
+
     _log_extraction_snapshot(candidate_id, enhanced_info)
 
     try:
@@ -798,6 +907,7 @@ async def _process_candidate_common(
         "certifications": enhanced_info.get("candidate_certification", []),
         "urls": enhanced_info.get("urls", {}),
         "raw": enhanced_info,
+        "_extraction_error": extraction_error,
     }
 
 
@@ -931,12 +1041,22 @@ def save_candidate_enhanced_info(candidate_id: str, enhanced_info: Dict[str, Any
                     candidate_certification JSONB DEFAULT '[]'::jsonb,
                     urls JSONB DEFAULT '{}'::jsonb,
                     resume_text TEXT,
+                    resume_hash TEXT,
                     resume_extraction_status TEXT DEFAULT 'pending',
                     source TEXT DEFAULT 'JobDiva',
                     extracted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + '30 days'::interval)
                 )
             """))
+            # Idempotent migrations for existing deployments: add resume_hash
+            # column + index if the table already exists without them.
+            conn.execute(text(
+                "ALTER TABLE candidate_enhanced_info ADD COLUMN IF NOT EXISTS resume_hash TEXT"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_candidate_enhanced_info_resume_hash "
+                "ON candidate_enhanced_info (resume_hash)"
+            ))
             
             # Safe int parsing for years_experience
             raw_years = enhanced_info.get("years_of_experience")
@@ -955,15 +1075,17 @@ def save_candidate_enhanced_info(candidate_id: str, enhanced_info: Dict[str, Any
             certifications = enhanced_info.get("candidate_certification", [])
             urls = enhanced_info.get("urls", {})
             
+            resume_hash = _resume_text_hash(resume_text or "")
+
             conn.execute(text("""
                 INSERT INTO candidate_enhanced_info
-                (candidate_id, candidate_name, email, phone, job_title, current_location, 
+                (candidate_id, candidate_name, email, phone, job_title, current_location,
                  years_of_experience, key_skills, company_experience, candidate_education,
-                 candidate_certification, urls, resume_text, 
+                 candidate_certification, urls, resume_text, resume_hash,
                  resume_extraction_status, source, extracted_at)
-                VALUES (:candidate_id, :candidate_name, :email, :phone, :job_title, :current_location, 
+                VALUES (:candidate_id, :candidate_name, :email, :phone, :job_title, :current_location,
                         :years_of_experience, :key_skills, :company_experience, :candidate_education,
-                        :candidate_certification, :urls, :resume_text,
+                        :candidate_certification, :urls, :resume_text, :resume_hash,
                         :resume_extraction_status, :source, CURRENT_TIMESTAMP)
                 ON CONFLICT (candidate_id) DO UPDATE SET
                     candidate_name = EXCLUDED.candidate_name,
@@ -978,6 +1100,7 @@ def save_candidate_enhanced_info(candidate_id: str, enhanced_info: Dict[str, Any
                     candidate_certification = EXCLUDED.candidate_certification,
                     urls = EXCLUDED.urls,
                     resume_text = EXCLUDED.resume_text,
+                    resume_hash = EXCLUDED.resume_hash,
                     resume_extraction_status = EXCLUDED.resume_extraction_status,
                     source = EXCLUDED.source,
                     extracted_at = CURRENT_TIMESTAMP
@@ -995,6 +1118,7 @@ def save_candidate_enhanced_info(candidate_id: str, enhanced_info: Dict[str, Any
                 "candidate_certification": json.dumps(certifications),
                 "urls": json.dumps(urls),
                 "resume_text": resume_text,
+                "resume_hash": resume_hash,
                 "resume_extraction_status": enhanced_info.get("resume_extraction_status", "pending"),
                 "source": enhanced_info.get("source", "JobDiva")
             })

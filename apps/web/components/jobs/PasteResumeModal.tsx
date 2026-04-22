@@ -38,7 +38,7 @@ export function PasteResumeModal({
         <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
           <div>
             <h3 className="text-[16px] font-semibold text-slate-900">Add Candidate by Resume</h3>
-            <p className="text-[12px] text-slate-500 mt-0.5">Paste the resume text. PAIR will enrich and score against the job rubric.</p>
+            <p className="text-[12px] text-slate-500 mt-0.5">Paste the resume text. Hoonr-Curate will enrich and score against the job rubric.</p>
           </div>
           <button
             onClick={onClose}

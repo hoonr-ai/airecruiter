@@ -1,12 +1,14 @@
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from typing import List, Dict, Any, Optional
+import asyncio
 import json
 import logging
 
 from services.ai_service import ai_service
 from services.jobdiva import jobdiva_service
 from services.unipile import unipile_service
+from services.sourced_candidates_storage import sourced_candidates_storage
 from models import (
     CandidateSearchRequest, CandidateMessageRequest, CandidatesSaveRequest,
     CandidateAnalysisRequest, CandidateAnalysisResponse,
@@ -15,6 +17,35 @@ from routers._helpers import get_db_connection
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _candidate_to_persist_row(job_id: str, cand: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten a search-stream candidate dict into the bind params accepted by
+    `sourced_candidates_storage.save_enhanced_candidate`. Keep the full
+    candidate blob in `data` so we don't lose any source-specific fields
+    (scores, explainability, enhanced_info, etc.)."""
+    enhanced = cand.get("enhanced_info") or {}
+    candidate_id = str(cand.get("candidate_id") or cand.get("id") or "").strip()
+    return {
+        "jobdiva_id": str(job_id),
+        "candidate_id": candidate_id,
+        "source": str(cand.get("source") or "Unknown"),
+        "name": cand.get("name") or enhanced.get("candidate_name"),
+        "email": cand.get("email") or enhanced.get("email"),
+        "phone": cand.get("phone") or enhanced.get("phone"),
+        "headline": cand.get("headline") or enhanced.get("job_title"),
+        "location": cand.get("location") or enhanced.get("current_location"),
+        "profile_url": (
+            cand.get("profile_url")
+            or cand.get("linkedin_url")
+            or cand.get("url")
+        ),
+        "image_url": cand.get("image_url") or cand.get("profile_image_url"),
+        "resume_id": cand.get("resume_id"),
+        "resume_text": cand.get("resume_text"),
+        "data": json.dumps(cand, default=str),
+        "status": "sourced",
+    }
 
 
 @router.post("/candidates/search")
@@ -100,14 +131,52 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             boolean_string=request.boolean_string or ""
         )
 
-        # Execute unified search as a stream
+        # Execute unified search as a stream. Persist each candidate to
+        # `sourced_candidates` as it's yielded — fire-and-forget via
+        # asyncio.to_thread so the sync SQLAlchemy call doesn't block the
+        # event loop. We keep a reference list so pending tasks aren't
+        # garbage-collected mid-flight.
         async def stream_candidates():
+            persist_tasks: List[asyncio.Task] = []
             try:
                 async for event in unified_search_service.search_candidates(criteria):
                     yield json.dumps(event) + "\n"
+                    if event.get("type") == "candidate":
+                        cand = event.get("data") or {}
+                        if cand.get("candidate_id") or cand.get("id"):
+                            try:
+                                row = _candidate_to_persist_row(str(request.job_id), cand)
+                                task = asyncio.create_task(
+                                    asyncio.to_thread(
+                                        sourced_candidates_storage.save_enhanced_candidate,
+                                        str(request.job_id),
+                                        row,
+                                    )
+                                )
+                                persist_tasks.append(task)
+                            except Exception as persist_err:
+                                logger.warning(
+                                    f"Persist skipped for candidate "
+                                    f"{cand.get('candidate_id')}: {persist_err}"
+                                )
             except Exception as e:
                 logger.error(f"Error in search stream: {e}", exc_info=True)
                 yield json.dumps({"type": "error", "message": str(e)}) + "\n"
+            finally:
+                # Drain persist tasks so failures surface in logs instead of
+                # vanishing when the generator closes.
+                if persist_tasks:
+                    results = await asyncio.gather(*persist_tasks, return_exceptions=True)
+                    failures = [r for r in results if isinstance(r, Exception)]
+                    if failures:
+                        logger.warning(
+                            f"Candidate persistence: {len(failures)}/{len(results)} failed"
+                        )
+                    else:
+                        logger.info(
+                            f"Candidate persistence: saved {len(results)} rows for "
+                            f"job {request.job_id}"
+                        )
 
         return StreamingResponse(
             stream_candidates(),
@@ -119,6 +188,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
         # Fallback to original search logic
         try:
             from services.jobdiva import JobDivaService
+            from services.unified_candidate_search import unified_search_service, SearchCriteria
             jobdiva_service = JobDivaService()
 
             # Lightweight fallback: do not hydrate every applicant during search.
@@ -130,6 +200,52 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             ) if token else []
             for candidate in candidates:
                 candidate["source"] = "JobDiva-Applicants"
+
+            # Fix 3 (Path C): score fallback candidates so the UI doesn't render
+            # every applicant at 0%. We rebuild SearchCriteria from the request
+            # inline because the outer try block may have failed before
+            # `criteria` was constructed.
+            try:
+                fallback_location = ""
+                if request.locations:
+                    fallback_location = request.locations[0].value
+                elif request.location:
+                    fallback_location = request.location
+
+                fallback_resume_match_filters = (
+                    [f.dict() for f in request.resume_match_filters]
+                    if request.resume_match_filters else []
+                )
+
+                fallback_criteria = SearchCriteria(
+                    job_id=request.job_id,
+                    title_criteria=[t.dict() for t in (request.title_criteria or [])],
+                    skill_criteria=[s.dict() for s in (request.skill_criteria or [])],
+                    keywords=request.keywords or [],
+                    resume_match_filters=fallback_resume_match_filters,
+                    location=fallback_location,
+                    companies=request.companies or [],
+                    page_size=request.limit or 100,
+                    sources=request.sources or ["JobDiva"],
+                    open_to_work=request.open_to_work,
+                    boolean_string=request.boolean_string or "",
+                )
+
+                for candidate in candidates:
+                    try:
+                        scored = unified_search_service._score_candidate(candidate, fallback_criteria)
+                        if isinstance(scored, dict):
+                            score = scored.get("match_score", scored.get("score"))
+                            if score is not None:
+                                candidate["match_score"] = score
+                            if scored.get("explainability"):
+                                candidate["explainability"] = scored["explainability"]
+                            if scored.get("matched_skills"):
+                                candidate["matched_skills"] = scored["matched_skills"]
+                    except Exception as score_err:
+                        logger.debug(f"Fallback scoring skipped for one candidate: {score_err}")
+            except Exception as score_setup_err:
+                logger.warning(f"Fallback scoring setup failed, returning unscored: {score_setup_err}")
 
             return {
                 "candidates": candidates[:request.limit or 100],

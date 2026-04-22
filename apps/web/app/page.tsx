@@ -186,12 +186,12 @@ export default function DashboardPage() {
       "Program Duration",
       "Max Allowed Submittals",
       "Job Status",
-      "PAIR Status",
+      "Hoonr-Curate Status",
       "Candidates Sourced",
       "Resumes Shortlisted",
       "Complete Submissions",
       "Pass Submissions",
-      "PAIR External Subs",
+      "Hoonr-Curate External Subs",
       "Feedback Completed",
       "Time to First Pass",
     ];
@@ -331,12 +331,12 @@ export default function DashboardPage() {
                 <SortableHeader field="programDuration">PROGRAM DURATION</SortableHeader>
                 <SortableHeader field="maxAllowedSubmittals">MAX ALLOWED SUBMITTALS</SortableHeader>
                 <SortableHeader field="status">JOB STATUS</SortableHeader>
-                <SortableHeader field="pairStatus">PAIR STATUS</SortableHeader>
+                <SortableHeader field="pairStatus">HOONR-CURATE STATUS</SortableHeader>
                 <SortableHeader field="candidatesSourced">CANDIDATES SOURCED</SortableHeader>
                 <SortableHeader field="resumesShortlisted">RESUMES SHORTLISTED</SortableHeader>
                 <SortableHeader field="completeSubmissions">COMPLETE SUBMISSIONS</SortableHeader>
                 <SortableHeader field="passSubmissions">PASS SUBMISSIONS</SortableHeader>
-                <SortableHeader field="pairExternalSubs">PAIR EXTERNAL SUBS</SortableHeader>
+                <SortableHeader field="pairExternalSubs">HOONR-CURATE EXTERNAL SUBS</SortableHeader>
                 <SortableHeader field="feedbackCompleted">FEEDBACK COMPLETED</SortableHeader>
                 <SortableHeader field="timeToFirstPass">TIME TO FIRST PASS</SortableHeader>
                 <th className="px-6 py-4 text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide border-b border-l border-slate-100/50 sticky right-0 bg-[#fcfdfd] z-10 shadow-[-10px_0_15px_-5px_rgba(0,0,0,0.03)] whitespace-nowrap">
