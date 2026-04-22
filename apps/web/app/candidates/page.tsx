@@ -1,8 +1,8 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
-import { Search, ExternalLink, User, MapPin, Briefcase, Linkedin, ShieldCheck, Mail, ArrowLeft, Eye, Zap, Filter, ChevronDown } from "lucide-react";
+import { Search, ExternalLink, User, MapPin, Briefcase, Linkedin, ShieldCheck, Mail, ArrowLeft, Eye, Zap, Filter, ChevronDown, X, ArrowUp, ArrowDown, ChevronsUpDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -19,6 +19,82 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
+// Sentinel value for "All X" options. Radix Select forbids "" as an item
+// value, so we use this constant and map it to "no filter" in the pipeline.
+const ALL = "__all__";
+
+// Match-band filter options. Values encode the score range so the filter
+// pipeline can decode without a switch.
+const MATCH_BANDS: { value: string; label: string }[] = [
+  { value: ALL, label: "Any match" },
+  { value: "strong", label: "Strong (≥80%)" },
+  { value: "good", label: "Good (60–79%)" },
+  { value: "low", label: "Low (<60%)" },
+  { value: "unscored", label: "Unscored" },
+];
+
+function pickMatchScore(c: any): number | null {
+  const s = c?.match_score ?? c?.data?.match_score ?? c?.resume_match_percentage;
+  return typeof s === "number" && !Number.isNaN(s) ? s : null;
+}
+
+function matchBandMatches(c: any, band: string): boolean {
+  if (band === ALL) return true;
+  const s = pickMatchScore(c);
+  if (band === "unscored") return s === null;
+  if (s === null) return false;
+  if (band === "strong") return s >= 80;
+  if (band === "good") return s >= 60 && s < 80;
+  if (band === "low") return s < 60;
+  return true;
+}
+
+// Excel-style sorting: 1st header click = asc, 2nd = desc, 3rd = clear.
+type SortDir = "asc" | "desc" | null;
+type SortKey =
+  | "name"
+  | "match"
+  | "job_title"
+  | "location"
+  | "source"
+  | "created_at";
+
+// Accessor for each sortable column. Returns a comparable value per
+// candidate — numbers for match/date (so we don't parse strings on every
+// compare) and lowercased strings for text columns (so sort is
+// case-insensitive like Excel).
+const SORT_ACCESSORS: Record<SortKey, (c: any) => number | string> = {
+  name: (c) => (c.name || "").toLowerCase(),
+  match: (c) => {
+    const s = pickMatchScore(c);
+    return s ?? -Infinity; // unscored sinks to the bottom on asc
+  },
+  job_title: (c) => (c.job_title || `#${c.jobdiva_id || ""}`).toLowerCase(),
+  location: (c) => (c.location || "").toLowerCase(),
+  source: (c) => (c.source || "").toLowerCase(),
+  created_at: (c) => {
+    const t = c.created_at ? new Date(c.created_at).getTime() : 0;
+    return Number.isFinite(t) ? t : 0;
+  },
+};
+
+function compareCandidates(a: any, b: any, key: SortKey, dir: SortDir): number {
+  if (!dir) return 0;
+  const av = SORT_ACCESSORS[key](a);
+  const bv = SORT_ACCESSORS[key](b);
+  let cmp = 0;
+  if (typeof av === "number" && typeof bv === "number") cmp = av - bv;
+  else cmp = String(av).localeCompare(String(bv));
+  return dir === "asc" ? cmp : -cmp;
+}
 
 interface Candidate {
   id: number;
@@ -39,20 +115,20 @@ interface Candidate {
 
 export default function CandidatesPage() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [filteredCandidates, setFilteredCandidates] = useState<Candidate[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
+  const [jobFilter, setJobFilter] = useState<string>(ALL);
+  const [matchFilter, setMatchFilter] = useState<string>(ALL);
+  const [sourceFilter, setSourceFilter] = useState<string>(ALL);
+  const [locationFilter, setLocationFilter] = useState<string>(ALL);
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<SortDir>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const searchQueryRef = useRef("");
   const [messageModalOpen, setMessageModalOpen] = useState(false);
   const [selectedCandidateForEmail, setSelectedCandidateForEmail] = useState<any>(null);
   const [resumeModalOpen, setResumeModalOpen] = useState(false);
   const [selectedCandidateForResume, setSelectedCandidateForResume] = useState<any>(null);
   const [detailsModalOpen, setDetailsModalOpen] = useState(false);
   const [selectedCandidateForDetails, setSelectedCandidateForDetails] = useState<any>(null);
-
-  useEffect(() => {
-    searchQueryRef.current = searchQuery;
-  }, [searchQuery]);
 
   useEffect(() => {
     fetchCandidates(false);
@@ -71,7 +147,7 @@ export default function CandidatesPage() {
       const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates`);
       const data = await response.json();
       if (!isBackground) console.log("📊 Fetched candidates data:", data);
-      
+
       if (data.status === "success" && Array.isArray(data.candidates)) {
         const seen = new Set();
         const uniqueCandidates = data.candidates.filter((c: any) => {
@@ -94,7 +170,7 @@ export default function CandidatesPage() {
           const prioA = getSourcePriority(a.source);
           const prioB = getSourcePriority(b.source);
           if (prioA !== prioB) return prioA - prioB;
-          
+
           const scoreA = a.match_score || (a as any).resume_match_percentage || 0;
           const scoreB = b.match_score || (b as any).resume_match_percentage || 0;
           return scoreB - scoreA;
@@ -102,19 +178,6 @@ export default function CandidatesPage() {
 
         if (!isBackground) console.log(`✅ Found ${data.candidates.length} tracking records, deduplicated and sorted to ${sortedUnique.length} unique candidates`);
         setCandidates(sortedUnique);
-        
-        // Re-apply search filter if user is actively searching during live updates
-        const currentQuery = searchQueryRef.current;
-        if (currentQuery) {
-          setFilteredCandidates(sortedUnique.filter((c: any) =>
-            c.name.toLowerCase().includes(currentQuery.toLowerCase()) ||
-            c.job_title?.toLowerCase().includes(currentQuery.toLowerCase()) ||
-            c.headline.toLowerCase().includes(currentQuery.toLowerCase()) ||
-            c.source.toLowerCase().includes(currentQuery.toLowerCase())
-          ));
-        } else {
-          setFilteredCandidates(sortedUnique);
-        }
       }
     } catch (error) {
       console.error("Error fetching candidates:", error);
@@ -126,15 +189,105 @@ export default function CandidatesPage() {
     }
   };
 
-  const handleSearch = (query: string) => {
-    setSearchQuery(query);
-    const filtered = candidates.filter((c: any) =>
-      c.name.toLowerCase().includes(query.toLowerCase()) ||
-      c.job_title?.toLowerCase().includes(query.toLowerCase()) ||
-      c.headline.toLowerCase().includes(query.toLowerCase()) ||
-      c.source.toLowerCase().includes(query.toLowerCase())
-    );
-    setFilteredCandidates(filtered);
+  // Build dropdown option lists from the current candidate set. We derive
+  // these from `candidates` (not `filteredCandidates`) so toggling one
+  // filter doesn't empty out the other dropdowns.
+  const jobOptions = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const c of candidates) {
+      if (!c.jobdiva_id) continue;
+      const label = c.job_title ? `${c.job_title} — #${c.jobdiva_id}` : `#${c.jobdiva_id}`;
+      if (!byId.has(c.jobdiva_id)) byId.set(c.jobdiva_id, label);
+    }
+    return Array.from(byId.entries())
+      .map(([id, label]) => ({ id, label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [candidates]);
+
+  const sourceOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of candidates) if (c.source) set.add(c.source);
+    return Array.from(set).sort();
+  }, [candidates]);
+
+  const locationOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const c of candidates) if (c.location) set.add(c.location);
+    return Array.from(set).sort();
+  }, [candidates]);
+
+  // Single derived list applying search + all active filters + optional
+  // column sort. Runs on every state change — no manual re-derivation
+  // needed in fetchCandidates.
+  const filteredCandidates = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    const filtered = candidates.filter((c: any) => {
+      if (jobFilter !== ALL && c.jobdiva_id !== jobFilter) return false;
+      if (sourceFilter !== ALL && c.source !== sourceFilter) return false;
+      if (locationFilter !== ALL && c.location !== locationFilter) return false;
+      if (!matchBandMatches(c, matchFilter)) return false;
+      if (q) {
+        const hay = [
+          c.name,
+          c.job_title,
+          c.headline,
+          c.source,
+          c.jobdiva_id,
+          c.location,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+    // When no column sort is active, the default order from fetchCandidates
+    // (source priority + match desc) is preserved. When active, apply the
+    // user-selected sort on a stable copy.
+    if (sortKey && sortDir) {
+      return [...filtered].sort((a, b) => compareCandidates(a, b, sortKey, sortDir));
+    }
+    return filtered;
+  }, [candidates, searchQuery, jobFilter, matchFilter, sourceFilter, locationFilter, sortKey, sortDir]);
+
+  const activeFilterCount =
+    (jobFilter !== ALL ? 1 : 0) +
+    (matchFilter !== ALL ? 1 : 0) +
+    (sourceFilter !== ALL ? 1 : 0) +
+    (locationFilter !== ALL ? 1 : 0);
+
+  const clearAllFilters = () => {
+    setJobFilter(ALL);
+    setMatchFilter(ALL);
+    setSourceFilter(ALL);
+    setLocationFilter(ALL);
+    setSearchQuery("");
+  };
+
+  // Excel-style three-state toggle on a column header: off -> asc -> desc -> off.
+  const toggleSort = (key: SortKey) => {
+    if (sortKey !== key) {
+      setSortKey(key);
+      setSortDir("asc");
+      return;
+    }
+    if (sortDir === "asc") {
+      setSortDir("desc");
+      return;
+    }
+    // dir === "desc" -> clear
+    setSortKey(null);
+    setSortDir(null);
+  };
+
+  const renderSortIcon = (key: SortKey) => {
+    if (sortKey !== key) {
+      return <ChevronsUpDown className="w-3.5 h-3.5 text-slate-300 group-hover/sortable:text-slate-400 transition-colors" />;
+    }
+    return sortDir === "asc"
+      ? <ArrowUp className="w-3.5 h-3.5 text-[#6366f1]" />
+      : <ArrowDown className="w-3.5 h-3.5 text-[#6366f1]" />;
   };
 
   const getSourceIcon = (source: string) => {
@@ -192,26 +345,108 @@ export default function CandidatesPage() {
       </div>
 
       {/* Controls */}
-      <div className="flex justify-between items-center gap-4 mt-4">
-        <div className="relative w-[400px]">
-          <Search className="absolute left-3.5 top-1/2 transform -translate-y-1/2 text-slate-400 h-[18px] w-[18px]" />
-          <Input
-            placeholder="Search candidates, jobs, or sources..."
-            value={searchQuery}
-            onChange={(e) => handleSearch(e.target.value)}
-            className="pl-10 h-11 border-slate-200 focus:border-primary/50 focus:ring-primary/20 bg-white rounded-xl text-[14px] shadow-sm"
-          />
+      <div className="space-y-3 mt-4">
+        <div className="flex justify-between items-center gap-4">
+          <div className="relative w-[400px]">
+            <Search className="absolute left-3.5 top-1/2 transform -translate-y-1/2 text-slate-400 h-[18px] w-[18px]" />
+            <Input
+              placeholder="Search candidates, jobs, or sources..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-10 h-11 border-slate-200 focus:border-primary/50 focus:ring-primary/20 bg-white rounded-xl text-[14px] shadow-sm"
+            />
+          </div>
+          <div className="flex items-center gap-3">
+            <Badge variant="outline" className="px-4 py-1.5 h-11 flex items-center gap-2 border-slate-200 bg-white text-slate-600 font-bold rounded-xl shadow-sm">
+              <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+              {filteredCandidates.length} of {candidates.length} shown
+            </Badge>
+          </div>
         </div>
-        <div className="flex items-center gap-3">
-          <Button variant="outline" className="h-11 px-4 border-slate-200 bg-white text-slate-600 font-bold rounded-xl shadow-sm hover:bg-slate-50 flex items-center gap-2">
+
+        {/* Filter dropdowns. Values derived from `candidates` so toggling
+            one filter never empties out the choices in the others. */}
+        <div className="flex flex-wrap items-center gap-2.5">
+          <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-slate-500 mr-1">
             <Filter className="w-4 h-4 text-slate-400" />
             Filters
-            <ChevronDown className="w-3.5 h-3.5 text-slate-400 ml-1" />
-          </Button>
-          <Badge variant="outline" className="px-4 py-1.5 h-11 flex items-center gap-2 border-slate-200 bg-white text-slate-600 font-bold rounded-xl shadow-sm">
-             <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-             {candidates.length} Total Sourced
-          </Badge>
+          </div>
+
+          <Select value={jobFilter} onValueChange={setJobFilter}>
+            <SelectTrigger className="h-10 min-w-[220px] bg-white border-slate-200 rounded-xl shadow-sm text-[13px] font-medium">
+              <SelectValue placeholder="All jobs" />
+            </SelectTrigger>
+            <SelectContent className="max-h-[320px]">
+              <SelectItem value={ALL}>All jobs</SelectItem>
+              {jobOptions.map((j) => (
+                <SelectItem key={j.id} value={j.id}>
+                  {j.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Select value={matchFilter} onValueChange={setMatchFilter}>
+            <SelectTrigger className="h-10 min-w-[160px] bg-white border-slate-200 rounded-xl shadow-sm text-[13px] font-medium">
+              <SelectValue placeholder="Any match" />
+            </SelectTrigger>
+            <SelectContent>
+              {MATCH_BANDS.map((b) => (
+                <SelectItem key={b.value} value={b.value}>
+                  {b.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Select value={sourceFilter} onValueChange={setSourceFilter}>
+            <SelectTrigger className="h-10 min-w-[170px] bg-white border-slate-200 rounded-xl shadow-sm text-[13px] font-medium">
+              <SelectValue placeholder="Any source" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALL}>Any source</SelectItem>
+              {sourceOptions.map((s) => (
+                <SelectItem key={s} value={s}>
+                  {s}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Select value={locationFilter} onValueChange={setLocationFilter}>
+            <SelectTrigger className="h-10 min-w-[170px] bg-white border-slate-200 rounded-xl shadow-sm text-[13px] font-medium">
+              <SelectValue placeholder="Any location" />
+            </SelectTrigger>
+            <SelectContent className="max-h-[320px]">
+              <SelectItem value={ALL}>Any location</SelectItem>
+              {locationOptions.map((l) => (
+                <SelectItem key={l} value={l}>
+                  {l}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          {(activeFilterCount > 0 || searchQuery || sortKey) && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                clearAllFilters();
+                setSortKey(null);
+                setSortDir(null);
+              }}
+              className="h-10 px-3 text-[12.5px] font-semibold text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-xl flex items-center gap-1.5"
+            >
+              <X className="w-3.5 h-3.5" />
+              Clear
+              {activeFilterCount > 0 && (
+                <span className="ml-1 px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded-md text-[11px] font-bold">
+                  {activeFilterCount}
+                </span>
+              )}
+            </Button>
+          )}
         </div>
       </div>
 
@@ -243,12 +478,42 @@ export default function CandidatesPage() {
               <TableHeader className="bg-[#fcfdfd]">
                 <TableRow className="border-slate-100">
                   <TableHead className="pl-10 sticky top-0 left-0 bg-[#fcfdfd] z-50 w-[110px] min-w-[110px] h-14 border-b border-slate-100"></TableHead>
-                  <TableHead className="w-[300px] min-w-[300px] text-left text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 left-[110px] bg-[#fcfdfd] z-50 border-r border-b border-slate-100 shadow-[4px_0_8px_-4px_rgba(0,0,0,0.1)]">Candidate Name</TableHead>
-                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100">Match</TableHead>
-                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100">Applied For</TableHead>
-                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100">Location</TableHead>
-                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100">Sourcing Details</TableHead>
-                  <TableHead className="text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100">Sourced On</TableHead>
+                  <TableHead
+                    onClick={() => toggleSort("name")}
+                    className="group/sortable cursor-pointer select-none w-[300px] min-w-[300px] text-left text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 left-[110px] bg-[#fcfdfd] z-50 border-r border-b border-slate-100 shadow-[4px_0_8px_-4px_rgba(0,0,0,0.1)] hover:text-slate-900 hover:bg-slate-50"
+                  >
+                    <span className="inline-flex items-center gap-1.5">Candidate Name {renderSortIcon("name")}</span>
+                  </TableHead>
+                  <TableHead
+                    onClick={() => toggleSort("match")}
+                    className="group/sortable cursor-pointer select-none text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100 hover:text-slate-900 hover:bg-slate-50"
+                  >
+                    <span className="inline-flex items-center gap-1.5">Match {renderSortIcon("match")}</span>
+                  </TableHead>
+                  <TableHead
+                    onClick={() => toggleSort("job_title")}
+                    className="group/sortable cursor-pointer select-none text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100 hover:text-slate-900 hover:bg-slate-50"
+                  >
+                    <span className="inline-flex items-center gap-1.5">Applied For {renderSortIcon("job_title")}</span>
+                  </TableHead>
+                  <TableHead
+                    onClick={() => toggleSort("location")}
+                    className="group/sortable cursor-pointer select-none text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100 hover:text-slate-900 hover:bg-slate-50"
+                  >
+                    <span className="inline-flex items-center gap-1.5">Location {renderSortIcon("location")}</span>
+                  </TableHead>
+                  <TableHead
+                    onClick={() => toggleSort("source")}
+                    className="group/sortable cursor-pointer select-none text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100 hover:text-slate-900 hover:bg-slate-50"
+                  >
+                    <span className="inline-flex items-center gap-1.5">Sourcing Details {renderSortIcon("source")}</span>
+                  </TableHead>
+                  <TableHead
+                    onClick={() => toggleSort("created_at")}
+                    className="group/sortable cursor-pointer select-none text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100 hover:text-slate-900 hover:bg-slate-50"
+                  >
+                    <span className="inline-flex items-center gap-1.5">Sourced On {renderSortIcon("created_at")}</span>
+                  </TableHead>
                   <TableHead className="text-center pr-10 text-[12.5px] font-bold text-slate-500 uppercase tracking-wide h-14 sticky top-0 bg-[#fcfdfd] z-40 border-b border-slate-100">Actions</TableHead>
                 </TableRow>
               </TableHeader>

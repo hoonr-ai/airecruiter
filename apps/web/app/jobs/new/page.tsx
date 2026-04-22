@@ -114,7 +114,7 @@ const STEP_LABELS = {
 
 const STEP_DESCRIPTIONS: Record<Step, string> = {
   1: "Enter a JobDiva Job ID to get started.",
-  2: "Review your PAIR-enhanced job posting and select where to publish externally.",
+  2: "Review your Hoonr-Curate-enhanced job posting and select where to publish externally.",
   3: "Define evaluation criteria and rubric for candidate assessment.",
   4: "Configure filters and requirements for candidate matching.",
   5: "Launch sourcing and begin candidate collection."
@@ -167,7 +167,19 @@ export default function NewJobPage() {
 function NewJobPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [currentStep, setCurrentStep] = useState<Step>(1);
+  const [currentStep, setCurrentStepState] = useState<Step>(1);
+  // Track the highest step the user has ever reached so the pipeline/stepper
+  // at the top allows jumping back to any step they've visited, not just
+  // current-1 and current+1. Without this, stepping backward from step 4 to
+  // step 1 forced the user to click Next three more times to return.
+  const [maxStepReached, setMaxStepReached] = useState<Step>(1);
+  const setCurrentStep = (next: Step | ((prev: Step) => Step)) => {
+    setCurrentStepState(prev => {
+      const resolved = typeof next === "function" ? (next as (p: Step) => Step)(prev) : next;
+      setMaxStepReached(current => (resolved > current ? resolved : current));
+      return resolved;
+    });
+  };
   const [numericJobId, setNumericJobId] = useState("");
   const [jobdivaId, setJobdivaId] = useState("");
   const [jobData, setJobData] = useState<any>(null);
@@ -300,6 +312,9 @@ function NewJobPageContent() {
     // match up to Step-4 filters without string-parsing the user-facing value
     // (which carries formatted suffixes like "— 3+ yrs, Similar match").
     rubricKey?: string;
+    // Per-filter weightage (default 1.0) applied inside the backend scoring
+    // ratio. Clamped to [0.1, 5] at the input layer.
+    weight?: number;
   }>>([]);
   const [filterIdCounter, setFilterIdCounter] = useState(1);
   // Step 4 - Phone Screen state
@@ -309,8 +324,8 @@ function NewJobPageContent() {
 
   // Step 5 - Sourcing state
   const [searchSources, setSearchSources] = useState({
+    jobdiva_applicants: true,
     jobdiva: true,
-    jobdiva_hotlist: true,
     linkedin: true,
     dice: true,
     exa: true
@@ -523,7 +538,13 @@ function NewJobPageContent() {
 
       // Restore resume match filters if they exist
       if (draft.resume_match_filters && draft.resume_match_filters.length > 0) {
-        setResumeMatchFilters(draft.resume_match_filters);
+        // Backfill weight=1 for legacy drafts that pre-date the per-filter
+        // weightage control. New drafts persist the user-set weight.
+        const normalized = draft.resume_match_filters.map((f: any) => ({
+          ...f,
+          weight: typeof f.weight === 'number' && isFinite(f.weight) ? f.weight : 1,
+        }));
+        setResumeMatchFilters(normalized);
         const maxId = Math.max(...draft.resume_match_filters.map((f: any) => f.id));
         setFilterIdCounter(maxId + 1);
         console.log(`✅ Restored ${draft.resume_match_filters.length} resume match filters from database`);
@@ -532,7 +553,12 @@ function NewJobPageContent() {
       // Restore sourcing filters if they exist
       if (draft.sourcing_filters) {
         const sf = draft.sourcing_filters;
-        if (sf.sources) setSearchSources(sf.sources);
+        if (sf.sources) {
+          // Strip the retired jobdiva_hotlist flag from persisted drafts so
+          // saved jobs don't resurrect the removed checkbox.
+          const { jobdiva_hotlist: _removed, ...cleanSources } = sf.sources as Record<string, boolean>;
+          setSearchSources(prev => ({ ...prev, ...cleanSources }));
+        }
         if (sf.titles) setSourceTitles(sf.titles);
         if (sf.skills) setSourceSkills(sf.skills);
         if (sf.locations) setSourceLocations(sf.locations);
@@ -545,6 +571,9 @@ function NewJobPageContent() {
       if (draft.current_step) {
         const savedStep = draft.current_step as Step;
         setCurrentStep(savedStep);
+        // Treat the saved step as previously-reached so the pipeline allows
+        // hopping back to it (and any earlier step) without re-clicking Next.
+        setMaxStepReached(prev => (savedStep > prev ? savedStep : prev));
         setPageSubtitle(STEP_DESCRIPTIONS[savedStep]);
         setIsFetched(true);
         setNumericJobId(jobIdToLoad);
@@ -925,7 +954,7 @@ function NewJobPageContent() {
         const data = await res.json();
         setEnhancedTitle(data.title);
 
-        showToast("Title enhanced by PAIR.", "success");
+        showToast("Title enhanced by Hoonr-Curate.", "success");
       } else {
         const err = await res.text();
         console.error("Title enhance failed:", err);
@@ -1064,7 +1093,14 @@ function NewJobPageContent() {
         const stepNumber = parseInt(step) as Step;
         const isActive = stepNumber === currentStep;
         const isCompleted = stepNumber < currentStep;
-        const isClickable = stepNumber <= currentStep || (stepNumber === currentStep + 1 && !!jobData);
+        // A step is clickable when the user has already reached it before
+        // (anywhere <= maxStepReached) OR it's the immediate next step and the
+        // current step is unlocked (jobData present). This lets users bounce
+        // back and forth in the pipeline without re-clicking Next on every
+        // intermediate step.
+        const isClickable =
+          stepNumber <= maxStepReached ||
+          (stepNumber === currentStep + 1 && !!jobData);
         const isLast = index === Object.keys(STEP_LABELS).length - 1;
 
         return (
@@ -1175,7 +1211,7 @@ function NewJobPageContent() {
         <FileInput className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[20px] font-semibold text-slate-900 leading-tight tracking-tight">Intake</h2>
-          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Fetch job details from JobDiva, then add any additional context for PAIR.</p>
+          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Fetch job details from JobDiva, then add any additional context for Hoonr-Curate.</p>
         </div>
       </div>
 
@@ -1238,7 +1274,7 @@ function NewJobPageContent() {
         ) : !isFetched ? (
           <div className="space-y-5">
             <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-[13px] text-amber-800 leading-relaxed">
-              <strong className="font-semibold">External Requirement</strong> — not linked to JobDiva. Paste the job description; PAIR will extract skills and rubric. JobDiva-specific fields (applicant list, UDFs) will be skipped.
+              <strong className="font-semibold">External Requirement</strong> — not linked to JobDiva. Paste the job description; Hoonr-Curate will extract skills and rubric. JobDiva-specific fields (applicant list, UDFs) will be skipped.
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div>
@@ -1269,7 +1305,7 @@ function NewJobPageContent() {
                 rows={10}
                 className="bg-white border-slate-200 text-[13px] leading-relaxed"
               />
-              <p className="text-[11px] text-slate-500 mt-2">PAIR will extract the rubric (titles, skills, education) from this text.</p>
+              <p className="text-[11px] text-slate-500 mt-2">Hoonr-Curate will extract the rubric (titles, skills, education) from this text.</p>
             </div>
             <div>
               <button
@@ -1407,10 +1443,10 @@ function NewJobPageContent() {
 
               <div className="border-t border-slate-100 my-6" />
 
-              {/* PAIR Setup Section */}
+              {/* Hoonr-Curate Setup Section */}
               <div className="flex items-center gap-2 mb-5">
                 <Settings className="w-5 h-5 text-slate-700 flex-shrink-0" />
-                <span className="text-[14px] font-bold text-slate-900">PAIR Setup</span>
+                <span className="text-[14px] font-bold text-slate-900">Hoonr-Curate Setup</span>
                 <span className="text-[12px] text-slate-500 font-normal">Configure your screening before proceeding</span>
               </div>
 
@@ -1493,7 +1529,7 @@ function NewJobPageContent() {
               {/* Screening Level */}
               <div>
                 <label className="block text-[14px] font-medium text-slate-900 mb-1">Screening Level</label>
-                <p className="text-[13px] text-slate-500 mb-4">How deeply should PAIR screen each candidate?</p>
+                <p className="text-[13px] text-slate-500 mb-4">How deeply should Hoonr-Curate screen each candidate?</p>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   {/* L1 */}
                   <div
@@ -1568,7 +1604,7 @@ function NewJobPageContent() {
         <Megaphone className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight">Publish</h2>
-          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Review your PAIR-enhanced job posting and select where to publish externally.</p>
+          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Review your Hoonr-Curate-enhanced job posting and select where to publish externally.</p>
         </div>
       </div>
       <div className="p-7">
@@ -1605,7 +1641,7 @@ function NewJobPageContent() {
             <div className="flex items-center justify-between mb-3 mt-8">
               <div className="bg-[#eef2ff] text-[#4f46e5] flex items-center gap-1.5 px-3 py-1 rounded-full text-[11.5px] font-medium border border-[#ddd6fe]">
                 <Sparkles className="w-3.5 h-3.5" />
-                PAIR-Enhanced Job Posting
+                Hoonr-Curate-Enhanced Job Posting
               </div>
               <Button
                 variant="outline"
@@ -1710,7 +1746,7 @@ function NewJobPageContent() {
             <div className="flex items-start gap-2 mt-5 px-1">
               <Info className="w-4 h-4 text-slate-400 mt-0.5 flex-shrink-0" />
               <p className="text-[12px] text-slate-500 leading-snug font-medium">
-                Job posting team will receive your request to post after you Launch PAIR.
+                Job posting team will receive your request to post after you Launch Hoonr-Curate.
               </p>
             </div>
           </div>
@@ -1834,13 +1870,13 @@ function NewJobPageContent() {
       if (!prev) return prev;
       const updated = { ...prev };
       if (!updated[category]) updated[category] = [];
-      // For titles, always set source to 'PAIR' and remove any other source
+      // For titles, always set source to 'Hoonr-Curate' and remove any other source
       if (category === 'titles') {
         const pairTitle = getNormalizedTitleItem({
           ...newItem,
           required: 'Preferred',
           matchType: 'Similar',
-          source: 'PAIR',
+          source: 'Hoonr-Curate',
         });
         updated[category] = [...updated[category], pairTitle];
       } else if (category === "skills") {
@@ -1861,14 +1897,14 @@ function NewJobPageContent() {
         <ListChecks className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[21px] font-medium text-slate-900 leading-tight tracking-tight">Establish Rubric</h2>
-          <p className="text-slate-500 text-[15px] mt-1 leading-relaxed">PAIR-extracted rubric items from the job description. These become the rubric by which candidates are graded. Edit freely.</p>
+          <p className="text-slate-500 text-[15px] mt-1 leading-relaxed">Hoonr-Curate-extracted rubric items from the job description. These become the rubric by which candidates are graded. Edit freely.</p>
         </div>
       </div>
 
       {isGeneratingRubric ? (
         <div className="p-20 flex flex-col items-center justify-center gap-4">
           <div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
-          <p className="text-[15px] font-medium text-slate-600 animate-pulse">Extracting criteria from PAIR Job Description...</p>
+          <p className="text-[15px] font-medium text-slate-600 animate-pulse">Extracting criteria from Hoonr-Curate Job Description...</p>
         </div>
       ) : rubricData ? (
         <div className="p-7 space-y-7">
@@ -1913,7 +1949,7 @@ function NewJobPageContent() {
                       onChange={(e) => updateRubricItem('titles', idx, 'value', e.target.value)}
                       className="flex-1 min-w-0 text-[13px] font-normal text-slate-700 bg-transparent border border-transparent rounded px-2 py-1.5 outline-none focus:border-slate-200 focus:bg-white transition-all"
                     />
-                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap">PAIR</span>
+                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap">Hoonr-Curate</span>
                   </div>
                   <div className="w-[110px] flex-shrink-0 flex items-center gap-1.5">
                     <input
@@ -1999,7 +2035,7 @@ function NewJobPageContent() {
                   variant="outline"
                   size="sm"
                   disabled={(rubricData.titles?.length || 0) >= 5}
-                  onClick={() => addRubricItem('titles', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'PAIR' })}
+                  onClick={() => addRubricItem('titles', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'Hoonr-Curate' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
@@ -2062,7 +2098,7 @@ function NewJobPageContent() {
                       onChange={(e) => updateRubricItem('skills', idx, 'value', e.target.value)}
                       className="flex-1 min-w-0 text-[13px] font-normal text-slate-700 bg-transparent border border-transparent rounded px-2 py-1.5 outline-none focus:border-slate-200 focus:bg-white transition-all"
                     />
-                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap">PAIR</span>
+                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap">Hoonr-Curate</span>
                   </div>
                   <div className="w-[110px] flex-shrink-0 flex items-center gap-1.5">
                     <input
@@ -2126,7 +2162,7 @@ function NewJobPageContent() {
                   variant="outline"
                   size="sm"
                   disabled={(rubricData.skills?.length || 0) >= 8}
-                  onClick={() => addRubricItem('skills', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'PAIR' })}
+                  onClick={() => addRubricItem('skills', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'Hoonr-Curate' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
@@ -2149,7 +2185,7 @@ function NewJobPageContent() {
                 <h3 className="text-[14px] font-bold text-slate-800">Education & Certificates</h3>
               </div>
               <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                <Sparkles className="w-3 h-3" /> PAIR detected
+                <Sparkles className="w-3 h-3" /> Hoonr-Curate detected
               </span>
             </div>
 
@@ -2177,7 +2213,7 @@ function NewJobPageContent() {
                       className="w-[260px] flex-shrink-0 h-[34px] text-[13px] font-medium text-slate-700 bg-white border-slate-200"
                       placeholder="Field of study"
                     />
-                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight whitespace-nowrap ml-1 uppercase">PAIR</span>
+                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight whitespace-nowrap ml-1 uppercase">Hoonr-Curate</span>
                   </div>
                   <div className="w-[110px] flex-shrink-0"></div>
                   <div className="w-[70px] flex-shrink-0"></div>
@@ -2240,7 +2276,7 @@ function NewJobPageContent() {
                       className="flex-1 h-[34px] text-[13px] font-medium text-slate-700 bg-white border-slate-200"
                       readOnly
                     />
-                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight whitespace-nowrap ml-2 uppercase">PAIR</span>
+                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight whitespace-nowrap ml-2 uppercase">Hoonr-Curate</span>
                   </div>
                   <div className="w-[110px] flex-shrink-0"></div>
                   <div className="w-[70px] flex-shrink-0"></div>
@@ -2289,7 +2325,7 @@ function NewJobPageContent() {
               <UserCheck className="w-4 h-4 text-slate-900 flex-shrink-0" />
               <h3 className="text-[14px] font-bold text-slate-800">Customer Requirements</h3>
               <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                <Sparkles className="w-3 h-3" /> PAIR generated
+                <Sparkles className="w-3 h-3" /> Hoonr-Curate generated
               </span>
             </div>
 
@@ -2446,7 +2482,8 @@ function NewJobPageContent() {
         value: value.trim(),
         active: true,
         ai: false,
-        fromRubric: false
+        fromRubric: false,
+        weight: 1
       }
     ]);
     setFilterIdCounter(prev => prev + 1);
@@ -2465,18 +2502,21 @@ function NewJobPageContent() {
       ai: boolean;
       fromRubric: boolean;
       rubricKey?: string;
+      weight?: number;
     }> = [];
 
     let idCounter = 1;
 
-    // Preserve user's active/inactive preferences for existing filters.
-    // Key on the stable rubricKey (when present) or derive one from the
-    // filter's base value. No more splitting on "—" — that was fragile and
-    // broke if we ever changed the formatting of the display string.
-    const existingFilterPrefs = new Map<string, boolean>();
+    // Preserve user's active/inactive preferences AND custom weight for
+    // existing filters across rubric re-inits. Key on the stable rubricKey
+    // (when present) or derive one from the filter's base value.
+    const existingFilterPrefs = new Map<string, { active: boolean; weight: number }>();
     resumeMatchFilters.forEach(f => {
       const key = f.rubricKey || rubricKeyFor(f.category, f.value.split("—")[0]);
-      existingFilterPrefs.set(key, f.active);
+      existingFilterPrefs.set(key, {
+        active: f.active,
+        weight: typeof f.weight === 'number' && isFinite(f.weight) ? f.weight : 1,
+      });
     });
 
     const pushRubricFilter = (
@@ -2486,9 +2526,9 @@ function NewJobPageContent() {
       defaultActive: boolean
     ) => {
       const key = rubricKeyFor(category, baseValue);
-      const active = existingFilterPrefs.has(key)
-        ? (existingFilterPrefs.get(key) ?? defaultActive)
-        : defaultActive;
+      const existing = existingFilterPrefs.get(key);
+      const active = existing ? existing.active : defaultActive;
+      const weight = existing ? existing.weight : 1;
       filters.push({
         id: idCounter++,
         category,
@@ -2497,17 +2537,25 @@ function NewJobPageContent() {
         ai: true,
         fromRubric: true,
         rubricKey: key,
+        weight,
       });
     };
 
     // 1. Titles
+    // Preserve Required vs Preferred flag set on Step 3 — previously every
+    // title was hard-coded as "Required Title" + active=true, which made
+    // Preferred titles appear as hard filters on Step 4. Now the category
+    // pill and the default On/Off state both track the rubric's
+    // `title.required` value, mirroring how skills are handled below.
     if (rubricData.titles) {
       rubricData.titles.forEach((title: any) => {
+        const isRequired = title.required === "Required";
+        const category = isRequired ? "Required Title" : "Preferred Title";
         pushRubricFilter(
-          "Required Title",
+          category,
           title.value || "",
           `${title.value} — ${title.minYears}+ yrs, ${title.matchType} match`,
-          true
+          isRequired
         );
       });
     }
@@ -2583,8 +2631,15 @@ function NewJobPageContent() {
     );
 
     // 1. Bot Introduction
-    const intro = `Hi {{candidate name}}, I'm Nova, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${jobTitle || "role"} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
-    setBotIntroduction(intro);
+    // Prefer the AI-enhanced title from Step 2 (cleaned / recruiter-friendly)
+    // over the raw Step 1 title, falling back to the raw title if the user
+    // never ran the enhancement.
+    const introTitle = (enhancedTitle || jobTitle || "role").trim();
+    const intro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+    // Only seed the intro if the user hasn't written their own yet. Without
+    // this guard, every re-entry to Step 4 (including after Save & Exit
+    // reload) clobbered the recruiter's manual edits with the template.
+    setBotIntroduction(prev => (prev && prev.trim().length > 0 ? prev : intro));
 
     // 2. Default Questions
     const defaultQs = [
@@ -2799,6 +2854,41 @@ function NewJobPageContent() {
       };
     });
   }, [rubricData?.skills]);
+
+  // Inject the Step 1 work-authorization value (e.g. "W2 only", "US Citizen /
+  // GC") into Step 3's "Other Requirements" list so recruiters don't have to
+  // re-enter it. We only inject once per rubric+workAuth pair — if the user
+  // deletes the item we don't re-add it on the same rubric. Tracked via a
+  // ref so state churn in other rubric fields doesn't re-trigger injection.
+  const injectedWorkAuthRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!rubricData) return;
+    const authValue = (workAuthorization || jobData?.work_authorization || "").trim();
+    if (!authValue) return;
+    // Don't re-inject the same value we already inserted on this rubric.
+    if (injectedWorkAuthRef.current === authValue) return;
+
+    setRubricData((prev: any) => {
+      if (!prev) return prev;
+      const existing: any[] = Array.isArray(prev.other_requirements) ? prev.other_requirements : [];
+      const already = existing.some(
+        (item: any) => typeof item?.value === "string" &&
+          item.value.trim().toLowerCase() === authValue.toLowerCase()
+      );
+      if (already) {
+        injectedWorkAuthRef.current = authValue;
+        return prev;
+      }
+      injectedWorkAuthRef.current = authValue;
+      return {
+        ...prev,
+        other_requirements: [
+          { value: authValue, required: "Required", source: "Step1" },
+          ...existing,
+        ],
+      };
+    });
+  }, [rubricData, workAuthorization, jobData?.work_authorization]);
 
   useEffect(() => {
     if (currentStep !== 4) return;
@@ -3085,12 +3175,17 @@ function NewJobPageContent() {
     const withinMiles = overrides?.withinMilesOverride ?? parsedRadius;
     const activeResumeFilters = (overrides?.resumeMatchFiltersOverride ?? resumeMatchFilters)
       .filter(f => f.active)
-      .map(f => ({ category: f.category, value: f.value, active: f.active }));
+      .map(f => ({
+        category: f.category,
+        value: f.value,
+        active: f.active,
+        weight: typeof f.weight === 'number' && isFinite(f.weight) ? f.weight : 1,
+      }));
     const selectedSourcesArray = Object.keys(searchSources)
       .filter(k => (searchSources as any)[k])
       .map(k => {
+        if (k === 'jobdiva_applicants') return 'JobDiva Applicants';
         if (k === 'jobdiva') return 'JobDiva';
-        if (k === 'jobdiva_hotlist') return 'JobDivaHotlist';
         if (k === 'linkedin') return 'LinkedIn';
         if (k === 'dice') return 'Dice';
         if (k === 'exa') return 'Exa';
@@ -3204,7 +3299,7 @@ function NewJobPageContent() {
     try {
       const initial = resolvedGeneratedBoolean;
       setGeneratedBoolean(initial);
-      const attempts: { query: string; label: string }[] = [{ query: initial, label: "PAIR generated" }];
+      const attempts: { query: string; label: string }[] = [{ query: initial, label: "Hoonr-Curate generated" }];
       setBooleanAttempts(attempts);
       setSearchStatus("Searching candidates...");
       const firstRun = await runSearchStream(initial, "replace");
@@ -3245,7 +3340,7 @@ function NewJobPageContent() {
     const relaxed = relaxBooleanString(base, tier);
     const nextAttempts = booleanAttempts.length
       ? [...booleanAttempts, { query: relaxed.query, label: relaxed.label }]
-      : [{ query: base, label: "PAIR generated" }, { query: relaxed.query, label: relaxed.label }];
+      : [{ query: base, label: "Hoonr-Curate generated" }, { query: relaxed.query, label: relaxed.label }];
     setBooleanAttempts(nextAttempts);
     setGeneratedBoolean(relaxed.query);
     setBooleanUserEdited(true);
@@ -3292,7 +3387,7 @@ function NewJobPageContent() {
         <Filter className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight">Set Filters</h2>
-          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Each rubric item from Establish Rubric is evaluated here. Toggle, edit, or add filters for resume matching and the PAIR phone screen.</p>
+          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Each rubric item from Establish Rubric is evaluated here. Toggle, edit, or add filters for resume matching and the Hoonr-Curate phone screen.</p>
         </div>
       </div>
 
@@ -3305,7 +3400,7 @@ function NewJobPageContent() {
             <span className="text-[12px] font-normal text-slate-500">Hard filters applied during resume screening</span>
             <span className="ml-auto bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
               <Sparkles className="w-3 h-3 inline mr-1" />
-              PAIR pre-filled
+              Hoonr-Curate pre-filled
             </span>
           </div>
 
@@ -3314,6 +3409,7 @@ function NewJobPageContent() {
             <div className="w-[44px] flex-shrink-0"></div>
             <div className="w-[110px] flex-shrink-0">Category</div>
             <div className="flex-1">Value</div>
+            <div className="w-[72px] flex-shrink-0 text-center" title="Relative weight for scoring. 1 = default, 2 = counts double, 0.5 = half.">Weight</div>
             <div className="w-[100px] flex-shrink-0"></div>
           </div>
 
@@ -3344,10 +3440,36 @@ function NewJobPageContent() {
                       className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium"
                     />
                   </div>
+                  <div className="w-[72px] flex-shrink-0 flex items-center justify-center">
+                    <input
+                      type="number"
+                      min={0.1}
+                      max={5}
+                      step={0.1}
+                      value={filter.weight ?? 1}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        const parsed = raw === "" ? 1 : parseFloat(raw);
+                        const next = isFinite(parsed) ? parsed : 1;
+                        setResumeMatchFilters(prev =>
+                          prev.map(f => f.id === filter.id ? { ...f, weight: next } : f)
+                        );
+                      }}
+                      onBlur={(e) => {
+                        const parsed = parseFloat(e.target.value);
+                        const clamped = isFinite(parsed) ? Math.max(0.1, Math.min(5, parsed)) : 1;
+                        setResumeMatchFilters(prev =>
+                          prev.map(f => f.id === filter.id ? { ...f, weight: clamped } : f)
+                        );
+                      }}
+                      className="w-14 text-[13px] text-center bg-slate-50 border border-slate-200 rounded-md px-1 py-1 text-slate-900 font-semibold focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30 focus:border-[#6366f1]"
+                      title="Relative weight. 1 = default, 2 = counts double, 0.5 = half."
+                    />
+                  </div>
                   <div className="w-[100px] flex-shrink-0 flex items-center justify-end gap-2">
                     {filter.ai && (
                       <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
-                        PAIR
+                        Hoonr-Curate
                       </span>
                     )}
                     {filter.fromRubric && (
@@ -3398,10 +3520,15 @@ function NewJobPageContent() {
                       className="w-full text-[13px] bg-transparent border-none outline-none text-slate-500 font-medium"
                     />
                   </div>
+                  <div className="w-[72px] flex-shrink-0 flex items-center justify-center">
+                    <span className="text-[12px] text-slate-400 font-semibold">
+                      {(filter.weight ?? 1).toFixed(1)}×
+                    </span>
+                  </div>
                   <div className="w-[100px] flex-shrink-0 flex items-center justify-end gap-2">
                     {filter.ai && (
                       <span className="bg-slate-100 text-slate-400 text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
-                        PAIR
+                        Hoonr-Curate
                       </span>
                     )}
                     {filter.fromRubric && (
@@ -3446,7 +3573,7 @@ function NewJobPageContent() {
           <div className="flex items-center gap-2 mb-4">
             <Users className="w-4 h-4 text-slate-900 flex-shrink-0" />
             <h3 className="text-[14px] font-bold text-slate-800">Screen</h3>
-            <span className="text-[12px] font-normal text-slate-500">Questions asked during PAIR phone screen</span>
+            <span className="text-[12px] font-normal text-slate-500">Questions asked during Hoonr-Curate phone screen</span>
             <span className="ml-auto text-slate-400 text-[11px] font-bold">
               {screenQuestions.length} / 12 questions
             </span>
@@ -3546,7 +3673,7 @@ function NewJobPageContent() {
           <div className="flex-1 text-left">
             <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight mb-1">Source</h2>
             <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">
-              Build your candidate search using structured filters. PAIR generates the Boolean string, searches JobDiva applicants first, then uses JobDiva Talent Search if fewer than 3 applicants match.
+              Build your candidate search using structured filters. Hoonr-Curate generates the Boolean string, searches JobDiva applicants first, then uses JobDiva Talent Search if fewer than 3 applicants match.
             </p>
           </div>
         </div>
@@ -3555,10 +3682,10 @@ function NewJobPageContent() {
           {/* Inner Content Box - Exact Screenshot Structure */}
           <div className="border border-slate-200 rounded-2xl bg-white shadow-sm overflow-hidden p-7 space-y-8">
             <div className="space-y-8">
-              {/* First line: PAIR Badge and Run Search */}
+              {/* First line: Hoonr-Curate Badge and Run Search */}
               <div className="flex items-center justify-between mb-2">
                 <div className="bg-[#ede9fe] text-[#6366f1] text-[11px] font-bold px-3 py-1 rounded-lg border border-[#ddd6fe] flex items-center gap-2">
-                  <Sparkles className="w-3.5 h-3.5" /> PAIR Pre-filled from Rubric
+                  <Sparkles className="w-3.5 h-3.5" /> Hoonr-Curate Pre-filled from Rubric
                 </div>
                 <div className="flex items-center gap-2">
                   {isSearching && (
@@ -3591,8 +3718,10 @@ function NewJobPageContent() {
                   <span className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Search Sources:</span>
                   <div className="flex items-center gap-5 ml-1">
                     {[
+                      { id: 'jobdiva_applicants', label: 'JobDiva Applicants', icon: <Users className="w-4 h-4 text-[#6366f1]" />, disabled: false },
                       { id: 'jobdiva', label: 'JobDiva', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false },
-                      { id: 'jobdiva_hotlist', label: 'JobDiva Hotlist', icon: <Zap className="w-4 h-4 text-orange-500 fill-orange-500" />, disabled: false },
+                      // JobDiva Hotlist removed — the integration wasn't
+                      // functional and the checkbox was misleading.
                       { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: false },
                       { id: 'dice', label: 'Dice', icon: <Box className="w-4 h-4 text-slate-700" />, disabled: false },
                       { id: 'exa', label: 'Exa', icon: <Search className="w-4 h-4 text-pink-500" />, disabled: false }
@@ -4053,7 +4182,7 @@ function NewJobPageContent() {
                             <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
                               <div className="flex items-center gap-2 flex-wrap">
                                 <span className="text-[11px] font-bold uppercase tracking-widest text-[#5b21b6] bg-[#f5f3ff] px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">
-                                  {booleanUserEdited ? "Edited" : "PAIR Generated"}
+                                  {booleanUserEdited ? "Edited" : "Hoonr-Curate Generated"}
                                 </span>
                                 {booleanAttempts.length > 0 && (
                                   <span className="text-[11px] font-bold uppercase tracking-widest text-slate-500 bg-slate-50 px-2.5 py-0.5 rounded-full border border-slate-200">
@@ -4551,7 +4680,7 @@ function NewJobPageContent() {
                     }));
 
                     const selectedCount = candidatesPayload.filter(c => c.is_selected).length;
-                    console.log(`🚀 Launching PAIR with ${selectedCount} selected candidates out of ${candidatesPayload.length} total`);
+                    console.log(`🚀 Launching Hoonr-Curate with ${selectedCount} selected candidates out of ${candidatesPayload.length} total`);
 
                     const apiUrl = process.env.NEXT_PUBLIC_API_URL;
                     const response = await fetch(`${apiUrl}/candidates/save`, {
