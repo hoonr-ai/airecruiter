@@ -146,6 +146,8 @@ print_status "Next.js dependencies installed and configured"
 
 # Build Next.js application for production
 echo -e "${BLUE}🏗️ Building Next.js application...${NC}"
+cd "$WEB_DIR"
+rm -rf .next  # Clean previous build artifacts
 npm run build
 print_status "Next.js application built"
 
