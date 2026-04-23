@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { API_BASE } from "@/lib/api";
 import {
   Dialog,
   DialogContent,
@@ -68,10 +69,8 @@ export function AssessModal({
     setLoading(true);
     setError(null);
     try {
-      const apiUrl =
-        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
       const response = await fetch(
-        `${apiUrl}/api/v1/engagement/assess/${interviewId}`
+        `${API_BASE}/api/v1/engagement/assess/${interviewId}`
       );
       if (!response.ok) throw new Error("Failed to fetch assessment data");
       const result = await response.json();
@@ -141,7 +140,7 @@ export function AssessModal({
         <DialogContent className="sm:max-w-[500px]">
           <DialogHeader>
             <DialogTitle className="text-lg font-bold text-slate-900">
-              Assessment — {candidateName}
+              Assessment â€” {candidateName}
             </DialogTitle>
           </DialogHeader>
           <div className="flex flex-col items-center justify-center py-12 text-center gap-3">
@@ -169,7 +168,7 @@ export function AssessModal({
           <DialogHeader>
             <div className="flex items-center justify-between">
               <DialogTitle className="text-lg font-bold text-slate-900">
-                Assessment — {candidateName}
+                Assessment - {candidateName}
               </DialogTitle>
               {data?.interview && (
                 <Badge
@@ -264,34 +263,47 @@ export function AssessModal({
             <TabsContent value="overview" className="px-6 pb-6 mt-0">
               <ScrollArea className="max-h-[400px] pr-3">
                 <div className="space-y-5 pt-4">
-                  {/* Score Card */}
-                  {data.interview?.overall_score !== undefined &&
-                    data.interview?.overall_score !== null && (
-                      <div className="bg-gradient-to-br from-slate-50 to-white border border-slate-200 rounded-xl p-5">
+                  {/* Score Card â€” use interview score or fall back to evaluation summary */}
+                  {(() => {
+                    const score =
+                      data.interview?.overall_score ??
+                      data.evaluation?.summary?.overall_score;
+                    if (score === undefined || score === null) return null;
+                    return (
+                      <div className="bg-gradient-to-br from-indigo-50 to-white border border-indigo-100 rounded-xl p-5">
                         <div className="flex items-center justify-between">
                           <div>
-                            <p className="text-[11px] text-slate-400 font-bold uppercase tracking-wide">
+                            <p className="text-[11px] text-indigo-400 font-bold uppercase tracking-wide">
                               Overall Score
                             </p>
-                            <p className="text-[36px] font-black text-slate-900 leading-tight mt-1">
-                              {data.interview.overall_score}
-                              <span className="text-[16px] text-slate-400 font-medium">
+                            <p className="text-[42px] font-black text-slate-900 leading-tight mt-1">
+                              {score}
+                              <span className="text-[18px] text-slate-400 font-medium">
                                 /10
                               </span>
                             </p>
+                            {data.evaluation?.summary && (
+                              <p className="text-[12px] text-slate-500 mt-1">
+                                {data.evaluation.summary.questions_completed}/{data.evaluation.summary.total_questions} questions completed
+                                {data.evaluation.summary.average_score !== undefined && (
+                                  <> Â· avg <span className="font-semibold">{data.evaluation.summary.average_score}</span></>
+                                )}
+                              </p>
+                            )}
                           </div>
                           <div
-                            className={`w-16 h-16 rounded-full flex items-center justify-center text-white font-bold text-[14px] ${getScoreColor(data.interview.overall_score)}`}
+                            className={`w-20 h-20 rounded-full flex items-center justify-center text-white font-black text-[15px] shadow-lg ${getScoreColor(score)}`}
                           >
-                            {data.interview.overall_score >= 7.5
+                            {score >= 7.5
                               ? "PASS"
-                              : data.interview.overall_score >= 5
+                              : score >= 5
                                 ? "AVG"
                                 : "FAIL"}
                           </div>
                         </div>
                       </div>
-                    )}
+                    );
+                  })()}
 
                   {/* Progress */}
                   <div className="grid grid-cols-2 gap-4">
@@ -300,9 +312,9 @@ export function AssessModal({
                         Questions
                       </p>
                       <p className="text-[22px] font-black text-slate-900 mt-1">
-                        {data.interview?.questions_completed ?? "—"}
+                        {data.interview?.questions_completed ?? "â€”"}
                         <span className="text-[14px] text-slate-400 font-medium">
-                          /{data.interview?.total_questions ?? "—"}
+                          /{data.interview?.total_questions ?? "â€”"}
                         </span>
                       </p>
                     </div>
@@ -311,7 +323,7 @@ export function AssessModal({
                         Role
                       </p>
                       <p className="text-[14px] font-bold text-slate-900 mt-1 truncate">
-                        {data.interview?.role_position || "—"}
+                        {data.interview?.role_position || "â€”"}
                       </p>
                     </div>
                   </div>
@@ -331,13 +343,13 @@ export function AssessModal({
                       <div>
                         <span className="text-slate-400">Email:</span>{" "}
                         <span className="font-medium text-slate-700">
-                          {data.interview?.person_email || "—"}
+                          {data.interview?.person_email || "â€”"}
                         </span>
                       </div>
                       <div>
                         <span className="text-slate-400">Phone:</span>{" "}
                         <span className="font-medium text-slate-700">
-                          {data.interview?.person_phone || "—"}
+                          {data.interview?.person_phone || "â€”"}
                         </span>
                       </div>
                       <div>
@@ -351,7 +363,7 @@ export function AssessModal({
                                 day: "numeric",
                                 year: "numeric",
                               })
-                            : "—"}
+                            : "â€”"}
                         </span>
                       </div>
                     </div>
@@ -361,120 +373,158 @@ export function AssessModal({
             </TabsContent>
 
             {/* ===== TAB 2: Evaluation ===== */}
-            <TabsContent value="evaluation" className="px-6 pb-6 mt-0">
-              <ScrollArea className="max-h-[400px] pr-3">
-                <div className="space-y-3 pt-4">
-                  {/* Summary */}
-                  {data.evaluation?.summary && (
-                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 mb-4">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <p className="text-[11px] text-slate-400 font-bold uppercase tracking-wide">
-                            Evaluation Summary
-                          </p>
-                          <p className="text-[13px] text-slate-600 mt-1">
-                            {data.evaluation.summary.questions_completed}/
-                            {data.evaluation.summary.total_questions} questions •
-                            Avg score:{" "}
-                            <span className="font-bold">
-                              {data.evaluation.summary.average_score}
+            <TabsContent value="evaluation" className="px-0 pb-0 mt-0">
+              <ScrollArea className="h-[calc(85vh-220px)]">
+                <div className="space-y-4 px-6 pt-4 pb-6">
+                  {(() => {
+                    const evalData = data.evaluation;
+
+                    // Overall score â€” try several possible field paths
+                    const overallScore =
+                      data.interview?.overall_score ??
+                      evalData?.summary?.overall_score ??
+                      evalData?.overall_score ??
+                      evalData?.score;
+
+                    // Questions completed / total
+                    const qCompleted =
+                      evalData?.summary?.questions_completed ??
+                      evalData?.questions_completed ??
+                      data.interview?.questions_completed;
+                    const qTotal =
+                      evalData?.summary?.total_questions ??
+                      evalData?.total_questions ??
+                      data.interview?.total_questions;
+
+                    // Questions array â€” PAIR API may use different keys
+                    const questions: any[] =
+                      (Array.isArray(evalData?.questions) && evalData.questions.length ? evalData.questions : null) ??
+                      (Array.isArray(evalData?.evaluations) && evalData.evaluations.length ? evalData.evaluations : null) ??
+                      (Array.isArray(evalData?.question_scores) && evalData.question_scores.length ? evalData.question_scores : null) ??
+                      (Array.isArray(evalData?.question_evaluations) && evalData.question_evaluations.length ? evalData.question_evaluations : null) ??
+                      (Array.isArray(evalData) && evalData.length ? evalData : null) ??
+                      [];
+
+                    const scoreLabel = (s: number) =>
+                      s >= 8 ? "Excellent" : s >= 6 ? "Good" : s >= 4 ? "Average" : "Needs Improvement";
+
+                    const scoreTextColor = (s: number) =>
+                      s >= 8 ? "text-emerald-600" : s >= 6 ? "text-amber-600" : "text-rose-600";
+
+                    return (
+                      <>
+                        {/* Section header */}
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <FileText className="w-4 h-4 text-[#6366f1]" />
+                            <h3 className="text-[15px] font-bold text-slate-900">Evaluation & Results</h3>
+                          </div>
+                          {qCompleted != null && qTotal != null && (
+                            <span className="text-[11px] font-semibold bg-indigo-50 text-indigo-600 border border-indigo-100 px-3 py-1 rounded-full">
+                              {qCompleted} / {qTotal} Questions Answered
                             </span>
-                          </p>
+                          )}
                         </div>
-                        <div className="text-[24px] font-black text-slate-900">
-                          {data.evaluation.summary.overall_score}
-                          <span className="text-[12px] text-slate-400 font-medium">
-                            /10
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  )}
 
-                  {/* Questions list */}
-                  {data.evaluation?.questions?.map(
-                    (q: any, idx: number) => (
-                      <div
-                        key={q.question_id || idx}
-                        className="bg-white border border-slate-200 rounded-xl p-4 space-y-3"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="text-[10px] bg-slate-100 text-slate-500 font-bold px-2 py-0.5 rounded uppercase">
-                                Q{idx + 1}
-                              </span>
-                              {q.category && (
-                                <Badge
-                                  variant="outline"
-                                  className="text-[10px] font-bold px-1.5 py-0"
-                                >
-                                  {q.category}
-                                </Badge>
-                              )}
+                        {/* Overall score card */}
+                        {overallScore != null && (
+                          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 flex items-center justify-between">
+                            <div>
+                              <p className="text-[13px] font-bold text-slate-800">Overall Score</p>
+                              <p className="text-[12px] text-slate-500 mt-0.5">Average performance across all questions</p>
                             </div>
-                            <p className="text-[13px] font-bold text-slate-900">
-                              {q.question}
-                            </p>
-                          </div>
-                          <div className="text-right shrink-0">
-                            <p
-                              className={`text-[18px] font-black ${
-                                q.score >= 8
-                                  ? "text-emerald-600"
-                                  : q.score >= 6
-                                    ? "text-amber-600"
-                                    : "text-rose-600"
-                              }`}
-                            >
-                              {q.score}
-                              <span className="text-[11px] text-slate-400 font-medium">
-                                /{q.max_score || 10}
-                              </span>
-                            </p>
-                          </div>
-                        </div>
-
-                        {/* Score bar */}
-                        <div className="w-full bg-slate-100 rounded-full h-1.5">
-                          <div
-                            className={`h-1.5 rounded-full transition-all ${getScoreColor(q.score, q.max_score || 10)}`}
-                            style={{
-                              width: `${(q.score / (q.max_score || 10)) * 100}%`,
-                            }}
-                          />
-                        </div>
-
-                        {/* Answer */}
-                        {q.answer && (
-                          <div className="bg-slate-50 rounded-lg p-3">
-                            <p className="text-[11px] text-slate-400 font-bold uppercase tracking-wide mb-1">
-                              Answer
-                            </p>
-                            <p className="text-[12px] text-slate-600 leading-relaxed">
-                              {q.answer}
-                            </p>
+                            <div className="text-right">
+                              <p className={`text-[28px] font-black leading-none ${scoreTextColor(overallScore)}`}>
+                                {overallScore}
+                                <span className="text-[14px] text-slate-400 font-medium">/10.0</span>
+                              </p>
+                              <p className={`text-[11px] font-semibold mt-1 ${scoreTextColor(overallScore)}`}>
+                                {scoreLabel(overallScore)}
+                              </p>
+                            </div>
                           </div>
                         )}
 
-                        {/* Feedback */}
-                        {q.feedback && (
-                          <div className="bg-indigo-50/50 border border-indigo-100 rounded-lg p-3">
-                            <p className="text-[11px] text-indigo-400 font-bold uppercase tracking-wide mb-1">
-                              AI Feedback
-                            </p>
-                            <p className="text-[12px] text-indigo-700 leading-relaxed">
-                              {q.feedback}
-                            </p>
+                        {/* Per-question cards */}
+                        {questions.length > 0 ? (
+                          questions.map((q: any, idx: number) => {
+                            const questionText =
+                              q.question ?? q.question_text ?? q.text ?? q.prompt ?? `Question ${idx + 1}`;
+                            const answerText =
+                              q.answer ?? q.candidate_answer ?? q.response ?? q.candidate_response ??
+                              q.transcribed_answer ?? q.user_response ?? q.speech_text ?? q.text_response;
+                            const score = q.score ?? q.question_score ?? q.rating ?? q.points;
+                            const feedback = q.feedback ?? q.ai_feedback ?? q.comment;
+                            const category = q.category ?? q.type;
+
+                            return (
+                              <div
+                                key={q.question_id ?? q.id ?? idx}
+                                className="bg-white border border-slate-200 rounded-xl overflow-hidden"
+                              >
+                                {/* Question + score row */}
+                                <div className="px-4 pt-4 pb-3 flex items-start justify-between gap-4">
+                                  <div className="flex items-start gap-3 flex-1 min-w-0">
+                                    <div className="shrink-0 w-7 h-7 rounded-full bg-[#6366f1] text-white flex items-center justify-center text-[12px] font-black mt-0.5">
+                                      {idx + 1}
+                                    </div>
+                                    <div className="min-w-0">
+                                      {category && (
+                                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-0.5">
+                                          {category}
+                                        </span>
+                                      )}
+                                      <p className="text-[13.5px] font-semibold text-slate-900 leading-snug">
+                                        {questionText}
+                                      </p>
+                                    </div>
+                                  </div>
+                                  {score != null && (
+                                    <span className={`shrink-0 text-[20px] font-black ${scoreTextColor(score)}`}>
+                                      {score}
+                                      <span className="text-[13px] text-slate-400 font-normal">/10</span>
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* Candidate response */}
+                                <div className="px-4 pb-4">
+                                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">
+                                    Candidate&apos;s Response
+                                  </p>
+                                  <div className="bg-slate-50 border border-slate-200 rounded-lg px-4 py-3">
+                                    <p className={`text-[13px] leading-relaxed italic ${
+                                      answerText ? "text-slate-700" : "text-slate-400"
+                                    }`}>
+                                      {answerText ? `"${answerText}"` : "No response recorded."}
+                                    </p>
+                                  </div>
+
+                                  {feedback && (
+                                    <div className="mt-3 bg-indigo-50 border border-indigo-100 rounded-lg px-4 py-3">
+                                      <div className="flex items-center gap-1.5 mb-1">
+                                        <Bot className="w-3 h-3 text-indigo-400" />
+                                        <p className="text-[10px] text-indigo-500 font-bold uppercase tracking-widest">
+                                          AI Feedback
+                                        </p>
+                                      </div>
+                                      <p className="text-[12.5px] text-indigo-700 leading-relaxed">{feedback}</p>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })
+                        ) : (
+                          <div className="text-center py-12 text-slate-400 text-[13px]">
+                            {evalData
+                              ? "No question-level data returned by the API yet."
+                              : "No evaluation data available yet."}
                           </div>
                         )}
-                      </div>
-                    )
-                  ) || (
-                    <div className="text-center py-10 text-slate-400 text-[13px]">
-                      No evaluation data available yet.
-                    </div>
-                  )}
+                      </>
+                    );
+                  })()}
                 </div>
               </ScrollArea>
             </TabsContent>
@@ -491,8 +541,7 @@ export function AssessModal({
                     size="sm"
                     className="h-7 text-[11px] gap-1.5 border-slate-200 text-slate-600 hover:bg-slate-50"
                     onClick={() => {
-                      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
-                      window.open(`${apiUrl}/api/v1/engagement/interviews/${interviewId}/transcriptions/download`, "_blank");
+                      window.open(`${API_BASE}/api/v1/engagement/interviews/${interviewId}/transcriptions/download`, "_blank");
                     }}
                   >
                     <Download className="w-3.5 h-3.5" />
@@ -582,12 +631,12 @@ export function AssessModal({
                           {data.outreach.outreach?.outreach_phase?.replace(
                             "_",
                             " "
-                          ) || "—"}
+                          ) || "â€”"}
                         </p>
                         <p className="text-[12px] text-slate-500 mt-0.5">
                           Status:{" "}
                           <span className="font-medium capitalize">
-                            {data.outreach.outreach?.outreach_status || "—"}
+                            {data.outreach.outreach?.outreach_status || "â€”"}
                           </span>
                         </p>
                       </div>

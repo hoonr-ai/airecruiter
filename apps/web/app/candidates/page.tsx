@@ -11,6 +11,7 @@ import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { ResumeModal } from "@/components/ResumeModal";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { AssessModal } from "@/components/AssessModal";
+import { API_BASE } from "@/lib/api";
 
 import {
   Table,
@@ -346,8 +347,7 @@ export default function CandidatesPage() {
     setEngageLoading(true);
     setEngageError(null);
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
-      const response = await fetch(`${apiUrl}/api/v1/engagement/engage/generate-payload`, {
+      const response = await fetch(`${API_BASE}/api/v1/engagement/engage/generate-payload`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -374,14 +374,13 @@ export default function CandidatesPage() {
     setApiResponse(null);
     const payloadToSend = payloadOverride ?? engagePayload;
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
       // Validate JSON
       try {
         JSON.parse(payloadToSend);
       } catch (e) {
         throw new Error('Invalid JSON format in payload');
       }
-      const response = await fetch(`${apiUrl}/api/v1/engagement/engage/send-bulk-interview`, {
+      const response = await fetch(`${API_BASE}/api/v1/engagement/engage/send-bulk-interview`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -424,8 +423,7 @@ export default function CandidatesPage() {
   const handleAssessClick = async (candidate: Candidate) => {
     setSelectedAssessCandidate(candidate);
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
-      const res = await fetch(`${apiUrl}/api/v1/engagement/latest-interview/by-id/${candidate.candidate_id}`);
+      const res = await fetch(`${API_BASE}/api/v1/engagement/latest-interview/by-id/${candidate.candidate_id}`);
       if (res.ok) {
         const data = await res.json();
         if (data.success && data.interview_id) {

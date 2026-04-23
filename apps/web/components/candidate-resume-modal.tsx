@@ -21,6 +21,7 @@ import {
   ExternalLink,
   Loader2
 } from "lucide-react";
+import { API_BASE } from "@/lib/api";
 
 interface CandidateResumeData {
   id: string;
@@ -57,8 +58,7 @@ export function CandidateResumeModal({
     
     try {
       console.log("Fetching resume for candidate ID:", id);
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001/api/v1";
-      const response = await fetch(`${apiUrl}/candidates/resume/${id}`);
+      const response = await fetch(`${API_BASE}/candidates/resume/${id}`);
       const data = await response.json();
       
       console.log("Resume API response:", response.status, data);
