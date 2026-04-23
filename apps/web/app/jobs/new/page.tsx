@@ -50,7 +50,8 @@ import {
   Ban,
   Mail,
   MessageSquare,
-  ExternalLink
+  ExternalLink,
+  Loader2
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -490,6 +491,10 @@ function NewJobPageContent() {
   const [isLoadingResume, setIsLoadingResume] = useState(false);
   const [showResumeModal, setShowResumeModal] = useState(false);
 
+  // Resume Setup load state. Gates the wizard shell so the user sees a full-page
+  // loader instead of a flash-of-empty-form while we hydrate from /jobs/{id}/draft.
+  const [isLoadingDraft, setIsLoadingDraft] = useState(false);
+
   useEffect(() => {
     const jobIdFromUrl = searchParams.get("jobId");
     if (jobIdFromUrl) {
@@ -498,7 +503,8 @@ function NewJobPageContent() {
       } else {
         setNumericJobId(jobIdFromUrl);
       }
-      loadJobDraft(jobIdFromUrl);
+      setIsLoadingDraft(true);
+      loadJobDraft(jobIdFromUrl).finally(() => setIsLoadingDraft(false));
     }
   }, [searchParams]);
 
@@ -531,22 +537,41 @@ function NewJobPageContent() {
 
       const draft = draftResult.data;
 
-      // 2. Fetch full job details from JobDiva to populate 'jobData'
-      // This is critical for subsequent "Save & Exit" or "Next" actions
-      const detailsResponse = await fetch(`${apiUrl}/jobs/fetch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ job_id: jobIdToLoad.trim() })
-      });
+      // 2. Hydrate `jobData` from the draft payload when possible.
+      // The `/jobs/{id}/draft` endpoint now embeds a `job_details` block mirroring
+      // what `/jobs/fetch` returns, sourced from monitored_jobs. For the Resume
+      // Setup flow this avoids a second JobDiva round-trip (≈2-3s lag + the
+      // refetch dialog) and lets us paint the wizard in a single render.
+      const embeddedDetails = draft.job_details;
+      const hasEmbeddedDetails = embeddedDetails && (embeddedDetails.title || embeddedDetails.customer_name);
 
-      if (detailsResponse.ok) {
-        const details = await detailsResponse.json();
-        setJobData(details);
-        if (details.jobdiva_id) {
-          setJobdivaId(details.jobdiva_id);
+      if (hasEmbeddedDetails) {
+        setJobData(embeddedDetails);
+        if (embeddedDetails.jobdiva_id) {
+          setJobdivaId(embeddedDetails.jobdiva_id);
         }
-        if (details.is_external || (details.jobdiva_id || "").startsWith("EXT-")) {
+        if (embeddedDetails.is_external || (embeddedDetails.jobdiva_id || "").startsWith("EXT-")) {
           setIsExternal(true);
+        }
+      } else {
+        // Cold path: no persisted job_details yet (e.g. the user pasted a
+        // JobDiva ID but hasn't saved the job). Fall back to the old JobDiva
+        // fetch so the first-time flow still works.
+        const detailsResponse = await fetch(`${apiUrl}/jobs/fetch`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ job_id: jobIdToLoad.trim() })
+        });
+
+        if (detailsResponse.ok) {
+          const details = await detailsResponse.json();
+          setJobData(details);
+          if (details.jobdiva_id) {
+            setJobdivaId(details.jobdiva_id);
+          }
+          if (details.is_external || (details.jobdiva_id || "").startsWith("EXT-")) {
+            setIsExternal(true);
+          }
         }
       }
 
@@ -5002,6 +5027,20 @@ function NewJobPageContent() {
       default: return null;
     }
   };
+
+  // Full-page loader while we hydrate a saved draft. Prevents the flash-of-
+  // empty-form that recruiters see on Resume Setup while /jobs/{id}/draft
+  // (plus rubric / screen questions) resolve.
+  if (isLoadingDraft) {
+    return (
+      <div className="p-8 max-w-7xl mx-auto min-h-[60vh] flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3 text-slate-500">
+          <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
+          <div className="text-[15px] font-medium">Loading draft…</div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="p-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">

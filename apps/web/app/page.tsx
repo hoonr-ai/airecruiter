@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Search, Plus, FileText, ArrowUpDown, MoreVertical, Link as LinkIcon, AlertTriangle, Archive } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -463,7 +464,35 @@ export default function DashboardPage() {
                     </DropdownMenu>
                   </td>
                 </tr>
-              )) : (
+              )) : isLoading ? (
+                // Skeleton rows while the initial fetch is in flight. Prevents the
+                // "No job results" empty state from flashing for ~500ms on cold load.
+                Array.from({ length: 5 }).map((_, idx) => (
+                  <tr key={`skeleton-${idx}`} className="border-b border-slate-100">
+                    <td className="px-6 py-4"><Skeleton className="h-4 w-20 bg-slate-100" /></td>
+                    <td className="px-6 py-4 sticky left-0 bg-white border-r border-slate-100/50 z-10">
+                      <Skeleton className="h-4 w-48 bg-slate-100" />
+                    </td>
+                    <td className="px-6 py-4"><Skeleton className="h-4 w-32 bg-slate-100" /></td>
+                    <td className="px-6 py-4"><Skeleton className="h-4 w-28 bg-slate-100" /></td>
+                    <td className="px-6 py-4"><Skeleton className="h-4 w-16 bg-slate-100" /></td>
+                    <td className="px-6 py-4"><Skeleton className="h-4 w-20 bg-slate-100" /></td>
+                    <td className="px-6 py-4"><Skeleton className="h-4 w-10 bg-slate-100" /></td>
+                    <td className="px-6 py-4"><Skeleton className="h-5 w-20 rounded-full bg-slate-100" /></td>
+                    <td className="px-6 py-4"><Skeleton className="h-5 w-24 rounded-full bg-slate-100" /></td>
+                    <td className="px-6 py-4"><Skeleton className="h-4 w-10 bg-slate-100" /></td>
+                    <td className="px-6 py-4"><Skeleton className="h-4 w-10 bg-slate-100" /></td>
+                    <td className="px-6 py-4"><Skeleton className="h-4 w-10 bg-slate-100" /></td>
+                    <td className="px-6 py-4"><Skeleton className="h-4 w-10 bg-slate-100" /></td>
+                    <td className="px-6 py-4"><Skeleton className="h-4 w-10 bg-slate-100" /></td>
+                    <td className="px-6 py-4"><Skeleton className="h-4 w-10 bg-slate-100" /></td>
+                    <td className="px-6 py-4"><Skeleton className="h-4 w-16 bg-slate-100" /></td>
+                    <td className="px-6 py-4 sticky right-0 bg-white border-l border-slate-100/50 z-10">
+                      <Skeleton className="h-6 w-6 rounded-full bg-slate-100 mx-auto" />
+                    </td>
+                  </tr>
+                ))
+              ) : (
                 <tr>
                   <td colSpan={17} className="py-12 px-6">
                     <div className="flex flex-col items-center justify-center gap-3" style={{ minWidth: '600px' }}>
