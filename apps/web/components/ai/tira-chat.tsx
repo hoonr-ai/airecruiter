@@ -21,6 +21,7 @@ import {
 import { useAI } from "@/context/ai-context";
 import { useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
+import { API_BASE } from "@/lib/api";
 
 type TiraMode = "chat" | "boolean" | "match" | "bug";
 
@@ -208,7 +209,7 @@ function ChatMode({
 // ---------------------------------------------------------------------------
 
 function BooleanMode() {
-    const apiBase = process.env.NEXT_PUBLIC_API_URL;
+    const apiBase = API_BASE;
 
     const [jdText, setJdText] = useState("");
     const [file, setFile] = useState<File | null>(null);
@@ -361,7 +362,7 @@ function ChipGroup({ label, items, tone }: { label: string; items: string[]; ton
 // ---------------------------------------------------------------------------
 
 function MatchMode() {
-    const apiBase = process.env.NEXT_PUBLIC_API_URL;
+    const apiBase = API_BASE;
 
     const [jobs, setJobs] = useState<MonitoredJob[]>([]);
     const [jobsError, setJobsError] = useState<string | null>(null);
@@ -551,7 +552,7 @@ function MatchResultCard({ result }: { result: MatchResult }) {
 // ---------------------------------------------------------------------------
 
 function BugMode() {
-    const apiBase = process.env.NEXT_PUBLIC_API_URL;
+    const apiBase = API_BASE;
 
     const [title, setTitle] = useState("");
     const [description, setDescription] = useState("");

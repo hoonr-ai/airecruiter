@@ -25,6 +25,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { API_BASE } from "@/lib/api";
 
 const getStatusColor = (status: string) => {
   switch (status?.toLowerCase()) {
@@ -139,7 +140,7 @@ export default function JobDetailPage() {
       // F3d: was two sequential fetches (active-only, then archived on miss).
       // One request with include_archived=true covers both cases and halves
       // the round-trip count for any job that's been archived.
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/jobs/monitored?include_archived=true`);
+      const response = await fetch(`${API_BASE}/jobs/monitored?include_archived=true`);
       const data = await response.json();
       const job = data.jobs?.[jobId];
 
@@ -173,7 +174,7 @@ export default function JobDetailPage() {
     }
     setSaving(true);
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/jobs/${jobId}/basic-info`, {
+      const response = await fetch(`${API_BASE}/jobs/${jobId}/basic-info`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
@@ -595,7 +596,7 @@ export default function JobDetailPage() {
                 setIsArchiving(true);
                 try {
                   const response = await fetch(
-                    `${process.env.NEXT_PUBLIC_API_URL}/jobs/${jobId}/archive`,
+                    `${API_BASE}/jobs/${jobId}/archive`,
                     {
                       method: "PUT",
                       headers: {
@@ -662,7 +663,7 @@ export default function JobDetailPage() {
                 setIsUnarchiving(true);
                 try {
                   const response = await fetch(
-                    `${process.env.NEXT_PUBLIC_API_URL}/jobs/${jobId}/unarchive`,
+                    `${API_BASE}/jobs/${jobId}/unarchive`,
                     {
                       method: "PUT",
                       headers: {

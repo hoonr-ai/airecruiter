@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Mail, Send } from "lucide-react";
+import { API_BASE } from "@/lib/api";
 
 interface CandidateMessageModalProps {
   candidateName: string;
@@ -49,7 +50,7 @@ Recruiting Team`;
     
     try {
       // Send message via API
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates/message`, {
+      const response = await fetch(`${API_BASE}/candidates/message`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
