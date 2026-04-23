@@ -861,7 +861,46 @@ async def get_job_draft(job_id: str, user_session: str = "default"):
             try: return json.loads(val)
             except: return []
 
-        # Map database columns back to JobDraftData format
+        # Map database columns back to JobDraftData format.
+        # The `job_details` block mirrors the shape returned by POST /jobs/fetch so
+        # the frontend can hydrate `jobData` directly from the draft payload without
+        # making a second round-trip to JobDiva on Resume Setup.
+        jobdiva_id_val = job_row.get("jobdiva_id") or db_job_id
+        is_external_row = str(jobdiva_id_val).startswith("EXT-") or str(job_row.get("job_id") or "").startswith("-")
+
+        job_details = {
+            "id": str(job_row.get("job_id") or db_job_id),
+            "job_id": str(jobdiva_id_val),
+            "jobdiva_id": str(jobdiva_id_val),
+            "title": job_row.get("title") or "",
+            "enhanced_title": job_row.get("enhanced_title") or job_row.get("title") or "",
+            "customer_name": job_row.get("customer_name") or "",
+            "customer": job_row.get("customer_name") or "",
+            "status": job_row.get("status") or "",
+            "description": job_row.get("jobdiva_description") or "",
+            "jobdiva_description": job_row.get("jobdiva_description") or "",
+            "ai_description": job_row.get("ai_description") or "",
+            "recruiter_notes": job_row.get("recruiter_notes") or "",
+            "city": job_row.get("city") or "",
+            "state": job_row.get("state") or "",
+            "zip_code": job_row.get("zip_code") or "",
+            "zip": job_row.get("zip_code") or "",
+            "location_type": job_row.get("location_type") or "",
+            "address1": job_row.get("address1") or "",
+            "employment_type": job_row.get("employment_type") or "",
+            "pay_rate": job_row.get("pay_rate") or "",
+            "openings": job_row.get("openings") or "",
+            "posted_date": job_row.get("posted_date") or "",
+            "start_date": job_row.get("start_date") or "",
+            "priority": job_row.get("priority") or "",
+            "program_duration": job_row.get("program_duration") or "",
+            "duration": job_row.get("program_duration") or "",
+            "max_allowed_submittals": job_row.get("max_allowed_submittals") or "",
+            "max_submittals": job_row.get("max_allowed_submittals") or "",
+            "work_authorization": job_row.get("work_authorization") or "",
+            "is_external": bool(is_external_row),
+        }
+
         return {
             "status": "success",
             "data": {
@@ -879,7 +918,8 @@ async def get_job_draft(job_id: str, user_session: str = "default"):
                 "screening_level": job_row.get("screening_level") or "L1.5",
                 "bot_introduction": job_row.get("bot_introduction") or "",
                 "resume_match_filters": parse_json(job_row.get("resume_match_filters")),
-                "sourcing_filters": job_row.get("sourcing_filters") or {}
+                "sourcing_filters": job_row.get("sourcing_filters") or {},
+                "job_details": job_details,
             }
         }
         
