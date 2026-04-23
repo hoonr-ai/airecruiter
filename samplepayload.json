@@ -1,0 +1,112 @@
+{
+  "phone_number": "+91 9113975140",
+  "resumes": [
+    {
+      "name": "Ronak Jain",
+      "candidate_name": "Ronak Jain",
+      "full_name": "Ronak Jain",
+      "first_name": "Ronak",
+      "last_name": "Jain",
+      "phone": "+91 9113975140",
+      "email": "ronakpahariya@gmail.com",
+      "raw_resume_text": "Ronak Jain\nHouston, TX (Hybrid)   +91 9113975140  ronakpahariya@gmail.com   linkedin.com/in/bernardcale \nENTERPRISE PROGRAM LEADER | PARTNER & REVENUE OPERATIONS | GOVERNANCE & SCALABLE \nOPERATING MODELS \nEnterprise program and transformation leader with 15+ years of experience designing and \noperationalizing governance frameworks, portfolio prioritization models, and cross-functional \nexecution rhythms across retail, supply chain, digital, and enterprise technology environments. \nSpecializes in translating commercial and strategic objectives into scalable operating systems   \nincluding intake models, prioritization logic, KPI dashboards, performance tracking, and business-rule \nintegration into enterprise platforms. Proven ability to align Legal, Finance, GTM, Product, \nEngineering, and Operations stakeholders while maintaining transparency, compliance, and \nmeasurable value realization. \nExperienced in B2B and retail ecosystems where automation, auditability, and cross-functional \ncoordination are critical to revenue performance and operational integrity. \n \nCORE EXPERTISE \nPartner & Incentive Program Governance \nRevenue Operations & Commercial Frameworks \nTiering Logic & Eligibility Rule Design \nPortfolio Prioritization & Intake Models \nCross-Functional Enterprise Alignment \nBusiness Logic Integration into Systems \nKPI & Performance Dashboard Design \nProcess Mapping & Workflow Optimization \nRisk Management & Compliance Controls \nScaled Agile & Hybrid Delivery Environments \n \nPROFESSIONAL EXPERIENCE \nEnterprise Transformation & Portfolio Program Lead \nHouston, TX | Recent Engagements \nLed enterprise-level portfolio governance, delivery stabilization, and operating model modernization \ninitiatives across complex, multi-team environments. \n \n \nKey Contributions: \n  Designed and implemented portfolio intake and prioritization frameworks to align strategic \nobjectives with execution capacity and financial constraints. \n  Established governance cadences, escalation pathways, and performance dashboards enabling \nexecutive visibility into delivery health, value realization, and risk exposure. \n  Embedded structured decision-making and scoring models into Azure DevOps and Jira-based \nenvironments to improve transparency and accountability. \n  Partnered with Product, Engineering, Finance, and Operations leaders to rationalize \nworkstreams, clarify dependency logic, and align resource allocation to highest-value \ninitiatives. \n  Developed KPI frameworks tracking throughput, cycle time, budget alignment, and outcome \nrealization across multiple teams. \n  Facilitated cross-functional working sessions to eliminate systemic bottlenecks and improve \nexecution predictability. \n  Drove adoption of standardized templates, SOPs, and governance models to ensure scalability \nand audit readiness. \nImpact: Increased delivery predictability, improved executive decision-making visibility, and reduced \nmisaligned work across enterprise portfolios. \n \nWALGREENS – Program Manager \nDeerfield, IL \nLed enterprise customer contact and campaign governance programs impacting 27M+ households \nand 100M+ outbound communications annually. \n  Designed and operationalized enterprise intake model governing outbound campaigns, \neligibility logic, prioritization rules, and channel sequencing. \n  Standardized campaign governance framework balancing commercial goals with customer \nexperience and compliance requirements. \n  Built KPI dashboards translating customer engagement data into measurable revenue and \nperformance insights. \n  Partnered with Marketing, Merchandising, IT, Finance, and Customer Care to embed business \nlogic into CRM and campaign systems. \n  Developed SOPs and audit controls ensuring transparency, scalability, and regulatory \nalignment. \n  Led cross-functional coordination supporting a $28M refill reminder infrastructure generating \n$288M in revenue within six months. \nImpact: Established scalable commercial governance model optimizing customer engagement and \nrevenue performance. \n \nACADEMY SPORTS + OUTDOORS – Senior IT Project Manager, eCommerce \nKaty, TX \nDirected cross-functional initiatives across digital commerce, merchandising, supply chain, and \ntechnology teams. \n  Led multi-team initiatives improving digital platform scalability and peak operational \nreadiness. \n  Embedded pricing, merchandising, and inventory business logic into enterprise systems \nsupporting revenue growth. \n  Managed governance across scope, schedule, and financial controls with executive reporting \ncadence. \n  Coordinated vendor and third-party integrations supporting online sales ecosystem. \nImpact: Delivered six enterprise initiatives on time and an average of 20% under budget while \nimproving digital execution rigor. \n \nACE HARDWARE – IT Project Manager \nOak Brook, IL \nStabilized post-SAP eCommerce and supply chain technology operations. \n  Conducted end-to-end process mapping identifying operational gaps and control weaknesses. \n  Embedded governance structures across onshore/offshore teams to improve release \npredictability. \n  Facilitated sprint and release planning while aligning operational priorities with business \nstakeholders. \n  Developed accountability frameworks and performance metrics to sustain improvements. \nImpact: Restored operational stability and improved cross-functional alignment within retail supply \nchain ecosystem. \n \nSYSCO FOODS – Senior Technical Program Manager (SAP) \nHouston, TX \n  Managed enterprise rollout of pricing engine integrated with SCM and CRM systems. \n  Coordinated cross-system dependencies and stakeholder alignment across supply chain and \nsales. \n  Implemented structured governance across scope, risk, and release management. \n \nEarlier Career: Accenture | Arthur J. Gallagher | Johnson Controls | USG Corporation \nProgressed through roles spanning supply chain, eCommerce, data warehouse, EDI, and enterprise \nsystems implementation, building strong foundation in systems thinking, business analysis, and cross-\nfunctional program leadership. \n \nEDUCATION \nMBA – Keller Graduate School of Management \nMaster of Project Management \nB.S. Computer Information Systems \n \nTECHNOLOGY & TOOLS \nAzure DevOps | Jira | SAP | CRM Platforms | SCM Systems \nSQL | Oracle | DB2 \nMicrosoft Project | SharePoint | Visio \nAgile | Scrum | Hybrid Delivery | Process Re-engineering \n"
+    }
+  ],
+  "jd": {
+    "job_id": "31920112",
+    "jobdiva_id": "26-06183",
+    "pre_screen_questions": [
+      {
+        "question_text": "Can you describe your experience with test automation frameworks and tools?",
+        "pass_criteria": "Should demonstrate hands-on experience with automation tools",
+        "is_default": true,
+        "category": "technical"
+      },
+      {
+        "question_text": "How do you approach API testing and what tools have you used?",
+        "pass_criteria": "Should mention REST Assured, Postman, or similar API testing tools",
+        "is_default": true,
+        "category": "technical"
+      },
+      {
+        "question_text": "Describe your experience with SQL and backend validation testing.",
+        "pass_criteria": "Should show understanding of database testing and SQL queries",
+        "is_default": true,
+        "category": "technical"
+      },
+      {
+        "question_text": "How do you handle test case design for complex business workflows?",
+        "pass_criteria": "Should demonstrate systematic approach to test design",
+        "is_default": true,
+        "category": "methodology"
+      },
+      {
+        "question_text": "What is your experience with Agile/Scrum testing practices?",
+        "pass_criteria": "Should show familiarity with iterative development and testing",
+        "is_default": true,
+        "category": "methodology"
+      }
+    ],
+    "context": {
+      "title": "IT Quality Assur Anlyt Sr",
+      "customer_name": "Progressive",
+      "city": "TBD",
+      "state": "OH",
+      "location_type": "Onsite",
+      "jobdiva_description": "We are seeking an experienced IT Quality Assurance Analyst Senior to join our team. The ideal candidate will have hands-on experience with test automation frameworks, API testing, SQL and backend validation, and Agile/Scrum methodologies. Responsibilities include designing and executing test cases for complex business workflows, collaborating with cross-functional teams, and ensuring the highest quality standards for our software products."
+    },
+    "rubric": {
+      "titles": [
+        {
+          "value": "IT Quality Assur Anlyt Sr",
+          "minYears": 0,
+          "recent": false,
+          "matchType": "Similar",
+          "required": "Required",
+          "source": "JobDiva"
+        }
+      ],
+      "skills": [
+        {
+          "value": "Duck Creek",
+          "minYears": 4,
+          "recent": true,
+          "matchType": "Similar",
+          "required": "Required"
+        },
+        {
+          "value": "Test Automation",
+          "minYears": 4,
+          "recent": true,
+          "matchType": "Similar",
+          "required": "Required"
+        }
+      ],
+      "education": [
+        {
+          "degree": "Bachelor's degree",
+          "field": "Information Technology",
+          "required": "Required"
+        }
+      ],
+      "domain": [
+        {
+          "value": "Insurance",
+          "required": "Required"
+        }
+      ],
+      "customer_requirements": [
+        {
+          "value": "Must not be employed by: Progressive"
+        }
+      ],
+      "other_requirements": [
+        {
+          "value": "Must be local to TBD, OH metro",
+          "required": "Required"
+        }
+      ]
+    }
+  },
+  "interview_duration": "20-25"
+}
