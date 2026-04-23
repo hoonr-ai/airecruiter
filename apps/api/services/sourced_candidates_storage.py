@@ -403,49 +403,240 @@ class SourcedCandidatesStorage:
             print(f"Error retrieving candidates for job {jobdiva_id}: {e}")
             return []
 
-    def get_all_candidates(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Retrieve all sourced candidates across all jobs."""
+    # Whitelist of sortable columns -> SQL expression. Inlined into the ORDER
+    # BY clause. NULLS LAST so empty/missing values don't crowd the top when
+    # sorting asc.
+    _SORT_EXPR = {
+        "name":       "COALESCE(NULLIF(d.name, ''), '') ",
+        "match":      "d.match_score",
+        "job":        "COALESCE(NULLIF(d.job_title, ''), '') ",
+        "source":     "COALESCE(NULLIF(d.source, ''), '') ",
+        "location":   "COALESCE(NULLIF(d.location, ''), '') ",
+        "created_at": "d.created_at",
+    }
+    # Match-band query-string values → (min, max) inclusive numeric bounds,
+    # or the "unscored" sentinel (NULL match_score). Names mirror the FE
+    # MATCH_BANDS constant at apps/web/app/candidates/page.tsx so no
+    # translation layer is needed between client & server.
+    _MATCH_BANDS = {
+        "strong":   (80, 100),
+        "good":     (60, 79.9999),
+        "low":      (0, 59.9999),
+        "unscored": None,  # sentinel → match_score IS NULL
+    }
+
+    def get_all_candidates(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        search: Optional[str] = None,
+        job_id: Optional[str] = None,
+        source: Optional[str] = None,
+        location: Optional[str] = None,
+        match_band: Optional[str] = None,
+        sort_key: Optional[str] = None,
+        sort_dir: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Retrieve paginated + filtered + sorted candidates across all jobs.
+
+        Returns {"candidates": [...current page...], "total": <filtered count>}.
+
+        Pagination is server-side; filters apply across the whole DB (not just
+        the current page). `match_band` buckets resume_match_percentage into
+        "80-100"/"60-79"/"0-59". `sort_key` is whitelisted — unknown keys fall
+        back to the default (source priority + match desc). Expensive SELECTs
+        are wrapped in a CTE so DISTINCT ON + filters compose cleanly.
+        """
         if not self.db_url:
-            return []
-            
+            return {"candidates": [], "total": 0}
+
         try:
-            # Use fresh connection to avoid transaction issues
             import psycopg2
             import psycopg2.extras
-            
+
             conn = psycopg2.connect(self.db_url)
-            conn.autocommit = True  # Prevent transaction issues
+            conn.autocommit = True
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            
-            # Join with monitored_jobs to get job title
-            # Try matching by jobdiva_id with the monitored jobs
-            cur.execute("""
-                SELECT DISTINCT ON (sc.candidate_id) sc.*, mj.title as job_title 
-                FROM sourced_candidates sc
-                LEFT JOIN monitored_jobs mj ON (sc.jobdiva_id = mj.job_id OR sc.jobdiva_id = mj.jobdiva_id)
-                ORDER BY sc.candidate_id, sc.created_at DESC
-                LIMIT %s
-            """, (limit,))
-            
-            candidates = []
-            for row in cur.fetchall():
+
+            # --- ORDER BY (whitelist) -----------------------------------------
+            expr = self._SORT_EXPR.get((sort_key or "").lower())
+            direction = "DESC" if (sort_dir or "desc").lower() == "desc" else "ASC"
+            if expr:
+                order_by = f"{expr} {direction} NULLS LAST, d.candidate_id ASC"
+            else:
+                # Default: source priority (applicants > linkedin > talentsearch
+                # > other) then match_score desc. Mirrors the FE default sort so
+                # server-driven paging agrees with what the user used to see.
+                order_by = """
+                    CASE
+                        WHEN LOWER(COALESCE(d.source,'')) LIKE '%%applicants%%' THEN 1
+                        WHEN LOWER(COALESCE(d.source,'')) LIKE '%%linkedin%%'   THEN 2
+                        WHEN LOWER(COALESCE(d.source,'')) LIKE '%%talentsearch%%'
+                             OR LOWER(COALESCE(d.source,'')) LIKE '%%talent_search%%' THEN 3
+                        ELSE 4
+                    END ASC,
+                    d.match_score DESC NULLS LAST,
+                    d.candidate_id ASC
+                """
+
+            # --- Match band -> numeric bounds or NULL filter ------------------
+            band_unscored = False
+            min_score: Optional[float] = None
+            max_score: Optional[float] = None
+            if match_band:
+                band = self._MATCH_BANDS.get(match_band)
+                if band is None and match_band == "unscored":
+                    band_unscored = True
+                elif band is not None:
+                    min_score, max_score = band
+
+            # --- Named params -------------------------------------------------
+            search_like = f"%{search.strip()}%" if search and search.strip() else None
+            params = {
+                "job_id":        job_id or None,
+                "source":        source or None,
+                "location":      location or None,
+                "search":        search_like,
+                "search_like":   search_like,
+                "min_score":     min_score,
+                "max_score":     max_score,
+                "band_unscored": band_unscored,
+                "limit":         max(1, min(int(limit), 200)),
+                "offset":        max(0, int(offset)),
+            }
+
+            # CTE dedupes by candidate_id (keep most-recent row), then outer
+            # SELECT filters, counts, orders, paginates.
+            query = f"""
+                WITH deduped AS (
+                    SELECT DISTINCT ON (sc.candidate_id)
+                        sc.*,
+                        COALESCE(
+                            sc.resume_match_percentage,
+                            NULLIF(sc.data->>'match_score','')::numeric
+                        ) AS match_score,
+                        mj.title AS job_title
+                    FROM sourced_candidates sc
+                    LEFT JOIN monitored_jobs mj
+                      ON (sc.jobdiva_id = mj.job_id OR sc.jobdiva_id = mj.jobdiva_id)
+                    ORDER BY sc.candidate_id, sc.created_at DESC
+                )
+                SELECT d.*, COUNT(*) OVER() AS total_count
+                FROM deduped d
+                WHERE (%(job_id)s IS NULL   OR d.jobdiva_id = %(job_id)s)
+                  AND (%(source)s IS NULL   OR d.source = %(source)s)
+                  AND (%(location)s IS NULL OR d.location = %(location)s)
+                  AND (
+                      %(band_unscored)s = FALSE
+                      OR d.match_score IS NULL
+                  )
+                  AND (%(min_score)s IS NULL OR d.match_score >= %(min_score)s)
+                  AND (%(max_score)s IS NULL OR d.match_score <= %(max_score)s)
+                  AND (
+                      %(search)s IS NULL
+                      OR COALESCE(d.name,'')       ILIKE %(search_like)s
+                      OR COALESCE(d.headline,'')   ILIKE %(search_like)s
+                      OR COALESCE(d.job_title,'')  ILIKE %(search_like)s
+                      OR COALESCE(d.location,'')   ILIKE %(search_like)s
+                      OR COALESCE(d.jobdiva_id,'') ILIKE %(search_like)s
+                  )
+                ORDER BY {order_by}
+                LIMIT %(limit)s OFFSET %(offset)s
+            """
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+            total = int(rows[0]["total_count"]) if rows else 0
+
+            candidates: List[Dict[str, Any]] = []
+            for row in rows:
                 c_dict = dict(row)
-                if c_dict.get('data'):
+                c_dict.pop("total_count", None)
+                # JSON uplift: column-level `match_score` already COALESCEd at
+                # SQL layer. engage_score / engage_status still live only in
+                # the `data` jsonb, so uplift them here for the FE.
+                if c_dict.get("data"):
                     try:
-                        if isinstance(c_dict['data'], str):
-                            c_dict['data'] = json.loads(c_dict['data'])
-                    except:
+                        data = c_dict["data"]
+                        if isinstance(data, str):
+                            data = json.loads(data)
+                            c_dict["data"] = data
+                        if isinstance(data, dict):
+                            if data.get("engage_score") is not None and c_dict.get("engage_score") is None:
+                                c_dict["engage_score"] = data["engage_score"]
+                            if data.get("engage_status") and c_dict.get("engage_status") is None:
+                                c_dict["engage_status"] = data["engage_status"]
+                    except Exception as e:
+                        logger.debug(f"Error parsing candidate.data json: {e}")
+                if c_dict.get("created_at"):
+                    c_dict["created_at"] = str(c_dict["created_at"])
+                # Numeric -> float for JSON serialization
+                if c_dict.get("match_score") is not None:
+                    try:
+                        c_dict["match_score"] = float(c_dict["match_score"])
+                    except Exception:
                         pass
-                if c_dict.get('created_at'):
-                    c_dict['created_at'] = str(c_dict['created_at'])
                 candidates.append(c_dict)
-                
+
             cur.close()
             conn.close()
-            return candidates
+            return {"candidates": candidates, "total": total}
         except Exception as e:
-            print(f"Error retrieving all candidates: {e}")
-            return []
+            logger.error(f"Error retrieving all candidates: {e}")
+            return {"candidates": [], "total": 0}
+
+    def get_filter_options(self) -> Dict[str, Any]:
+        """Distinct values used to populate FE filter dropdowns.
+
+        Pulled from the full `sourced_candidates` table (DB-wide, not the
+        current page) so filtering still operates on all rows post-pagination.
+        """
+        if not self.db_url:
+            return {"jobs": [], "sources": [], "locations": []}
+
+        try:
+            import psycopg2
+            import psycopg2.extras
+
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+            # Jobs: jobdiva_id + best-effort title via monitored_jobs.
+            cur.execute("""
+                SELECT sc.jobdiva_id AS id, MIN(mj.title) AS title
+                FROM sourced_candidates sc
+                LEFT JOIN monitored_jobs mj
+                  ON (sc.jobdiva_id = mj.job_id OR sc.jobdiva_id = mj.jobdiva_id)
+                WHERE sc.jobdiva_id IS NOT NULL AND sc.jobdiva_id <> ''
+                GROUP BY sc.jobdiva_id
+                ORDER BY title NULLS LAST, sc.jobdiva_id
+            """)
+            jobs = [
+                {"id": r["id"], "label": f"{r['title']} — #{r['id']}" if r["title"] else f"#{r['id']}"}
+                for r in cur.fetchall()
+            ]
+
+            cur.execute("""
+                SELECT DISTINCT source FROM sourced_candidates
+                WHERE source IS NOT NULL AND source <> ''
+                ORDER BY source
+            """)
+            sources = [r["source"] for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT DISTINCT location FROM sourced_candidates
+                WHERE location IS NOT NULL AND location <> ''
+                ORDER BY location
+            """)
+            locations = [r["location"] for r in cur.fetchall()]
+
+            cur.close()
+            conn.close()
+            return {"jobs": jobs, "sources": sources, "locations": locations}
+        except Exception as e:
+            logger.error(f"Error retrieving filter options: {e}")
+            return {"jobs": [], "sources": [], "locations": []}
 
 sourced_candidates_storage = SourcedCandidatesStorage()
 
