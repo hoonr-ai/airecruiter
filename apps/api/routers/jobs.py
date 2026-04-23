@@ -1260,32 +1260,42 @@ async def save_draft_requirements(job_id: str, requirements_data: JobDraftRequir
 async def get_monitored_job_data(job_id: str):
     """
     Get current data from monitored_jobs table for verification.
+
+    Accepts either the numeric `job_id` PK or the ref-code `jobdiva_id`
+    (e.g. '26-12795') since the home-screen link uses jobdiva_id when
+    available.
     """
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
+
         cursor.execute("""
             SELECT job_id, title, enhanced_title, ai_description, selected_job_boards,
                    recruiter_notes, recruiter_emails, selected_employment_types,
                    work_authorization, screening_level, current_step, processing_status,
-                   job_requirements, ai_enhanced, created_at, updated_at
-            FROM monitored_jobs 
-            WHERE job_id = %s
-        """, (job_id,))
-        
+                   job_requirements, ai_enhanced, created_at, updated_at,
+                   customer_name, jobdiva_id, status, city, state, location_type,
+                   employment_type, pay_rate, openings, priority, program_duration,
+                   max_allowed_submittals
+            FROM monitored_jobs
+            WHERE job_id = %s OR jobdiva_id = %s
+        """, (job_id, job_id))
+
         row = cursor.fetchone()
         cursor.close()
         conn.close()
-        
+
         if not row:
             raise HTTPException(status_code=404, detail=f"Job {job_id} not found in monitored_jobs")
         
-        # Column names for reference
+        # Column names for reference (must match SELECT order above)
         columns = ["job_id", "title", "enhanced_title", "ai_description", "selected_job_boards",
-                   "recruiter_notes", "recruiter_emails", "selected_employment_types", 
+                   "recruiter_notes", "recruiter_emails", "selected_employment_types",
                    "work_authorization", "screening_level", "current_step", "processing_status",
-                   "job_requirements", "ai_enhanced", "created_at", "updated_at"]
+                   "job_requirements", "ai_enhanced", "created_at", "updated_at",
+                   "customer_name", "jobdiva_id", "status", "city", "state", "location_type",
+                   "employment_type", "pay_rate", "openings", "priority", "program_duration",
+                   "max_allowed_submittals"]
         
         data = dict(zip(columns, row))
         
@@ -1297,11 +1307,11 @@ async def get_monitored_job_data(job_id: str):
                 except:
                     pass
         
-        # Convert datetime objects to strings
-        if data.get("created_at"):
-            data["created_at"] = data["created_at"].isoformat()
-        if data.get("updated_at"):
-            data["updated_at"] = data["updated_at"].isoformat()
+        # Convert datetime objects to strings (some rows already store strings)
+        for dt_field in ("created_at", "updated_at"):
+            val = data.get(dt_field)
+            if val and hasattr(val, "isoformat"):
+                data[dt_field] = val.isoformat()
         
         logger.info(f"📊 Retrieved monitored_jobs data for {job_id}")
         return {

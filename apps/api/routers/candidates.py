@@ -511,34 +511,52 @@ async def message_candidate(request: CandidateMessageRequest):
 async def get_job_candidates(jobdiva_id: str):
     """
     Fetches all sourced candidates tied to a specific job.
+
+    The path param accepts either the ref-code jobdiva_id (e.g. '26-12795')
+    or the numeric job_id PK. We resolve whichever was passed to the
+    canonical jobdiva_id stored on sourced_candidates rows.
     """
     try:
         from core.config import DATABASE_URL
         import psycopg2
         from psycopg2.extras import RealDictCursor
 
-        # Convert job_id to jobdiva_id
-        jobdiva_id = None
+        job_ref = jobdiva_id  # keep the incoming value; don't shadow
+        # NOTE: despite the column name, `sourced_candidates.jobdiva_id` actually
+        # stores the NUMERIC job_id PK (e.g. '32129274'), not the ref code
+        # ('26-11355'). We resolve both possible URL shapes to that numeric key.
+        resolved_numeric_id = None
         with psycopg2.connect(DATABASE_URL) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s", (job_id,))
+                cur.execute(
+                    "SELECT job_id FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s",
+                    (job_ref, job_ref),
+                )
                 result = cur.fetchone()
                 if result:
-                    jobdiva_id = result[0]
+                    resolved_numeric_id = str(result[0])
 
-        if not jobdiva_id:
-            return {"candidates": [], "message": f"No JobDiva ID found for job {jobdiva_id}"}
+        if not resolved_numeric_id:
+            return {"status": "success", "candidates": [], "message": f"No JobDiva ID found for job {job_ref}"}
 
         with psycopg2.connect(DATABASE_URL) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT id, jobdiva_id, candidate_id, name, email, skills,
-                           experience_years, source, match_score, is_selected, created_at
+                    SELECT id, jobdiva_id, candidate_id, name, email, phone,
+                           headline, location, source, status, profile_url, image_url,
+                           resume_match_percentage, data, created_at
                     FROM sourced_candidates
                     WHERE jobdiva_id = %s
                     ORDER BY created_at DESC;
-                """, (jobdiva_id,))
+                """, (resolved_numeric_id,))
                 candidates = cur.fetchall()
+                # Frontend expects a `match_score` field; alias from resume_match_percentage
+                # so the rankings page's sort + badge logic works.
+                for c in candidates:
+                    c["match_score"] = c.get("resume_match_percentage") or 0
+                    # Normalize datetimes for JSON serialization
+                    if c.get("created_at") and hasattr(c["created_at"], "isoformat"):
+                        c["created_at"] = c["created_at"].isoformat()
 
         return {"status": "success", "candidates": candidates}
     except Exception as e:
