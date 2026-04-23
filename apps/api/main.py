@@ -163,6 +163,7 @@ app.include_router(job_criteria_router.router)
 app.include_router(manual_candidates_router.router)
 app.include_router(candidates_router.router)
 app.include_router(jobs_router.router)
+app.include_router(engagement.router, prefix="/api/v1/engagement")
 
 app.add_middleware(
     CORSMiddleware,

@@ -4,6 +4,9 @@ import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
+import { EngageWizardModal } from "@/components/EngageWizardModal";
+import { AssessModal } from "@/components/AssessModal";
+
 import { 
   ArrowLeft,
   Linkedin,
@@ -51,6 +54,19 @@ export function SourcedCandidatesView({
   );
   const [selectedCount, setSelectedCount] = useState(0);
   const [selectBest, setSelectBest] = useState<number>(150);
+
+  // Engage state
+  const [isEngageModalOpen, setIsEngageModalOpen] = useState(false);
+  const [engagePayload, setEngagePayload] = useState<string>('');
+  const [engageLoading, setEngageLoading] = useState(false);
+  const [engageError, setEngageError] = useState<string | null>(null);
+  const [engageApiResponse, setEngageApiResponse] = useState<any>(null);
+  const [engageCandidateIds, setEngageCandidateIds] = useState<string[]>([]);
+
+  // Assess state
+  const [isAssessModalOpen, setIsAssessModalOpen] = useState(false);
+  const [selectedAssessCandidate, setSelectedAssessCandidate] = useState<SourcedCandidate | null>(null);
+  const [selectedAssessInterviewId, setSelectedAssessInterviewId] = useState<string | null>(null);
 
   useEffect(() => {
     setCandidates(initialCandidates.map(c => ({ ...c, selected: false })));
@@ -134,14 +150,86 @@ export function SourcedCandidatesView({
     }
   };
 
-  const handleEngageCandidate = (candidate: SourcedCandidate) => {
-    // Coming in next phase
-    console.log("Engage feature coming in next phase:", candidate.name);
+  const handleEngageCandidate = async (candidate: SourcedCandidate) => {
+    setEngageLoading(true);
+    setEngageError(null);
+    setEngageApiResponse(null);
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
+      const candidateId = candidate.candidate_id || candidate.id;
+      const response = await fetch(`${apiUrl}/api/v1/engagement/engage/generate-payload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          candidate_ids: [candidateId],
+          job_id: 'GENERAL_SOURCING'
+        })
+      });
+      if (!response.ok) throw new Error('Failed to generate payload');
+      const data = await response.json();
+      setEngagePayload(data.payload);
+      setEngageCandidateIds([candidateId]);
+      setIsEngageModalOpen(true);
+    } catch (err: any) {
+      setEngageError(err.message || 'Failed to generate payload');
+      console.error('Engage error:', err);
+    } finally {
+      setEngageLoading(false);
+    }
   };
 
-  const handleAssessCandidate = (candidate: SourcedCandidate) => {
-    // Coming in next phase
-    console.log("Assess feature coming in next phase:", candidate.name);
+  const handleSendEngagePayload = async (payloadOverride?: string) => {
+    setEngageLoading(true);
+    setEngageError(null);
+    setEngageApiResponse(null);
+    const payloadToSend = payloadOverride ?? engagePayload;
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
+      try { JSON.parse(payloadToSend); } catch (e) {
+        throw new Error('Invalid JSON format in payload');
+      }
+      const response = await fetch(`${apiUrl}/api/v1/engagement/engage/send-bulk-interview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          payload: payloadToSend,
+          real_candidate_ids: engageCandidateIds
+        })
+      });
+      const data = await response.json();
+      setEngageApiResponse(data);
+      if (response.ok && data.success) {
+        setTimeout(() => setIsEngageModalOpen(false), 1500);
+      } else {
+        setEngageError(data.message || 'API returned error status');
+      }
+    } catch (err: any) {
+      setEngageError(err.message || 'Unknown error');
+    } finally {
+      setEngageLoading(false);
+    }
+  };
+
+  const handleAssessCandidate = async (candidate: SourcedCandidate) => {
+    setSelectedAssessCandidate(candidate);
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
+      const candidateId = candidate.candidate_id || candidate.id;
+      const res = await fetch(`${apiUrl}/api/v1/engagement/latest-interview/by-id/${candidateId}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.interview_id) {
+          setSelectedAssessInterviewId(data.interview_id);
+        } else {
+          setSelectedAssessInterviewId(null);
+        }
+      } else {
+        setSelectedAssessInterviewId(null);
+      }
+    } catch (e) {
+      setSelectedAssessInterviewId(null);
+    }
+    setIsAssessModalOpen(true);
   };
 
   const getSourceIcon = (source: string) => {
@@ -297,19 +385,18 @@ export function SourcedCandidatesView({
                     size="sm"
                     variant="outline"
                     onClick={() => handleEngageCandidate(candidate)}
-                    disabled={true}
-                    className="h-8 px-3 opacity-50 cursor-not-allowed"
+                    disabled={engageLoading}
+                    className="h-8 px-3"
                   >
                     <MessageSquare className="w-3.5 h-3.5 mr-1.5" />
-                    Engage
+                    {engageLoading ? 'Loading...' : 'Engage'}
                   </Button>
                   
                   <Button 
                     size="sm"
                     variant="outline"
                     onClick={() => handleAssessCandidate(candidate)}
-                    disabled={true}
-                    className="h-8 px-3 opacity-50 cursor-not-allowed"
+                    className="h-8 px-3"
                   >
                     <FileText className="w-3.5 h-3.5 mr-1.5" />
                     Assess
@@ -335,6 +422,32 @@ export function SourcedCandidatesView({
           <p className="text-gray-500">Try adjusting your search criteria.</p>
         </div>
       )}
+
+      <EngageWizardModal
+        open={isEngageModalOpen}
+        onClose={() => setIsEngageModalOpen(false)}
+        initialPayload={engagePayload}
+        candidateIds={engageCandidateIds}
+        onSend={async (payload) => {
+          setEngagePayload(payload);
+          await handleSendEngagePayload(payload);
+        }}
+        loading={engageLoading}
+        error={engageError}
+        successData={engageApiResponse}
+      />
+
+      {/* Assess Modal */}
+      <AssessModal
+        open={isAssessModalOpen}
+        onClose={() => {
+          setIsAssessModalOpen(false);
+          setSelectedAssessCandidate(null);
+          setSelectedAssessInterviewId(null);
+        }}
+        interviewId={selectedAssessInterviewId}
+        candidateName={selectedAssessCandidate?.name || ''}
+      />
     </div>
   );
 }

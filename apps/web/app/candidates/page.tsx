@@ -2,13 +2,16 @@
 
 import { useState, useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
-import { Search, ExternalLink, User, MapPin, Briefcase, Linkedin, ShieldCheck, Mail, ArrowLeft, Eye, Zap, Filter, ChevronDown, X, ArrowUp, ArrowDown, ChevronsUpDown } from "lucide-react";
+import { Search, ExternalLink, User, MapPin, Briefcase, Linkedin, ShieldCheck, Mail, ArrowLeft, Eye, Zap, Filter, ChevronDown, X, ArrowUp, ArrowDown, ChevronsUpDown, MessageSquare, FileText } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { ResumeModal } from "@/components/ResumeModal";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
+import { AssessModal } from "@/components/AssessModal";
+
 import {
   Table,
   TableBody,
@@ -123,12 +126,28 @@ export default function CandidatesPage() {
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [sortDir, setSortDir] = useState<SortDir>(null);
   const [isLoading, setIsLoading] = useState(true);
+  // Used by fetchCandidates to cancel older in-flight polls when a new one starts.
+  const abortControllerRef = useRef<AbortController | null>(null);
   const [messageModalOpen, setMessageModalOpen] = useState(false);
   const [selectedCandidateForEmail, setSelectedCandidateForEmail] = useState<any>(null);
   const [resumeModalOpen, setResumeModalOpen] = useState(false);
   const [selectedCandidateForResume, setSelectedCandidateForResume] = useState<any>(null);
   const [detailsModalOpen, setDetailsModalOpen] = useState(false);
   const [selectedCandidateForDetails, setSelectedCandidateForDetails] = useState<any>(null);
+
+  // Engage state
+  const [isEngageModalOpen, setIsEngageModalOpen] = useState(false);
+  const [engagePayload, setEngagePayload] = useState<string>('');
+  const [engageLoading, setEngageLoading] = useState(false);
+  const [engageError, setEngageError] = useState<string | null>(null);
+  const [selectedCandidateIds, setSelectedCandidateIds] = useState<string[]>([]);
+  const [apiResponse, setApiResponse] = useState<any>(null);
+  const [candidateInterviewData, setCandidateInterviewData] = useState<{[key: string]: any}>({});
+
+  // Assess state
+  const [isAssessModalOpen, setIsAssessModalOpen] = useState(false);
+  const [selectedAssessCandidate, setSelectedAssessCandidate] = useState<any>(null);
+  const [selectedAssessInterviewId, setSelectedAssessInterviewId] = useState<string | null>(null);
 
   useEffect(() => {
     fetchCandidates(false);
@@ -138,13 +157,28 @@ export default function CandidatesPage() {
       fetchCandidates(true);
     }, 5000);
 
-    return () => clearInterval(intervalId);
+    return () => {
+      clearInterval(intervalId);
+      // Cancel any in-flight fetch on unmount
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
   }, []);
 
   const fetchCandidates = async (isBackground = false) => {
+    // Cancel any previous in-flight request before starting a new one
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     if (!isBackground) setIsLoading(true);
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates`);
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates`, {
+        signal: controller.signal,
+      });
       const data = await response.json();
       if (!isBackground) console.log("📊 Fetched candidates data:", data);
 
@@ -179,8 +213,14 @@ export default function CandidatesPage() {
         if (!isBackground) console.log(`✅ Found ${data.candidates.length} tracking records, deduplicated and sorted to ${sortedUnique.length} unique candidates`);
         setCandidates(sortedUnique);
       }
-    } catch (error) {
-      console.error("Error fetching candidates:", error);
+    } catch (error: any) {
+      // AbortError is expected when a newer poll cancels an older in-flight request
+      if (error?.name === 'AbortError') return;
+      if (isBackground) {
+        console.warn("Background candidate poll failed (will retry):", error);
+      } else {
+        console.error("Error fetching candidates:", error);
+      }
     } finally {
       if (!isBackground) {
         setIsLoading(true);
@@ -327,6 +367,107 @@ export default function CandidatesPage() {
       resumeText: resumeText || "Resume content is not available for this candidate."
     });
     setResumeModalOpen(true);
+  };
+
+  // ---- Engage Handlers ----
+  const handleEngageClick = async (candidate: Candidate) => {
+    setEngageLoading(true);
+    setEngageError(null);
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
+      const response = await fetch(`${apiUrl}/api/v1/engagement/engage/generate-payload`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          candidate_ids: [candidate.candidate_id],
+          job_id: candidate.jobdiva_id
+        })
+      });
+      if (!response.ok) throw new Error('Failed to generate payload');
+      const data = await response.json();
+      setEngagePayload(data.payload);
+      setSelectedCandidateIds([candidate.candidate_id]);
+      setIsEngageModalOpen(true);
+    } catch (err: any) {
+      setEngageError(err.message || 'Failed to generate payload');
+      console.error('Engage error:', err);
+    } finally {
+      setEngageLoading(false);
+    }
+  };
+
+  const handleScheduleCall = async (payloadOverride?: string) => {
+    setEngageLoading(true);
+    setEngageError(null);
+    setApiResponse(null);
+    const payloadToSend = payloadOverride ?? engagePayload;
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
+      // Validate JSON
+      try {
+        JSON.parse(payloadToSend);
+      } catch (e) {
+        throw new Error('Invalid JSON format in payload');
+      }
+      const response = await fetch(`${apiUrl}/api/v1/engagement/engage/send-bulk-interview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          payload: payloadToSend,
+          real_candidate_ids: selectedCandidateIds
+        })
+      });
+      const data = await response.json();
+      setApiResponse(data);
+      if (response.ok && data.success) {
+        // Store interview data for Assess lookups
+        if (data.data && Array.isArray(data.data)) {
+          const interviewDataMap = { ...candidateInterviewData };
+          data.data.forEach((interviewInfo: any) => {
+            const candidateId = selectedCandidateIds[0] || interviewInfo.candidate_email;
+            interviewDataMap[candidateId] = {
+              interview_id: interviewInfo.interview_id,
+              candidate_name: interviewInfo.candidate_name,
+              candidate_email: interviewInfo.candidate_email,
+              links: interviewInfo.links,
+              session_token: interviewInfo.session_token,
+              created_at: interviewInfo.created_at
+            };
+          });
+          setCandidateInterviewData(interviewDataMap);
+        }
+        // Close modal on success after short delay
+        setTimeout(() => setIsEngageModalOpen(false), 1500);
+      } else {
+        setEngageError(data.message || 'API returned error status');
+      }
+    } catch (err: any) {
+      setEngageError(err.message || 'Unknown error');
+    } finally {
+      setEngageLoading(false);
+    }
+  };
+
+  // ---- Assess Handler ----
+  const handleAssessClick = async (candidate: Candidate) => {
+    setSelectedAssessCandidate(candidate);
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
+      const res = await fetch(`${apiUrl}/api/v1/engagement/latest-interview/by-id/${candidate.candidate_id}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.interview_id) {
+          setSelectedAssessInterviewId(data.interview_id);
+        } else {
+          setSelectedAssessInterviewId(null);
+        }
+      } else {
+        setSelectedAssessInterviewId(null);
+      }
+    } catch (e) {
+      setSelectedAssessInterviewId(null);
+    }
+    setIsAssessModalOpen(true);
   };
 
   return (
@@ -635,13 +776,18 @@ export default function CandidatesPage() {
                          <Button
                            size="sm"
                            className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 min-w-[70px]"
+                           onClick={() => handleEngageClick(candidate)}
+                           disabled={engageLoading}
                          >
-                           Engage
+                           <MessageSquare className="w-3.5 h-3.5" />
+                           {engageLoading ? 'Loading...' : 'Engage'}
                          </Button>
                          <Button
                            size="sm"
                            className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 min-w-[70px]"
+                           onClick={() => handleAssessClick(candidate)}
                          >
+                           <FileText className="w-3.5 h-3.5" />
                            Assess
                          </Button>
 
@@ -702,6 +848,33 @@ export default function CandidatesPage() {
           matchedSkills={selectedCandidateForDetails.matchedSkills}
         />
       )}
+
+      {/* Engage Wizard Modal */}
+      <EngageWizardModal
+        open={isEngageModalOpen}
+        onClose={() => setIsEngageModalOpen(false)}
+        initialPayload={engagePayload}
+        candidateIds={selectedCandidateIds}
+        onSend={async (payload) => {
+          setEngagePayload(payload);
+          await handleScheduleCall(payload);
+        }}
+        loading={engageLoading}
+        error={engageError}
+        successData={apiResponse}
+      />
+
+      {/* Assess Modal */}
+      <AssessModal
+        open={isAssessModalOpen}
+        onClose={() => {
+          setIsAssessModalOpen(false);
+          setSelectedAssessCandidate(null);
+          setSelectedAssessInterviewId(null);
+        }}
+        interviewId={selectedAssessInterviewId}
+        candidateName={selectedAssessCandidate?.name || ''}
+      />
     </div>
   );
 }
