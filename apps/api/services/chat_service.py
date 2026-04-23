@@ -8,12 +8,12 @@ class ChatService:
 
     async def get_response(self, message: str, history: List[dict]) -> str:
         if not self.client:
-            return "I am Aria, your AI assistant. (Mock Mode: OpenAI Key missing)"
+            return "I'm Tira, your recruiting sidekick. (Mock Mode: OpenAI Key missing)"
 
         try:
             # Simple context window management
             messages = [
-                {"role": "system", "content": "You are Aria, an intelligent recruiting assistant in the Hoonr platform. You are helpful, professional, and concise. You help recruiters find candidates, create jobs, and analyze data."}
+                {"role": "system", "content": "You are Tira, a recruiting sidekick inside Hoonr. You help recruiters find candidates, shape job rubrics, score resumes, and move submissions forward. Keep replies short, specific, and action-oriented. Refer to the product as Hoonr. When a user asks about something you can actually do from the Tira panel (score a resume against a job, report a bug), point them to the right mode."}
             ]
             # Convert pydantic models to dicts if needed, or assume they are dicts
             messages.extend([{"role": h.role, "content": h.content} for h in history])

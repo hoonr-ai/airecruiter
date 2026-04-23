@@ -22,7 +22,7 @@ const AIContext = createContext<AIContextType | undefined>(undefined);
 export function AIProvider({ children }: { children: ReactNode }) {
     const [isOpen, setIsOpen] = useState(false);
     const [messages, setMessages] = useState<Message[]>([
-        { role: 'assistant', content: "Hi, I'm Aria! How can I help you today?" }
+        { role: 'assistant', content: "Hi, I'm Tira — your recruiting sidekick. Ask me anything, or switch to Match or Report a bug above." }
     ]);
     const [isLoading, setIsLoading] = useState(false);
 
