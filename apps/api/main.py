@@ -32,8 +32,11 @@ def readable_ist_now() -> str:
     ist = timezone(timedelta(hours=5, minutes=30))
     return datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
+# Setup structured logging. JSON by default (override LOG_FORMAT=text for
+# local dev readability) and picks up LOG_LEVEL from env. New Relic /
+# Datadog / OpenTelemetry can layer on later with zero code change.
+from core.logging import configure_logging, RequestIDMiddleware
+configure_logging()
 logger = logging.getLogger(__name__)
 
 from services.ai_service import ai_service
@@ -151,6 +154,9 @@ from routers import candidates as candidates_router
 from routers import jobs as jobs_router
 
 app = FastAPI(title="Hoonr.ai API", lifespan=lifespan)
+# Request-correlation middleware. Must wrap every route so downstream
+# handlers and services see the same request_id via contextvars.
+app.add_middleware(RequestIDMiddleware)
 app.include_router(ai_generation.router, prefix="/api/v1/ai-generation")
 app.include_router(ai_generation.router, prefix="/api/v1/gemini")
 app.include_router(voice_agent.router, prefix="/api/v1/voice")

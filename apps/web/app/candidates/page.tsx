@@ -29,6 +29,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { API_BASE } from "@/lib/api";
+import { logger } from "@/lib/logger";
+import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 
 // Sentinel value for "All X" options. Radix Select forbids "" as an item
 // value, so we use this constant and map it to "no filter" in the pipeline.
@@ -106,6 +109,7 @@ type FilterOptions = {
 };
 
 export default function CandidatesPage() {
+  const engagement = useEngagementFlow();
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [totalCandidates, setTotalCandidates] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
@@ -165,10 +169,9 @@ export default function CandidatesPage() {
   // table — not just whichever appear on the current page.
   useEffect(() => {
     let cancelled = false;
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
     (async () => {
       try {
-        const r = await fetch(`${apiUrl}/candidates/filter-options`);
+        const r = await fetch(`${API_BASE}/candidates/filter-options`);
         const data = await r.json();
         if (cancelled) return;
         if (data.status === "success") {
@@ -209,7 +212,7 @@ export default function CandidatesPage() {
     }
 
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates?${qs.toString()}`, {
+      const response = await fetch(`${API_BASE}/candidates?${qs.toString()}`, {
         signal: controller.signal,
       });
       const data = await response.json();
@@ -239,14 +242,34 @@ export default function CandidatesPage() {
   }, [pageSize, currentPage, searchDebounced, jobFilter, sourceFilter, locationFilter, matchFilter, sortKey, sortDir]);
 
   // Drive data fetch + background poll off of the filter/paging state. Any
-  // dependency change refetches; a 5s interval keeps the current page
-  // "live" (new candidates appearing, status changes, etc.) without the
-  // recruiter clicking refresh.
+  // dependency change refetches; a 30s interval keeps the current page
+  // "live" without hammering the server. The poll is gated on the tab
+  // actually being visible — there's no point refetching for a backgrounded
+  // tab, and it avoids stacking request churn when the user comes back to a
+  // tab that has been open all day.
   useEffect(() => {
     fetchCandidates(false);
-    const id = setInterval(() => fetchCandidates(true), 5000);
+    const POLL_MS = 30_000;
+    const tick = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") return;
+      fetchCandidates(true);
+    };
+    const id = setInterval(tick, POLL_MS);
+    // Re-fire once the user returns to the tab so they don't stare at stale
+    // data for up to 30s.
+    const onVisible = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "visible") {
+        fetchCandidates(true);
+      }
+    };
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVisible);
+    }
     return () => {
       clearInterval(id);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVisible);
+      }
       if (abortControllerRef.current) abortControllerRef.current.abort();
     };
   }, [fetchCandidates]);
@@ -316,12 +339,25 @@ export default function CandidatesPage() {
 
   const fetchCandidateResume = async (candidateId: string) => {
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates/${candidateId}/resume`);
+      const response = await fetch(`${API_BASE}/candidates/${candidateId}/resume`);
+      if (!response.ok) {
+        // F3e: differentiate fetch failure from a genuine empty resume so
+        // the recruiter sees an actionable message rather than a silent
+        // "not available" fallback that hides real outages.
+        logger.error("candidates.resume.fetch_failed", {
+          candidateId,
+          status: response.status,
+        });
+        return "We couldn't load this resume right now. Please try again in a moment.";
+      }
       const data = await response.json();
-      return data.resume_text || "Resume content is not available for this candidate.";
+      return data.resume_text || "No resume is on file for this candidate.";
     } catch (error) {
-      console.error("Error fetching resume:", error);
-      return "Resume content is not available for this candidate.";
+      logger.error("candidates.resume.fetch_error", {
+        candidateId,
+        message: (error as Error)?.message,
+      });
+      return "We couldn't load this resume right now. Please try again in a moment.";
     }
   };
 
@@ -346,23 +382,15 @@ export default function CandidatesPage() {
     setEngageLoading(true);
     setEngageError(null);
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
-      const response = await fetch(`${apiUrl}/api/v1/engagement/engage/generate-payload`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          candidate_ids: [candidate.candidate_id],
-          job_id: candidate.jobdiva_id
-        })
+      const data = await engagement.generatePayload({
+        candidateIds: [candidate.candidate_id],
+        jobId: candidate.jobdiva_id,
       });
-      if (!response.ok) throw new Error('Failed to generate payload');
-      const data = await response.json();
       setEngagePayload(data.payload);
       setSelectedCandidateIds([candidate.candidate_id]);
       setIsEngageModalOpen(true);
     } catch (err: any) {
       setEngageError(err.message || 'Failed to generate payload');
-      console.error('Engage error:', err);
     } finally {
       setEngageLoading(false);
     }
@@ -374,24 +402,12 @@ export default function CandidatesPage() {
     setApiResponse(null);
     const payloadToSend = payloadOverride ?? engagePayload;
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
-      // Validate JSON
-      try {
-        JSON.parse(payloadToSend);
-      } catch (e) {
-        throw new Error('Invalid JSON format in payload');
-      }
-      const response = await fetch(`${apiUrl}/api/v1/engagement/engage/send-bulk-interview`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          payload: payloadToSend,
-          real_candidate_ids: selectedCandidateIds
-        })
+      const data = await engagement.sendBulkInterview({
+        payload: payloadToSend,
+        realCandidateIds: selectedCandidateIds,
       });
-      const data = await response.json();
       setApiResponse(data);
-      if (response.ok && data.success) {
+      if (data.success) {
         // Store interview data for Assess lookups
         if (data.data && Array.isArray(data.data)) {
           const interviewDataMap = { ...candidateInterviewData };
@@ -408,7 +424,6 @@ export default function CandidatesPage() {
           });
           setCandidateInterviewData(interviewDataMap);
         }
-        // Close modal on success after short delay
         setTimeout(() => setIsEngageModalOpen(false), 1500);
       } else {
         setEngageError(data.message || 'API returned error status');
@@ -424,15 +439,9 @@ export default function CandidatesPage() {
   const handleAssessClick = async (candidate: Candidate) => {
     setSelectedAssessCandidate(candidate);
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
-      const res = await fetch(`${apiUrl}/api/v1/engagement/latest-interview/by-id/${candidate.candidate_id}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && data.interview_id) {
-          setSelectedAssessInterviewId(data.interview_id);
-        } else {
-          setSelectedAssessInterviewId(null);
-        }
+      const data = await engagement.latestInterviewById(candidate.candidate_id);
+      if (data.success && data.interview_id) {
+        setSelectedAssessInterviewId(data.interview_id);
       } else {
         setSelectedAssessInterviewId(null);
       }

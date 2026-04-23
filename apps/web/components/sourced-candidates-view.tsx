@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { AssessModal } from "@/components/AssessModal";
+import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 
 import { 
   ArrowLeft,
@@ -49,6 +50,7 @@ export function SourcedCandidatesView({
   onEmailCandidate,
   showFilters = true
 }: SourcedCandidatesViewProps) {
+  const engagement = useEngagementFlow();
   const [candidates, setCandidates] = useState<SourcedCandidate[]>(
     initialCandidates.map(c => ({ ...c, selected: false }))
   );
@@ -154,25 +156,17 @@ export function SourcedCandidatesView({
     setEngageLoading(true);
     setEngageError(null);
     setEngageApiResponse(null);
+    const candidateId = candidate.candidate_id || candidate.id;
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
-      const candidateId = candidate.candidate_id || candidate.id;
-      const response = await fetch(`${apiUrl}/api/v1/engagement/engage/generate-payload`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          candidate_ids: [candidateId],
-          job_id: 'GENERAL_SOURCING'
-        })
+      const data = await engagement.generatePayload({
+        candidateIds: [candidateId],
+        jobId: "GENERAL_SOURCING",
       });
-      if (!response.ok) throw new Error('Failed to generate payload');
-      const data = await response.json();
       setEngagePayload(data.payload);
       setEngageCandidateIds([candidateId]);
       setIsEngageModalOpen(true);
     } catch (err: any) {
-      setEngageError(err.message || 'Failed to generate payload');
-      console.error('Engage error:', err);
+      setEngageError(err.message || "Failed to generate payload");
     } finally {
       setEngageLoading(false);
     }
@@ -184,27 +178,18 @@ export function SourcedCandidatesView({
     setEngageApiResponse(null);
     const payloadToSend = payloadOverride ?? engagePayload;
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
-      try { JSON.parse(payloadToSend); } catch (e) {
-        throw new Error('Invalid JSON format in payload');
-      }
-      const response = await fetch(`${apiUrl}/api/v1/engagement/engage/send-bulk-interview`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          payload: payloadToSend,
-          real_candidate_ids: engageCandidateIds
-        })
+      const data = await engagement.sendBulkInterview({
+        payload: payloadToSend,
+        realCandidateIds: engageCandidateIds,
       });
-      const data = await response.json();
       setEngageApiResponse(data);
-      if (response.ok && data.success) {
+      if (data.success) {
         setTimeout(() => setIsEngageModalOpen(false), 1500);
       } else {
-        setEngageError(data.message || 'API returned error status');
+        setEngageError(data.message || "API returned error status");
       }
     } catch (err: any) {
-      setEngageError(err.message || 'Unknown error');
+      setEngageError(err.message || "Unknown error");
     } finally {
       setEngageLoading(false);
     }
@@ -212,23 +197,9 @@ export function SourcedCandidatesView({
 
   const handleAssessCandidate = async (candidate: SourcedCandidate) => {
     setSelectedAssessCandidate(candidate);
-    try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
-      const candidateId = candidate.candidate_id || candidate.id;
-      const res = await fetch(`${apiUrl}/api/v1/engagement/latest-interview/by-id/${candidateId}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && data.interview_id) {
-          setSelectedAssessInterviewId(data.interview_id);
-        } else {
-          setSelectedAssessInterviewId(null);
-        }
-      } else {
-        setSelectedAssessInterviewId(null);
-      }
-    } catch (e) {
-      setSelectedAssessInterviewId(null);
-    }
+    const candidateId = candidate.candidate_id || candidate.id;
+    const data = await engagement.latestInterviewById(candidateId);
+    setSelectedAssessInterviewId(data.success && data.interview_id ? data.interview_id : null);
     setIsAssessModalOpen(true);
   };
 
