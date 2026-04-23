@@ -486,11 +486,29 @@ class JobDivaService:
             logger.error(f"JobDiva Auth Exception: {repr(e)}")
             return None
 
-    async def search_candidates(self, skills: List[Any], location: str, page: int = 1, limit: int = 100, job_id: str = None, boolean_string: str = "") -> List[Dict[str, Any]]:
+    async def search_candidates(
+        self,
+        skills: List[Any],
+        location: str,
+        page: int = 1,
+        limit: int = 100,
+        job_id: str = None,
+        boolean_string: str = "",
+        recent_days: Optional[int] = None,
+        require_resume: bool = True,
+    ) -> List[Dict[str, Any]]:
         """
-        Search for candidates. 
+        Search for candidates.
         - If job_id provided: Search applicants to that specific job (with optional filtering)
         - If no job_id: Search the general Talent Pool based on skills and location
+
+        New in April 2026:
+        - `recent_days`: if set, JobDiva Talent Search is constrained to candidates
+          whose LASTMODIFIED is within the last N days (embedded inside the
+          boolean via jobdiva_boolean_translator).
+        - `require_resume`: when True (default), Talent Search results without
+          resume text/file are dropped before returning. Recruiters opted into
+          "Include candidates without resumes" pass False.
         """
         token = await self.authenticate()
         if not token: return []
@@ -498,10 +516,15 @@ class JobDivaService:
         # If job_id provided, search for applicants to that specific job (with filtering)
         if job_id:
             return await self._search_job_applicants(job_id, limit, token, skills, location)
-        
+
         # Talent pool search
         logger.debug("Searching JobDiva general talent pool")
-        return await self._search_talent_pool(skills, location, limit, token, boolean_string)
+        return await self._search_talent_pool(
+            skills, location, limit, token,
+            boolean_string=boolean_string,
+            recent_days=recent_days,
+            require_resume=require_resume,
+        )
 
     async def _search_job_applicants(self, job_id: str, limit: int, token: str, skills: List[Any] = None, location: str = "") -> List[Dict[str, Any]]:
         """
@@ -608,20 +631,71 @@ class JobDivaService:
         
         return jd_results
 
-    async def _search_talent_pool(self, skills: List[Any], location: str, limit: int, token: str, boolean_string: str = "") -> List[Dict[str, Any]]:
-        """Search JobDiva Talent Search using the generated Boolean string."""
+    async def _search_talent_pool(
+        self,
+        skills: List[Any],
+        location: str,
+        limit: int,
+        token: str,
+        boolean_string: str = "",
+        recent_days: Optional[int] = None,
+        require_resume: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search JobDiva Talent Search using the generated Boolean string.
+
+        The raw `boolean_string` coming from the frontend is in human-readable
+        form (`"Databricks" AND "5+ years"`). JobDiva expects the
+        `OVER N YRS` dialect (`"DATABRICKS" OVER 5 YRS`) — so we translate
+        through `jobdiva_boolean_translator.translate_for_jobdiva` right
+        before building the payload. See
+        `apps/api/services/jobdiva_boolean_translator.py` for the syntax
+        rules we normalize.
+
+        Also filters out profile-only candidates (no resume_text) unless the
+        caller explicitly opts in via `require_resume=False`. These profiles
+        are what triggered the "This candidate's resume is not available"
+        warning in the UI and eroded trust in the match ranking.
+        """
+        from services.jobdiva_boolean_translator import (
+            translate_for_jobdiva,
+            extract_skill_years,
+        )
+
         jd_results = []
-        search_value = boolean_string.strip() if boolean_string else self._build_talent_boolean(skills, location)
+        raw_search_value = (
+            boolean_string.strip()
+            if boolean_string
+            else self._build_talent_boolean(skills, location)
+        )
+
+        # Pull { skill: years } hints from the passed `skills` payload so
+        # the translator can attach OVER clauses even if the frontend
+        # forgot to inline them.
+        skill_years = extract_skill_years(
+            skills if isinstance(skills, list) else []
+        )
+
+        translated_search_value = translate_for_jobdiva(
+            raw_search_value,
+            skill_years=skill_years,
+            recent_days=recent_days,
+        )
+
         url = f"{self.api_url}/apiv2/jobdiva/TalentSearch"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         payload = {
-            "searchValue": search_value,
+            "searchValue": translated_search_value or raw_search_value,
             "maxReturned": limit,
-            "startFrom": 0
+            "startFrom": 0,
         }
 
-        logger.debug(f"JobDiva Talent Search query: {search_value}")
+        logger.debug(
+            f"JobDiva Talent Search — raw: {raw_search_value!r} | "
+            f"translated: {translated_search_value!r} | recent_days={recent_days}"
+        )
 
+        dropped_no_resume = 0
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(url, json=payload, headers=headers)
@@ -644,6 +718,42 @@ class JobDivaService:
                     last_name = get_field(c, ["lastName", "lastname", "LASTNAME"]) or "Candidate"
                     full_name = f"{first_name} {last_name}".strip()
 
+                    resume_text = self._extract_resume_text(c)
+                    resume_id = get_field(c, ["resumeId", "RESUMEID", "resume_id"])
+                    has_resume = bool((resume_text or "").strip()) or bool(resume_id)
+
+                    # Filter out profile-only candidates unless caller opts in.
+                    # These trigger the "resume not available" warning downstream
+                    # and hurt the recruiter's trust in the match ranking.
+                    if require_resume and not has_resume:
+                        dropped_no_resume += 1
+                        continue
+
+                    city = get_field(c, ["city", "locationCity", "CITY"]) or ""
+                    state = get_field(c, ["state", "locationState", "STATE"]) or ""
+                    location_str = ", ".join([p for p in [city, state] if p]).strip()
+
+                    # Abstract: prefer an explicit summary/comments field if JobDiva
+                    # returns one; fall back to the first ~200 chars of resume text
+                    # so the Step-5 list can show something meaningful.
+                    raw_abstract = (
+                        get_field(c, ["summary", "SUMMARY", "abstract", "ABSTRACT", "comments", "COMMENTS", "notes", "NOTES"])
+                        or ""
+                    )
+                    if not raw_abstract and resume_text:
+                        raw_abstract = resume_text[:240].replace("\n", " ").strip()
+                    if raw_abstract and len(raw_abstract) > 240:
+                        raw_abstract = raw_abstract[:237].rstrip() + "..."
+
+                    availability_status = (
+                        get_field(c, ["available", "AVAILABLE", "availability", "AVAILABILITY", "status", "STATUS"])
+                        or ""
+                    )
+                    profile_url = get_field(
+                        c,
+                        ["profileUrl", "PROFILEURL", "profile_url", "PROFILE_URL"],
+                    )
+
                     jd_results.append({
                         "candidate_id": candidate_id,
                         "id": candidate_id,
@@ -653,21 +763,31 @@ class JobDivaService:
                         "firstName": first_name,
                         "lastName": last_name,
                         "email": get_field(c, ["email", "EMAIL"]) or "",
-                        "city": get_field(c, ["city", "locationCity", "CITY"]) or "",
-                        "state": get_field(c, ["state", "locationState", "STATE"]) or "",
+                        "city": city,
+                        "state": state,
+                        "location": location_str,
                         "title": get_field(c, ["title", "candidateTitle", "TITLE"]) or "",
                         "source": "JobDiva-TalentSearch",
                         "match_score": 75,
                         "skills": self._extract_candidate_skills(c),
                         "experience_years": self._extract_experience_years(c),
-                        "resume_text": self._extract_resume_text(c),
-                        "resume_id": get_field(c, ["resumeId", "RESUMEID", "resume_id"]),
+                        "resume_text": resume_text,
+                        "resume_id": resume_id,
                         "received": get_field(c, ["received", "RECEIVED"]),
-                        "available": get_field(c, ["available", "AVAILABLE"]),
+                        "available": availability_status,
+                        "availability_status": availability_status,
+                        "abstract": raw_abstract,
+                        "profile_url": profile_url,
                         "lastnote": get_field(c, ["lastNote", "LASTNOTE"]),
-                        "phone": get_field(c, ["phone", "phoneNumber", "PHONE"]) or ""
+                        "phone": get_field(c, ["phone", "phoneNumber", "PHONE"]) or "",
                     })
 
+                if dropped_no_resume:
+                    logger.info(
+                        f"JobDiva Talent Search: dropped {dropped_no_resume} "
+                        f"profile-only candidates (no resume). Toggle "
+                        f"'Include candidates without resumes' on the UI to keep them."
+                    )
                 logger.debug(f"JobDiva Talent Search returned {len(jd_results)} candidates")
         except Exception as e:
             logger.error(f"Talent Search Error: {e}")
@@ -1466,8 +1586,46 @@ class JobDivaService:
                 logger.debug(f"CandidatesDetail returned {response.status_code} for {candidate_id}, using fallback")
         except Exception as e:
             logger.debug(f"Error fetching candidate detail for {candidate_id}: {e}")
-        
+
         return {}
+
+    async def get_candidate_profile_url(self, candidate_id: str) -> str:
+        """
+        Fetch a JobDiva candidate's profile URL on demand.
+
+        JobDiva's Talent Search response does not include PROFILEURL, but the
+        CandidatesDetail endpoint does (at least for tenants that publish it).
+        Routers use this as a lightweight on-click enrichment so candidate names
+        in Step 5 can hyperlink to the JobDiva profile without eagerly pulling
+        details for every result.
+
+        Returns an empty string if no URL can be resolved — callers should treat
+        that as "render plain text, no link".
+        """
+        if not candidate_id:
+            return ""
+
+        try:
+            token = await self.authenticate()
+            if not token:
+                logger.debug("get_candidate_profile_url: auth failed")
+                return ""
+
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            }
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                detail = await self._get_candidate_detail(str(candidate_id), client, headers)
+
+            profile_url = (
+                get_field(detail, ["PROFILEURL", "profileUrl", "profile_url", "PROFILE_URL"])
+                or ""
+            )
+            return str(profile_url).strip()
+        except Exception as e:
+            logger.debug(f"get_candidate_profile_url failed for {candidate_id}: {e}")
+            return ""
 
     def _parse_jobdiva_datetime(self, value: Any) -> Optional[datetime]:
         if not value:

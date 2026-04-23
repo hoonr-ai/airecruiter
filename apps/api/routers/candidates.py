@@ -812,6 +812,37 @@ async def get_candidate_resume(candidate_id: str):
             "message": f"Error fetching resume: {str(e)}"
         }
 
+@router.get("/candidates/{candidate_id}/profile-url")
+async def get_candidate_profile_url(candidate_id: str):
+    """
+    Lightweight on-click enrichment: return the JobDiva profile URL for a
+    Talent Search candidate. Talent Search responses omit PROFILEURL, so the
+    frontend calls this lazily when a recruiter clicks a candidate name
+    rather than eagerly fetching details for every search result.
+
+    Returns `{ profile_url: "" }` when JobDiva doesn't expose one — callers
+    should render plain text in that case (no broken link).
+    """
+    if not candidate_id:
+        raise HTTPException(status_code=400, detail="candidate_id is required")
+
+    try:
+        profile_url = await jobdiva_service.get_candidate_profile_url(candidate_id)
+        return {
+            "status": "success",
+            "candidate_id": candidate_id,
+            "profile_url": profile_url or "",
+        }
+    except Exception as e:
+        logger.warning(f"profile-url lookup failed for {candidate_id}: {e}")
+        return {
+            "status": "error",
+            "candidate_id": candidate_id,
+            "profile_url": "",
+            "message": str(e),
+        }
+
+
 @router.post("/candidates/analyze", response_model=CandidateAnalysisResponse)
 async def analyze_candidates(request: CandidateAnalysisRequest):
     """
