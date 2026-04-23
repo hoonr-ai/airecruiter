@@ -269,29 +269,51 @@ class JobRubricDB:
         except Exception as e:
             print(f"❌ Failed to fetch rubric for {jobdiva_id}: {e}")
             return None
+    def _ensure_hard_filter_column(self, cur) -> None:
+        """Idempotent DDL: add `is_hard_filter` if missing.
+
+        We don't run formal migrations in this codebase, so we guarantee the
+        column exists on first write/read after the feature lands. DEFAULT
+        FALSE keeps historical rows honest — only the recruiter-marked
+        arrangement question becomes a hard filter going forward.
+        """
+        try:
+            cur.execute(
+                "ALTER TABLE job_screen_questions "
+                "ADD COLUMN IF NOT EXISTS is_hard_filter BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+        except Exception as e:
+            # Non-fatal: older Postgres without IF NOT EXISTS, or permission issue.
+            # Reads still work because the SELECT below COALESCEs a missing column.
+            self.logger.debug(f"ensure_hard_filter_column skipped: {e}")
+
     def _save_screen_questions_internal(self, cur, jobdiva_id: str, questions: List[Dict]):
         """Internal helper to save screen questions using an existing cursor."""
+        self._ensure_hard_filter_column(cur)
         cur.execute("DELETE FROM job_screen_questions WHERE jobdiva_id = %s", (jobdiva_id,))
         for i, q in enumerate(questions):
             cur.execute("""
                 INSERT INTO job_screen_questions (
-                    jobdiva_id, question_text, pass_criteria, is_default, category, order_index
-                ) VALUES (%s, %s, %s, %s, %s, %s)
+                    jobdiva_id, question_text, pass_criteria, is_default, category, order_index, is_hard_filter
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (
                 jobdiva_id,
                 q.get('question_text', ''),
                 q.get('pass_criteria', ''),
                 bool(q.get('is_default', False)),
                 q.get('category', 'other'),
-                q.get('order_index', i)
+                q.get('order_index', i),
+                bool(q.get('is_hard_filter', False)),
             ))
 
     def _get_screen_questions_internal(self, cur, jobdiva_id: str) -> List[Dict]:
         """Internal helper to fetch screen questions using an existing cursor."""
+        self._ensure_hard_filter_column(cur)
         cur.execute("""
-            SELECT question_text, pass_criteria, is_default, category, order_index 
-            FROM job_screen_questions 
-            WHERE jobdiva_id = %s 
+            SELECT question_text, pass_criteria, is_default, category, order_index,
+                   COALESCE(is_hard_filter, FALSE) AS is_hard_filter
+            FROM job_screen_questions
+            WHERE jobdiva_id = %s
             ORDER BY order_index
         """, (jobdiva_id,))
         return [{
@@ -299,5 +321,6 @@ class JobRubricDB:
             "pass_criteria": r['pass_criteria'],
             "is_default": r['is_default'],
             "category": r['category'],
-            "order_index": r['order_index']
+            "order_index": r['order_index'],
+            "is_hard_filter": bool(r.get('is_hard_filter', False)),
         } for r in cur.fetchall()]

@@ -4,8 +4,8 @@ import "./globals.css";
 import { Sidebar } from "@/components/layout/sidebar";
 import { AIProvider } from "@/context/ai-context";
 import { MsalProviderWrapper } from "@/components/auth/MsalProviderWrapper";
-import { AriaChat } from "@/components/ai/aria-chat";
-import { AriaFab } from "@/components/ai/aria-fab";
+import { TiraChat } from "@/components/ai/tira-chat";
+import { TiraFab } from "@/components/ai/tira-fab";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 const outfit = Outfit({ subsets: ["latin"], variable: "--font-outfit" });
@@ -31,8 +31,8 @@ export default function RootLayout({
                 {children}
               </main>
             </div>
-            <AriaChat />
-            <AriaFab />
+            <TiraChat />
+            <TiraFab />
           </AIProvider>
         </MsalProviderWrapper>
       </body>
