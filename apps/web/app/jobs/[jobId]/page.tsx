@@ -136,18 +136,13 @@ export default function JobDetailPage() {
   const fetchJobDetail = async () => {
     setIsLoading(true);
     try {
-      // Try fetching active jobs first, then archived if not found
-      let response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/jobs/monitored?include_archived=false`);
-      let data = await response.json();
-      let job = data.jobs[jobId];
-      
-      // If not found in active jobs, try archived jobs
-      if (!job) {
-        response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/jobs/monitored?include_archived=true`);
-        data = await response.json();
-        job = data.jobs[jobId];
-      }
-      
+      // F3d: was two sequential fetches (active-only, then archived on miss).
+      // One request with include_archived=true covers both cases and halves
+      // the round-trip count for any job that's been archived.
+      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/jobs/monitored?include_archived=true`);
+      const data = await response.json();
+      const job = data.jobs?.[jobId];
+
       if (job) {
         const jobDetail = {
           id: jobId,
