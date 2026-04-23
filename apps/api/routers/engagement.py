@@ -471,6 +471,8 @@ async def get_assessment_data(interview_id: str):
         evaluation_data = evaluation_data["data"]
     if outreach_data and "data" in outreach_data:
         outreach_data = outreach_data["data"]
+    if transcription_data and "data" in transcription_data:
+        transcription_data = transcription_data["data"]
 
     return {
         "success": True,
@@ -480,3 +482,78 @@ async def get_assessment_data(interview_id: str):
         "transcriptions": transcription_data if isinstance(transcription_data, list) else (transcription_data or []),
         "outreach": outreach_data
     }
+
+
+# ---------------------------------------------------------------------------
+# 5. Outreach API Proxies
+# ---------------------------------------------------------------------------
+async def _proxy_get(path: str, params: dict = None):
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.get(f"{EXTERNAL_INTERVIEW_API_URL}{path}", params=params)
+            res.raise_for_status()
+            return res.json()
+    except Exception as e:
+        logger.error(f"❌ Proxy GET {path} failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def _proxy_post(path: str, json_data: dict = None):
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.post(f"{EXTERNAL_INTERVIEW_API_URL}{path}", json=json_data)
+            res.raise_for_status()
+            return res.json()
+    except Exception as e:
+        logger.error(f"❌ Proxy POST {path} failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/dashboard/pair-outreach")
+async def get_pair_outreach(status: Optional[str] = None, phase: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, jd_id: Optional[str] = None, search: Optional[str] = None):
+    params = {k: v for k, v in {"status": status, "phase": phase, "date_from": date_from, "date_to": date_to, "jd_id": jd_id, "search": search}.items() if v is not None}
+    return await _proxy_get("/api/dashboard/pair-outreach", params=params)
+
+@router.get("/dashboard/pair-outreach/{jd_id}")
+async def get_pair_outreach_jd(jd_id: str):
+    return await _proxy_get(f"/api/dashboard/pair-outreach/{jd_id}")
+
+@router.get("/dashboard/pair-metrics")
+async def get_pair_metrics():
+    return await _proxy_get("/api/dashboard/pair-metrics")
+
+@router.get("/dashboard/pair-passed")
+async def get_pair_passed(score_threshold: Optional[int] = None):
+    params = {"score_threshold": score_threshold} if score_threshold is not None else {}
+    return await _proxy_get("/api/dashboard/pair-passed", params=params)
+
+@router.get("/interviews/{interview_id}/outreach-status")
+async def get_outreach_status(interview_id: str):
+    return await _proxy_get(f"/api/interviews/{interview_id}/outreach-status")
+
+@router.post("/outreach/start-scheduler")
+async def start_scheduler():
+    return await _proxy_post("/api/outreach/start-scheduler")
+
+@router.post("/interviews/{interview_id}/trigger-phase2")
+async def trigger_phase2(interview_id: str):
+    return await _proxy_post(f"/api/interviews/{interview_id}/trigger-phase2")
+
+
+# ---------------------------------------------------------------------------
+# 6. Retrieval of Transcripts API Proxies
+# ---------------------------------------------------------------------------
+@router.get("/interviews/{interview_id}/transcriptions")
+async def get_transcriptions(interview_id: str):
+    return await _proxy_get(f"/api/interviews/{interview_id}/transcriptions")
+
+from fastapi.responses import StreamingResponse
+
+@router.get("/interviews/{interview_id}/transcriptions/download")
+async def download_transcriptions(interview_id: str):
+    try:
+        client = httpx.AsyncClient(timeout=30.0)
+        req = client.build_request("GET", f"{EXTERNAL_INTERVIEW_API_URL}/api/interviews/{interview_id}/transcriptions/download")
+        res = await client.send(req, stream=True)
+        return StreamingResponse(res.aiter_bytes(), headers=res.headers)
+    except Exception as e:
+        logger.error(f"❌ download_transcriptions failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
