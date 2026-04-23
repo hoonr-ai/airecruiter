@@ -1,6 +1,7 @@
 "use client";
 
 import React, { createContext, useContext, useState, ReactNode } from 'react';
+import { API_BASE } from "@/lib/api";
 
 interface Message {
     role: 'user' | 'assistant';
@@ -37,7 +38,7 @@ export function AIProvider({ children }: { children: ReactNode }) {
         addMessage('user', content);
 
         try {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+            const apiUrl = API_BASE;
             const res = await fetch(`${apiUrl}/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },

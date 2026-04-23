@@ -10,7 +10,25 @@ The PAIR dashboard provides comprehensive visibility into the outreach process, 
 - **Phase 2**: Reminder/follow-up (16-hour delay)  
 - **Phase 3**: Immediate processing
 
-The dashboard uses **16 API endpoints** covering outreach management, candidate details, evaluations, transcripts, and analytics.
+The dashboard uses **17 API endpoints** covering outreach management, candidate details, evaluations, transcripts, and analytics.
+
+## Recent Updates (April 2026)
+
+### Transcript Storage Improvements
+- **Complete Message Storage**: All conversation messages are now stored, including partial responses, hesitations, and real-time utterances
+- **No Filtering**: Removed previous filtering that excluded short or incomplete messages
+- **Real-time Persistence**: Messages are stored immediately as they occur during interviews
+
+### Evaluation System Enhancements
+- **One Question at a Time**: Fixed bot behavior to ask exactly one question per response (no more multiple questions)
+- **Question Reset Logic**: Evaluations now reset all questions to "unanswered" before processing to prevent accumulation
+- **Improved Scoring**: Better detection of substantive responses with selective question completion marking
+- **Response Validation**: Added safeguards to prevent multiple questions in single responses
+
+### Technical Improvements
+- **Lower Temperature**: Reduced LLM temperature to 0.01 for more deterministic responses
+- **Token Limits**: Added max_tokens=150 to prevent overly long responses
+- **Enhanced Prompts**: Strengthened instructions with explicit forbidden patterns and correct examples
 
 ## Authentication
 
@@ -576,32 +594,36 @@ curl "http://localhost:8000/api/interviews/123/detail"
 {
   "questions": [
     {
-      "question_id": 1,
-      "question": "What is your experience with automated testing?",
-      "answer": "I have extensive experience with Selenium, JUnit, and TestNG...",
+      "question_id": 224,
+      "question_text": "What is your experience with automated testing?",
+      "question_order": 1,
+      "answer_text": "I have extensive experience with Selenium, JUnit, and TestNG...",
       "score": 9.5,
-      "max_score": 10.0,
-      "feedback": "Demonstrates strong technical expertise and practical experience",
-      "category": "technical"
+      "answered_at": "2024-01-17T10:15:30Z"
     },
     {
-      "question_id": 2,
-      "question": "How do you handle test case prioritization?",
-      "answer": "I prioritize based on risk assessment and business impact...",
+      "question_id": 225,
+      "question_text": "How do you handle test case prioritization?",
+      "question_order": 2,
+      "answer_text": "I prioritize based on risk assessment and business impact...",
       "score": 8.5,
-      "max_score": 10.0,
-      "feedback": "Good understanding of prioritization techniques",
-      "category": "methodology"
+      "answered_at": "2024-01-17T10:18:45Z"
     }
   ],
   "summary": {
-    "total_questions": 7,
-    "questions_completed": 7,
+    "total_questions": 14,
+    "questions_completed": 14,
     "overall_score": 9.0,
     "average_score": 9.0
   }
 }
 ```
+
+**Notes**:
+- **Evaluation Logic**: The system now evaluates interviews by analyzing conversation transcripts and mapping candidate answers to specific questions. It saves ALL evaluations (including unanswered questions scored as 0.0) and calculates overall scores as averages.
+- **Question Reset**: Before each evaluation run, all questions are reset to "unanswered" state to prevent accumulation of completion marks from previous evaluations.
+- **Scoring**: Individual question scores range from 0.0 to 10.0. Overall score is the average of all evaluated questions.
+- **Completion Tracking**: Questions are marked as "answered" only when candidates provide substantive responses (score > 0 OR explicitly marked as PASS).
 
 **Usage Example**:
 ```bash
@@ -609,6 +631,52 @@ curl "http://localhost:8000/api/interviews/123/evaluation"
 ```
 
 **Dashboard Usage**: Shows detailed evaluation results and scoring breakdown for completed interviews. **⚠️ WARNING: This endpoint returns evaluations for ALL interviews. For PAIR dashboard usage, ensure only PAIR-tagged candidates are displayed.**
+
+---
+
+## 12.5. POST /api/interviews/{interview_id}/evaluate
+
+**Purpose**: Manually trigger evaluation of an interview using stored transcripts.
+
+**Method**: POST
+
+**Path Parameters**:
+- `interview_id`: Interview identifier (integer)
+
+**Request Body**: None
+
+**Response Data**:
+```json
+{
+  "success": true,
+  "message": "Evaluation completed successfully",
+  "data": {
+    "interview_id": 123,
+    "evaluation_status": "completed",
+    "questions_evaluated": 14,
+    "overall_score": 8.5,
+    "progress": {
+      "total": 14,
+      "completed": 12,
+      "overall_score": 8.5
+    }
+  }
+}
+```
+
+**Notes**:
+- **Automatic Evaluation Reset**: Before evaluation, all questions are reset to "unanswered" state to ensure clean evaluation
+- **Transcript Analysis**: Uses the latest interview session transcripts to evaluate candidate responses
+- **Question Mapping**: AI analyzes conversation flow to map candidate answers to specific interview questions
+- **Selective Completion**: Only marks questions as "answered" when substantive responses are detected (score > 0 OR explicitly PASS)
+- **Scoring**: Evaluates each question on 0.0-10.0 scale based on technical accuracy, relevance, and completeness
+
+**Usage Example**:
+```bash
+curl -X POST "http://localhost:8000/api/interviews/123/evaluate"
+```
+
+**Dashboard Usage**: Allows manual triggering of interview evaluation for completed interviews. **⚠️ WARNING: This endpoint evaluates ALL interviews. For PAIR dashboard usage, ensure only PAIR-tagged candidates are processed.**
 
 ---
 
@@ -626,22 +694,48 @@ curl "http://localhost:8000/api/interviews/123/evaluation"
 [
   {
     "id": 1001,
+    "interview_id": 123,
     "session_id": 456,
-    "speaker_type": "interviewer",
-    "message_text": "Welcome to your interview. Let's begin with your experience in quality assurance.",
+    "speaker_type": "bot",
+    "message_text": "Hello Pragati, I'm John here to assess your fit for the IT Quality Assur Anlyt Sr position. Are you ready to begin?",
     "timestamp": "2024-01-17T10:00:15Z",
-    "message_order": 1
+    "message_order": 1,
+    "audio_duration": 0.0,
+    "confidence_score": null
   },
   {
     "id": 1002,
+    "interview_id": 123,
     "session_id": 456,
     "speaker_type": "candidate",
-    "message_text": "Thank you. I've been working in QA for 5 years, focusing on both manual and automated testing.",
-    "timestamp": "2024-01-17T10:00:25Z",
-    "message_order": 2
+    "message_text": "Yes. I'm ready to begin this.",
+    "timestamp": "2024-01-17T10:00:20Z",
+    "message_order": 2,
+    "audio_duration": 0.0,
+    "confidence_score": null
+  },
+  {
+    "id": 1003,
+    "interview_id": 123,
+    "session_id": 456,
+    "speaker_type": "candidate",
+    "message_text": "Uh, right now, yes, I'm open to explore.",
+    "timestamp": "2024-01-17T10:01:05Z",
+    "message_order": 3,
+    "audio_duration": 0.0,
+    "confidence_score": null
   }
 ]
 ```
+
+**Notes**:
+- **Complete Transcript Storage**: The system now stores ALL conversation messages, including partial responses, hesitations, and incomplete utterances. No filtering is applied - every message from both bot and candidate is preserved.
+- **Real-time Storage**: Messages are stored immediately as they occur during the interview, ensuring no loss of conversation data.
+- **Speaker Types**: 
+  - `"bot"`: Interviewer/AI messages
+  - `"candidate"`: Candidate responses
+- **Message Order**: Messages are ordered chronologically by `message_order` field
+- **Latest Session**: Returns transcripts from the most recent interview session that contains conversation data
 
 **Usage Example**:
 ```bash
@@ -661,7 +755,12 @@ curl "http://localhost:8000/api/interviews/123/transcriptions"
 **Path Parameters**:
 - `interview_id`: Interview identifier (integer)
 
-**Response**: Text file download with formatted transcript content.
+**Response**: Text file download with formatted transcript content including ALL messages.
+
+**Notes**:
+- **Complete Conversation**: Downloads the full conversation including all partial messages, hesitations, and real-time exchanges
+- **Formatted Output**: Presents transcripts in a readable format with timestamps and speaker labels
+- **All Sessions**: Includes transcripts from all sessions if multiple interview sessions exist
 
 **Usage Example**:
 ```bash
@@ -722,12 +821,12 @@ curl "http://localhost:8000/api/interviews/123/progress"
 **Response Data**:
 ```json
 {
-  "candidate_name": "Ronak Jain",
+  "candidate_name": "Pragati",
   "total_interviews": 2,
   "interviews": {
     "123_IT Quality Assur Anlyt Sr": {
       "interview_id": 123,
-      "person_name": "Ronak Jain",
+      "person_name": "Pragati",
       "role_position": "IT Quality Assur Anlyt Sr",
       "interview_status": "completed",
       "interview_date": "2024-01-17T10:00:00Z",
@@ -740,16 +839,16 @@ curl "http://localhost:8000/api/interviews/123/progress"
           "messages": [
             {
               "id": 1001,
-              "speaker_type": "interviewer",
-              "message_text": "Welcome to your interview...",
+              "speaker_type": "bot",
+              "message_text": "Hello Pragati, I'm John here to assess your fit...",
               "timestamp": "2024-01-17T10:00:15Z",
               "message_order": 1
             },
             {
               "id": 1002,
               "speaker_type": "candidate",
-              "message_text": "Thank you...",
-              "timestamp": "2024-01-17T10:00:25Z",
+              "message_text": "Yes. I'm ready to begin this.",
+              "timestamp": "2024-01-17T10:00:20Z",
               "message_order": 2
             }
           ]
@@ -760,9 +859,14 @@ curl "http://localhost:8000/api/interviews/123/progress"
 }
 ```
 
+**Notes**:
+- **Complete History**: Returns ALL conversation messages across all interviews for the candidate
+- **Multi-Session Support**: Handles candidates with multiple interview sessions
+- **Real-time Data**: Includes all stored messages, including partial responses and real-time conversation flow
+
 **Usage Example**:
 ```bash
-curl "http://localhost:8000/api/candidates/Ronak%20Jain/transcripts"
+curl "http://localhost:8000/api/candidates/Pragati/transcripts"
 ```
 
 **Dashboard Usage**: Provides comprehensive transcript history for candidates across multiple interviews. **⚠️ WARNING: This endpoint returns transcripts for ALL candidates. For PAIR dashboard usage, ensure only PAIR-tagged candidates are accessed.**

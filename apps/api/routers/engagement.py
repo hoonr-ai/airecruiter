@@ -10,6 +10,7 @@ Provides endpoints for:
 Auto-creates the engage_interview_audit table on startup.
 """
 
+import asyncio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Any, Dict
@@ -37,7 +38,11 @@ EXTERNAL_INTERVIEW_API_URL = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pa
 def _ensure_audit_table():
     """Create engage_interview_audit table if it doesn't exist, and patch any missing columns."""
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        # connect_timeout=5 → slow/unreachable DB must fail fast. Previously an
+        # unbounded wait here (called at module import) could hang FastAPI
+        # startup past systemd's TimeoutStartSec, triggering a restart loop
+        # that returned 404 for every route until the DB recovered.
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
         cur = conn.cursor()
         # Create table (no-op if already exists)
         cur.execute("""
@@ -86,14 +91,22 @@ def _ensure_audit_table():
     except Exception as e:
         logger.error(f"❌ Failed to create engage_interview_audit table: {e}")
 
-# Run migration on module load
-_ensure_audit_table()
+# NOTE: _ensure_audit_table used to run at module import. That meant any
+# DB slowness or lock blocked `from routers import engagement, ai_generation, …`
+# in main.py — which in turn prevented every other router in that import
+# statement from registering, producing 404s across the API. The call has
+# been moved to `init_engagement_tables` which main.py awaits from lifespan
+# with a timeout.
+
+async def init_engagement_tables() -> None:
+    """Async wrapper for the sync migration. Called from main.py lifespan."""
+    await asyncio.to_thread(_ensure_audit_table)
 
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
 def _get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    return psycopg2.connect(DATABASE_URL, connect_timeout=5)
 
 # ---------------------------------------------------------------------------
 # Request / Response Models
@@ -471,6 +484,8 @@ async def get_assessment_data(interview_id: str):
         evaluation_data = evaluation_data["data"]
     if outreach_data and "data" in outreach_data:
         outreach_data = outreach_data["data"]
+    if transcription_data and "data" in transcription_data:
+        transcription_data = transcription_data["data"]
 
     return {
         "success": True,
@@ -480,3 +495,78 @@ async def get_assessment_data(interview_id: str):
         "transcriptions": transcription_data if isinstance(transcription_data, list) else (transcription_data or []),
         "outreach": outreach_data
     }
+
+
+# ---------------------------------------------------------------------------
+# 5. Outreach API Proxies
+# ---------------------------------------------------------------------------
+async def _proxy_get(path: str, params: dict = None):
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.get(f"{EXTERNAL_INTERVIEW_API_URL}{path}", params=params)
+            res.raise_for_status()
+            return res.json()
+    except Exception as e:
+        logger.error(f"❌ Proxy GET {path} failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+async def _proxy_post(path: str, json_data: dict = None):
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.post(f"{EXTERNAL_INTERVIEW_API_URL}{path}", json=json_data)
+            res.raise_for_status()
+            return res.json()
+    except Exception as e:
+        logger.error(f"❌ Proxy POST {path} failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/dashboard/pair-outreach")
+async def get_pair_outreach(status: Optional[str] = None, phase: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None, jd_id: Optional[str] = None, search: Optional[str] = None):
+    params = {k: v for k, v in {"status": status, "phase": phase, "date_from": date_from, "date_to": date_to, "jd_id": jd_id, "search": search}.items() if v is not None}
+    return await _proxy_get("/api/dashboard/pair-outreach", params=params)
+
+@router.get("/dashboard/pair-outreach/{jd_id}")
+async def get_pair_outreach_jd(jd_id: str):
+    return await _proxy_get(f"/api/dashboard/pair-outreach/{jd_id}")
+
+@router.get("/dashboard/pair-metrics")
+async def get_pair_metrics():
+    return await _proxy_get("/api/dashboard/pair-metrics")
+
+@router.get("/dashboard/pair-passed")
+async def get_pair_passed(score_threshold: Optional[int] = None):
+    params = {"score_threshold": score_threshold} if score_threshold is not None else {}
+    return await _proxy_get("/api/dashboard/pair-passed", params=params)
+
+@router.get("/interviews/{interview_id}/outreach-status")
+async def get_outreach_status(interview_id: str):
+    return await _proxy_get(f"/api/interviews/{interview_id}/outreach-status")
+
+@router.post("/outreach/start-scheduler")
+async def start_scheduler():
+    return await _proxy_post("/api/outreach/start-scheduler")
+
+@router.post("/interviews/{interview_id}/trigger-phase2")
+async def trigger_phase2(interview_id: str):
+    return await _proxy_post(f"/api/interviews/{interview_id}/trigger-phase2")
+
+
+# ---------------------------------------------------------------------------
+# 6. Retrieval of Transcripts API Proxies
+# ---------------------------------------------------------------------------
+@router.get("/interviews/{interview_id}/transcriptions")
+async def get_transcriptions(interview_id: str):
+    return await _proxy_get(f"/api/interviews/{interview_id}/transcriptions")
+
+from fastapi.responses import StreamingResponse
+
+@router.get("/interviews/{interview_id}/transcriptions/download")
+async def download_transcriptions(interview_id: str):
+    try:
+        client = httpx.AsyncClient(timeout=30.0)
+        req = client.build_request("GET", f"{EXTERNAL_INTERVIEW_API_URL}/api/interviews/{interview_id}/transcriptions/download")
+        res = await client.send(req, stream=True)
+        return StreamingResponse(res.aiter_bytes(), headers=res.headers)
+    except Exception as e:
+        logger.error(f"❌ download_transcriptions failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

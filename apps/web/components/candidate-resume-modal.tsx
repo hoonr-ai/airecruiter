@@ -1,26 +1,28 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { 
-  Dialog, 
-  DialogContent, 
-  DialogHeader, 
-  DialogTitle 
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
-import { 
-  Mail, 
-  Phone, 
-  MapPin, 
-  Briefcase, 
+import {
+  Mail,
+  Phone,
+  MapPin,
+  Briefcase,
   GraduationCap,
   FileText,
   Download,
   ExternalLink,
   Loader2
 } from "lucide-react";
+import { API_BASE } from "@/lib/api";
+import { logger } from "@/lib/logger";
 
 interface CandidateResumeData {
   id: string;
@@ -56,20 +58,29 @@ export function CandidateResumeModal({
     setError(null);
     
     try {
-      console.log("Fetching resume for candidate ID:", id);
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001/api/v1";
-      const response = await fetch(`${apiUrl}/candidates/resume/${id}`);
+      // Backend route is mounted at `/api/v1/candidates/resume/{id}`. Prior
+      // code dropped the `/api/v1/` prefix which only worked against the
+      // localhost fallback (which itself hard-coded the prefix) — in prod
+      // the request 404'd through nginx. Single source of truth via
+      // API_BASE keeps dev + prod consistent.
+      const response = await fetch(`${API_BASE}/api/v1/candidates/resume/${id}`);
       const data = await response.json();
-      
-      console.log("Resume API response:", response.status, data);
-      
+
       if (response.ok) {
         setResumeData(data.candidate);
       } else {
+        logger.error("candidate_resume.fetch.failed", {
+          status: response.status,
+          candidateId: id,
+          detail: data?.detail,
+        });
         setError(data.detail || "Failed to load resume");
       }
     } catch (err) {
-      console.error("Resume fetch error:", err);
+      logger.error("candidate_resume.fetch.exception", {
+        candidateId: id,
+        message: (err as Error)?.message,
+      });
       setError("Network error loading resume");
     } finally {
       setLoading(false);
@@ -79,7 +90,6 @@ export function CandidateResumeModal({
   // Fetch resume data when modal opens
   useEffect(() => {
     if (candidateId && isOpen) {
-      console.log("Modal opened for candidate ID:", candidateId);
       setResumeData(null); // Reset previous data
       fetchResumeData(candidateId);
     } else if (!isOpen) {

@@ -111,6 +111,8 @@ deploy_application() {
     
     # Build web application
     echo -e "${BLUE}🏗️ Building web application...${NC}"
+    cd "$WEB_DIR"
+    rm -rf .next  # Clean previous build artifacts
     npm run build
     
     # Reload systemd and restart services

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { API_BASE } from "@/lib/api";
 import {
   Dialog,
   DialogContent,
@@ -25,6 +26,7 @@ import {
   Check,
   User,
   Bot,
+  Download,
 } from "lucide-react";
 
 interface AssessModalProps {
@@ -67,10 +69,8 @@ export function AssessModal({
     setLoading(true);
     setError(null);
     try {
-      const apiUrl =
-        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
       const response = await fetch(
-        `${apiUrl}/api/v1/engagement/assess/${interviewId}`
+        `${API_BASE}/api/v1/engagement/assess/${interviewId}`
       );
       if (!response.ok) throw new Error("Failed to fetch assessment data");
       const result = await response.json();
@@ -480,7 +480,25 @@ export function AssessModal({
 
             {/* ===== TAB 3: Transcript ===== */}
             <TabsContent value="transcript" className="px-6 pb-6 mt-0">
-              <ScrollArea className="max-h-[400px] pr-3">
+              <div className="flex items-center justify-between mb-2 pt-4">
+                <p className="text-[11px] text-slate-400 font-bold uppercase tracking-wide">
+                  Conversation Log
+                </p>
+                {data.transcriptions.length > 0 && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-[11px] gap-1.5 border-slate-200 text-slate-600 hover:bg-slate-50"
+                    onClick={() => {
+                      window.open(`${API_BASE}/api/v1/engagement/interviews/${interviewId}/transcriptions/download`, "_blank");
+                    }}
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    Download PDF
+                  </Button>
+                )}
+              </div>
+              <ScrollArea className="h-[500px] pr-3">
                 <div className="space-y-3 pt-4">
                   {data.transcriptions.length > 0 ? (
                     data.transcriptions.map((msg: any, idx: number) => (
