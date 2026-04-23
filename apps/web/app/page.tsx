@@ -21,6 +21,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Users } from "lucide-react";
+import { API_BASE } from "@/lib/api";
 
 interface Job {
   id: string;
@@ -83,7 +84,7 @@ export default function DashboardPage() {
     setIsLoading(true);
     try {
       const includeArchived = activeTab === "archived";
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/jobs/monitored?include_archived=${includeArchived}`);
+      const response = await fetch(`${API_BASE}/jobs/monitored?include_archived=${includeArchived}`);
       const data = await response.json();
 
       const jobs: Job[] = Object.entries(data.jobs).map(([id, details]: [string, any]) => {
@@ -562,7 +563,7 @@ export default function DashboardPage() {
                 setIsArchiving(true);
                 try {
                   const response = await fetch(
-                    `${process.env.NEXT_PUBLIC_API_URL}/jobs/${jobToArchive.jobdiva_id || jobToArchive.id}/archive`,
+                    `${API_BASE}/jobs/${jobToArchive.jobdiva_id || jobToArchive.id}/archive`,
                     {
                       method: "PUT",
                       headers: {
@@ -638,7 +639,7 @@ export default function DashboardPage() {
                 setIsUnarchiving(true);
                 try {
                   const response = await fetch(
-                    `${process.env.NEXT_PUBLIC_API_URL}/jobs/${jobToUnarchive.jobdiva_id || jobToUnarchive.id}/unarchive`,
+                    `${API_BASE}/jobs/${jobToUnarchive.jobdiva_id || jobToUnarchive.id}/unarchive`,
                     {
                       method: "PUT",
                       headers: {
