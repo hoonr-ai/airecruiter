@@ -2,6 +2,7 @@
 import json
 import re
 import time
+import hashlib
 import asyncio
 import logging
 from typing import List, Optional, Dict, Any
@@ -10,10 +11,12 @@ from sqlalchemy import text
 from core.config import (
     DATABASE_URL, SUPABASE_DB_URL,
     AZURE_OPENAI_API_KEY,
-    OPENAI_API_KEY, OPENAI_MODEL
+    OPENAI_API_KEY, OPENAI_MODEL,
+    LLM_CONCURRENCY,
 )
 import httpx
 from models import SourcedCandidate
+from services.candidate_profiles_db import candidate_profiles_db
 
 logger = logging.getLogger(__name__)
 
@@ -400,55 +403,323 @@ class SourcedCandidatesStorage:
             print(f"Error retrieving candidates for job {jobdiva_id}: {e}")
             return []
 
-    def get_all_candidates(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Retrieve all sourced candidates across all jobs."""
+    # Whitelist of sortable columns -> SQL expression. Inlined into the ORDER
+    # BY clause. NULLS LAST so empty/missing values don't crowd the top when
+    # sorting asc.
+    _SORT_EXPR = {
+        "name":       "COALESCE(NULLIF(d.name, ''), '') ",
+        "match":      "d.match_score",
+        "job":        "COALESCE(NULLIF(d.job_title, ''), '') ",
+        "source":     "COALESCE(NULLIF(d.source, ''), '') ",
+        "location":   "COALESCE(NULLIF(d.location, ''), '') ",
+        "created_at": "d.created_at",
+    }
+    # Match-band query-string values → (min, max) inclusive numeric bounds,
+    # or the "unscored" sentinel (NULL match_score). Names mirror the FE
+    # MATCH_BANDS constant at apps/web/app/candidates/page.tsx so no
+    # translation layer is needed between client & server.
+    _MATCH_BANDS = {
+        "strong":   (80, 100),
+        "good":     (60, 79.9999),
+        "low":      (0, 59.9999),
+        "unscored": None,  # sentinel → match_score IS NULL
+    }
+
+    def get_all_candidates(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        search: Optional[str] = None,
+        job_id: Optional[str] = None,
+        source: Optional[str] = None,
+        location: Optional[str] = None,
+        match_band: Optional[str] = None,
+        sort_key: Optional[str] = None,
+        sort_dir: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Retrieve paginated + filtered + sorted candidates across all jobs.
+
+        Returns {"candidates": [...current page...], "total": <filtered count>}.
+
+        Pagination is server-side; filters apply across the whole DB (not just
+        the current page). `match_band` buckets resume_match_percentage into
+        "80-100"/"60-79"/"0-59". `sort_key` is whitelisted — unknown keys fall
+        back to the default (source priority + match desc). Expensive SELECTs
+        are wrapped in a CTE so DISTINCT ON + filters compose cleanly.
+        """
         if not self.db_url:
-            return []
-            
+            return {"candidates": [], "total": 0}
+
         try:
-            # Use fresh connection to avoid transaction issues
             import psycopg2
             import psycopg2.extras
-            
+
             conn = psycopg2.connect(self.db_url)
-            conn.autocommit = True  # Prevent transaction issues
+            conn.autocommit = True
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            
-            # Join with monitored_jobs to get job title
-            # Try matching by jobdiva_id with the monitored jobs
-            cur.execute("""
-                SELECT DISTINCT ON (sc.candidate_id) sc.*, mj.title as job_title 
-                FROM sourced_candidates sc
-                LEFT JOIN monitored_jobs mj ON (sc.jobdiva_id = mj.job_id OR sc.jobdiva_id = mj.jobdiva_id)
-                ORDER BY sc.candidate_id, sc.created_at DESC
-                LIMIT %s
-            """, (limit,))
-            
-            candidates = []
-            for row in cur.fetchall():
+
+            # --- ORDER BY (whitelist) -----------------------------------------
+            expr = self._SORT_EXPR.get((sort_key or "").lower())
+            direction = "DESC" if (sort_dir or "desc").lower() == "desc" else "ASC"
+            if expr:
+                order_by = f"{expr} {direction} NULLS LAST, d.candidate_id ASC"
+            else:
+                # Default: source priority (applicants > linkedin > talentsearch
+                # > other) then match_score desc. Mirrors the FE default sort so
+                # server-driven paging agrees with what the user used to see.
+                order_by = """
+                    CASE
+                        WHEN LOWER(COALESCE(d.source,'')) LIKE '%%applicants%%' THEN 1
+                        WHEN LOWER(COALESCE(d.source,'')) LIKE '%%linkedin%%'   THEN 2
+                        WHEN LOWER(COALESCE(d.source,'')) LIKE '%%talentsearch%%'
+                             OR LOWER(COALESCE(d.source,'')) LIKE '%%talent_search%%' THEN 3
+                        ELSE 4
+                    END ASC,
+                    d.match_score DESC NULLS LAST,
+                    d.candidate_id ASC
+                """
+
+            # --- Match band -> numeric bounds or NULL filter ------------------
+            band_unscored = False
+            min_score: Optional[float] = None
+            max_score: Optional[float] = None
+            if match_band:
+                band = self._MATCH_BANDS.get(match_band)
+                if band is None and match_band == "unscored":
+                    band_unscored = True
+                elif band is not None:
+                    min_score, max_score = band
+
+            # --- Named params -------------------------------------------------
+            search_like = f"%{search.strip()}%" if search and search.strip() else None
+            params = {
+                "job_id":        job_id or None,
+                "source":        source or None,
+                "location":      location or None,
+                "search":        search_like,
+                "search_like":   search_like,
+                "min_score":     min_score,
+                "max_score":     max_score,
+                "band_unscored": band_unscored,
+                "limit":         max(1, min(int(limit), 200)),
+                "offset":        max(0, int(offset)),
+            }
+
+            # CTE dedupes by candidate_id (keep most-recent row), then outer
+            # SELECT filters, counts, orders, paginates.
+            query = f"""
+                WITH deduped AS (
+                    SELECT DISTINCT ON (sc.candidate_id)
+                        sc.*,
+                        COALESCE(
+                            sc.resume_match_percentage,
+                            NULLIF(sc.data->>'match_score','')::numeric
+                        ) AS match_score,
+                        mj.title AS job_title
+                    FROM sourced_candidates sc
+                    LEFT JOIN monitored_jobs mj
+                      ON (sc.jobdiva_id = mj.job_id OR sc.jobdiva_id = mj.jobdiva_id)
+                    ORDER BY sc.candidate_id, sc.created_at DESC
+                )
+                SELECT d.*, COUNT(*) OVER() AS total_count
+                FROM deduped d
+                WHERE (%(job_id)s IS NULL   OR d.jobdiva_id = %(job_id)s)
+                  AND (%(source)s IS NULL   OR d.source = %(source)s)
+                  AND (%(location)s IS NULL OR d.location = %(location)s)
+                  AND (
+                      %(band_unscored)s = FALSE
+                      OR d.match_score IS NULL
+                  )
+                  AND (%(min_score)s IS NULL OR d.match_score >= %(min_score)s)
+                  AND (%(max_score)s IS NULL OR d.match_score <= %(max_score)s)
+                  AND (
+                      %(search)s IS NULL
+                      OR COALESCE(d.name,'')       ILIKE %(search_like)s
+                      OR COALESCE(d.headline,'')   ILIKE %(search_like)s
+                      OR COALESCE(d.job_title,'')  ILIKE %(search_like)s
+                      OR COALESCE(d.location,'')   ILIKE %(search_like)s
+                      OR COALESCE(d.jobdiva_id,'') ILIKE %(search_like)s
+                  )
+                ORDER BY {order_by}
+                LIMIT %(limit)s OFFSET %(offset)s
+            """
+            cur.execute(query, params)
+            rows = cur.fetchall()
+
+            total = int(rows[0]["total_count"]) if rows else 0
+
+            candidates: List[Dict[str, Any]] = []
+            for row in rows:
                 c_dict = dict(row)
-                if c_dict.get('data'):
+                c_dict.pop("total_count", None)
+                # JSON uplift: column-level `match_score` already COALESCEd at
+                # SQL layer. engage_score / engage_status still live only in
+                # the `data` jsonb, so uplift them here for the FE.
+                if c_dict.get("data"):
                     try:
-                        if isinstance(c_dict['data'], str):
-                            c_dict['data'] = json.loads(c_dict['data'])
-                    except:
+                        data = c_dict["data"]
+                        if isinstance(data, str):
+                            data = json.loads(data)
+                            c_dict["data"] = data
+                        if isinstance(data, dict):
+                            if data.get("engage_score") is not None and c_dict.get("engage_score") is None:
+                                c_dict["engage_score"] = data["engage_score"]
+                            if data.get("engage_status") and c_dict.get("engage_status") is None:
+                                c_dict["engage_status"] = data["engage_status"]
+                    except Exception as e:
+                        logger.debug(f"Error parsing candidate.data json: {e}")
+                if c_dict.get("created_at"):
+                    c_dict["created_at"] = str(c_dict["created_at"])
+                # Numeric -> float for JSON serialization
+                if c_dict.get("match_score") is not None:
+                    try:
+                        c_dict["match_score"] = float(c_dict["match_score"])
+                    except Exception:
                         pass
-                if c_dict.get('created_at'):
-                    c_dict['created_at'] = str(c_dict['created_at'])
                 candidates.append(c_dict)
-                
+
             cur.close()
             conn.close()
-            return candidates
+            return {"candidates": candidates, "total": total}
         except Exception as e:
-            print(f"Error retrieving all candidates: {e}")
-            return []
+            logger.error(f"Error retrieving all candidates: {e}")
+            return {"candidates": [], "total": 0}
+
+    def get_filter_options(self) -> Dict[str, Any]:
+        """Distinct values used to populate FE filter dropdowns.
+
+        Pulled from the full `sourced_candidates` table (DB-wide, not the
+        current page) so filtering still operates on all rows post-pagination.
+        """
+        if not self.db_url:
+            return {"jobs": [], "sources": [], "locations": []}
+
+        try:
+            import psycopg2
+            import psycopg2.extras
+
+            conn = psycopg2.connect(self.db_url)
+            conn.autocommit = True
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+            # Jobs: jobdiva_id + best-effort title via monitored_jobs.
+            cur.execute("""
+                SELECT sc.jobdiva_id AS id, MIN(mj.title) AS title
+                FROM sourced_candidates sc
+                LEFT JOIN monitored_jobs mj
+                  ON (sc.jobdiva_id = mj.job_id OR sc.jobdiva_id = mj.jobdiva_id)
+                WHERE sc.jobdiva_id IS NOT NULL AND sc.jobdiva_id <> ''
+                GROUP BY sc.jobdiva_id
+                ORDER BY title NULLS LAST, sc.jobdiva_id
+            """)
+            jobs = [
+                {"id": r["id"], "label": f"{r['title']} — #{r['id']}" if r["title"] else f"#{r['id']}"}
+                for r in cur.fetchall()
+            ]
+
+            cur.execute("""
+                SELECT DISTINCT source FROM sourced_candidates
+                WHERE source IS NOT NULL AND source <> ''
+                ORDER BY source
+            """)
+            sources = [r["source"] for r in cur.fetchall()]
+
+            cur.execute("""
+                SELECT DISTINCT location FROM sourced_candidates
+                WHERE location IS NOT NULL AND location <> ''
+                ORDER BY location
+            """)
+            locations = [r["location"] for r in cur.fetchall()]
+
+            cur.close()
+            conn.close()
+            return {"jobs": jobs, "sources": sources, "locations": locations}
+        except Exception as e:
+            logger.error(f"Error retrieving filter options: {e}")
+            return {"jobs": [], "sources": [], "locations": []}
 
 sourced_candidates_storage = SourcedCandidatesStorage()
 
 
 # Concurrency controls to prevent 429 Too Many Requests for LLM enrichment.
-_llm_semaphore = asyncio.Semaphore(2)  # Reduced to 2 to avoid rate limits
+# Width configurable via LLM_CONCURRENCY env (default 5). Previous hard-coded 2
+# serialized crisp+extract behind a 2-wide gate, adding wall-time cost even
+# when the upstream API could handle more.
+_llm_semaphore = asyncio.Semaphore(max(1, LLM_CONCURRENCY))
+
+
+def _resume_text_hash(resume_text: str) -> Optional[str]:
+    """SHA256 over normalized resume text for extraction-cache lookups.
+
+    Returns None when the input is too short to meaningfully cache against
+    (mirrors the ``min_text_length=50`` gate in ``_process_candidate_common``).
+    """
+    if not resume_text:
+        return None
+    normalized = re.sub(r"\s+", " ", resume_text).strip()
+    if len(normalized) < 50:
+        return None
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _lookup_cached_enhanced_info_by_resume_hash(resume_hash: str) -> Optional[Dict[str, Any]]:
+    """Return a reusable enhanced_info payload for a resume we've already
+    LLM-parsed. Keyed on resume_text SHA256 so the same resume content parsed
+    against a different candidate_id (JobDiva re-ingestion, duplicate
+    applicants) doesn't trigger a second LLM pass.
+
+    Returns None on miss or any DB error (callers treat None as "go parse").
+    """
+    if not resume_hash:
+        return None
+    try:
+        engine = sqlalchemy.create_engine(DATABASE_URL)
+        with engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT candidate_name, email, phone, job_title, current_location,
+                       years_of_experience, key_skills, company_experience,
+                       candidate_education, candidate_certification, urls, source,
+                       resume_extraction_status
+                FROM candidate_enhanced_info
+                WHERE resume_hash = :h
+                  AND resume_extraction_status = 'completed'
+                ORDER BY extracted_at DESC
+                LIMIT 1
+            """), {"h": resume_hash}).fetchone()
+            if not row:
+                return None
+            row_map = row._mapping if hasattr(row, "_mapping") else dict(row)
+
+            def _j(value):
+                if value is None:
+                    return []
+                if isinstance(value, (list, dict)):
+                    return value
+                try:
+                    return json.loads(value)
+                except Exception:
+                    return []
+
+            return {
+                "candidate_name": row_map.get("candidate_name"),
+                "email": row_map.get("email"),
+                "phone": row_map.get("phone"),
+                "job_title": row_map.get("job_title"),
+                "current_location": row_map.get("current_location"),
+                "years_of_experience": row_map.get("years_of_experience"),
+                "structured_skills": _j(row_map.get("key_skills")),
+                "key_skills": _j(row_map.get("key_skills")),
+                "company_experience": _j(row_map.get("company_experience")),
+                "candidate_education": _j(row_map.get("candidate_education")),
+                "candidate_certification": _j(row_map.get("candidate_certification")),
+                "urls": _j(row_map.get("urls")) if row_map.get("urls") else {},
+                "source": row_map.get("source"),
+                "resume_extraction_status": row_map.get("resume_extraction_status"),
+                "_cache_hit": "resume_hash",
+            }
+    except Exception as exc:
+        logger.debug(f"resume_hash cache lookup failed (soft miss): {exc}")
+        return None
 
 async def crisp_resume_with_ai(resume_text: str, max_length: int = 7500) -> str:
     """
@@ -694,113 +965,130 @@ async def extract_enhanced_info_with_llm(resume_text: str) -> Dict[str, Any]:
                 await asyncio.sleep(wait_time)
 
 
-async def process_jobdiva_candidate(candidate: Dict[str, Any]):
-    candidate_id = candidate.get("candidate_id", "unknown")
-    candidate_name = candidate.get("name", "Unknown")
-    
-    logger.info(f"🔄 [Candidate:{candidate_id}] Starting resume processing for {candidate_name}")
-    
-    # Get original resume text (this is what gets saved to database and shown in UI)
-    original_resume_text = candidate.get("resume_text", "")
-    if not _has_real_resume_text(original_resume_text):
-        logger.warning(f"⚠️ [Candidate:{candidate_id}] No usable resume text found, skipping processing")
-        return {"candidate_id": candidate_id, "raw": {}, "skipped": True}
-    
-    logger.info(f"📄 [Candidate:{candidate_id}] Original resume text length: {len(original_resume_text)} characters")
-    resume_contact_fallbacks = _extract_resume_contact_details(original_resume_text)
+async def _process_candidate_common(
+    candidate: Dict[str, Any],
+    resume_text_for_llm: str,
+    resume_text_to_save: str,
+    source: str,
+    fallbacks: Dict[str, Any],
+    min_text_length: int = 50,
+) -> Dict[str, Any]:
+    """Shared pipeline: crisp → LLM extract → build enhanced_info → save → return.
 
-    # Step 1: Crisp the resume first, then let the LLM extract every field from
-    # that crisped version. This matches the earlier successful flow while
-    # keeping extraction fully LLM-driven.
-    logger.info(f"📄 [Candidate:{candidate_id}] Crisping resume for LLM extraction...")
-    crisped_resume_text = await crisp_resume_with_ai(original_resume_text, max_length=12000)
-    logger.info(f"📄 [Candidate:{candidate_id}] Using crisped resume ({len(crisped_resume_text)} chars) for LLM extraction")
-        
-    # Step 2: Run LLM-only extraction for all enhanced candidate fields.
-    logger.info(f"🧠 [Candidate:{candidate_id}] Calling LLM for enhanced info extraction (using crisped resume)...")
-    enhanced_info_task = asyncio.create_task(extract_enhanced_info_with_llm(crisped_resume_text))
-    
-    logger.info(f"⏳ [Candidate:{candidate_id}] Waiting for LLM response...")
-    enhanced_info_result = await enhanced_info_task
-    
-    # Log LLM results
+    Callers assemble source-specific resume text and fallbacks. `fallbacks` may
+    contain any of: name, email, phone, location, title, urls, skills,
+    company_experience, education, certifications.
+    """
+    candidate_id = candidate.get("candidate_id", candidate.get("id", "unknown"))
+    candidate_name = candidate.get("name", "Unknown")
+
+    logger.info(f"🔄 [{source} Candidate:{candidate_id}] Starting processing for {candidate_name}")
+
+    if len(resume_text_for_llm.strip()) < min_text_length:
+        logger.warning(f"⚠️ [{source} Candidate:{candidate_id}] Insufficient text, skipping LLM processing")
+        return candidate
+
+    logger.info(f"📄 [{source} Candidate:{candidate_id}] Text length: {len(resume_text_for_llm)} characters")
+
+    # Resume-hash cache: the same resume parsed once costs money; look up by
+    # SHA256 of the resume text before calling crisp+extract. On hit we skip
+    # both LLM calls entirely.
+    resume_hash = _resume_text_hash(resume_text_to_save or resume_text_for_llm)
+    enhanced_info_result: Optional[Dict[str, Any]] = None
+    if resume_hash:
+        cached = _lookup_cached_enhanced_info_by_resume_hash(resume_hash)
+        if cached:
+            logger.info(
+                f"💾 [{source} Candidate:{candidate_id}] resume_hash cache HIT, "
+                f"skipping crisp+LLM"
+            )
+            enhanced_info_result = cached
+
+    if enhanced_info_result is None:
+        crisped = await crisp_resume_with_ai(resume_text_for_llm, max_length=12000)
+        logger.info(f"📄 [{source} Candidate:{candidate_id}] Crisped to {len(crisped)} chars")
+        enhanced_info_result = await extract_enhanced_info_with_llm(crisped)
+
+    extraction_error: Optional[str] = None
     if enhanced_info_result.get("error"):
-        logger.error(f"❌ [Candidate:{candidate_id}] LLM error: {enhanced_info_result.get('error')}")
+        extraction_error = str(enhanced_info_result.get("error"))
+        logger.error(f"❌ [{source} Candidate:{candidate_id}] LLM error: {extraction_error}")
         formatted_skills = []
+    elif enhanced_info_result.get("_cache_hit"):
+        # Cached payload already stores skills in the final structured shape
+        # ({"skill": ..., "similar_skills": [...]}) under "structured_skills".
+        cached_skills = enhanced_info_result.get("structured_skills") or []
+        formatted_skills = [
+            s for s in cached_skills if isinstance(s, dict) and s.get("skill")
+        ]
     else:
         formatted_skills = _normalize_llm_skills(enhanced_info_result)
 
+    company_exp_llm = enhanced_info_result.get("company_experience") or []
+    first_exp_title = (
+        company_exp_llm[0].get("title")
+        if isinstance(company_exp_llm, list) and company_exp_llm and isinstance(company_exp_llm[0], dict)
+        else None
+    )
     extracted_job_title = (
         enhanced_info_result.get("job_title")
         or enhanced_info_result.get("current_title")
-        or ((enhanced_info_result.get("company_experience") or [{}])[0].get("title") if isinstance(enhanced_info_result.get("company_experience"), list) and (enhanced_info_result.get("company_experience") or []) else None)
-        or candidate.get("title")
-        or candidate.get("headline")
+        or first_exp_title
+        or fallbacks.get("title")
     )
 
-    # Validate LLM-extracted name - fall back to JobDiva name if LLM returns "Not Provided" or empty
     llm_name = _clean_extracted_value(enhanced_info_result.get("candidate_name"))
-    jobdiva_name = _clean_extracted_value(candidate.get("name"))
-    
-    # Use LLM name only if it's valid (not empty and not "Not Provided")
-    if llm_name:
-        final_name = llm_name
-    elif jobdiva_name:
-        final_name = jobdiva_name
-    else:
-        final_name = None
-    
-    logger.info(f"👤 [Candidate:{candidate_id}] Name selection: LLM='{llm_name}', JobDiva='{jobdiva_name}', Final='{final_name}'")
-    
+    fallback_name = _clean_extracted_value(fallbacks.get("name"))
+    final_name = llm_name or fallback_name or None
+    logger.info(f"👤 [{source} Candidate:{candidate_id}] Name: LLM='{llm_name}', Fallback='{fallback_name}', Final='{final_name}'")
+
     enhanced_info = {
-        # LLM-only extracted values for candidate enrichment
         "candidate_name": final_name,
-        "email": _clean_extracted_value(enhanced_info_result.get("email")) or _clean_extracted_value(resume_contact_fallbacks.get("email")) or _clean_extracted_value(candidate.get("email")),
-        "phone": _clean_extracted_value(enhanced_info_result.get("phone")) or _clean_extracted_value(resume_contact_fallbacks.get("phone")) or _clean_extracted_value(candidate.get("phone")),
+        "email": _clean_extracted_value(enhanced_info_result.get("email")) or _clean_extracted_value(fallbacks.get("email")),
+        "phone": _clean_extracted_value(enhanced_info_result.get("phone")) or _clean_extracted_value(fallbacks.get("phone")),
         "job_title": _clean_extracted_value(extracted_job_title),
         "years_of_experience": enhanced_info_result.get("years_of_experience"),
-        "current_location": _clean_extracted_value(enhanced_info_result.get("current_location")) or _clean_extracted_value(candidate.get("location")),
-        
-        # Structured data from LLM
-        "company_experience": enhanced_info_result.get("company_experience", []),
-        "candidate_education": enhanced_info_result.get("candidate_education", []),
-        "candidate_certification": enhanced_info_result.get("candidate_certification", []),
+        "current_location": _clean_extracted_value(enhanced_info_result.get("current_location")) or _clean_extracted_value(fallbacks.get("location")),
+
+        "company_experience": company_exp_llm or fallbacks.get("company_experience", []),
+        "candidate_education": enhanced_info_result.get("candidate_education", []) or fallbacks.get("education", []),
+        "candidate_certification": enhanced_info_result.get("candidate_certification", []) or fallbacks.get("certifications", []),
         "urls": _normalize_candidate_urls({
-            **(resume_contact_fallbacks.get("urls") or {}),
+            **(fallbacks.get("urls") or {}),
             **(enhanced_info_result.get("urls") or {}),
         }),
-        "structured_skills": formatted_skills,
-        
-        # Metadata
-        "source": candidate.get("source", "JobDiva"),
+        "structured_skills": formatted_skills or fallbacks.get("skills", []),
+
+        "source": source,
         "resume_extraction_status": "completed" if any([
             final_name,
             _clean_extracted_value(extracted_job_title),
             formatted_skills,
-            enhanced_info_result.get("company_experience", []),
+            company_exp_llm,
             enhanced_info_result.get("candidate_education", []),
-            enhanced_info_result.get("candidate_certification", []),
-            _clean_extracted_value(enhanced_info_result.get("phone")),
             _clean_extracted_value(enhanced_info_result.get("email")),
             _clean_extracted_value(enhanced_info_result.get("current_location")),
         ]) else "partial"
     }
 
+    # Fix 2 (Path A′ observability): stamp LLM-extraction error onto the
+    # enhanced_info so downstream scoring and the streamed stage event can
+    # tell a silent degradation apart from a clean empty extraction.
+    if extraction_error:
+        enhanced_info["_extraction_error"] = extraction_error
+
     _log_extraction_snapshot(candidate_id, enhanced_info)
 
-    # Save to candidate_enhanced_info (using ORIGINAL resume, not crisped)
-    logger.info(f"💾 [Candidate:{candidate_id}] Saving to candidate_enhanced_info table...")
     try:
-        save_candidate_enhanced_info(candidate["candidate_id"], enhanced_info, original_resume_text)
-        logger.info(f"✅ [Candidate:{candidate_id}] Successfully saved to candidate_enhanced_info")
+        save_candidate_enhanced_info(candidate_id, enhanced_info, resume_text_to_save)
+        logger.info(f"✅ [{source} Candidate:{candidate_id}] Saved to candidate_enhanced_info")
     except Exception as e:
-        logger.error(f"❌ [Candidate:{candidate_id}] Failed to save to candidate_enhanced_info: {e}")
+        logger.error(f"❌ [{source} Candidate:{candidate_id}] Failed to save: {e}")
 
-    logger.info("[ResumeExtract] candidate_id=%s persisted=%s source=%s", candidate_id, "yes", enhanced_info.get("source", "JobDiva"))
-    
-    # Return merged/enriched data for API response
+    logger.info("[%sExtract] candidate_id=%s persisted=yes source=%s", source, candidate_id, source)
+
     return {
-        "candidate_id": candidate["candidate_id"],
+        "candidate_id": candidate_id,
         "name": enhanced_info.get("candidate_name"),
         "current_title": enhanced_info.get("job_title"),
         "location": enhanced_info.get("current_location"),
@@ -810,18 +1098,39 @@ async def process_jobdiva_candidate(candidate: Dict[str, Any]):
         "education": enhanced_info.get("candidate_education", []),
         "certifications": enhanced_info.get("candidate_certification", []),
         "urls": enhanced_info.get("urls", {}),
-        "raw": enhanced_info
+        "raw": enhanced_info,
+        "_extraction_error": extraction_error,
     }
+
+
+async def process_jobdiva_candidate(candidate: Dict[str, Any]):
+    candidate_id = candidate.get("candidate_id", "unknown")
+    original_resume_text = candidate.get("resume_text", "")
+    if not _has_real_resume_text(original_resume_text):
+        logger.warning(f"⚠️ [Candidate:{candidate_id}] No usable resume text found, skipping processing")
+        return {"candidate_id": candidate_id, "raw": {}, "skipped": True}
+
+    resume_contact_fallbacks = _extract_resume_contact_details(original_resume_text)
+    fallbacks = {
+        "name": candidate.get("name"),
+        "email": resume_contact_fallbacks.get("email") or candidate.get("email"),
+        "phone": resume_contact_fallbacks.get("phone") or candidate.get("phone"),
+        "location": candidate.get("location"),
+        "title": candidate.get("title") or candidate.get("headline"),
+        "urls": resume_contact_fallbacks.get("urls") or {},
+    }
+    return await _process_candidate_common(
+        candidate,
+        resume_text_for_llm=original_resume_text,
+        resume_text_to_save=original_resume_text,
+        source=candidate.get("source", "JobDiva"),
+        fallbacks=fallbacks,
+    )
 
 
 async def process_linkedin_candidate(candidate: Dict[str, Any]):
     """Process LinkedIn candidate and save enhanced info to database."""
-    candidate_id = candidate.get("candidate_id", candidate.get("id", "unknown"))
     candidate_name = candidate.get("name", "Unknown")
-    
-    logger.info(f"🔄 [LinkedIn Candidate:{candidate_id}] Starting profile processing for {candidate_name}")
-    
-    # Build a pseudo-resume from LinkedIn profile data for LLM extraction
     profile_summary = candidate.get("summary", "")
     headline = candidate.get("title", candidate.get("headline", ""))
     location = candidate.get("location", candidate.get("city", ""))
@@ -830,8 +1139,7 @@ async def process_linkedin_candidate(candidate: Dict[str, Any]):
     certifications = candidate.get("candidate_certification", [])
     skills = candidate.get("skills", [])
     profile_url = candidate.get("profile_url", "")
-    
-    # Construct a text representation of the LinkedIn profile
+
     linkedin_profile_text = f"""
 Name: {candidate_name}
 Headline: {headline}
@@ -843,225 +1151,65 @@ Summary:
 
 Experience:
 """
-    
     for exp in company_exp:
         linkedin_profile_text += f"- {exp.get('title', '')} at {exp.get('company', '')} ({exp.get('start_date', '')} to {exp.get('end_date', '')})\n"
-    
     linkedin_profile_text += "\nEducation:\n"
     for edu in education:
         linkedin_profile_text += f"- {edu.get('degree', '')} from {edu.get('institution', '')} ({edu.get('year', '')})\n"
-    
     linkedin_profile_text += "\nCertifications:\n"
     for cert in certifications:
         linkedin_profile_text += f"- {cert.get('name', '')} by {cert.get('issuer', '')} ({cert.get('year', '')})\n"
-    
     linkedin_profile_text += "\nSkills:\n"
     for skill in skills:
         skill_name = skill.get("name", skill) if isinstance(skill, dict) else skill
         linkedin_profile_text += f"- {skill_name}\n"
-    
-    # Check if we have meaningful profile data
-    if len(linkedin_profile_text.strip()) < 100:
-        logger.warning(f"⚠️ [LinkedIn Candidate:{candidate_id}] Insufficient profile data, skipping LLM processing")
-        return candidate
-    
-    logger.info(f"📄 [LinkedIn Candidate:{candidate_id}] Profile text length: {len(linkedin_profile_text)} characters")
-    
-    # Crisp the profile text for LLM extraction
-    logger.info(f"📄 [LinkedIn Candidate:{candidate_id}] Crisping profile for LLM extraction...")
-    crisped_profile_text = await crisp_resume_with_ai(linkedin_profile_text, max_length=12000)
-    logger.info(f"📄 [LinkedIn Candidate:{candidate_id}] Using crisped profile ({len(crisped_profile_text)} chars) for LLM extraction")
-    
-    # Run LLM extraction
-    logger.info(f"🧠 [LinkedIn Candidate:{candidate_id}] Calling LLM for enhanced info extraction...")
-    enhanced_info_result = await extract_enhanced_info_with_llm(crisped_profile_text)
-    
-    # Log LLM results
-    if enhanced_info_result.get("error"):
-        logger.error(f"❌ [LinkedIn Candidate:{candidate_id}] LLM error: {enhanced_info_result.get('error')}")
-        formatted_skills = []
-    else:
-        formatted_skills = _normalize_llm_skills(enhanced_info_result)
-    
-    # Extract job title with fallbacks
-    extracted_job_title = (
-        enhanced_info_result.get("job_title")
-        or enhanced_info_result.get("current_title")
-        or ((enhanced_info_result.get("company_experience") or [{}])[0].get("title") if isinstance(enhanced_info_result.get("company_experience"), list) and (enhanced_info_result.get("company_experience") or []) else None)
-        or headline
+
+    fallbacks = {
+        "name": candidate_name,
+        "email": candidate.get("email"),
+        "phone": candidate.get("phone"),
+        "location": location,
+        "title": headline,
+        "urls": {"linkedin": profile_url} if profile_url else {},
+        "skills": skills,
+        "company_experience": company_exp,
+        "education": education,
+        "certifications": certifications,
+    }
+    return await _process_candidate_common(
+        candidate,
+        resume_text_for_llm=linkedin_profile_text,
+        resume_text_to_save=linkedin_profile_text,
+        source="LinkedIn",
+        fallbacks=fallbacks,
+        min_text_length=100,
     )
-    
-    # Validate LLM-extracted name
-    llm_name = _clean_extracted_value(enhanced_info_result.get("candidate_name"))
-    linkedin_name = _clean_extracted_value(candidate.get("name"))
-    
-    if llm_name:
-        final_name = llm_name
-    elif linkedin_name:
-        final_name = linkedin_name
-    else:
-        final_name = None
-    
-    logger.info(f"👤 [LinkedIn Candidate:{candidate_id}] Name selection: LLM='{llm_name}', LinkedIn='{linkedin_name}', Final='{final_name}'")
-    
-    # Build enhanced info
-    enhanced_info = {
-        "candidate_name": final_name,
-        "email": _clean_extracted_value(enhanced_info_result.get("email")) or _clean_extracted_value(candidate.get("email")),
-        "phone": _clean_extracted_value(enhanced_info_result.get("phone")) or _clean_extracted_value(candidate.get("phone")),
-        "job_title": _clean_extracted_value(extracted_job_title),
-        "years_of_experience": enhanced_info_result.get("years_of_experience"),
-        "current_location": _clean_extracted_value(enhanced_info_result.get("current_location")) or _clean_extracted_value(location),
-        
-        # Use LLM-extracted data with LinkedIn data as fallback
-        "company_experience": enhanced_info_result.get("company_experience", []) or company_exp,
-        "candidate_education": enhanced_info_result.get("candidate_education", []) or education,
-        "candidate_certification": enhanced_info_result.get("candidate_certification", []) or certifications,
-        "urls": _normalize_candidate_urls({
-            "linkedin": profile_url,
-            **(enhanced_info_result.get("urls") or {}),
-        }),
-        "structured_skills": formatted_skills or skills,
-        
-        # Metadata
-        "source": "LinkedIn",
-        "resume_extraction_status": "completed" if any([
-            final_name,
-            _clean_extracted_value(extracted_job_title),
-            formatted_skills,
-            enhanced_info_result.get("company_experience", []) or company_exp,
-            enhanced_info_result.get("candidate_education", []) or education,
-            _clean_extracted_value(enhanced_info_result.get("email")),
-            _clean_extracted_value(enhanced_info_result.get("current_location")),
-        ]) else "partial"
-    }
-    
-    _log_extraction_snapshot(candidate_id, enhanced_info)
-    
-    # Save to candidate_enhanced_info table
-    logger.info(f"💾 [LinkedIn Candidate:{candidate_id}] Saving to candidate_enhanced_info table...")
-    try:
-        save_candidate_enhanced_info(candidate_id, enhanced_info, linkedin_profile_text)
-        logger.info(f"✅ [LinkedIn Candidate:{candidate_id}] Successfully saved to candidate_enhanced_info")
-    except Exception as e:
-        logger.error(f"❌ [LinkedIn Candidate:{candidate_id}] Failed to save to candidate_enhanced_info: {e}")
-    
-    logger.info("[LinkedInExtract] candidate_id=%s persisted=%s source=LinkedIn", candidate_id, "yes")
-    
-    # Return merged/enriched data for API response
-    return {
-        "candidate_id": candidate_id,
-        "name": enhanced_info.get("candidate_name"),
-        "current_title": enhanced_info.get("job_title"),
-        "location": enhanced_info.get("current_location"),
-        "years_experience": enhanced_info.get("years_of_experience"),
-        "skills": formatted_skills,
-        "company_experience": enhanced_info.get("company_experience", []),
-        "education": enhanced_info.get("candidate_education", []),
-        "certifications": enhanced_info.get("candidate_certification", []),
-        "urls": enhanced_info.get("urls", {}),
-        "raw": enhanced_info
-    }
-    
+
+
 async def process_dice_candidate(candidate: Dict[str, Any]):
     """Process Dice candidate and save enhanced info to database."""
-    candidate_id = candidate.get("candidate_id", candidate.get("id", "unknown"))
     candidate_name = candidate.get("name", "Unknown")
-    
-    logger.info(f"🔄 [Dice Candidate:{candidate_id}] Starting profile processing for {candidate_name}")
-    
-    # Build a pseudo-resume from Dice candidate data for LLM extraction
     headline = candidate.get("title", candidate.get("headline", ""))
     location = candidate.get("location", candidate.get("city", ""))
-    # Dice candidates usually have resume_text already
     resume_text = candidate.get("resume_text", "")
-    
+
     if not _has_real_resume_text(resume_text):
-        # Construct summary from metadata if no resume
-        summary = f"""
-Name: {candidate_name}
-Title: {headline}
-Location: {location}
-"""
-        resume_text = summary
-    
-    # Check if we have meaningful data
-    if len(resume_text.strip()) < 50:
-        logger.warning(f"⚠️ [Dice Candidate:{candidate_id}] Insufficient profile data, skipping LLM processing")
-        return candidate
-    
-    logger.info(f"📄 [Dice Candidate:{candidate_id}] Profile text length: {len(resume_text)} characters")
-    
-    # Crisp the profile text for LLM extraction
-    logger.info(f"📄 [Dice Candidate:{candidate_id}] Crisping profile for LLM extraction...")
-    crisped_text = await crisp_resume_with_ai(resume_text, max_length=12000)
-    
-    # Run LLM extraction
-    logger.info(f"🧠 [Dice Candidate:{candidate_id}] Calling LLM for enhanced info extraction...")
-    enhanced_info_result = await extract_enhanced_info_with_llm(crisped_text)
-    
-    # Log LLM results
-    if enhanced_info_result.get("error"):
-        logger.error(f"❌ [Dice Candidate:{candidate_id}] LLM error: {enhanced_info_result.get('error')}")
-        formatted_skills = []
-    else:
-        formatted_skills = _normalize_llm_skills(enhanced_info_result)
-    
-    # Extract job title with fallbacks
-    extracted_job_title = (
-        enhanced_info_result.get("job_title")
-        or enhanced_info_result.get("current_title")
-        or headline
+        resume_text = f"\nName: {candidate_name}\nTitle: {headline}\nLocation: {location}\n"
+
+    fallbacks = {
+        "name": candidate_name,
+        "email": candidate.get("email"),
+        "phone": candidate.get("phone"),
+        "location": location,
+        "title": headline,
+    }
+    return await _process_candidate_common(
+        candidate,
+        resume_text_for_llm=resume_text,
+        resume_text_to_save=resume_text,
+        source="Dice",
+        fallbacks=fallbacks,
     )
-    
-    # Build enhanced info
-    enhanced_info = {
-        "candidate_name": _clean_extracted_value(enhanced_info_result.get("candidate_name")) or candidate_name,
-        "email": _clean_extracted_value(enhanced_info_result.get("email")) or candidate.get("email"),
-        "phone": _clean_extracted_value(enhanced_info_result.get("phone")) or candidate.get("phone"),
-        "job_title": _clean_extracted_value(extracted_job_title),
-        "years_of_experience": enhanced_info_result.get("years_of_experience"),
-        "current_location": _clean_extracted_value(enhanced_info_result.get("current_location")) or location,
-        
-        "company_experience": enhanced_info_result.get("company_experience", []),
-        "candidate_education": enhanced_info_result.get("candidate_education", []),
-        "candidate_certification": enhanced_info_result.get("candidate_certification", []),
-        "urls": _normalize_candidate_urls({
-            **(enhanced_info_result.get("urls") or {}),
-        }),
-        "structured_skills": formatted_skills,
-        
-        # Metadata
-        "source": "Dice",
-        "resume_extraction_status": "completed" if any([
-            formatted_skills,
-            enhanced_info_result.get("company_experience", []),
-            _clean_extracted_value(enhanced_info_result.get("email")),
-        ]) else "partial"
-    }
-    
-    _log_extraction_snapshot(candidate_id, enhanced_info)
-    
-    # Save to candidate_enhanced_info table
-    try:
-        save_candidate_enhanced_info(candidate_id, enhanced_info, resume_text)
-    except Exception as e:
-        logger.error(f"❌ [Dice Candidate:{candidate_id}] Failed to save: {e}")
-    
-    # Return merged data
-    return {
-        "candidate_id": candidate_id,
-        "name": enhanced_info.get("candidate_name"),
-        "current_title": enhanced_info.get("job_title"),
-        "location": enhanced_info.get("current_location"),
-        "years_experience": enhanced_info.get("years_of_experience"),
-        "skills": formatted_skills,
-        "company_experience": enhanced_info.get("company_experience", []),
-        "education": enhanced_info.get("candidate_education", []),
-        "certifications": enhanced_info.get("candidate_certification", []),
-        "urls": enhanced_info.get("urls", {}),
-        "raw": enhanced_info
-    }
 
 # --- Save Functions ---
 def save_candidate_enhanced_info(candidate_id: str, enhanced_info: Dict[str, Any], resume_text: str):
@@ -1085,12 +1233,22 @@ def save_candidate_enhanced_info(candidate_id: str, enhanced_info: Dict[str, Any
                     candidate_certification JSONB DEFAULT '[]'::jsonb,
                     urls JSONB DEFAULT '{}'::jsonb,
                     resume_text TEXT,
+                    resume_hash TEXT,
                     resume_extraction_status TEXT DEFAULT 'pending',
                     source TEXT DEFAULT 'JobDiva',
                     extracted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + '30 days'::interval)
                 )
             """))
+            # Idempotent migrations for existing deployments: add resume_hash
+            # column + index if the table already exists without them.
+            conn.execute(text(
+                "ALTER TABLE candidate_enhanced_info ADD COLUMN IF NOT EXISTS resume_hash TEXT"
+            ))
+            conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS idx_candidate_enhanced_info_resume_hash "
+                "ON candidate_enhanced_info (resume_hash)"
+            ))
             
             # Safe int parsing for years_experience
             raw_years = enhanced_info.get("years_of_experience")
@@ -1109,15 +1267,17 @@ def save_candidate_enhanced_info(candidate_id: str, enhanced_info: Dict[str, Any
             certifications = enhanced_info.get("candidate_certification", [])
             urls = enhanced_info.get("urls", {})
             
+            resume_hash = _resume_text_hash(resume_text or "")
+
             conn.execute(text("""
                 INSERT INTO candidate_enhanced_info
-                (candidate_id, candidate_name, email, phone, job_title, current_location, 
+                (candidate_id, candidate_name, email, phone, job_title, current_location,
                  years_of_experience, key_skills, company_experience, candidate_education,
-                 candidate_certification, urls, resume_text, 
+                 candidate_certification, urls, resume_text, resume_hash,
                  resume_extraction_status, source, extracted_at)
-                VALUES (:candidate_id, :candidate_name, :email, :phone, :job_title, :current_location, 
+                VALUES (:candidate_id, :candidate_name, :email, :phone, :job_title, :current_location,
                         :years_of_experience, :key_skills, :company_experience, :candidate_education,
-                        :candidate_certification, :urls, :resume_text,
+                        :candidate_certification, :urls, :resume_text, :resume_hash,
                         :resume_extraction_status, :source, CURRENT_TIMESTAMP)
                 ON CONFLICT (candidate_id) DO UPDATE SET
                     candidate_name = EXCLUDED.candidate_name,
@@ -1132,6 +1292,7 @@ def save_candidate_enhanced_info(candidate_id: str, enhanced_info: Dict[str, Any
                     candidate_certification = EXCLUDED.candidate_certification,
                     urls = EXCLUDED.urls,
                     resume_text = EXCLUDED.resume_text,
+                    resume_hash = EXCLUDED.resume_hash,
                     resume_extraction_status = EXCLUDED.resume_extraction_status,
                     source = EXCLUDED.source,
                     extracted_at = CURRENT_TIMESTAMP
@@ -1149,10 +1310,21 @@ def save_candidate_enhanced_info(candidate_id: str, enhanced_info: Dict[str, Any
                 "candidate_certification": json.dumps(certifications),
                 "urls": json.dumps(urls),
                 "resume_text": resume_text,
+                "resume_hash": resume_hash,
                 "resume_extraction_status": enhanced_info.get("resume_extraction_status", "pending"),
                 "source": enhanced_info.get("source", "JobDiva")
             })
             conn.commit()
+            
+            # --- Propagate strictly to the newly normalized relations ---
+            try:
+                candidate_profiles_db.upsert_candidate(
+                    jobdiva_id="", # We may not have jobdiva_id locally here but it operates as intended
+                    candidate=enhanced_info,
+                    source=enhanced_info.get("source", "JobDiva")
+                )
+            except Exception as e_norm:
+                logger.error(f"❌ Normalized persistence failed for {candidate_id}: {e_norm}")
     except Exception as e:
         print(f"Error saving candidate_enhanced_info for {candidate_id}: {e}")
 

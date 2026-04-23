@@ -1,12 +1,28 @@
 import sqlalchemy
 from google.cloud.sql.connector import Connector, IPTypes
 import pg8000
+import psycopg2
+import psycopg2.extras
 import json
 from .config import (
-    INSTANCE_CONNECTION_NAME, DB_USER, DB_PASSWORD, DB_NAME
+    INSTANCE_CONNECTION_NAME, DB_USER, DB_PASSWORD, DB_NAME, DATABASE_URL
 )
 # Note: DB_PASS is mapped to DB_PASSWORD from config
 DB_PASS = DB_PASSWORD
+
+
+def get_db_connection():
+    """Canonical psycopg2 connection to the application database."""
+    if not DATABASE_URL:
+        raise Exception("DATABASE_URL not configured")
+    return psycopg2.connect(DATABASE_URL)
+
+
+def get_dict_cursor_connection():
+    """psycopg2 connection whose default cursor returns dicts (RealDictCursor)."""
+    if not DATABASE_URL:
+        raise Exception("DATABASE_URL not configured")
+    return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
 # Global Pool
 pool = None
