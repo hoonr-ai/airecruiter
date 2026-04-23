@@ -480,7 +480,7 @@ export function AssessModal({
 
             {/* ===== TAB 3: Transcript ===== */}
             <TabsContent value="transcript" className="px-6 pb-6 mt-0">
-              <ScrollArea className="max-h-[400px] pr-3">
+              <ScrollArea className="h-[500px] pr-3">
                 <div className="space-y-3 pt-4">
                   {data.transcriptions.length > 0 ? (
                     data.transcriptions.map((msg: any, idx: number) => (
