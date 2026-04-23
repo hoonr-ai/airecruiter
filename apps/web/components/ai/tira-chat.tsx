@@ -15,12 +15,24 @@ import {
     Check,
     Loader2,
     AlertCircle,
+    Search,
+    Copy,
 } from "lucide-react";
 import { useAI } from "@/context/ai-context";
 import { useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 
-type TiraMode = "chat" | "match" | "bug";
+type TiraMode = "chat" | "boolean" | "match" | "bug";
+
+interface BooleanResult {
+    status: string;
+    boolean_string: string;
+    must_have_titles: string[];
+    must_have_skills: string[];
+    nice_to_have: string[];
+    exclusions: string[];
+    source?: string;
+}
 
 interface MonitoredJob {
     job_id?: string;
@@ -74,6 +86,7 @@ export function TiraChat() {
                         isLoading={isLoading}
                     />
                 )}
+                {mode === "boolean" && <BooleanMode />}
                 {mode === "match" && <MatchMode />}
                 {mode === "bug" && <BugMode />}
             </SheetContent>
@@ -88,6 +101,7 @@ export function TiraChat() {
 function ModeSwitcher({ mode, setMode }: { mode: TiraMode; setMode: (m: TiraMode) => void }) {
     const tabs: Array<{ id: TiraMode; label: string; icon: React.ReactNode }> = [
         { id: "chat", label: "Chat", icon: <MessageSquare className="w-3.5 h-3.5" /> },
+        { id: "boolean", label: "Boolean", icon: <Search className="w-3.5 h-3.5" /> },
         { id: "match", label: "Resume match", icon: <FileSearch className="w-3.5 h-3.5" /> },
         { id: "bug", label: "Report bug", icon: <Bug className="w-3.5 h-3.5" /> },
     ];
@@ -186,6 +200,159 @@ function ChatMode({
                 </form>
             </div>
         </>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Boolean mode
+// ---------------------------------------------------------------------------
+
+function BooleanMode() {
+    const apiBase = process.env.NEXT_PUBLIC_API_URL;
+
+    const [jdText, setJdText] = useState("");
+    const [file, setFile] = useState<File | null>(null);
+    const [submitting, setSubmitting] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [result, setResult] = useState<BooleanResult | null>(null);
+    const [copied, setCopied] = useState(false);
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setError(null);
+        setResult(null);
+        if (!jdText.trim() && !file) {
+            setError("Paste a JD or upload a file.");
+            return;
+        }
+        setSubmitting(true);
+        try {
+            const fd = new FormData();
+            if (jdText.trim()) fd.append("jd_text", jdText.trim());
+            if (file) fd.append("jd_file", file);
+            const res = await fetch(`${apiBase}/tira/boolean`, { method: "POST", body: fd });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data?.detail || `Failed (${res.status})`);
+            setResult(data as BooleanResult);
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : "Couldn't build a boolean string.";
+            setError(msg);
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    const handleCopy = async () => {
+        if (!result?.boolean_string) return;
+        try {
+            await navigator.clipboard.writeText(result.boolean_string);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+        } catch {
+            /* clipboard not available */
+        }
+    };
+
+    return (
+        <ScrollArea className="flex-1">
+            <form onSubmit={handleSubmit} className="p-4 space-y-4">
+                <div>
+                    <label className="text-[12px] font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">Job description</label>
+                    <textarea
+                        value={jdText}
+                        onChange={e => setJdText(e.target.value)}
+                        rows={6}
+                        placeholder="Paste a JD here — or upload one below."
+                        className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-[13.5px] focus:outline-none focus:ring-2 focus:ring-indigo-500/30 resize-y"
+                    />
+                </div>
+
+                <div>
+                    <label className="text-[12px] font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">Or upload a JD file</label>
+                    <label className="flex items-center gap-2 h-10 px-3 border border-dashed border-slate-300 rounded-md bg-slate-50/60 text-[13px] text-slate-600 cursor-pointer hover:bg-slate-50">
+                        <Upload className="w-4 h-4 text-slate-400" />
+                        <span className="truncate">{file ? file.name : "PDF, DOCX, or TXT"}</span>
+                        <input
+                            type="file"
+                            accept=".pdf,.docx,.txt,.md"
+                            onChange={e => setFile(e.target.files?.[0] || null)}
+                            className="hidden"
+                        />
+                    </label>
+                </div>
+
+                {error && (
+                    <div className="text-[13px] text-rose-600 flex items-start gap-1.5">
+                        <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" /> <span>{error}</span>
+                    </div>
+                )}
+
+                <Button type="submit" disabled={submitting} className="w-full bg-hoonr-gradient text-white h-10">
+                    {submitting ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Generating…</>) : "Generate boolean string"}
+                </Button>
+
+                {result && (
+                    <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-4 shadow-sm">
+                        <div>
+                            <div className="flex items-center justify-between mb-1.5">
+                                <div className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold">Boolean string</div>
+                                <button
+                                    type="button"
+                                    onClick={handleCopy}
+                                    className="inline-flex items-center gap-1 text-[11.5px] text-indigo-600 hover:text-indigo-700 font-medium"
+                                >
+                                    {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                                    {copied ? "Copied" : "Copy"}
+                                </button>
+                            </div>
+                            <div className="font-mono text-[12.5px] leading-relaxed bg-slate-50 border border-slate-200 rounded-md p-3 whitespace-pre-wrap break-words text-slate-800">
+                                {result.boolean_string}
+                            </div>
+                        </div>
+
+                        {result.must_have_titles?.length > 0 && (
+                            <ChipGroup label="Must-have titles" tone="indigo" items={result.must_have_titles} />
+                        )}
+                        {result.must_have_skills?.length > 0 && (
+                            <ChipGroup label="Must-have skills" tone="emerald" items={result.must_have_skills} />
+                        )}
+                        {result.nice_to_have?.length > 0 && (
+                            <ChipGroup label="Nice to have" tone="slate" items={result.nice_to_have} />
+                        )}
+                        {result.exclusions?.length > 0 && (
+                            <ChipGroup label="Exclusions" tone="rose" items={result.exclusions} />
+                        )}
+                    </div>
+                )}
+            </form>
+        </ScrollArea>
+    );
+}
+
+function ChipGroup({ label, items, tone }: { label: string; items: string[]; tone: "indigo" | "emerald" | "rose" | "slate" }) {
+    const toneMap = {
+        indigo: "bg-indigo-50 text-indigo-700 border-indigo-200",
+        emerald: "bg-emerald-50 text-emerald-700 border-emerald-200",
+        rose: "bg-rose-50 text-rose-700 border-rose-200",
+        slate: "bg-slate-50 text-slate-700 border-slate-200",
+    } as const;
+    const headingTone = {
+        indigo: "text-indigo-700",
+        emerald: "text-emerald-700",
+        rose: "text-rose-700",
+        slate: "text-slate-500",
+    } as const;
+    return (
+        <div>
+            <div className={cn("text-[11px] uppercase tracking-wider font-semibold mb-1.5", headingTone[tone])}>{label}</div>
+            <div className="flex flex-wrap gap-1.5">
+                {items.map((s, i) => (
+                    <span key={`${label}-${i}`} className={cn("px-2 py-0.5 rounded-full border text-[11.5px] font-medium", toneMap[tone])}>
+                        {s}
+                    </span>
+                ))}
+            </div>
+        </div>
     );
 }
 
