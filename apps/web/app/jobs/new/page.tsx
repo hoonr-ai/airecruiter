@@ -70,6 +70,8 @@ import { ResumeModal } from "@/components/ResumeModal";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { PasteResumeModal } from "@/components/jobs/PasteResumeModal";
 import { BulkUploadSection } from "@/components/jobs/BulkUploadSection";
+import { API_BASE } from "@/lib/api";
+import { logger } from "@/lib/logger";
 
 // Utility function to clean location_type values and filter out employment terms
 function cleanLocationType(locationType: string | null | undefined): string {
@@ -262,7 +264,7 @@ function NewJobPageContent() {
   // Function to fetch candidate resume if not available - only real JobDiva resumes
   const fetchCandidateResume = async (candidateId: string) => {
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates/${candidateId}/resume`);
+      const response = await fetch(`${API_BASE}/candidates/${candidateId}/resume`);
       const data = await response.json();
 
       // Check if the API returned an error or no real resume
@@ -456,7 +458,7 @@ function NewJobPageContent() {
     }
     if (!candId) return false;
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const apiUrl = API_BASE;
       const res = await fetch(`${apiUrl}/candidates/${encodeURIComponent(candId)}/profile-url`);
       if (!res.ok) return false;
       const data = await res.json();
@@ -556,7 +558,7 @@ function NewJobPageContent() {
 
   const loadJobDraft = async (jobIdToLoad: string) => {
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const apiUrl = API_BASE;
 
       // 1. Fetch the basic draft info from monitored_jobs
       const draftResponse = await fetch(`${apiUrl}/jobs/${jobIdToLoad}/draft`);
@@ -711,7 +713,7 @@ function NewJobPageContent() {
     }
     setIsCreatingExternal(true);
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const apiUrl = API_BASE;
       const createRes = await fetch(`${apiUrl}/jobs/external/create`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -792,7 +794,7 @@ function NewJobPageContent() {
     }
     setIsSavingPasteResume(true);
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const apiUrl = API_BASE;
       const res = await fetch(`${apiUrl}/jobs/${encodeURIComponent(jobRef)}/manual-candidate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -841,7 +843,7 @@ function NewJobPageContent() {
     setIsUploadingBulk(true);
     setBulkProgress({ processed: 0, failed: 0, total: bulkFiles.length });
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const apiUrl = API_BASE;
       const formData = new FormData();
       bulkFiles.forEach(f => formData.append("files", f));
       const res = await fetch(`${apiUrl}/jobs/${encodeURIComponent(jobRef)}/bulk-resumes`, {
@@ -898,7 +900,7 @@ function NewJobPageContent() {
     setSelectedEmpTypes([]);
 
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const apiUrl = API_BASE;
       const response = await fetch(`${apiUrl}/jobs/fetch`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1019,8 +1021,7 @@ function NewJobPageContent() {
   const handleEnhanceJob = async (titleOverride?: string, descOverride?: string, notesOverride?: string) => {
     setIsGeneratingJD(true);
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-      const response = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/${numericJobId || jobdivaId || 'new'}/generate-description`, {
+      const response = await fetch(`${API_BASE}/api/v1/ai-generation/jobs/${numericJobId || jobdivaId || 'new'}/generate-description`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1039,9 +1040,20 @@ function NewJobPageContent() {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        console.error("Enhance failed:", errorText);
-        throw new Error("Failed to generate JD");
+        // Surface the backend's structured detail so recruiters see *why* the
+        // call failed (e.g. "OPENAI_API_KEY is not set") instead of a generic
+        // "AI enhancement failed" toast. Prior code swallowed `errorText` into
+        // console.error and threw a constant string — making QA triage in
+        // live deploys blind.
+        const raw = await response.text();
+        let detail = raw;
+        try { detail = JSON.parse(raw).detail ?? raw; } catch { /* not JSON — keep raw */ }
+        logger.error("ai_jd.enhance.failed", {
+          status: response.status,
+          jobId: numericJobId || jobdivaId || 'new',
+          detail,
+        });
+        throw new Error(detail || `Failed to generate JD (${response.status})`);
       }
 
       const data = await response.json();
@@ -1049,8 +1061,9 @@ function NewJobPageContent() {
 
       showToast("AI Job Description enriched!", "success");
     } catch (error) {
-      console.error("Enhance error:", error);
-      showToast("AI enhancement failed. Please try again.", "info");
+      const message = (error as Error)?.message ?? "unknown error";
+      logger.error("ai_jd.enhance.exception", { message });
+      showToast(`JD generation failed: ${message}`, "info");
     } finally {
       setIsGeneratingJD(false);
     }
@@ -1083,7 +1096,7 @@ function NewJobPageContent() {
     if (!jobTitle) return;
     setIsEnhancingTitle(true);
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const apiUrl = API_BASE;
       const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-title`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1161,7 +1174,7 @@ function NewJobPageContent() {
     }
 
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const apiUrl = API_BASE;
       // Use the new endpoint that saves directly to monitored_jobs
       const response = await fetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/save`, {
         method: "POST",
@@ -2873,7 +2886,7 @@ function NewJobPageContent() {
     // never leave the recruiter empty-handed.
     let roleSpecific: ScreenQuestion[] = [];
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const apiUrl = API_BASE;
       const jobRef = numericJobId || jobdivaId || "new";
       const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobRef}/screening-questions/generate`, {
         method: "POST",
@@ -3481,7 +3494,7 @@ function NewJobPageContent() {
     mode: "replace" | "append",
     overrides?: { withinMilesOverride?: number; resumeMatchFiltersOverride?: typeof resumeMatchFilters }
   ): Promise<any[]> => {
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+    const apiUrl = API_BASE;
     const payload = buildSearchPayload(booleanString, overrides);
     const controller = new AbortController();
     searchAbortRef.current = controller;
@@ -5154,7 +5167,7 @@ function NewJobPageContent() {
                     const selectedCount = candidatesPayload.filter(c => c.is_selected).length;
                     console.log(`🚀 Launching Hoonr-Curate with ${selectedCount} selected candidates out of ${candidatesPayload.length} total`);
 
-                    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+                    const apiUrl = API_BASE;
                     const response = await fetch(`${apiUrl}/candidates/save`, {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
@@ -5319,7 +5332,7 @@ function NewJobPageContent() {
                     setIsGeneratingRubric(true);
                     setCurrentStep(3);
                     try {
-                      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+                      const apiUrl = API_BASE;
                       const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
