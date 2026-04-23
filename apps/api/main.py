@@ -144,6 +144,7 @@ async def lifespan(app: FastAPI):
     
 from routers import engagement, ai_generation, voice_agent, boolean_agent, candidate_processing, job_archive
 from routers import chat as chat_router
+from routers import tira as tira_router
 from routers import job_criteria as job_criteria_router
 from routers import manual_candidates as manual_candidates_router
 from routers import candidates as candidates_router
@@ -157,6 +158,7 @@ app.include_router(boolean_agent.router, prefix="/api/v1/boolean")
 app.include_router(candidate_processing.router, prefix="/api/v1/candidates")
 app.include_router(job_archive.router)
 app.include_router(chat_router.router)
+app.include_router(tira_router.router)
 app.include_router(job_criteria_router.router)
 app.include_router(manual_candidates_router.router)
 app.include_router(candidates_router.router)

@@ -40,6 +40,12 @@ class SearchCriteria(BaseModel):
     open_to_work: bool = True
     boolean_string: str = ""
     bypass_screening: bool = False
+    # 5.6: limit JobDiva Talent Search to candidates whose record was touched in
+    # the last N days. None / 0 means "no freshness filter".
+    recent_days: Optional[int] = None
+    # 5.10: by default JobDiva Talent Search drops profile-only candidates
+    # (no resume attached). Set false to opt back in to the full signal.
+    require_resume: bool = True
 
     def sourcing_skill_values(self) -> List[str]:
         """Flat skill-like strings for sources that only accept a plain list
@@ -356,12 +362,18 @@ class UnifiedCandidateSearch:
         
     async def _search_jobdiva_talent(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
+            # Pass through the freshness window (5.6) and profile-only filter
+            # (5.10). The JobDiva service handles both — Boolean prepends a
+            # LASTMODIFIED cutoff when recent_days is set, and drops profile-
+            # only candidates when require_resume is true.
             candidates = await self.jobdiva_service.search_candidates(
                 skills=self._jobdiva_search_terms(criteria),
                 location=criteria.location,
                 limit=criteria.page_size,
                 job_id=None,
-                boolean_string=criteria.boolean_string or self._build_boolean_string(criteria)
+                boolean_string=criteria.boolean_string or self._build_boolean_string(criteria),
+                recent_days=getattr(criteria, "recent_days", None),
+                require_resume=getattr(criteria, "require_resume", True),
             )
             self._log_stage("TalentSearch", f"JobDiva returned {len(candidates)} candidate(s)")
             for c in candidates:

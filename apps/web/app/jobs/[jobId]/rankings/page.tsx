@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
@@ -15,13 +15,15 @@ import {
   ExternalLink,
   Medal,
   ChevronDown,
+  ChevronUp,
   ChevronsUpDown,
   Filter,
   Calendar,
   Check,
   X,
   Lightbulb,
-  LinkIcon
+  LinkIcon,
+  Loader2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -94,9 +96,120 @@ export default function CandidateRankingsPage() {
 
   const [job, setJob] = useState<JobDetails | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [filteredCandidates, setFilteredCandidates] = useState<Candidate[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+
+  // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
+  // filter updates the table synchronously (no stale state via setFilteredCandidates).
+  type StatusFilter = "all" | "pass" | "fail" | "pending";
+  type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score";
+  type SortDir = "asc" | "desc";
+
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [sourceFilter, setSourceFilter] = useState<string>("all");
+  const [minScore, setMinScore] = useState<number>(0);
+  const [sortField, setSortField] = useState<SortField>("index");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+
+  // Derive screening status. Treat unscored candidates (score === 0 or null/undefined)
+  // as "Pending" rather than "Fail" — they haven't been evaluated yet. Only real
+  // evaluations that came in below the 70 bar are "Fail".
+  const deriveStatus = (c: Candidate): "pass" | "fail" | "pending" => {
+    const s = c.match_score ?? c.resume_match_percentage ?? 0;
+    if (!s) return "pending";
+    return s >= 70 ? "pass" : "fail";
+  };
+
+  // Pull availability off the JSONB `data` blob. Different producers put it in
+  // different keys — surface whichever is present, else return null so we render "—".
+  const deriveAvailability = (c: Candidate): string | null => {
+    const d = c.data || {};
+    return (
+      d.availability_status ||
+      d.available ||
+      d.availability ||
+      c.availability ||
+      null
+    );
+  };
+
+  const availabilityPillClasses = (raw: string | null): string => {
+    if (!raw) return "text-slate-500";
+    const v = String(raw).toLowerCase();
+    if (v.includes("available") || v.includes("active") || v.includes("open")) {
+      return "text-emerald-600";
+    }
+    if (v.includes("placed") || v.includes("employed") || v.includes("on assignment")) {
+      return "text-slate-500";
+    }
+    if (v.includes("do not") || v.includes("unavailable") || v.includes("closed")) {
+      return "text-rose-600";
+    }
+    return "text-slate-600";
+  };
+
+  // Distinct sources present in the current candidate set, for the source dropdown.
+  const availableSources = useMemo(() => {
+    const set = new Set<string>();
+    candidates.forEach(c => { if (c.source) set.add(c.source); });
+    return Array.from(set).sort();
+  }, [candidates]);
+
+  const filteredCandidates = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    let rows = candidates.filter(c => {
+      // Search
+      if (q) {
+        const hay = `${c.name || ""} ${c.email || ""} ${c.headline || ""} ${c.location || ""}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      // Status
+      if (statusFilter !== "all" && deriveStatus(c) !== statusFilter) return false;
+      // Source
+      if (sourceFilter !== "all" && c.source !== sourceFilter) return false;
+      // Min score
+      const score = c.match_score ?? c.resume_match_percentage ?? 0;
+      if (score < minScore) return false;
+      return true;
+    });
+
+    if (sortField !== "index") {
+      const dir = sortDir === "asc" ? 1 : -1;
+      rows = [...rows].sort((a, b) => {
+        const getScore = (c: Candidate) => c.match_score ?? c.resume_match_percentage ?? 0;
+        const getEngage = (c: Candidate) => c.engage_score ?? 0;
+        switch (sortField) {
+          case "name":
+            return dir * (a.name || "").localeCompare(b.name || "");
+          case "screening_score":
+            return dir * (getScore(a) - getScore(b));
+          case "engage_score":
+            return dir * (getEngage(a) - getEngage(b));
+          case "total_score":
+            return dir * ((getScore(a) + getEngage(a)) - (getScore(b) + getEngage(b)));
+          default:
+            return 0;
+        }
+      });
+    }
+    return rows;
+  }, [candidates, searchQuery, statusFilter, sourceFilter, minScore, sortField, sortDir]);
+
+  const toggleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortDir(prev => (prev === "asc" ? "desc" : "asc"));
+    } else {
+      setSortField(field);
+      setSortDir(field === "name" ? "asc" : "desc");
+    }
+  };
+
+  const clearFilters = () => {
+    setSearchQuery("");
+    setStatusFilter("all");
+    setSourceFilter("all");
+    setMinScore(0);
+  };
 
   // Modal states
   const [detailsModalOpen, setDetailsModalOpen] = useState(false);
@@ -188,7 +301,6 @@ export default function CandidateRankingsPage() {
           return totalB - totalA;
         });
         setCandidates(sorted);
-        setFilteredCandidates(sorted);
 
         // EXTRA FALLBACK: If job title is still Unknown, borrow from candidates
         setJob(prev => {
@@ -209,16 +321,6 @@ export default function CandidateRankingsPage() {
     } finally {
       setIsLoading(false);
     }
-  };
-
-  const handleSearch = (query: string) => {
-    setSearchQuery(query);
-    const filtered = candidates.filter(c =>
-      c.name.toLowerCase().includes(query.toLowerCase()) ||
-      c.email?.toLowerCase().includes(query.toLowerCase()) ||
-      c.headline?.toLowerCase().includes(query.toLowerCase())
-    );
-    setFilteredCandidates(filtered);
   };
 
   const openDetails = (candidate: Candidate) => {
@@ -331,17 +433,79 @@ export default function CandidateRankingsPage() {
 
       {/* Table Interface */}
       <div className="space-y-4">
-        {/* Full-width Search Bar */}
-        <div className="relative w-full h-[40px]">
-          <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
-            <Search className="h-4 w-4 text-slate-400" />
+        {/* Filter bar: search + status + source + min-score. All filter state
+            feeds into the `filteredCandidates` useMemo above. */}
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative flex-1 min-w-[260px] h-[40px]">
+            <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
+              <Search className="h-4 w-4 text-slate-400" />
+            </div>
+            <Input
+              placeholder="Search name, email, headline, or location…"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="h-full pl-10 pr-6 bg-white border-slate-200 rounded-[8px] shadow-sm text-[14px] focus:ring-indigo-500/20 focus:border-indigo-500/50"
+            />
           </div>
-          <Input
-            placeholder="Search..."
-            value={searchQuery}
-            onChange={(e) => handleSearch(e.target.value)}
-            className="h-full pl-10 pr-6 bg-white border-slate-200 rounded-[8px] shadow-sm text-[14px] focus:ring-indigo-500/20 focus:border-indigo-500/50"
-          />
+
+          <div className="flex items-center gap-2 h-[40px] bg-white border border-slate-200 rounded-[8px] px-3 shadow-sm">
+            <Filter className="w-3.5 h-3.5 text-slate-400" />
+            <label className="text-[12px] font-semibold text-slate-500 uppercase tracking-wide">Status</label>
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+              className="text-[13px] font-medium text-slate-700 bg-transparent focus:outline-none cursor-pointer"
+            >
+              <option value="all">All</option>
+              <option value="pass">Pass</option>
+              <option value="fail">Fail</option>
+              <option value="pending">Pending</option>
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2 h-[40px] bg-white border border-slate-200 rounded-[8px] px-3 shadow-sm">
+            <Filter className="w-3.5 h-3.5 text-slate-400" />
+            <label className="text-[12px] font-semibold text-slate-500 uppercase tracking-wide">Source</label>
+            <select
+              value={sourceFilter}
+              onChange={(e) => setSourceFilter(e.target.value)}
+              className="text-[13px] font-medium text-slate-700 bg-transparent focus:outline-none cursor-pointer max-w-[180px]"
+            >
+              <option value="all">All</option>
+              {availableSources.map(s => (
+                <option key={s} value={s}>{s}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="flex items-center gap-2 h-[40px] bg-white border border-slate-200 rounded-[8px] px-3 shadow-sm">
+            <Filter className="w-3.5 h-3.5 text-slate-400" />
+            <label className="text-[12px] font-semibold text-slate-500 uppercase tracking-wide">Min score</label>
+            <Input
+              type="number"
+              min={0}
+              max={100}
+              value={minScore}
+              onChange={(e) => {
+                const n = Number.parseInt(e.target.value, 10);
+                setMinScore(Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0);
+              }}
+              className="h-7 w-16 text-[13px] font-medium border-slate-200 px-2"
+            />
+          </div>
+
+          {(searchQuery || statusFilter !== "all" || sourceFilter !== "all" || minScore > 0) && (
+            <button
+              onClick={clearFilters}
+              className="h-[40px] px-3 text-[13px] font-semibold text-slate-500 hover:text-slate-700 flex items-center gap-1"
+            >
+              <X className="w-3.5 h-3.5" /> Clear
+            </button>
+          )}
+
+          <div className="ml-auto text-[12.5px] font-semibold text-slate-500 px-2">
+            Showing <span className="text-slate-900">{filteredCandidates.length}</span> of <span className="text-slate-900">{candidates.length}</span>
+          </div>
         </div>
 
         {/* HTML Exact Replica Table */}
@@ -351,93 +515,110 @@ export default function CandidateRankingsPage() {
               <TableHeader>
                 <TableRow className="bg-white border-b border-slate-200 hover:bg-white h-[50px]">
                   <TableHead className="w-[60px] text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider border-r border-[#e2e8f0]">#</TableHead>
+                  {(() => {
+                    // Helper that turns a column header into a sortable button.
+                    // Shows an active arrow when that column is the current sort.
+                    const SortIcon = ({ field }: { field: SortField }) => {
+                      if (sortField !== field) {
+                        return <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />;
+                      }
+                      return sortDir === "asc"
+                        ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" />
+                        : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />;
+                    };
+                    return null; // just a hoist trick; the component is used inline below
+                  })()}
                   <TableHead className="w-[300px] font-bold text-slate-900 text-[12px] uppercase tracking-wider border-r border-slate-200 py-0">
-                    <div className="flex items-center justify-between w-full h-full">
-                      <div className="w-[40px]" /> {/* Spacer */}
+                    <button
+                      onClick={() => toggleSort("name")}
+                      className="flex items-center justify-between w-full h-full px-3 cursor-pointer hover:bg-slate-50 transition-colors"
+                    >
+                      <div className="w-[40px]" />
                       <span className="whitespace-nowrap flex-1 text-center">CANDIDATE NAME</span>
-                      <div className="w-[40px] flex items-center justify-end gap-1 px-2 opacity-40">
-                        <ChevronsUpDown className="w-3.5 h-3.5" />
-                        <Filter className="w-3.5 h-3.5" />
+                      <div className="w-[40px] flex items-center justify-end gap-1 px-2">
+                        {sortField === "name"
+                          ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
+                          : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
                       </div>
-                    </div>
+                    </button>
                   </TableHead>
                   <TableHead className="text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider min-w-[240px] py-0">
-                    <div className="flex items-center justify-between w-full h-full">
+                    <div className="flex items-center justify-between w-full h-full px-3">
                       <div className="w-[40px]" />
                       <span className="whitespace-nowrap flex-1 text-center">RESUME SCREENING STATUS</span>
-                      <div className="w-[40px] flex items-center justify-end gap-1 px-2 opacity-40">
-                        <ChevronsUpDown className="w-3.5 h-3.5" />
-                        <Filter className="w-3.5 h-3.5" />
-                      </div>
+                      <div className="w-[40px]" />
                     </div>
                   </TableHead>
                   <TableHead className="text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider min-w-[220px] py-0">
-                    <div className="flex items-center justify-between w-full h-full">
+                    <button
+                      onClick={() => toggleSort("screening_score")}
+                      className="flex items-center justify-between w-full h-full px-3 cursor-pointer hover:bg-slate-50 transition-colors"
+                    >
                       <div className="w-[40px]" />
                       <span className="whitespace-nowrap flex-1 text-center">RESUME SCREENING SCORE</span>
-                      <div className="w-[40px] flex items-center justify-end gap-1 px-2 opacity-40">
-                        <ChevronsUpDown className="w-3.5 h-3.5" />
-                        <Filter className="w-3.5 h-3.5" />
+                      <div className="w-[40px] flex items-center justify-end gap-1 px-2">
+                        {sortField === "screening_score"
+                          ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
+                          : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
                       </div>
-                    </div>
+                    </button>
                   </TableHead>
                   <TableHead className="text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider min-w-[180px] py-0">
-                    <div className="flex items-center justify-between w-full h-full">
+                    <div className="flex items-center justify-between w-full h-full px-3">
                       <div className="w-[40px]" />
                       <span className="whitespace-nowrap flex-1 text-center">ENGAGE STATUS</span>
-                      <div className="w-[40px] flex items-center justify-end gap-1 px-2 opacity-40">
-                        <ChevronsUpDown className="w-3.5 h-3.5" />
-                        <Filter className="w-3.5 h-3.5" />
-                      </div>
+                      <div className="w-[40px]" />
                     </div>
                   </TableHead>
                   <TableHead className="text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider min-w-[170px] py-0">
-                    <div className="flex items-center justify-between w-full h-full">
+                    <button
+                      onClick={() => toggleSort("engage_score")}
+                      className="flex items-center justify-between w-full h-full px-3 cursor-pointer hover:bg-slate-50 transition-colors"
+                    >
                       <div className="w-[40px]" />
                       <span className="whitespace-nowrap flex-1 text-center">ENGAGE SCORE</span>
-                      <div className="w-[40px] flex items-center justify-end gap-1 px-2 opacity-40">
-                        <ChevronsUpDown className="w-3.5 h-3.5" />
-                        <Filter className="w-3.5 h-3.5" />
+                      <div className="w-[40px] flex items-center justify-end gap-1 px-2">
+                        {sortField === "engage_score"
+                          ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
+                          : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
                       </div>
-                    </div>
+                    </button>
                   </TableHead>
                   <TableHead className="text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider min-w-[240px] py-0">
-                    <div className="flex items-center justify-between w-full h-full">
+                    <div className="flex items-center justify-between w-full h-full px-3">
                       <div className="w-[40px]" />
                       <span className="whitespace-nowrap flex-1 text-center">ENGAGE COMPLETED AT</span>
-                      <div className="w-[40px] flex items-center justify-end gap-1 px-2 opacity-40">
-                        <ChevronsUpDown className="w-3.5 h-3.5" />
-                        <Filter className="w-3.5 h-3.5" />
-                      </div>
+                      <div className="w-[40px]" />
                     </div>
                   </TableHead>
                   <TableHead className="text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider min-w-[160px] py-0">
-                    <div className="flex items-center justify-between w-full h-full">
+                    <button
+                      onClick={() => toggleSort("total_score")}
+                      className="flex items-center justify-between w-full h-full px-3 cursor-pointer hover:bg-slate-50 transition-colors"
+                    >
                       <div className="w-[40px]" />
                       <span className="whitespace-nowrap flex-1 text-center">TOTAL FIT SCORE</span>
-                      <div className="w-[40px] flex items-center justify-end gap-1 px-2 opacity-40">
-                        <ChevronsUpDown className="w-3.5 h-3.5" />
-                        <Filter className="w-3.5 h-3.5" />
+                      <div className="w-[40px] flex items-center justify-end gap-1 px-2">
+                        {sortField === "total_score"
+                          ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
+                          : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
                       </div>
-                    </div>
+                    </button>
                   </TableHead>
                   <TableHead className="text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider min-w-[140px] py-0">
-                    <div className="flex items-center justify-between w-full h-full">
+                    <div className="flex items-center justify-between w-full h-full px-3">
                       <div className="w-[40px]" />
                       <span className="whitespace-nowrap flex-1 text-center">JOB CONFIG</span>
-                      <div className="w-[40px] flex items-center justify-end gap-1 px-2 opacity-40">
+                      <div className="w-[40px] flex items-center justify-end gap-1 px-2">
                         <Lightbulb className="w-3.5 h-3.5 text-slate-500" />
                       </div>
                     </div>
                   </TableHead>
                   <TableHead className="sticky right-0 bg-white z-50 text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider border-l border-slate-200 py-0 min-w-[160px]">
-                    <div className="flex items-center justify-between w-full h-full">
+                    <div className="flex items-center justify-between w-full h-full px-3">
                       <div className="w-[40px]" />
                       <span className="whitespace-nowrap flex-1 text-center">FEEDBACK</span>
-                      <div className="w-[40px] flex items-center justify-end gap-1 px-2 opacity-40">
-                        <ChevronsUpDown className="w-3.5 h-3.5" />
-                        <Filter className="w-3.5 h-3.5" />
-                      </div>
+                      <div className="w-[40px]" />
                     </div>
                   </TableHead>
                 </TableRow>
@@ -483,23 +664,31 @@ export default function CandidateRankingsPage() {
                           <span className="text-[13px] text-[#64748b] block mb-1 text-center">
                             <Phone className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {candidate.phone || <span className="font-normal opacity-50">—</span>}
                           </span>
-                          <span className="text-[13px] text-[#64748b] block text-center">
-                            <Calendar className="w-3.5 h-3.5 inline mr-1 opacity-70" /> Available: {candidate.availability || <span className="font-normal opacity-50">—</span>}
+                          <span className={`text-[13px] block text-center ${availabilityPillClasses(deriveAvailability(candidate))}`}>
+                            <Calendar className="w-3.5 h-3.5 inline mr-1 opacity-70" /> Available: {deriveAvailability(candidate) || <span className="font-normal opacity-50">—</span>}
                           </span>
                         </TableCell>
 
                         <TableCell className="text-center align-middle py-4">
                           <div className="flex items-center justify-center gap-1.5">
-                            <span className="font-medium text-[13px]" style={{ color: screeningScore >= 70 ? '#059669' : '#e11d48' }}>
-                              {screeningScore >= 70 ? "Pass" : "Fail"}
-                            </span>
+                            {(() => {
+                              const status = deriveStatus(candidate);
+                              if (status === "pending") {
+                                return <span className="font-medium text-[13px] italic text-slate-400">Pending</span>;
+                              }
+                              return (
+                                <span className="font-medium text-[13px]" style={{ color: status === "pass" ? '#059669' : '#e11d48' }}>
+                                  {status === "pass" ? "Pass" : "Fail"}
+                                </span>
+                              );
+                            })()}
                             <Lightbulb className="w-3.5 h-3.5 text-amber-500 opacity-80 cursor-help" />
                           </div>
                         </TableCell>
 
                         <TableCell className="text-center align-top py-4 font-medium text-[#0f172a] text-[14px]">
                           <div className="flex items-center justify-center gap-1.5 w-full text-center">
-                            {screeningScore}
+                            {screeningScore > 0 ? screeningScore : <span className="font-normal opacity-50">—</span>}
                             <Lightbulb className="w-3.5 h-3.5 text-amber-500 opacity-80 cursor-help" />
                           </div>
                         </TableCell>

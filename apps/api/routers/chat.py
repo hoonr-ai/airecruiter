@@ -10,6 +10,6 @@ logger = logging.getLogger(__name__)
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat_with_aria(request: ChatRequest):
+async def chat_with_tira(request: ChatRequest):
     response = await chat_service.get_response(request.message, request.history)
     return {"response": response}

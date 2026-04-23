@@ -144,19 +144,43 @@ class JobSkillsExtractor:
         skill_names = [s['value'] for s in all_grounded]
         
         phase2_prompt = f"""
-You are a strict recruitment extraction engine. 
+You are a strict recruitment extraction engine.
 Read the following job description and extract specific facts.
 
-1. EDUCATION: 
+JOB CONTEXT:
+- Job title: {enhanced_job_title or job_title}
+- Customer: {customer_name or "N/A"}
+
+TITLE HINT (applies to SKILLS section below):
+- If the job title contains a specific technology, tool, framework, platform, language, or product
+  name (e.g. "Databricks" in "Databricks Data Engineer", "Snowflake" in "Snowflake Architect",
+  "Salesforce" in "Salesforce Developer", "Kubernetes" in "Kubernetes SRE"), you MUST include that
+  technology as a skill AND mark its "importance" as "required" and "evidence_type" as "direct".
+  The title is treated as authoritative evidence — a role named after a technology implies the
+  candidate must have that technology.
+
+1. EDUCATION:
    - Choose ONLY from ["High School / GED", "Associate's degree", "Bachelor's degree", "Master's degree", "PhD or equivalent", "Certification / License"]
-   - field: The specific field (e.g. "Biology"). 
+   - field: The specific field (e.g. "Biology").
    - MANDATORY: If multiple fields of study are mentioned for the same degree (e.g. "Engineering, Life Sciences, or Biology"), extract EACH as a separate entry in the 'education' array.
-   - MANDATORY: If a degree is mentioned without a direct subject (e.g. "Associate degree with 5 years experience in..."), search the SURROUNDING context for the specialty (e.g. "Laboratory Automation") and use that as the Field. 
+   - MANDATORY: If a degree is mentioned without a direct subject (e.g. "Associate degree with 5 years experience in..."), search the SURROUNDING context for the specialty (e.g. "Laboratory Automation") and use that as the Field.
    - DO NOT use the degree level name as the Field.
    - IGNORE "Board Certified" or general descriptors.
 
-2. DOMAIN: 
-   - Short industry names (e.g. "Healthcare").
+2. DOMAIN (INDUSTRY SECTOR ONLY — NOT job function):
+   - Extract the CUSTOMER's industry sector. The customer name is "{customer_name or 'unknown'}".
+     Use world knowledge of that company (e.g. Cummins → "Diesel Engines" / "Automotive",
+     Pfizer → "Pharmaceuticals", JPMorgan Chase → "Banking", Boeing → "Aerospace") to determine
+     the sector.
+   - VALID examples: "Automotive", "Diesel Engines", "Healthcare", "Insurance", "Banking",
+     "Pharmaceuticals", "Aerospace", "Retail", "Telecom", "Oil & Gas", "Manufacturing",
+     "Government", "Education", "Media", "Hospitality", "Logistics".
+   - INVALID — DO NOT EXTRACT any of these (they are job functions, not industries):
+     "Data Engineering", "Software Development", "QA", "DevOps", "Machine Learning",
+     "Cloud Engineering", "Product Management", "Analytics", "Security", "Sales",
+     "Marketing", "Customer Support".
+   - If the customer's industry sector is not obvious from the JD text or your world
+     knowledge, return an EMPTY array rather than guessing.
 
 3. CUSTOMER REQUIREMENTS:
    - DEFAULT: If customer name is provided, ALWAYS include: "Must not be employed by {customer_name}."
@@ -166,9 +190,19 @@ Read the following job description and extract specific facts.
    - Extract Shift (Day/Night, Rotating), Work Authorization, or Travel %.
    - MANDATORY: Use concise, professional label-based formatting (e.g. "Label: Value").
    - MANDATORY: Keep under 10 words per requirement.
-   - EXAMPLES: 
+   - WORK AUTHORIZATION NORMALIZATION: When the JD mentions work-authorization, normalize the
+     extracted value to include one of these standard labels (comma-separated if multiple):
+     W2, 1099, Corp-to-Corp (C2C), H1B, Green Card, US Citizen, TN Visa, OPT/CPT, Any.
+     Examples:
+       * JD says "W2 only" or "W2 candidates" → "Work Authorization: W2 only."
+       * JD says "US Citizens or Green Card holders" → "Work Authorization: US Citizen or Green Card."
+       * JD says "must be authorized to work in the US" (no specific type) → "Work Authorization: Any US work authorization."
+       * JD says "No C2C" → "Work Authorization: W2 or 1099 (no C2C)."
+     If the JD is silent on work-authorization, omit this requirement entirely — do NOT
+     invent one.
+   - EXAMPLES:
      * "Shift: Day and night shifts required." (NOT "Day and night shifts are required.")
-     * "Work Authorization: Must be authorized to work in the US." (NOT "Candidate must be authorized to work in the United States.")
+     * "Work Authorization: W2 only." (NOT "Candidate must be authorized to work in the United States.")
      * "Travel: Up to 25% travel expected." (NOT "Up to 25% travel is expected for this role.")
    - DO NOT extract Location or years of experience.
 
