@@ -107,7 +107,7 @@ deploy_application() {
     
     echo -e "${BLUE}📦 Installing web dependencies...${NC}"
     cd "$WEB_DIR"
-    npm install
+    npm install --legacy-peer-deps
     
     # Build web application
     echo -e "${BLUE}🏗️ Building web application...${NC}"
@@ -243,7 +243,7 @@ update_app() {
     # Update web dependencies
     echo -e "${BLUE}⚛️ Updating web dependencies...${NC}"
     cd "$WEB_DIR"
-    npm install
+    npm install --legacy-peer-deps
     npm run build
     
     # Restart services

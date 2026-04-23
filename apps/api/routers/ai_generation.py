@@ -1,7 +1,8 @@
 import os
 import time
+from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import hashlib
 from dataclasses import asdict
 from datetime import datetime
@@ -10,9 +11,10 @@ from services.jobdiva import jobdiva_service
 from services.job_skills_extractor import JobSkillsExtractor, ExtractedSkill
 from services.job_skills_db import JobSkillsDB
 from services.job_rubric_db import JobRubricDB
+from services.screening_question_generator import generate_screening_questions
 from openai import AsyncOpenAI
 from core import (
-    OPENAI_API_KEY, 
+    OPENAI_API_KEY,
     JOBDIVA_AI_JD_UDF_ID, JOBDIVA_JOB_NOTES_UDF_ID,
     OPENAI_MODEL
 )
@@ -28,6 +30,10 @@ class JobDescriptionRequest(BaseModel):
     jobNotes: str = ""
     workAuthorization: str = ""
     jobDescription: str = ""
+    # Rubric-derived context. All optional so older clients keep working.
+    yearsOfExperience: Optional[int] = None
+    education: List[Dict[str, Any]] = Field(default_factory=list)
+    certifications: List[Dict[str, Any]] = Field(default_factory=list)
 
 class JobDivaSyncRequest(BaseModel):
     jobId: str
@@ -84,19 +90,73 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
 
     last_request_time = time.time()
 
-    print(f"DEBUG PAYLOAD: Job Notes Length = {len(req.jobNotes)}, JD Length = {len(req.jobDescription)}")
+    print(
+        f"DEBUG PAYLOAD: Job Notes Length = {len(req.jobNotes)}, JD Length = {len(req.jobDescription)}, "
+        f"YoE = {req.yearsOfExperience}, education={len(req.education)}, certs={len(req.certifications)}"
+    )
+
+    # ---- Structured context blocks (empty strings when no data, so the prompt
+    # stays clean instead of leaking "None" / "[]").
+    notes_block = (req.jobNotes or "").strip()
+    recruiter_notes_block = (
+        "RECRUITER NOTES (HIGHEST PRIORITY — the hiring team wrote these. "
+        "Quote concrete facts from here VERBATIM: exact years, exact tools, "
+        "exact certifications, exact location. Do not paraphrase numbers or "
+        "proper nouns. If a fact appears here, it MUST appear in the output):\n"
+        f"\"\"\"\n{notes_block}\n\"\"\""
+        if notes_block else "RECRUITER NOTES: (none provided)"
+    )
+
+    yoe_block = (
+        f"REQUIRED EXPERIENCE: {req.yearsOfExperience}+ years (bold this figure in the output)."
+        if isinstance(req.yearsOfExperience, int) and req.yearsOfExperience > 0
+        else "REQUIRED EXPERIENCE: (not specified — infer conservatively from JD if needed)"
+    )
+
+    def _fmt_edu(items: List[Dict[str, Any]]) -> str:
+        lines = []
+        for e in items or []:
+            degree = (e.get("degree") or "").strip()
+            field = (e.get("field") or "").strip()
+            req_flag = (e.get("required") or "Preferred").strip()
+            if not degree and not field:
+                continue
+            parts = [p for p in [degree, f"in {field}" if field else ""] if p]
+            lines.append(f"- {' '.join(parts)} [{req_flag}]")
+        return "\n".join(lines) if lines else "(none specified)"
+
+    def _fmt_certs(items: List[Dict[str, Any]]) -> str:
+        lines = []
+        for c in items or []:
+            name = (c.get("name") or c.get("value") or "").strip()
+            req_flag = (c.get("required") or "Preferred").strip()
+            if not name:
+                continue
+            lines.append(f"- {name} [{req_flag}]")
+        return "\n".join(lines) if lines else "(none specified)"
+
+    education_block = f"EDUCATION & CERTIFICATIONS:\n{_fmt_edu(req.education)}"
+    certs_block = f"ADDITIONAL CERTIFICATIONS:\n{_fmt_certs(req.certifications)}"
 
     prompt = (
         "You are an expert recruitment copywriter. Your task is to generate a premium, catchy, and concise job description ready for external publication on platforms like LinkedIn and job boards.\n\n"
         "STRICT EXTRACTION PRIORITY (You MUST extract concrete facts based on this hierarchy):\n"
-        "1. HIGHEST PRIORITY - Job Notes & Work Authorization: Focus heavily on any specific requirements, hiring manager insights, or details mentioned here. Ensure you reflect the Work Authorization requirement clearly if provided.\n"
-        "2. SECOND PRIORITY - Existing Job Description: Extensively mine this for concrete facts (e.g., years of experience, mandatory tools, key duties) if they are missing or sparse in the Job Notes. Do NOT summarize away specific numbers like '10 years of experience'.\n"
-        "3. LAST PRIORITY - Job Title: Use this for general context and naming conventions.\n\n"
+        "1. HIGHEST PRIORITY - Recruiter Notes & Work Authorization: The recruiter notes are the hiring manager's own words. Quote concrete facts VERBATIM (exact years, exact tools, exact certifications). Reflect Work Authorization clearly if provided.\n"
+        "2. SECOND PRIORITY - Required Experience & Education blocks: If a Required Experience figure is provided, bold it in 'What You Bring'. If Education or Certifications are listed, render them under 'What You Bring' grouped by Required vs Preferred — do NOT drop them.\n"
+        "3. THIRD PRIORITY - Existing Job Description: Mine for concrete facts (tools, duties, domain terms) missing from the blocks above. Do NOT summarize away specific numbers like '10 years of experience'.\n"
+        "4. LAST PRIORITY - Job Title: Use this for general context and naming conventions.\n\n"
         f"Input Data:\n"
-        f"Job Notes: {req.jobNotes}\n"
-        f"Work Authorization: {req.workAuthorization}\n"
-        f"Existing Job Description: {req.jobDescription}\n"
+        f"{recruiter_notes_block}\n\n"
+        f"Work Authorization: {req.workAuthorization or '(not specified)'}\n\n"
+        f"{yoe_block}\n\n"
+        f"{education_block}\n\n"
+        f"{certs_block}\n\n"
+        f"Existing Job Description:\n\"\"\"\n{req.jobDescription}\n\"\"\"\n\n"
         f"Job Title: {req.jobTitle}\n\n"
+        "MANDATORY CONTENT (non-negotiable):\n"
+        "- If Required Experience is provided, the phrase '**X+ years**' MUST appear in 'What You Bring'.\n"
+        "- Every Required education/certification item MUST appear as a bullet in 'What You Bring'; Preferred items go in a 'Nice to have' bullet set under the same section.\n"
+        "- Every concrete fact in Recruiter Notes (named tools, certifications, domain terms, numeric thresholds) MUST be reflected in the output.\n\n"
         "STYLING & STRUCTURE INSTRUCTIONS:\n"
         "- Format headers by using **Bold Title Case** (e.g., **The Role**).\n"
         "- Format bullet points by starting the line with the • bullet (e.g., • Responsibility details).\n"
@@ -135,7 +195,9 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
                 {"role": "system", "content": "You are an expert recruitment copywriter."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.7,
+            # Lower temperature keeps recruiter-notes facts (exact years, tools,
+            # certifications) from being paraphrased away.
+            temperature=0.3,
             timeout=45
         )
         description = completion.choices[0].message.content
@@ -383,6 +445,57 @@ async def generate_rubric(req: RubricGenerationRequest):
             "customer_requirements": [],
             "other_requirements": []
         }
+
+class ScreeningQuestionsRequest(BaseModel):
+    """
+    Request model for the new depth-aware screening-question generator
+    (Step 4 of the New Job wizard). Replaces the frontend's boilerplate
+    "Can you describe your experience with {skill}?" template with
+    role + seniority-aware questions produced by an LLM.
+    """
+    jobTitle: str
+    rubric: dict
+    screeningLevel: str = "medium"      # light | medium | intensive
+    customerName: str = ""
+    workArrangement: str = "on-site"    # on-site | onsite | hybrid | remote
+    address: str = ""
+    totalYears: int = 0
+
+
+@router.post("/jobs/{job_id}/screening-questions/generate")
+async def generate_screening_questions_endpoint(job_id: str, req: ScreeningQuestionsRequest):
+    """
+    Generate role + seniority-aware screening questions for Step 4.
+
+    Returns a list of question objects the frontend maps onto its
+    `screenQuestions` state. Questions are NOT persisted here — the
+    frontend drives persistence via the existing save-draft flow.
+
+    Front-matter questions (intro / total-years / work-arrangement) are
+    always included. Role-specific questions come from the LLM in
+    numbers scaled by screening_level.
+    """
+    if not client:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not set")
+
+    try:
+        questions = await generate_screening_questions(
+            openai_client=client,
+            model=OPENAI_MODEL or "gpt-4o-mini",
+            job_title=req.jobTitle or "",
+            rubric=req.rubric or {},
+            screening_level=req.screeningLevel,
+            customer_name=req.customerName,
+            work_arrangement=req.workArrangement,
+            address=req.address,
+            total_years=req.totalYears or 0,
+        )
+        return {"questions": questions}
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).error(f"screening-questions generate failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 @router.get("/jobs/{job_id}/rubric")
 async def get_job_rubric(job_id: str):

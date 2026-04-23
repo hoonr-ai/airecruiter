@@ -10,7 +10,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timezone, timedelta
 
-from core.config import DATABASE_URL, SUPABASE_DB_URL
+from core.db import get_db_connection
 
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
 logger = logging.getLogger(__name__)
@@ -21,14 +21,6 @@ def readable_ist_now() -> str:
     """Returns current IST time in readable format: 2026-02-24 16:25:59 IST"""
     ist = timezone(timedelta(hours=5, minutes=30))
     return datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
-
-
-def get_db_connection():
-    """Get database connection using configured URL."""
-    db_url = DATABASE_URL or SUPABASE_DB_URL
-    if not db_url:
-        raise HTTPException(status_code=500, detail="Database not configured")
-    return psycopg2.connect(db_url)
 
 
 # ============================================================================

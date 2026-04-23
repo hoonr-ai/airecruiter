@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useEffectEvent, Suspense, useRef } from "react";
+import { useState, useEffect, useEffectEvent, useRef, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -50,7 +50,8 @@ import {
   Ban,
   Mail,
   MessageSquare,
-  ExternalLink
+  ExternalLink,
+  Loader2
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -67,6 +68,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { ResumeModal } from "@/components/ResumeModal";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
+import { PasteResumeModal } from "@/components/jobs/PasteResumeModal";
+import { BulkUploadSection } from "@/components/jobs/BulkUploadSection";
 
 // Utility function to clean location_type values and filter out employment terms
 function cleanLocationType(locationType: string | null | undefined): string {
@@ -100,6 +103,10 @@ type ScreenQuestion = {
   is_default: boolean;
   category: string;
   order_index: number;
+  // 4.3: onsite/hybrid arrangement must knock candidates out automatically
+  // when they say no. Persisted per-question so non-default recruiter-authored
+  // questions can also be marked as hard filters.
+  is_hard_filter?: boolean;
 };
 
 const STEP_LABELS = {
@@ -112,11 +119,18 @@ const STEP_LABELS = {
 
 const STEP_DESCRIPTIONS: Record<Step, string> = {
   1: "Enter a JobDiva Job ID to get started.",
-  2: "Review your PAIR-enhanced job posting and select where to publish externally.",
+  2: "Review your Hoonr-Curate-enhanced job posting and select where to publish externally.",
   3: "Define evaluation criteria and rubric for candidate assessment.",
   4: "Configure filters and requirements for candidate matching.",
   5: "Launch sourcing and begin candidate collection."
 };
+
+// Stable handle tying a rubric item to its Step-4 resume_match filter.
+// Replaces the earlier "value.split('—')[0]" fragility: Step-5 sourcing
+// derivation now matches by this key rather than by re-parsing the
+// user-visible filter string.
+const rubricKeyFor = (category: string, baseValue: string): string =>
+  `${category}|${(baseValue || "").trim()}`;
 
 const getCandidateDisplayName = (candidate: {
   name?: string;
@@ -158,12 +172,44 @@ export default function NewJobPage() {
 function NewJobPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [currentStep, setCurrentStep] = useState<Step>(1);
+  const [currentStep, setCurrentStepState] = useState<Step>(1);
+  // Track the highest step the user has ever reached so the pipeline/stepper
+  // at the top allows jumping back to any step they've visited, not just
+  // current-1 and current+1. Without this, stepping backward from step 4 to
+  // step 1 forced the user to click Next three more times to return.
+  const [maxStepReached, setMaxStepReached] = useState<Step>(1);
+  const setCurrentStep = (next: Step | ((prev: Step) => Step)) => {
+    setCurrentStepState(prev => {
+      const resolved = typeof next === "function" ? (next as (p: Step) => Step)(prev) : next;
+      setMaxStepReached(current => (resolved > current ? resolved : current));
+      return resolved;
+    });
+  };
   const [numericJobId, setNumericJobId] = useState("");
   const [jobdivaId, setJobdivaId] = useState("");
   const [jobData, setJobData] = useState<any>(null);
   const [isFetching, setIsFetching] = useState(false);
   const [isFetched, setIsFetched] = useState(false);
+
+  // External (non-JobDiva) requirement flow
+  const [isExternal, setIsExternal] = useState(false);
+  const [extTitle, setExtTitle] = useState("");
+  const [extCustomer, setExtCustomer] = useState("");
+  const [extDescription, setExtDescription] = useState("");
+  const [isCreatingExternal, setIsCreatingExternal] = useState(false);
+
+  // Paste-resume modal (sourced candidates step)
+  const [pasteResumeOpen, setPasteResumeOpen] = useState(false);
+  const [pasteName, setPasteName] = useState("");
+  const [pasteEmail, setPasteEmail] = useState("");
+  const [pasteResumeText, setPasteResumeText] = useState("");
+  const [isSavingPasteResume, setIsSavingPasteResume] = useState(false);
+
+  // Bulk resume upload state
+  const [bulkFiles, setBulkFiles] = useState<File[]>([]);
+  const [isUploadingBulk, setIsUploadingBulk] = useState(false);
+  const [bulkProgress, setBulkProgress] = useState<{ processed: number; failed: number; total: number } | null>(null);
+  const bulkFileInputRef = useRef<HTMLInputElement | null>(null);
   const [recruiterNotes, setRecruiterNotes] = useState("");
   const [selectedEmpTypes, setSelectedEmpTypes] = useState<EmploymentType[]>([]);
   const [recruiterEmails, setRecruiterEmails] = useState<string[]>([]);
@@ -253,7 +299,7 @@ function NewJobPageContent() {
   const [isEditingJD, setIsEditingJD] = useState(false);
   const [selectedJobBoards, setSelectedJobBoards] = useState<string[]>([]);
   const [screeningLevel, setScreeningLevel] = useState<ScreeningLevel>("L1.5");
-  const [toast, setToast] = useState<{ message: string; type: "success" | "info" | "error" } | null>(null);
+  const [toast, setToast] = useState<{ message: string; type: "success" | "info" | "error"} | null>(null);
   const [pageSubtitle, setPageSubtitle] = useState(STEP_DESCRIPTIONS[1]);
   const [rubricData, setRubricData] = useState<any>(null);
   const [isGeneratingRubric, setIsGeneratingRubric] = useState(false);
@@ -267,23 +313,43 @@ function NewJobPageContent() {
     active: boolean;
     ai: boolean;
     fromRubric: boolean;
+    // Stable handle for rubric-derived items. Lets Step-5 sourcing derivation
+    // match up to Step-4 filters without string-parsing the user-facing value
+    // (which carries formatted suffixes like "— 3+ yrs, Similar match").
+    rubricKey?: string;
+    // Per-filter weightage (default 1.0) applied inside the backend scoring
+    // ratio. Clamped to [0.1, 5] at the input layer.
+    weight?: number;
   }>>([]);
   const [filterIdCounter, setFilterIdCounter] = useState(1);
   // Step 4 - Phone Screen state
   const [botIntroduction, setBotIntroduction] = useState("");
   const [screenQuestions, setScreenQuestions] = useState<ScreenQuestion[]>([]);
   const [questionIdCounter, setQuestionIdCounter] = useState(1);
-  // Guard: true once questions have been initialised (either from DB or from rubric).
-  // Prevents re-generation when the recruiter adds/deletes a question or returns to Step 4.
-  const screenQuestionsInitializedRef = useRef(false);
 
   // Step 5 - Sourcing state
+  // Recruiter QA 5.1 / 5.2: the "JobDiva Applicants" toggle was misleading —
+  // applicants auto-enroll via jobdiva_applicant_auto_sync. It's off the
+  // switchboard now. Only JobDiva Talent Search is pre-ticked; the recruiter
+  // opts in to LinkedIn/Dice/Exa explicitly.
   const [searchSources, setSearchSources] = useState({
     jobdiva: true,
-    jobdiva_hotlist: true,
-    linkedin: true,
-    dice: true
+    linkedin: false,
+    dice: false,
+    exa: false,
   });
+  // 5.6: JobDiva Talent Search freshness window. Default 90 days — recent
+  // enough to weed out stale resumes while still surfacing passive candidates.
+  // 0 / null means "Any" (no freshness filter).
+  const [recentDaysFilter, setRecentDaysFilter] = useState<number>(90);
+  // 5.10: opt-in override to include JobDiva Talent Search candidates that
+  // don't have an attached resume. Off by default — recruiters repeatedly
+  // complained about "Resume not available" results poisoning the list.
+  const [includeNoResume, setIncludeNoResume] = useState<boolean>(false);
+  // 5.8: cached JobDiva profile URLs per candidate id. Populated on-demand
+  // when the recruiter clicks a candidate name — Talent Search doesn't
+  // return PROFILEURL so we enrich lazily.
+  const [candidateProfileUrls, setCandidateProfileUrls] = useState<Record<string, string>>({});
   const [sourceTitles, setSourceTitles] = useState<Array<{
     id: number;
     value: string;
@@ -323,23 +389,88 @@ function NewJobPageContent() {
   const [sourceCompanyInput, setSourceCompanyInput] = useState("");
   const [sourceKeywordInput, setSourceKeywordInput] = useState("");
   const [isSearching, setIsSearching] = useState(false);
-  const searchAbortControllerRef = useRef<AbortController | null>(null);
   const [hasSearched, setHasSearched] = useState(false);
   const [booleanStringOpen, setBooleanStringOpen] = useState(false);
   const [generatedBoolean, setGeneratedBoolean] = useState("");
   const [isRefreshingBoolean, setIsRefreshingBoolean] = useState(false);
+  const [booleanUserEdited, setBooleanUserEdited] = useState(false);
+  const [booleanAttempts, setBooleanAttempts] = useState<{ query: string; label: string }[]>([]);
+  const MAX_BOOLEAN_ATTEMPTS = 4;
+  const QUALIFIED_SCORE_THRESHOLD = 70;
+  const QUALIFIED_TARGET_COUNT = 50;
   const [candidates, setCandidates] = useState<any[]>([]);
+  const seenCandidateIdsRef = useRef<Set<string>>(new Set());
+  const searchAbortRef = useRef<AbortController | null>(null);
+  // Fires handleEnhanceJob() exactly once per session when the user first lands on
+  // Step 2 without an existing AI JD. Prevents a re-fire after a user wipe and
+  // re-entry — recruiter intent (blank) must be respected once the flag is set.
+  const hasAutoGeneratedJDRef = useRef(false);
+
+  // 5.8: lazily fetch the JobDiva profile URL for a Talent Search candidate.
+  // Talent Search doesn't return PROFILEURL, so we hit the backend enrichment
+  // endpoint on first click and cache the result.
+  const fetchAndOpenProfileUrl = async (candidate: any) => {
+    const candId = String(candidate?.candidate_id || candidate?.id || "").trim();
+    // Prefer any URL already on the candidate (applicants path returns one).
+    const existing = candidate?.profile_url || candidateProfileUrls[candId] || "";
+    if (existing) {
+      window.open(existing, "_blank", "noopener,noreferrer");
+      return true;
+    }
+    if (!candId) return false;
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const res = await fetch(`${apiUrl}/candidates/${encodeURIComponent(candId)}/profile-url`);
+      if (!res.ok) return false;
+      const data = await res.json();
+      const url = (data?.profile_url || "").trim();
+      if (url) {
+        setCandidateProfileUrls(prev => ({ ...prev, [candId]: url }));
+        window.open(url, "_blank", "noopener,noreferrer");
+        return true;
+      }
+    } catch (e) {
+      console.warn("profile-url fetch failed", e);
+    }
+    return false;
+  };
   const [selectedCandidates, setSelectedCandidates] = useState<Set<string>>(new Set());
   const [searchStatus, setSearchStatus] = useState("Fetching applicants...");
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const [candidatesPerPage, setCandidatesPerPage] = useState(10);
-  const sortedCandidates = [...candidates].sort((a, b) => {
-    const scoreA = a.match_score || 0;
-    const scoreB = b.match_score || 0;
-    return scoreB - scoreA;
-  });
+  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "linkedin-unipile" | "linkedin-exa" | "dice" | "upload-resume">("all");
+
+  const matchesSourceFilter = (cand: any) => {
+    const src = String(cand.source || "").toLowerCase();
+    switch (sourceFilter) {
+      case "all": return true;
+      case "jobdiva": return src.startsWith("jobdiva");
+      case "linkedin-unipile": return src === "linkedin-unipile" || src === "linkedin";
+      case "linkedin-exa": return src === "linkedin-exa";
+      case "dice": return src === "dice";
+      case "upload-resume": return src === "upload-resume";
+      default: return true;
+    }
+  };
+  const sourceCounts = candidates.reduce((acc: Record<string, number>, c) => {
+    const s = String(c.source || "").toLowerCase();
+    if (s.startsWith("jobdiva")) acc["jobdiva"] = (acc["jobdiva"] || 0) + 1;
+    else if (s === "linkedin-unipile" || s === "linkedin") acc["linkedin-unipile"] = (acc["linkedin-unipile"] || 0) + 1;
+    else if (s === "linkedin-exa") acc["linkedin-exa"] = (acc["linkedin-exa"] || 0) + 1;
+    else if (s === "dice") acc["dice"] = (acc["dice"] || 0) + 1;
+    else if (s === "upload-resume") acc["upload-resume"] = (acc["upload-resume"] || 0) + 1;
+    return acc;
+  }, {});
+
+  const sortedCandidates = [...candidates]
+    .filter(matchesSourceFilter)
+    .sort((a, b) => {
+      const scoreA = a.match_score || 0;
+      const scoreB = b.match_score || 0;
+      return scoreB - scoreA;
+    });
 
   const totalPages = Math.max(1, Math.ceil(sortedCandidates.length / candidatesPerPage));
   const paginatedCandidates = sortedCandidates.slice(
@@ -348,7 +479,7 @@ function NewJobPageContent() {
   );
 
   const visiblePages = (() => {
-    if (totalPages <= 5) return Array.from({ length: totalPages }, (_, i) => i + 1);
+    if (totalPages <= 5) return Array.from({length: totalPages}, (_, i) => i + 1);
     if (currentPage <= 3) return [1, 2, 3, 4, "...", totalPages];
     if (currentPage >= totalPages - 2) return [1, "...", totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
     return [1, "...", currentPage - 1, currentPage, currentPage + 1, "...", totalPages];
@@ -360,6 +491,10 @@ function NewJobPageContent() {
   const [isLoadingResume, setIsLoadingResume] = useState(false);
   const [showResumeModal, setShowResumeModal] = useState(false);
 
+  // Resume Setup load state. Gates the wizard shell so the user sees a full-page
+  // loader instead of a flash-of-empty-form while we hydrate from /jobs/{id}/draft.
+  const [isLoadingDraft, setIsLoadingDraft] = useState(false);
+
   useEffect(() => {
     const jobIdFromUrl = searchParams.get("jobId");
     if (jobIdFromUrl) {
@@ -368,7 +503,8 @@ function NewJobPageContent() {
       } else {
         setNumericJobId(jobIdFromUrl);
       }
-      loadJobDraft(jobIdFromUrl);
+      setIsLoadingDraft(true);
+      loadJobDraft(jobIdFromUrl).finally(() => setIsLoadingDraft(false));
     }
   }, [searchParams]);
 
@@ -401,19 +537,41 @@ function NewJobPageContent() {
 
       const draft = draftResult.data;
 
-      // 2. Fetch full job details from JobDiva to populate 'jobData'
-      // This is critical for subsequent "Save & Exit" or "Next" actions
-      const detailsResponse = await fetch(`${apiUrl}/jobs/fetch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ job_id: jobIdToLoad.trim() })
-      });
+      // 2. Hydrate `jobData` from the draft payload when possible.
+      // The `/jobs/{id}/draft` endpoint now embeds a `job_details` block mirroring
+      // what `/jobs/fetch` returns, sourced from monitored_jobs. For the Resume
+      // Setup flow this avoids a second JobDiva round-trip (≈2-3s lag + the
+      // refetch dialog) and lets us paint the wizard in a single render.
+      const embeddedDetails = draft.job_details;
+      const hasEmbeddedDetails = embeddedDetails && (embeddedDetails.title || embeddedDetails.customer_name);
 
-      if (detailsResponse.ok) {
-        const details = await detailsResponse.json();
-        setJobData(details);
-        if (details.jobdiva_id) {
-          setJobdivaId(details.jobdiva_id);
+      if (hasEmbeddedDetails) {
+        setJobData(embeddedDetails);
+        if (embeddedDetails.jobdiva_id) {
+          setJobdivaId(embeddedDetails.jobdiva_id);
+        }
+        if (embeddedDetails.is_external || (embeddedDetails.jobdiva_id || "").startsWith("EXT-")) {
+          setIsExternal(true);
+        }
+      } else {
+        // Cold path: no persisted job_details yet (e.g. the user pasted a
+        // JobDiva ID but hasn't saved the job). Fall back to the old JobDiva
+        // fetch so the first-time flow still works.
+        const detailsResponse = await fetch(`${apiUrl}/jobs/fetch`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ job_id: jobIdToLoad.trim() })
+        });
+
+        if (detailsResponse.ok) {
+          const details = await detailsResponse.json();
+          setJobData(details);
+          if (details.jobdiva_id) {
+            setJobdivaId(details.jobdiva_id);
+          }
+          if (details.is_external || (details.jobdiva_id || "").startsWith("EXT-")) {
+            setIsExternal(true);
+          }
         }
       }
 
@@ -425,13 +583,11 @@ function NewJobPageContent() {
           const rData = await rubricRes.json();
           // Only pre-load if it's an actual populated rubric, not an empty shell
           if (rData.titles?.length > 0 || rData.skills?.length > 0) {
-            setRubricData(rData);
+            setRubricData(applyTitleRequiredSafetyNet(rData));
             // Restore screen questions if they exist in the rubric
             if (rData.screen_questions?.length) {
               setScreenQuestions(rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1 })));
               setQuestionIdCounter(rData.screen_questions.length + 1);
-              // Mark as initialised so we don't overwrite with rubric defaults later
-              screenQuestionsInitializedRef.current = true;
             }
             if (rData.bot_introduction) {
               setBotIntroduction(rData.bot_introduction);
@@ -459,7 +615,13 @@ function NewJobPageContent() {
 
       // Restore resume match filters if they exist
       if (draft.resume_match_filters && draft.resume_match_filters.length > 0) {
-        setResumeMatchFilters(draft.resume_match_filters);
+        // Backfill weight=1 for legacy drafts that pre-date the per-filter
+        // weightage control. New drafts persist the user-set weight.
+        const normalized = draft.resume_match_filters.map((f: any) => ({
+          ...f,
+          weight: typeof f.weight === 'number' && isFinite(f.weight) ? f.weight : 1,
+        }));
+        setResumeMatchFilters(normalized);
         const maxId = Math.max(...draft.resume_match_filters.map((f: any) => f.id));
         setFilterIdCounter(maxId + 1);
         console.log(`✅ Restored ${draft.resume_match_filters.length} resume match filters from database`);
@@ -468,7 +630,12 @@ function NewJobPageContent() {
       // Restore sourcing filters if they exist
       if (draft.sourcing_filters) {
         const sf = draft.sourcing_filters;
-        if (sf.sources) setSearchSources(sf.sources);
+        if (sf.sources) {
+          // Strip the retired jobdiva_hotlist flag from persisted drafts so
+          // saved jobs don't resurrect the removed checkbox.
+          const { jobdiva_hotlist: _removed, ...cleanSources } = sf.sources as Record<string, boolean>;
+          setSearchSources(prev => ({ ...prev, ...cleanSources }));
+        }
         if (sf.titles) setSourceTitles(sf.titles);
         if (sf.skills) setSourceSkills(sf.skills);
         if (sf.locations) setSourceLocations(sf.locations);
@@ -481,6 +648,9 @@ function NewJobPageContent() {
       if (draft.current_step) {
         const savedStep = draft.current_step as Step;
         setCurrentStep(savedStep);
+        // Treat the saved step as previously-reached so the pipeline allows
+        // hopping back to it (and any earlier step) without re-clicking Next.
+        setMaxStepReached(prev => (savedStep > prev ? savedStep : prev));
         setPageSubtitle(STEP_DESCRIPTIONS[savedStep]);
         setIsFetched(true);
         setNumericJobId(jobIdToLoad);
@@ -491,6 +661,181 @@ function NewJobPageContent() {
       console.error("Failed to load draft:", error);
     }
     return false;
+  };
+
+  const handleCreateExternal = async () => {
+    if (!extTitle.trim()) {
+      showToast("Please enter a job title", "info");
+      return;
+    }
+    if (!extDescription.trim()) {
+      showToast("Please paste the job description", "info");
+      return;
+    }
+    setIsCreatingExternal(true);
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const createRes = await fetch(`${apiUrl}/jobs/external/create`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: extTitle.trim(),
+          description: extDescription.trim(),
+          customer_name: extCustomer.trim() || "External",
+        }),
+      });
+      if (!createRes.ok) {
+        showToast("Failed to create external requirement", "error");
+        return;
+      }
+      const created = await createRes.json();
+      const newJobId = String(created.job_id);
+      const newRef = String(created.jobdiva_id);
+
+      setNumericJobId(newJobId);
+      setJobdivaId(newRef);
+      setJobTitle(extTitle.trim());
+      setEnhancedTitle(extTitle.trim());
+      setJobPosting(extDescription.trim());
+      setJobData({
+        id: newJobId,
+        jobdiva_id: newRef,
+        title: extTitle.trim(),
+        customer_name: extCustomer.trim() || "External",
+        description: extDescription.trim(),
+        ai_description: extDescription.trim(),
+        is_external: true,
+      });
+      setIsFetched(true);
+      showToast("External requirement created. Extracting rubric…", "success");
+
+      // Fire rubric extraction in the background — same endpoint JobDiva flow uses.
+      try {
+        const rubricRes = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jobId: newJobId,
+            jobdivaId: newRef,
+            jobTitle: extTitle.trim(),
+            enhancedJobTitle: extTitle.trim(),
+            jobDescription: extDescription.trim(),
+            jobNotes: "",
+            customerName: extCustomer.trim() || "External",
+            originalDescription: extDescription.trim(),
+          }),
+        });
+        if (rubricRes.ok) {
+          const rubric = await rubricRes.json();
+          if (rubric && (rubric.titles?.length || rubric.skills?.length)) {
+            setRubricData(applyTitleRequiredSafetyNet(rubric, extTitle));
+            showToast("Rubric ready", "success");
+          }
+        }
+      } catch (err) {
+        console.error("External rubric extraction failed:", err);
+      }
+    } catch (err) {
+      console.error("External create failed:", err);
+      showToast("Failed to create external requirement", "error");
+    } finally {
+      setIsCreatingExternal(false);
+    }
+  };
+
+  const handleSubmitPasteResume = async () => {
+    if (!pasteName.trim() || !pasteResumeText.trim()) {
+      showToast("Name and resume text are required", "info");
+      return;
+    }
+    const jobRef = numericJobId || jobdivaId;
+    if (!jobRef) {
+      showToast("No job context found", "error");
+      return;
+    }
+    setIsSavingPasteResume(true);
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const res = await fetch(`${apiUrl}/jobs/${encodeURIComponent(jobRef)}/manual-candidate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: pasteName.trim(),
+          email: pasteEmail.trim(),
+          resume_text: pasteResumeText,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || "Failed to save resume", "error");
+        return;
+      }
+      const result = await res.json();
+      const cand = result.candidate;
+      // Prepend so the user sees it immediately
+      setCandidates((prev: any[]) => [{
+        ...cand,
+        id: cand.candidate_id,
+        full_name: cand.name,
+      }, ...prev]);
+      setPasteResumeOpen(false);
+      setPasteName("");
+      setPasteEmail("");
+      setPasteResumeText("");
+      showToast(`Saved ${cand.name} (score ${cand.match_score ?? "—"})`, "success");
+    } catch (err) {
+      console.error("Paste resume failed:", err);
+      showToast("Failed to save resume", "error");
+    } finally {
+      setIsSavingPasteResume(false);
+    }
+  };
+
+  const handleBulkUpload = async () => {
+    if (!bulkFiles.length) {
+      showToast("Select one or more resume files first", "info");
+      return;
+    }
+    const jobRef = numericJobId || jobdivaId;
+    if (!jobRef) {
+      showToast("No job context found", "error");
+      return;
+    }
+    setIsUploadingBulk(true);
+    setBulkProgress({ processed: 0, failed: 0, total: bulkFiles.length });
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const formData = new FormData();
+      bulkFiles.forEach(f => formData.append("files", f));
+      const res = await fetch(`${apiUrl}/jobs/${encodeURIComponent(jobRef)}/bulk-resumes`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || "Bulk upload failed", "error");
+        return;
+      }
+      const result = await res.json();
+      const newCands = (result.candidates || []).map((c: any) => ({
+        ...c,
+        id: c.candidate_id,
+        full_name: c.name,
+      }));
+      setCandidates((prev: any[]) => [...newCands, ...prev]);
+      setBulkProgress({ processed: result.processed_count || 0, failed: result.failed_count || 0, total: bulkFiles.length });
+      setBulkFiles([]);
+      if (bulkFileInputRef.current) bulkFileInputRef.current.value = "";
+      const msg = result.failed_count
+        ? `Processed ${result.processed_count}, failed ${result.failed_count}`
+        : `Processed ${result.processed_count} resume${result.processed_count === 1 ? "" : "s"}`;
+      showToast(msg, result.failed_count ? "info" : "success");
+    } catch (err) {
+      console.error("Bulk upload failed:", err);
+      showToast("Bulk upload failed", "error");
+    } finally {
+      setIsUploadingBulk(false);
+    }
   };
 
   const handleFetchJob = async () => {
@@ -645,7 +990,14 @@ function NewJobPageContent() {
           jobTitle: titleOverride || jobTitle,
           jobDescription: descOverride || jobData?.description || jobPosting,
           jobNotes: notesOverride === undefined ? recruiterNotes : notesOverride,
-          workAuthorization: selectedEmpTypes.join(", ")
+          workAuthorization: selectedEmpTypes.join(", "),
+          // Forward rubric-derived context so the backend prompt can include
+          // required YoE and Education/Certs without paraphrasing them away.
+          yearsOfExperience: typeof rubricData?.total_years === "number"
+            ? rubricData.total_years
+            : (parseInt(rubricData?.total_years, 10) || null),
+          education: Array.isArray(rubricData?.education) ? rubricData.education : [],
+          certifications: Array.isArray(rubricData?.certifications) ? rubricData.certifications : [],
         })
       });
 
@@ -667,6 +1019,29 @@ function NewJobPageContent() {
     }
   };
 
+  // 2.1 Auto-generate the AI Job Description the first time the user lands on
+  // Step 2 without one. Recruiters shouldn't have to click Regenerate to see the
+  // initial draft — the persisted-draft loader already skips this by populating
+  // `jobPosting`, so re-entering an existing job is a no-op.
+  useEffect(() => {
+    if (currentStep !== 2) return;
+    if (jobPosting && jobPosting.trim().length > 0) return;
+    if (hasAutoGeneratedJDRef.current) return;
+    if (isGeneratingJD) return;
+    if (!jobTitle && !jobData?.description) return;
+    // Wait for JobDiva hydration to finish before the first auto-fire, so the
+    // generator sees recruiter notes + rubric (education, total_years) that
+    // arrive asynchronously. If the user typed the job manually (no jobdivaId
+    // and no pending fetch), skip this guard.
+    const awaitingJobDivaImport = Boolean(jobdivaId) && !isFetched && isFetching;
+    if (awaitingJobDivaImport) return;
+    hasAutoGeneratedJDRef.current = true;
+    handleEnhanceJob();
+    // Intentionally depend only on the trigger inputs; `handleEnhanceJob` is
+    // stable enough for this guarded single-fire.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep, jobPosting, isGeneratingJD, jobTitle, jobData?.description, isFetched, isFetching, jobdivaId, recruiterNotes]);
+
   const handleEnhanceTitle = async () => {
     if (!jobTitle) return;
     setIsEnhancingTitle(true);
@@ -686,7 +1061,7 @@ function NewJobPageContent() {
         const data = await res.json();
         setEnhancedTitle(data.title);
 
-        showToast("Title enhanced by PAIR.", "success");
+        showToast("Title enhanced by Hoonr-Curate.", "success");
       } else {
         const err = await res.text();
         console.error("Title enhance failed:", err);
@@ -825,7 +1200,14 @@ function NewJobPageContent() {
         const stepNumber = parseInt(step) as Step;
         const isActive = stepNumber === currentStep;
         const isCompleted = stepNumber < currentStep;
-        const isClickable = stepNumber <= currentStep || (stepNumber === currentStep + 1 && !!jobData);
+        // A step is clickable when the user has already reached it before
+        // (anywhere <= maxStepReached) OR it's the immediate next step and the
+        // current step is unlocked (jobData present). This lets users bounce
+        // back and forth in the pipeline without re-clicking Next on every
+        // intermediate step.
+        const isClickable =
+          stepNumber <= maxStepReached ||
+          (stepNumber === currentStep + 1 && !!jobData);
         const isLast = index === Object.keys(STEP_LABELS).length - 1;
 
         return (
@@ -936,45 +1318,128 @@ function NewJobPageContent() {
         <FileInput className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[20px] font-semibold text-slate-900 leading-tight tracking-tight">Intake</h2>
-          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Fetch job details from JobDiva, then add any additional context for PAIR.</p>
+          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Fetch job details from JobDiva, then add any additional context for Hoonr-Curate.</p>
         </div>
       </div>
 
       <div className="p-7 space-y-7">
-        <div>
-          <label className="block text-[14px] font-medium text-slate-900 mb-3">JobDiva Job ID</label>
-          <div className="flex items-center gap-3">
-            <Input
-              placeholder="e.g. 26-08025"
-              value={jobdivaId}
-              onChange={(e) => setJobdivaId(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && jobdivaId.trim().includes("-") && handleFetchJob()}
-              className="max-w-[180px] h-[36px] bg-white border-slate-200 text-[13px]"
-            />
+        {/* Source toggle: JobDiva vs External */}
+        {!isFetched && (
+          <div className="flex items-center gap-2">
             <button
-              onClick={handleFetchJob}
-              disabled={!jobdivaId.trim().includes("-") || isFetching}
-              className={`h-[36px] px-3.5 rounded-lg flex items-center gap-2 text-[13px] font-medium transition-all text-white disabled:opacity-50 disabled:cursor-not-allowed ${isFetched ? "bg-[#16a34a]" : "bg-primary hover:bg-[#5b21b6]"}`}
+              type="button"
+              onClick={() => setIsExternal(false)}
+              className={`px-3 py-1.5 rounded-full text-[12px] font-semibold border transition-colors ${!isExternal ? 'bg-[#6366f1] text-white border-[#6366f1]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
             >
-              {isFetching ? (
-                <>
-                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  Fetching...
-                </>
-              ) : isFetched ? (
-                <>
-                  <Check className="w-4 h-4" />
-                  Fetched
-                </>
-              ) : (
-                <>
-                  <CloudDownload className="w-4 h-4" />
-                  Fetch from JobDiva
-                </>
-              )}
+              JobDiva Requirement
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsExternal(true)}
+              className={`px-3 py-1.5 rounded-full text-[12px] font-semibold border transition-colors ${isExternal ? 'bg-[#6366f1] text-white border-[#6366f1]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+            >
+              External Requirement
             </button>
           </div>
-        </div>
+        )}
+
+        {!isExternal ? (
+          <div>
+            <label className="block text-[14px] font-medium text-slate-900 mb-3">JobDiva Job ID</label>
+            <div className="flex items-center gap-3">
+              <Input
+                placeholder="e.g. 26-08025"
+                value={jobdivaId}
+                onChange={(e) => setJobdivaId(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && jobdivaId.trim().includes("-") && handleFetchJob()}
+                className="max-w-[180px] h-[36px] bg-white border-slate-200 text-[13px]"
+              />
+              <button
+                onClick={handleFetchJob}
+                disabled={!jobdivaId.trim().includes("-") || isFetching}
+                className={`h-[36px] px-3.5 rounded-lg flex items-center gap-2 text-[13px] font-medium transition-all text-white disabled:opacity-50 disabled:cursor-not-allowed ${isFetched ? "bg-[#16a34a]" : "bg-primary hover:bg-[#5b21b6]"}`}
+              >
+                {isFetching ? (
+                  <>
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Fetching...
+                  </>
+                ) : isFetched ? (
+                  <>
+                    <Check className="w-4 h-4" />
+                    Fetched
+                  </>
+                ) : (
+                  <>
+                    <CloudDownload className="w-4 h-4" />
+                    Fetch from JobDiva
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        ) : !isFetched ? (
+          <div className="space-y-5">
+            <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-[13px] text-amber-800 leading-relaxed">
+              <strong className="font-semibold">External Requirement</strong> — not linked to JobDiva. Paste the job description; Hoonr-Curate will extract skills and rubric. JobDiva-specific fields (applicant list, UDFs) will be skipped.
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-[13px] font-medium text-slate-900 mb-2">Job Title *</label>
+                <Input
+                  placeholder="e.g. AI Agent Engineer"
+                  value={extTitle}
+                  onChange={(e) => setExtTitle(e.target.value)}
+                  className="h-[36px] bg-white border-slate-200 text-[13px]"
+                />
+              </div>
+              <div>
+                <label className="block text-[13px] font-medium text-slate-900 mb-2">Customer</label>
+                <Input
+                  placeholder="e.g. Accenture"
+                  value={extCustomer}
+                  onChange={(e) => setExtCustomer(e.target.value)}
+                  className="h-[36px] bg-white border-slate-200 text-[13px]"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-[13px] font-medium text-slate-900 mb-2">Job Description *</label>
+              <Textarea
+                placeholder="Paste the full JD (responsibilities, required skills, preferred experience, etc.)"
+                value={extDescription}
+                onChange={(e) => setExtDescription(e.target.value)}
+                rows={10}
+                className="bg-white border-slate-200 text-[13px] leading-relaxed"
+              />
+              <p className="text-[11px] text-slate-500 mt-2">Hoonr-Curate will extract the rubric (titles, skills, education) from this text.</p>
+            </div>
+            <div>
+              <button
+                onClick={handleCreateExternal}
+                disabled={isCreatingExternal || !extTitle.trim() || !extDescription.trim()}
+                className="h-[36px] px-4 rounded-lg flex items-center gap-2 text-[13px] font-medium transition-all text-white disabled:opacity-50 disabled:cursor-not-allowed bg-primary hover:bg-[#5b21b6]"
+              >
+                {isCreatingExternal ? (
+                  <>
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    Creating requirement…
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4" />
+                    Create External Requirement
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-3 text-[13px] text-emerald-800 flex items-center gap-2">
+            <Check className="w-4 h-4" />
+            External requirement <strong>{jobdivaId}</strong> created. You can now proceed through the rubric and sourcing steps.
+          </div>
+        )}
 
         {jobData && (
           <>
@@ -1085,10 +1550,10 @@ function NewJobPageContent() {
 
               <div className="border-t border-slate-100 my-6" />
 
-              {/* PAIR Setup Section */}
+              {/* Hoonr-Curate Setup Section */}
               <div className="flex items-center gap-2 mb-5">
                 <Settings className="w-5 h-5 text-slate-700 flex-shrink-0" />
-                <span className="text-[14px] font-bold text-slate-900">PAIR Setup</span>
+                <span className="text-[14px] font-bold text-slate-900">Hoonr-Curate Setup</span>
                 <span className="text-[12px] text-slate-500 font-normal">Configure your screening before proceeding</span>
               </div>
 
@@ -1171,7 +1636,7 @@ function NewJobPageContent() {
               {/* Screening Level */}
               <div>
                 <label className="block text-[14px] font-medium text-slate-900 mb-1">Screening Level</label>
-                <p className="text-[13px] text-slate-500 mb-4">How deeply should PAIR screen each candidate?</p>
+                <p className="text-[13px] text-slate-500 mb-4">How deeply should Hoonr-Curate screen each candidate?</p>
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   {/* L1 */}
                   <div
@@ -1246,7 +1711,7 @@ function NewJobPageContent() {
         <Megaphone className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight">Publish</h2>
-          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Review your PAIR-enhanced job posting and select where to publish externally.</p>
+          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Review your Hoonr-Curate-enhanced job posting and select where to publish externally.</p>
         </div>
       </div>
       <div className="p-7">
@@ -1281,9 +1746,9 @@ function NewJobPageContent() {
             </div>
 
             <div className="flex items-center justify-between mb-3 mt-8">
-              <div className="bg-[#eef2ff] text-[#4f46e5] flex items-center gap-1.5 px-3 py-1 rounded-full text-[11.5px] font-medium border border-[#ddd6fe]">
+              <div className="bg-[#eef2ff] text-[#4f46e5] flex items-center gap-1.5 px-4 py-1.5 rounded-full text-[12.5px] font-medium border border-[#ddd6fe]">
                 <Sparkles className="w-3.5 h-3.5" />
-                PAIR-Enhanced Job Posting
+                Hoonr-Curate-Enhanced Job Posting
               </div>
               <Button
                 variant="outline"
@@ -1388,7 +1853,7 @@ function NewJobPageContent() {
             <div className="flex items-start gap-2 mt-5 px-1">
               <Info className="w-4 h-4 text-slate-400 mt-0.5 flex-shrink-0" />
               <p className="text-[12px] text-slate-500 leading-snug font-medium">
-                Job posting team will receive your request to post after you Launch PAIR.
+                Job posting team will receive your request to post after you Launch Hoonr-Curate.
               </p>
             </div>
           </div>
@@ -1404,6 +1869,44 @@ function NewJobPageContent() {
       .replace(/[^a-z0-9]/g, "");
 
   const getPrimaryJobTitle = () => normalizeTitle(jobData?.title || jobTitle);
+
+  // 3.1 Belt-and-suspenders: if a skill's `value` appears (word-boundary,
+  // case-insensitive) inside the job title, force it to Required. The backend
+  // prompt already nudges this, but an LLM regression shouldn't downgrade a
+  // title-named skill to Preferred and silently change sourcing weights.
+  const applyTitleRequiredSafetyNet = (rubric: any, titleHint?: string): any => {
+    if (!rubric || !Array.isArray(rubric.skills) || rubric.skills.length === 0) {
+      return rubric;
+    }
+    const haystack = (titleHint || jobData?.title || jobTitle || "").toLowerCase();
+    if (!haystack.trim()) return rubric;
+
+    const tokenize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const titleTokens = new Set(tokenize(haystack).split(/\s+/).filter(Boolean));
+
+    const patched = rubric.skills.map((s: any) => {
+      const val = String(s?.value || "").toLowerCase();
+      if (!val) return s;
+      // Substring AND token match — catches "databricks" in "Databricks
+      // Data Engineer" without false-positiving on a loose "data" token
+      // leaking through.
+      const tokens = tokenize(val).split(/\s+/).filter(Boolean);
+      const allTokensHit =
+        tokens.length > 0 && tokens.every((t) => titleTokens.has(t));
+      const phraseHit = haystack.includes(val);
+      if (allTokensHit || phraseHit) {
+        return {
+          ...s,
+          required: "Required",
+          importance: "required",
+          is_required: true,
+          fromTitle: true,
+        };
+      }
+      return s;
+    });
+    return { ...rubric, skills: patched };
+  };
 
   const isRubricItemRequired = (item: any) => {
     if (!item) return false;
@@ -1512,13 +2015,13 @@ function NewJobPageContent() {
       if (!prev) return prev;
       const updated = { ...prev };
       if (!updated[category]) updated[category] = [];
-      // For titles, always set source to 'PAIR' and remove any other source
+      // For titles, always set source to 'Hoonr-Curate' and remove any other source
       if (category === 'titles') {
         const pairTitle = getNormalizedTitleItem({
           ...newItem,
           required: 'Preferred',
           matchType: 'Similar',
-          source: 'PAIR',
+          source: 'Hoonr-Curate',
         });
         updated[category] = [...updated[category], pairTitle];
       } else if (category === "skills") {
@@ -1539,14 +2042,14 @@ function NewJobPageContent() {
         <ListChecks className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[21px] font-medium text-slate-900 leading-tight tracking-tight">Establish Rubric</h2>
-          <p className="text-slate-500 text-[15px] mt-1 leading-relaxed">PAIR-extracted rubric items from the job description. These become the rubric by which candidates are graded. Edit freely.</p>
+          <p className="text-slate-500 text-[15px] mt-1 leading-relaxed">Hoonr-Curate-extracted rubric items from the job description. These become the rubric by which candidates are graded. Edit freely.</p>
         </div>
       </div>
 
       {isGeneratingRubric ? (
         <div className="p-20 flex flex-col items-center justify-center gap-4">
           <div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
-          <p className="text-[15px] font-medium text-slate-600 animate-pulse">Extracting criteria from PAIR Job Description...</p>
+          <p className="text-[15px] font-medium text-slate-600 animate-pulse">Extracting criteria from Hoonr-Curate Job Description...</p>
         </div>
       ) : rubricData ? (
         <div className="p-7 space-y-7">
@@ -1583,102 +2086,100 @@ function NewJobPageContent() {
                 const title = getNormalizedTitleItem(rawTitle);
 
                 return (
-                  <div key={idx} className="flex items-center gap-2.5 py-2 border-b border-slate-200 last:border-b-0">
-                    <div className="flex-1 min-w-0 flex items-center gap-2">
-                      <input
-                        type="text"
-                        value={title.value}
-                        onChange={(e) => updateRubricItem('titles', idx, 'value', e.target.value)}
-                        className="flex-1 min-w-0 text-[13px] font-normal text-slate-700 bg-transparent border border-transparent rounded px-2 py-1.5 outline-none focus:border-slate-200 focus:bg-white transition-all"
-                      />
-                      <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap">PAIR</span>
-                    </div>
-                    <div className="w-[110px] flex-shrink-0 flex items-center gap-1.5">
-                      <input
-                        type="number"
-                        min={0}
-                        value={title.minYears}
-                        onChange={(e) => updateRubricItem('titles', idx, 'minYears', Math.max(0, parseInt(e.target.value) || 0))}
-                        className="w-12 border border-slate-200 rounded px-1.5 py-1 text-[13px] text-center outline-none focus:border-[#818cf8]"
-                      />
-                      <span className="text-[12px] text-slate-500">{title.minYears === 0 ? '—' : 'yrs'}</span>
-                    </div>
-                    <div className="w-[70px] flex-shrink-0 flex items-center justify-center">
-                      <Checkbox checked={title.recent} onCheckedChange={(checked) => updateRubricItem('titles', idx, 'recent', !!checked)} className="border-slate-300 rounded-[4px] data-[state=checked]:bg-[#6d28d9] data-[state=checked]:border-[#6d28d9] text-white w-[16px] h-[16px] hover:border-[#6d28d9] transition-all" />
-                    </div>
-                    <div className="w-[170px] flex-shrink-0">
-                      <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[118px] bg-white cursor-pointer select-none">
-                        <button
-                          onClick={() => updateRubricItem('titles', idx, 'matchType', 'Exact')}
-                          disabled
-                          className="flex-1 py-[3px] rounded-full transition-all text-slate-500 cursor-not-allowed"
-                        >
-                          Exact
-                        </button>
-                        <button
-                          onClick={() => updateRubricItem('titles', idx, 'matchType', 'Similar')}
-                          className={`flex-1 py-[3px] rounded-full transition-all ${title.matchType === 'Similar' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}
-                        >
-                          Similar
-                        </button>
-                      </div>
-                    </div>
-                    <div className="w-[190px] flex-shrink-0 flex items-center justify-center">
-                      <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[135px] bg-white cursor-pointer select-none">
-                        <button
-                          onClick={() => updateRubricItem('titles', idx, 'required', 'Required')}
-                          className={`flex-1 py-[3px] rounded-full transition-all ${title.required === 'Required' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}
-                        >
-                          Required
-                        </button>
-                        <button
-                          onClick={() => updateRubricItem('titles', idx, 'required', 'Preferred')}
-                          disabled={isDirectResumeTitle(title)}
-                          className={`flex-1 py-[3px] rounded-full transition-all ${title.required === 'Preferred' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'} ${isDirectResumeTitle(title) ? 'opacity-40 cursor-not-allowed' : ''}`}
-                        >
-                          Preferred
-                        </button>
-                      </div>
-                    </div>
-                    <div className="w-[70px] flex-shrink-0 flex flex-col gap-1 items-center">
+                <div key={idx} className="flex items-center gap-2.5 py-2 border-b border-slate-200 last:border-b-0">
+                  <div className="flex-1 min-w-0 flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={title.value}
+                      onChange={(e) => updateRubricItem('titles', idx, 'value', e.target.value)}
+                      className="flex-1 min-w-0 text-[13px] font-normal text-slate-700 bg-transparent border border-transparent rounded px-2 py-1.5 outline-none focus:border-slate-200 focus:bg-white transition-all"
+                    />
+                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap">Hoonr-Curate</span>
+                  </div>
+                  <div className="w-[110px] flex-shrink-0 flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      min={0}
+                      value={title.minYears}
+                      onChange={(e) => updateRubricItem('titles', idx, 'minYears', Math.max(0, parseInt(e.target.value) || 0))}
+                      className="w-12 border border-slate-200 rounded px-1.5 py-1 text-[13px] text-center outline-none focus:border-[#818cf8]"
+                    />
+                    <span className="text-[12px] text-slate-500">{title.minYears === 0 ? '—' : 'yrs'}</span>
+                  </div>
+                  <div className="w-[70px] flex-shrink-0 flex items-center justify-center">
+                    <Checkbox checked={title.recent} onCheckedChange={(checked) => updateRubricItem('titles', idx, 'recent', !!checked)} className="border-slate-300 rounded-[4px] data-[state=checked]:bg-[#6d28d9] data-[state=checked]:border-[#6d28d9] text-white w-[16px] h-[16px] hover:border-[#6d28d9] transition-all" />
+                  </div>
+                  <div className="w-[170px] flex-shrink-0">
+                    <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[118px] bg-white cursor-pointer select-none">
                       <button
-                        disabled={idx === 0}
-                        onClick={() => moveRubricItem('titles', idx, idx - 1)}
-                        className="w-[22px] h-[22px] flex items-center justify-center border border-slate-200 rounded-[4px] bg-white text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-20 disabled:pointer-events-none"
+                        onClick={() => updateRubricItem('titles', idx, 'matchType', 'Exact')}
+                        className={`flex-1 py-[3px] rounded-full transition-all ${title.matchType === 'Exact' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}
                       >
-                        <ChevronUp className="w-3.5 h-3.5" />
+                        Exact
                       </button>
                       <button
-                        disabled={idx === (rubricData.titles?.length - 1)}
-                        onClick={() => moveRubricItem('titles', idx, idx + 1)}
-                        className="w-[22px] h-[22px] flex items-center justify-center border border-slate-200 rounded-[4px] bg-white text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-20 disabled:pointer-events-none"
+                        onClick={() => updateRubricItem('titles', idx, 'matchType', 'Similar')}
+                        className={`flex-1 py-[3px] rounded-full transition-all ${title.matchType === 'Similar' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}
                       >
-                        <ChevronDown className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                    <div className="w-[36px] flex-shrink-0 text-center">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          removeRubricItem('titles', idx);
-                        }}
-                        className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
-                        title="Remove"
-                      >
-                        <X className="w-4 h-4" />
+                        Similar
                       </button>
                     </div>
                   </div>
-                )
-              })}
+                  <div className="w-[190px] flex-shrink-0 flex items-center justify-center">
+                    <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[135px] bg-white cursor-pointer select-none">
+                      <button
+                        onClick={() => updateRubricItem('titles', idx, 'required', 'Required')}
+                        className={`flex-1 py-[3px] rounded-full transition-all ${title.required === 'Required' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}
+                      >
+                        Required
+                      </button>
+                      <button
+                        onClick={() => updateRubricItem('titles', idx, 'required', 'Preferred')}
+                        disabled={isDirectResumeTitle(title)}
+                        className={`flex-1 py-[3px] rounded-full transition-all ${title.required === 'Preferred' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'} ${isDirectResumeTitle(title) ? 'opacity-40 cursor-not-allowed' : ''}`}
+                      >
+                        Preferred
+                      </button>
+                    </div>
+                  </div>
+                  <div className="w-[70px] flex-shrink-0 flex flex-col gap-1 items-center">
+                    <button
+                      disabled={idx === 0}
+                      onClick={() => moveRubricItem('titles', idx, idx - 1)}
+                      className="w-[22px] h-[22px] flex items-center justify-center border border-slate-200 rounded-[4px] bg-white text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-20 disabled:pointer-events-none"
+                    >
+                      <ChevronUp className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      disabled={idx === (rubricData.titles?.length - 1)}
+                      onClick={() => moveRubricItem('titles', idx, idx + 1)}
+                      className="w-[22px] h-[22px] flex items-center justify-center border border-slate-200 rounded-[4px] bg-white text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-20 disabled:pointer-events-none"
+                    >
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                  <div className="w-[36px] flex-shrink-0 text-center">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeRubricItem('titles', idx);
+                      }}
+                      className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
+                      title="Remove"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              )})}
 
               <div className="mt-3">
                 <Button
                   variant="outline"
                   size="sm"
                   disabled={(rubricData.titles?.length || 0) >= 5}
-                  onClick={() => addRubricItem('titles', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'PAIR' })}
+                  onClick={() => addRubricItem('titles', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'Hoonr-Curate' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
@@ -1741,7 +2242,7 @@ function NewJobPageContent() {
                       onChange={(e) => updateRubricItem('skills', idx, 'value', e.target.value)}
                       className="flex-1 min-w-0 text-[13px] font-normal text-slate-700 bg-transparent border border-transparent rounded px-2 py-1.5 outline-none focus:border-slate-200 focus:bg-white transition-all"
                     />
-                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap">PAIR</span>
+                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap">Hoonr-Curate</span>
                   </div>
                   <div className="w-[110px] flex-shrink-0 flex items-center gap-1.5">
                     <input
@@ -1805,7 +2306,7 @@ function NewJobPageContent() {
                   variant="outline"
                   size="sm"
                   disabled={(rubricData.skills?.length || 0) >= 8}
-                  onClick={() => addRubricItem('skills', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'PAIR' })}
+                  onClick={() => addRubricItem('skills', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'Hoonr-Curate' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
@@ -1828,7 +2329,7 @@ function NewJobPageContent() {
                 <h3 className="text-[14px] font-bold text-slate-800">Education & Certificates</h3>
               </div>
               <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                <Sparkles className="w-3 h-3" /> PAIR detected
+                <Sparkles className="w-3 h-3" /> Hoonr-Curate detected
               </span>
             </div>
 
@@ -1856,7 +2357,7 @@ function NewJobPageContent() {
                       className="w-[260px] flex-shrink-0 h-[34px] text-[13px] font-medium text-slate-700 bg-white border-slate-200"
                       placeholder="Field of study"
                     />
-                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight whitespace-nowrap ml-1 uppercase">PAIR</span>
+                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight whitespace-nowrap ml-1 uppercase">Hoonr-Curate</span>
                   </div>
                   <div className="w-[110px] flex-shrink-0"></div>
                   <div className="w-[70px] flex-shrink-0"></div>
@@ -1899,11 +2400,12 @@ function NewJobPageContent() {
 
           <div className="mb-7"></div>
 
-          {/* Domain */}
+          {/* Domain (rendered as "Industry Experience" — the data key stays
+              `domain` throughout the rubric to avoid a cross-codebase rename). */}
           <section>
             <div className="flex items-center gap-2 mb-4">
               <Building2 className="w-4 h-4 text-slate-900" />
-              <h3 className="text-[14px] font-bold text-slate-800">Domain</h3>
+              <h3 className="text-[14px] font-bold text-slate-800">Industry Experience</h3>
               <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
                 <Sparkles className="w-3 h-3" /> Detected in JD
               </span>
@@ -1917,9 +2419,8 @@ function NewJobPageContent() {
                       value={dom.value}
                       onChange={(e) => updateRubricItem('domain', idx, 'value', e.target.value)}
                       className="flex-1 h-[34px] text-[13px] font-medium text-slate-700 bg-white border-slate-200"
-                      readOnly
                     />
-                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight whitespace-nowrap ml-2 uppercase">PAIR</span>
+                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight whitespace-nowrap ml-2 uppercase">Hoonr-Curate</span>
                   </div>
                   <div className="w-[110px] flex-shrink-0"></div>
                   <div className="w-[70px] flex-shrink-0"></div>
@@ -1954,7 +2455,7 @@ function NewJobPageContent() {
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
-                  Add Domain
+                  Add Industry
                 </Button>
               </div>
             </div>
@@ -1968,7 +2469,7 @@ function NewJobPageContent() {
               <UserCheck className="w-4 h-4 text-slate-900 flex-shrink-0" />
               <h3 className="text-[14px] font-bold text-slate-800">Customer Requirements</h3>
               <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                <Sparkles className="w-3 h-3" /> PAIR generated
+                <Sparkles className="w-3 h-3" /> Hoonr-Curate generated
               </span>
             </div>
 
@@ -2112,23 +2613,28 @@ function NewJobPageContent() {
   };
 
   const addResumeFilter = () => {
-    const category = prompt('Filter category (e.g. Skills, Location, Certification):');
-    if (!category || !category.trim()) return;
-    const value = prompt(`Value for "${category.trim()}":`);
-    if (!value || !value.trim()) return;
-
+    // Inline-editable draft row. User fills category + value directly inside
+    // the filter card (no native prompt). Manual filters (ai=false,
+    // fromRubric=false) render the category as an editable <input>.
     setResumeMatchFilters(prev => [
       ...prev,
       {
         id: filterIdCounter,
-        category: category.trim(),
-        value: value.trim(),
+        category: 'Custom',
+        value: '',
         active: true,
         ai: false,
-        fromRubric: false
+        fromRubric: false,
+        weight: 1
       }
     ]);
     setFilterIdCounter(prev => prev + 1);
+  };
+
+  const updateResumeFilterCategory = (id: number, category: string) => {
+    setResumeMatchFilters(prev =>
+      prev.map(filter => (filter.id === id ? { ...filter, category } : filter))
+    );
   };
 
   // Initialize filters from rubric data when moving to step 4
@@ -2143,90 +2649,90 @@ function NewJobPageContent() {
       active: boolean;
       ai: boolean;
       fromRubric: boolean;
+      rubricKey?: string;
+      weight?: number;
     }> = [];
 
     let idCounter = 1;
 
-    // Preserve user's active/inactive preferences for existing filters
-    const existingFilterPrefs = new Map<string, boolean>();
+    // Preserve user's active/inactive preferences AND custom weight for
+    // existing filters across rubric re-inits. Key on the stable rubricKey
+    // (when present) or derive one from the filter's base value.
+    const existingFilterPrefs = new Map<string, { active: boolean; weight: number }>();
     resumeMatchFilters.forEach(f => {
-      // Create a key from category + base value (without minYears/matchType which may change)
-      const baseValue = f.value.split('—')[0].trim();
-      existingFilterPrefs.set(`${f.category}|${baseValue}`, f.active);
+      const key = f.rubricKey || rubricKeyFor(f.category, f.value.split("—")[0]);
+      existingFilterPrefs.set(key, {
+        active: f.active,
+        weight: typeof f.weight === 'number' && isFinite(f.weight) ? f.weight : 1,
+      });
     });
 
+    const pushRubricFilter = (
+      category: string,
+      baseValue: string,
+      displayValue: string,
+      defaultActive: boolean
+    ) => {
+      const key = rubricKeyFor(category, baseValue);
+      const existing = existingFilterPrefs.get(key);
+      const active = existing ? existing.active : defaultActive;
+      const weight = existing ? existing.weight : 1;
+      filters.push({
+        id: idCounter++,
+        category,
+        value: displayValue,
+        active,
+        ai: true,
+        fromRubric: true,
+        rubricKey: key,
+        weight,
+      });
+    };
+
     // 1. Titles
+    // Preserve Required vs Preferred flag set on Step 3 — previously every
+    // title was hard-coded as "Required Title" + active=true, which made
+    // Preferred titles appear as hard filters on Step 4. Now the category
+    // pill and the default On/Off state both track the rubric's
+    // `title.required` value, mirroring how skills are handled below.
     if (rubricData.titles) {
       rubricData.titles.forEach((title: any) => {
-        const filterKey = `Required Title|${title.value}`;
-        const wasActive = existingFilterPrefs.has(filterKey) ? (existingFilterPrefs.get(filterKey) ?? true) : true;
-        filters.push({
-          id: idCounter++,
-          category: 'Required Title',
-          value: `${title.value} — ${title.minYears}+ yrs, ${title.matchType} match`,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+        const isRequired = title.required === "Required";
+        const category = isRequired ? "Required Title" : "Preferred Title";
+        pushRubricFilter(
+          category,
+          title.value || "",
+          `${title.value} — ${title.minYears}+ yrs, ${title.matchType} match`,
+          isRequired
+        );
       });
     }
 
     // 2. Skills
     if (rubricData.skills) {
       rubricData.skills.forEach((skill: any) => {
-        const category = skill.required === 'Required' ? 'Required Skill' : 'Preferred Skill';
-        const filterKey = `${category}|${skill.value}`;
-        // Active if explicitly "Required" or if it was previously active.
-        const wasActive = existingFilterPrefs.has(filterKey)
-          ? (existingFilterPrefs.get(filterKey) ?? (skill.required === 'Required'))
-          : (skill.required === 'Required');
-
-        filters.push({
-          id: idCounter++,
+        const category = skill.required === "Required" ? "Required Skill" : "Preferred Skill";
+        pushRubricFilter(
           category,
-          value: `${skill.value} — ${skill.minYears}+ yrs, ${skill.matchType} match`,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+          skill.value || "",
+          `${skill.value} — ${skill.minYears}+ yrs, ${skill.matchType} match`,
+          skill.required === "Required"
+        );
       });
     }
 
     // 3. Education
     if (rubricData.education) {
       rubricData.education.forEach((edu: any) => {
-        const filterKey = `Education|${edu.degree}${edu.field ? ` in ${edu.field}` : ''}`;
-        const wasActive = existingFilterPrefs.has(filterKey)
-          ? (existingFilterPrefs.get(filterKey) ?? (edu.required === 'Required'))
-          : (edu.required === 'Required');
-
-        filters.push({
-          id: idCounter++,
-          category: 'Education',
-          value: `${edu.degree}${edu.field ? ` in ${edu.field}` : ''}`,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+        const display = `${edu.degree}${edu.field ? ` in ${edu.field}` : ""}`;
+        pushRubricFilter("Education", display, display, edu.required === "Required");
       });
     }
 
     // 4. Domain Experience
     if (rubricData.domain) {
       rubricData.domain.forEach((dom: any) => {
-        const filterKey = `Domain|${dom.value}`;
-        const wasActive = existingFilterPrefs.has(filterKey)
-          ? (existingFilterPrefs.get(filterKey) ?? (dom.required === 'Required'))
-          : (dom.required === 'Required');
-
-        filters.push({
-          id: idCounter++,
-          category: 'Domain',
-          value: dom.value,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+        pushRubricFilter("Domain", dom.value || "", dom.value || "", dom.required === "Required");
       });
     }
 
@@ -2234,17 +2740,8 @@ function NewJobPageContent() {
     if (rubricData.customer_requirements) {
       rubricData.customer_requirements.forEach((req: any) => {
         if (!req.value) return;
-        const filterKey = `Customer Req.|${req.type}: ${req.value}`;
-        const wasActive = existingFilterPrefs.has(filterKey) ? (existingFilterPrefs.get(filterKey) ?? true) : true;
-
-        filters.push({
-          id: idCounter++,
-          category: 'Customer Req.',
-          value: `${req.type}: ${req.value}`,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+        const display = `${req.type}: ${req.value}`;
+        pushRubricFilter("Customer Req.", display, display, true);
       });
     }
 
@@ -2252,19 +2749,7 @@ function NewJobPageContent() {
     if (rubricData.other_requirements) {
       rubricData.other_requirements.forEach((req: any) => {
         if (!req.value) return;
-        const filterKey = `Requirement|${req.value}`;
-        const wasActive = existingFilterPrefs.has(filterKey)
-          ? (existingFilterPrefs.get(filterKey) ?? (req.required === 'Required'))
-          : (req.required === 'Required');
-
-        filters.push({
-          id: idCounter++,
-          category: 'Requirement',
-          value: req.value,
-          active: wasActive,
-          ai: true,
-          fromRubric: true
-        });
+        pushRubricFilter("Requirement", req.value, req.value, req.required === "Required");
       });
     }
 
@@ -2281,13 +2766,24 @@ function NewJobPageContent() {
   };
 
 
-  const initializeScreenQuestionsFromRubric = () => {
-    // Skip if questions were already loaded from DB or the recruiter has already edited them
-    if (screenQuestionsInitializedRef.current) return;
-    if (!jobData) return;
+  // 4.4: Tracks whether the recruiter has manually added/deleted/edited a
+  // question. If so, the Step-4 sync effect stops overwriting the list — only
+  // an explicit "Regenerate" button can rewrite it.
+  const userHasEditedQuestionsRef = useRef(false);
 
+  const initializeScreenQuestionsFromRubric = async (opts: { force?: boolean } = {}) => {
+    if (!jobData) return;
+    // Respect recruiter edits. Sync-effect re-fires (from level / rubric
+    // changes) MUST NOT clobber handcrafted questions — an explicit
+    // `force: true` (from a user-initiated Regenerate) is the only escape.
+    if (userHasEditedQuestionsRef.current && !opts.force) return;
+
+    const addressParts = [jobData.address1, jobData.city, jobData.state].filter(Boolean);
+    const addressStr = addressParts.join(", ");
     const location = `${jobData.city || ""}, ${jobData.state || ""}`.trim().replace(/^, |, $/g, "");
-    const isRemote = jobData.location_type?.toLowerCase() === "remote";
+    const arrangement = (jobData.location_type || "").toLowerCase();
+    const isRemote = arrangement === "remote";
+    const arrangementLabel = arrangement === "hybrid" ? "a hybrid" : "an onsite";
 
     let idCounter = 1;
     const questions: ScreenQuestion[] = [];
@@ -2296,20 +2792,31 @@ function NewJobPageContent() {
     );
 
     // 1. Bot Introduction
-    const intro = `Hi {{candidate name}}, I'm Nova, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${jobTitle || "role"} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
-    setBotIntroduction(intro);
+    const introTitle = (enhancedTitle || jobTitle || "role").trim();
+    const intro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+    setBotIntroduction(prev => (prev && prev.trim().length > 0 ? prev : intro));
 
-    // 2. Default Questions
-    const defaultQs = [
+    // 2. Default Questions — note the onsite/hybrid question is now
+    // arrangement-aware, address-aware, and marked as a hard filter so the
+    // downstream screening flow can disqualify automatically.
+    const defaultQs: Array<{ text: string; criteria: string; is_hard_filter?: boolean }> = [
       { text: "Are you open to exploring new job opportunities?", criteria: "Must be open to new job opportunities" },
       { text: "What is your current or most recent role and key responsibilities?", criteria: "" },
       { text: "What is your current location?", criteria: "" },
-      ...(isRemote ? [] : [{ text: "Are you open to working onsite if required for the role?", criteria: "Must be willing to work onsite" }]),
+    ];
+    if (!isRemote) {
+      defaultQs.push({
+        text: `This role follows ${arrangementLabel} work arrangement based in ${addressStr || location || "the job location"}. Are you open to working in this setup?`,
+        criteria: `Must be open to ${arrangementLabel} work arrangement`,
+        is_hard_filter: true,
+      });
+    }
+    defaultQs.push(
       { text: "What is your earliest availability to start a new role?", criteria: `Must be available by ${jobData.start_date || 'ASAP'}` },
       { text: "What is your current compensation and expected compensation?", criteria: "" },
       { text: "Are you authorized to work in the United States?", criteria: "" },
-      { text: "Will you now or in the future require visa sponsorship to continue working in the United States?", criteria: "" }
-    ];
+      { text: "Will you now or in the future require visa sponsorship to continue working in the United States?", criteria: "" },
+    );
 
     defaultQs.forEach((q, index) => {
       questions.push({
@@ -2318,41 +2825,89 @@ function NewJobPageContent() {
         pass_criteria: q.criteria,
         is_default: true,
         category: "default",
-        order_index: index
+        order_index: index,
+        is_hard_filter: !!q.is_hard_filter,
       });
     });
 
-    // 3. Role-Specific Questions (from rubric skills)
-    if (rubricData?.skills) {
-      rubricData.skills.forEach((skill: any) => {
-        // Only generate questions for required skills or first 4 skills
-        if (questions.length < 12) {
-          questions.push({
-            id: idCounter++,
-            question_text: `Can you describe your experience with ${skill.value}? We're looking for ${skill.minYears}+ years of experience.`,
-            pass_criteria: `Must have ${skill.minYears}+ yrs of ${skill.value} experience`,
-            is_default: false,
-            category: "role-specific",
-            order_index: questions.length
+    // 3. Role-Specific Questions — prefer the backend LLM-backed generator
+    // which produces depth-probing, seniority-aware questions. Fall back to
+    // the legacy per-skill template only if the endpoint fails, so we
+    // never leave the recruiter empty-handed.
+    let roleSpecific: ScreenQuestion[] = [];
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+      const jobRef = numericJobId || jobdivaId || "new";
+      const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobRef}/screening-questions/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jobTitle: (enhancedTitle || jobTitle || "").trim(),
+          rubric: rubricData || {},
+          screeningLevel: screeningLevel,
+          customerName: jobData?.customer_name || "",
+          workArrangement: jobData?.location_type || "",
+          address: addressStr,
+          totalYears: rubricData?.total_years || null,
+        }),
+      });
+      if (res.ok) {
+        const payload = await res.json();
+        const raw = Array.isArray(payload?.questions) ? payload.questions : [];
+        // Front-matter (intro, arrangement, total-years) is already owned by
+        // the frontend above — keep only role-specific questions to avoid
+        // duplicates.
+        raw
+          .filter((q: any) => {
+            const cat = String(q?.category || "").toLowerCase();
+            return cat !== "default" && cat !== "work-arrangement" && cat !== "intro";
+          })
+          .forEach((q: any) => {
+            roleSpecific.push({
+              id: idCounter++,
+              question_text: q.question_text || "",
+              pass_criteria: q.pass_criteria || "",
+              is_default: false,
+              category: "role-specific",
+              order_index: questions.length + roleSpecific.length,
+              is_hard_filter: false,
+            });
           });
-        }
+      }
+    } catch (e) {
+      console.warn("screening-questions/generate failed, using template fallback", e);
+    }
+
+    // Fallback path: legacy per-skill template so Step 4 is never empty.
+    if (roleSpecific.length === 0 && rubricData?.skills) {
+      rubricData.skills.forEach((skill: any) => {
+        if (questions.length + roleSpecific.length >= 12) return;
+        roleSpecific.push({
+          id: idCounter++,
+          question_text: `Can you describe your experience with ${skill.value}? We're looking for ${skill.minYears || 3}+ years of experience.`,
+          pass_criteria: `Must have ${skill.minYears || 3}+ yrs of ${skill.value} experience`,
+          is_default: false,
+          category: "role-specific",
+          order_index: questions.length + roleSpecific.length,
+          is_hard_filter: false,
+        });
       });
     }
 
-    const remainingSlots = Math.max(0, 12 - questions.length);
+    roleSpecific.forEach(q => questions.push(q));
+
+    const remainingSlots = Math.max(0, 14 - questions.length);
     const mergedQuestions = [
       ...questions,
       ...customQuestions.slice(0, remainingSlots).map((question, index) => ({
         ...question,
         id: idCounter + index,
-        order_index: questions.length + index
-      }))
+        order_index: questions.length + index,
+      })),
     ];
 
     setScreenQuestions(mergedQuestions);
     setQuestionIdCounter(mergedQuestions.length + 1);
-    // Mark as initialised so subsequent adds/deletes or return visits don't overwrite
-    screenQuestionsInitializedRef.current = true;
   };
 
   const initializeSourceFromRubric = () => {
@@ -2363,18 +2918,18 @@ function NewJobPageContent() {
       return isRubricItemRequired(item) ? "must" : "can";
     };
 
+    // Use the stable rubricKey planted in Step 4 rather than re-parsing the
+    // formatted filter value. If no rubric filter is active yet (initial
+    // page load), fall back to including every rubric item.
     const activeRubricFilterKeys = new Set(
       resumeMatchFilters
-        .filter(filter => filter.fromRubric && filter.active)
-        .map(filter => {
-          const baseValue = filter.value.split("—")[0].trim();
-          return `${filter.category}|${baseValue}`;
-        })
+        .filter(filter => filter.fromRubric && filter.active && filter.rubricKey)
+        .map(filter => filter.rubricKey as string)
     );
 
     const shouldIncludeRubricItem = (category: string, value: string) => {
       if (activeRubricFilterKeys.size === 0) return true;
-      return activeRubricFilterKeys.has(`${category}|${value.trim()}`);
+      return activeRubricFilterKeys.has(rubricKeyFor(category, value));
     };
 
     // 1. Titles
@@ -2385,23 +2940,23 @@ function NewJobPageContent() {
         const rubricTitles = rubricData.titles
           .filter((title: any) => shouldIncludeRubricItem("Required Title", title.value || ""))
           .map((title: any, index: number) => {
-            const existing = existingByValue.get(title.value || "");
+          const existing = existingByValue.get(title.value || "");
 
-            return {
-              id: existing?.id ?? index + 1,
-              value: title.value || "",
-              matchType: getRubricDrivenMatchType(title, existing?.matchType),
-              years: title.minYears || 0,
-              recent: existing?.recent ?? !!title.recent,
-              similarCount: `${(title.similar_titles || []).length}/${(title.similar_titles || []).length} similar`,
-              similarTitles: title.similar_titles || [],
-              selectedSimilarTitles: existing?.selectedSimilarTitles?.filter((item: string) =>
-                (title.similar_titles || []).includes(item)
-              ) ?? (title.similar_titles || []),
-              similarExpanded: existing?.similarExpanded ?? false,
-              fromRubric: true
-            };
-          });
+          return {
+            id: existing?.id ?? index + 1,
+            value: title.value || "",
+            matchType: getRubricDrivenMatchType(title, existing?.matchType),
+            years: title.minYears || 0,
+            recent: existing?.recent ?? !!title.recent,
+            similarCount: `${(title.similar_titles || []).length}/${(title.similar_titles || []).length} similar`,
+            similarTitles: title.similar_titles || [],
+            selectedSimilarTitles: existing?.selectedSimilarTitles?.filter((item: string) =>
+              (title.similar_titles || []).includes(item)
+            ) ?? (title.similar_titles || []),
+            similarExpanded: existing?.similarExpanded ?? false,
+            fromRubric: true
+          };
+        });
 
         return [...rubricTitles, ...manualTitles];
       });
@@ -2418,23 +2973,23 @@ function NewJobPageContent() {
             skill.value || ""
           ))
           .map((skill: any, index: number) => {
-            const existing = existingByValue.get(skill.value || "");
+          const existing = existingByValue.get(skill.value || "");
 
-            return {
-              id: existing?.id ?? index + 1001,
-              value: skill.value || "",
-              matchType: getRubricDrivenMatchType(skill, existing?.matchType),
-              years: skill.minYears || 0,
-              recent: existing?.recent ?? !!skill.recent,
-              similarCount: `${(skill.similar_skills || []).length}/${(skill.similar_skills || []).length} similar`,
-              similarSkills: skill.similar_skills || [],
-              selectedSimilarSkills: existing?.selectedSimilarSkills?.filter((item: string) =>
-                (skill.similar_skills || []).includes(item)
-              ) ?? (skill.similar_skills || []),
-              similarExpanded: existing?.similarExpanded ?? false,
-              fromRubric: true
-            };
-          });
+          return {
+            id: existing?.id ?? index + 1001,
+            value: skill.value || "",
+            matchType: getRubricDrivenMatchType(skill, existing?.matchType),
+            years: skill.minYears || 0,
+            recent: existing?.recent ?? !!skill.recent,
+            similarCount: `${(skill.similar_skills || []).length}/${(skill.similar_skills || []).length} similar`,
+            similarSkills: skill.similar_skills || [],
+            selectedSimilarSkills: existing?.selectedSimilarSkills?.filter((item: string) =>
+              (skill.similar_skills || []).includes(item)
+            ) ?? (skill.similar_skills || []),
+            similarExpanded: existing?.similarExpanded ?? false,
+            fromRubric: true
+          };
+        });
 
         return [...rubricSkills, ...manualSkills];
       });
@@ -2466,10 +3021,18 @@ function NewJobPageContent() {
     initializeScreenQuestionsFromRubric();
   });
 
+  // 5.3: once sourcing criteria have been derived from the rubric for a job,
+  // don't re-derive them. Re-runs on every dep-list change caused visible
+  // drift ("first picked 2 skills, later 3, later 5+1 title"). An explicit
+  // Reset button (or user-forced regenerate) is the only way to recompute.
+  const sourcingCriteriaInitializedRef = useRef(false);
+
   const syncStepFiveData = useEffectEvent(() => {
     if (!rubricData) return;
+    if (sourcingCriteriaInitializedRef.current) return;
 
     initializeSourceFromRubric();
+    sourcingCriteriaInitializedRef.current = true;
   });
 
   useEffect(() => {
@@ -2515,13 +3078,49 @@ function NewJobPageContent() {
     });
   }, [rubricData?.skills]);
 
+  // Inject the Step 1 work-authorization value (e.g. "W2 only", "US Citizen /
+  // GC") into Step 3's "Other Requirements" list so recruiters don't have to
+  // re-enter it. We only inject once per rubric+workAuth pair — if the user
+  // deletes the item we don't re-add it on the same rubric. Tracked via a
+  // ref so state churn in other rubric fields doesn't re-trigger injection.
+  const injectedWorkAuthRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!rubricData) return;
+    const authValue = (workAuthorization || jobData?.work_authorization || "").trim();
+    if (!authValue) return;
+    // Don't re-inject the same value we already inserted on this rubric.
+    if (injectedWorkAuthRef.current === authValue) return;
+
+    setRubricData((prev: any) => {
+      if (!prev) return prev;
+      const existing: any[] = Array.isArray(prev.other_requirements) ? prev.other_requirements : [];
+      const already = existing.some(
+        (item: any) => typeof item?.value === "string" &&
+          item.value.trim().toLowerCase() === authValue.toLowerCase()
+      );
+      if (already) {
+        injectedWorkAuthRef.current = authValue;
+        return prev;
+      }
+      injectedWorkAuthRef.current = authValue;
+      return {
+        ...prev,
+        other_requirements: [
+          { value: authValue, required: "Required", source: "Step1" },
+          ...existing,
+        ],
+      };
+    });
+  }, [rubricData, workAuthorization, jobData?.work_authorization]);
+
   useEffect(() => {
     if (currentStep !== 4) return;
 
     syncStepFourData();
-    // NOTE: screenQuestions.length intentionally omitted — adding/deleting a question
-    // must NOT re-trigger rubric initialisation and overwrite recruiter edits.
-  }, [currentStep, rubricData, jobData]);
+    // `screeningLevel` is a dep so flipping Light/Medium/Intensive on Step 1
+    // re-derives the role-specific question set to match the new depth. User
+    // edits are protected by `userHasEditedQuestionsRef` inside the initializer.
+  }, [currentStep, rubricData, jobData, screenQuestions.length, screeningLevel]);
 
   useEffect(() => {
     if (currentStep !== 5) return;
@@ -2699,6 +3298,7 @@ function NewJobPageContent() {
   const resolvedGeneratedBoolean = generatedBoolean || buildGeneratedBooleanString();
 
   useEffect(() => {
+    if (booleanUserEdited) return;
     setIsRefreshingBoolean(true);
     const timeoutId = window.setTimeout(() => {
       setGeneratedBoolean(buildGeneratedBooleanString());
@@ -2706,7 +3306,290 @@ function NewJobPageContent() {
     }, 150);
 
     return () => window.clearTimeout(timeoutId);
-  }, [sourceTitles, sourceSkills, sourceLocations, sourceCompanies, sourceKeywords, resumeMatchFilters, jobTitle]);
+  }, [sourceTitles, sourceSkills, sourceLocations, sourceCompanies, sourceKeywords, resumeMatchFilters, jobTitle, booleanUserEdited]);
+
+  // Item F: mirror the boolean-string relaxation into the structured search
+  // payload. Tier 1/2 widen radius — also bump `within_miles` so LinkedIn /
+  // Dice / Exa (which don't read the boolean's `within N mi`) benefit too.
+  // Tier 3 drops NOT(...) from the boolean — deactivate exclude-category
+  // resume_match_filters so scoring doesn't penalize the same candidates
+  // whose "excluded" terms we just allowed through at sourcing time.
+  const relaxStructuralOverrides = (
+    tier: number,
+    baseWithinMiles: number,
+    currentFilters: typeof resumeMatchFilters
+  ): { withinMilesOverride?: number; resumeMatchFiltersOverride?: typeof resumeMatchFilters } => {
+    if (tier === 1) {
+      return { withinMilesOverride: Math.max(50, baseWithinMiles * 2) };
+    }
+    if (tier === 2) {
+      return { withinMilesOverride: Math.max(100, baseWithinMiles * 2) };
+    }
+    // tier >= 3: also deactivate Exclude-category filters for scoring.
+    return {
+      withinMilesOverride: Math.max(100, baseWithinMiles * 2),
+      resumeMatchFiltersOverride: currentFilters.map(f =>
+        (f.category || "").toLowerCase().includes("exclude")
+          ? { ...f, active: false }
+          : f
+      ),
+    };
+  };
+
+  const relaxBooleanString = (input: string, tier: number): { query: string; label: string } => {
+    let query = input;
+    let label = "";
+    if (tier === 1) {
+      query = query.replace(/within\s+(\d+)\s+mi/gi, (_m, n) => `within ${Math.max(50, Number(n) * 2)} mi`);
+      query = query.replace(/\s+AND\s+"\d+\+\s*years?"/gi, "");
+      label = "Widened radius · dropped year thresholds";
+    } else if (tier === 2) {
+      query = query.replace(/within\s+(\d+)\s+mi/gi, (_m, n) => `within ${Math.max(100, Number(n) * 2)} mi`);
+      query = query.replace(/\(([^()]+?)\)/g, (_m, inner) => {
+        const parts = String(inner).split(/\s+AND\s+/i).map((p: string) => p.trim()).filter(Boolean);
+        return parts.length > 1 ? `(${parts.join(" OR ")})` : `(${inner})`;
+      });
+      query = query.replace(/\s+AND\s+recent/gi, "");
+      label = "Radius widened further · required clauses OR-joined";
+    } else {
+      query = query.replace(/\s+NOT\s+\([^)]*\)/gi, "");
+      const andParts = query.split(/\s+AND\s+/i).map(p => p.trim()).filter(Boolean);
+      const locationPart = andParts.find(p => /within\s+\d+\s+mi/i.test(p));
+      const rolePart = andParts.find(p => !/within\s+\d+\s+mi/i.test(p) && !/"\d+\+\s*years?"/i.test(p));
+      const keep = [rolePart, locationPart].filter(Boolean) as string[];
+      query = keep.length ? keep.join(" AND ") : andParts[0] || query;
+      label = "Kept only role + location";
+    }
+    return { query: query.replace(/\s+/g, " ").trim(), label };
+  };
+
+  const countQualified = (list: any[]) =>
+    list.filter(c => (c.match_score || 0) >= QUALIFIED_SCORE_THRESHOLD).length;
+
+  const buildSearchPayload = (booleanString: string, overrides?: { withinMilesOverride?: number; resumeMatchFiltersOverride?: typeof resumeMatchFilters }) => {
+    const titleCriteria = sourceTitles.map(t => ({
+      value: t.value || "Title",
+      match_type: t.matchType || "must",
+      years: t.years || 0,
+      recent: t.recent || false,
+      similar_terms: t.selectedSimilarTitles || []
+    }));
+    const skillCriteria = sourceSkills.map(s => ({
+      value: s.value || "Skill",
+      match_type: s.matchType || "must",
+      years: s.years || 0,
+      recent: s.recent || false,
+      similar_terms: s.selectedSimilarSkills || []
+    }));
+    // Degrade gracefully: if nothing was configured, inject the job title as
+    // a preferred title so the search isn't totally empty. Backend sources
+    // that only accept a flat skills list (LinkedIn/Dice/Exa) derive their
+    // list from title_criteria + skill_criteria server-side.
+    if (titleCriteria.length === 0 && skillCriteria.length === 0 && jobTitle) {
+      titleCriteria.push({
+        value: jobTitle,
+        match_type: "can",
+        years: 0,
+        recent: false,
+        similar_terms: []
+      });
+    }
+    const primaryLocation = sourceLocations[0];
+    const parsedRadius = primaryLocation?.radius?.match(/(\d+)/)?.[1]
+      ? Number(primaryLocation.radius.match(/(\d+)/)?.[1])
+      : 25;
+    const withinMiles = overrides?.withinMilesOverride ?? parsedRadius;
+    const activeResumeFilters = (overrides?.resumeMatchFiltersOverride ?? resumeMatchFilters)
+      .filter(f => f.active)
+      .map(f => ({
+        category: f.category,
+        value: f.value,
+        active: f.active,
+        weight: typeof f.weight === 'number' && isFinite(f.weight) ? f.weight : 1,
+      }));
+    const selectedSourcesArray = Object.keys(searchSources)
+      .filter(k => (searchSources as any)[k])
+      .map(k => {
+        // `jobdiva_applicants` was removed as a toggle (5.1). Applicants
+        // still land via the auto-sync path; they're just not gated by a
+        // recruiter checkbox on Step 5 anymore.
+        if (k === 'jobdiva') return 'JobDiva';
+        if (k === 'linkedin') return 'LinkedIn';
+        if (k === 'dice') return 'Dice';
+        if (k === 'exa') return 'Exa';
+        return k;
+      });
+    return {
+      job_id: numericJobId || jobdivaId,
+      title_criteria: titleCriteria,
+      skill_criteria: skillCriteria,
+      keywords: sourceKeywords,
+      companies: sourceCompanies,
+      resume_match_filters: activeResumeFilters,
+      location: primaryLocation?.value || "",
+      within_miles: withinMiles,
+      sources: selectedSourcesArray,
+      boolean_string: booleanString,
+      // 5.6 / 5.10 plumbing — backend honors these in
+      // jobdiva_service.search_candidates. `recent_days: 0` means Any.
+      recent_days: recentDaysFilter > 0 ? recentDaysFilter : null,
+      require_resume: !includeNoResume,
+      page: 1,
+      page_size: 100
+    };
+  };
+
+  const runSearchStream = async (
+    booleanString: string,
+    mode: "replace" | "append",
+    overrides?: { withinMilesOverride?: number; resumeMatchFiltersOverride?: typeof resumeMatchFilters }
+  ): Promise<any[]> => {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+    const payload = buildSearchPayload(booleanString, overrides);
+    const controller = new AbortController();
+    searchAbortRef.current = controller;
+    let response: Response;
+    try {
+      response = await fetch(`${apiUrl}/candidates/search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+    } catch (e: any) {
+      if (e?.name === "AbortError") {
+        if (mode === "replace") setCandidates([]);
+        return [];
+      }
+      throw e;
+    }
+    if (!response.ok || !response.body) {
+      console.error("Search failed:", response.status);
+      if (mode === "replace") setCandidates([]);
+      return [];
+    }
+    if (mode === "replace") {
+      setCandidates([]);
+      setCurrentPage(1);
+      seenCandidateIdsRef.current = new Set<string>();
+    }
+    const seenIds = seenCandidateIdsRef.current;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let runList: any[] = [];
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const event = JSON.parse(line);
+            if (event.type === "candidate") {
+              const id = String(event.data.candidate_id || event.data.id || "");
+              if (id && seenIds.has(id)) continue;
+              if (id) seenIds.add(id);
+              runList.push(event.data);
+              setCandidates(prev => [...prev, event.data]);
+            } else if (event.type === "stage") {
+              setSearchStatus(event.data);
+            } else if (event.type === "summary") {
+              console.log("Search stream complete:", event.data);
+            } else if (event.type === "error") {
+              console.error("Stream error:", event.message);
+            }
+          } catch (e) {
+            console.error("Failed to parse stream line:", line, e);
+          }
+        }
+      }
+    } catch (e: any) {
+      if (e?.name === "AbortError" || controller.signal.aborted) {
+        console.log("Search stream aborted by user");
+      } else {
+        throw e;
+      }
+    }
+    return runList;
+  };
+
+  const handleStopSearch = () => {
+    if (searchAbortRef.current) {
+      searchAbortRef.current.abort();
+    }
+    setIsSearching(false);
+    setSearchStatus("Search stopped");
+  };
+
+  const handleRunSearch = async () => {
+    setIsSearching(true);
+    setHasSearched(true);
+    try {
+      const initial = resolvedGeneratedBoolean;
+      setGeneratedBoolean(initial);
+      const attempts: { query: string; label: string }[] = [{ query: initial, label: "Hoonr-Curate generated" }];
+      setBooleanAttempts(attempts);
+      setSearchStatus("Searching candidates...");
+      const firstRun = await runSearchStream(initial, "replace");
+      let accumulated = [...firstRun];
+
+      const baseWithinMiles = (() => {
+        const m = sourceLocations[0]?.radius?.match(/(\d+)/)?.[1];
+        return m ? Number(m) : 25;
+      })();
+      let currentAttempts = attempts;
+      while (currentAttempts.length < MAX_BOOLEAN_ATTEMPTS) {
+        if (searchAbortRef.current?.signal.aborted) break;
+        const qualified = countQualified(accumulated);
+        if (qualified >= QUALIFIED_TARGET_COUNT) break;
+        const tier = currentAttempts.length; // 1, 2, 3 as attempts grow
+        const relaxed = relaxBooleanString(currentAttempts[currentAttempts.length - 1].query, tier);
+        if (relaxed.query === currentAttempts[currentAttempts.length - 1].query) break;
+        const structuralOverrides = relaxStructuralOverrides(tier, baseWithinMiles, resumeMatchFilters);
+        currentAttempts = [...currentAttempts, { query: relaxed.query, label: relaxed.label }];
+        setBooleanAttempts(currentAttempts);
+        setGeneratedBoolean(relaxed.query);
+        setSearchStatus(`Only ${qualified}/${QUALIFIED_TARGET_COUNT} strong matches — relaxing boolean (attempt ${currentAttempts.length}/${MAX_BOOLEAN_ATTEMPTS})...`);
+        const nextRun = await runSearchStream(relaxed.query, "append", structuralOverrides);
+        accumulated = [...accumulated, ...nextRun];
+      }
+    } catch (error) {
+      console.error("Failed to search candidates:", error);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const handleExtendBoolean = async () => {
+    if (isSearching) return;
+    if (booleanAttempts.length >= MAX_BOOLEAN_ATTEMPTS) return;
+    const base = resolvedGeneratedBoolean;
+    const tier = Math.max(1, booleanAttempts.length);
+    const relaxed = relaxBooleanString(base, tier);
+    const nextAttempts = booleanAttempts.length
+      ? [...booleanAttempts, { query: relaxed.query, label: relaxed.label }]
+      : [{ query: base, label: "Hoonr-Curate generated" }, { query: relaxed.query, label: relaxed.label }];
+    setBooleanAttempts(nextAttempts);
+    setGeneratedBoolean(relaxed.query);
+    setBooleanUserEdited(true);
+    setIsSearching(true);
+    setHasSearched(true);
+    try {
+      const baseWithinMiles = (() => {
+        const m = sourceLocations[0]?.radius?.match(/(\d+)/)?.[1];
+        return m ? Number(m) : 25;
+      })();
+      const structuralOverrides = relaxStructuralOverrides(tier, baseWithinMiles, resumeMatchFilters);
+      setSearchStatus(`Extending search with more lenient boolean (attempt ${nextAttempts.length}/${MAX_BOOLEAN_ATTEMPTS})...`);
+      await runSearchStream(relaxed.query, "append", structuralOverrides);
+    } finally {
+      setIsSearching(false);
+    }
+  };
 
   const addScreenQuestion = () => {
     const newQuestion: ScreenQuestion = {
@@ -2715,17 +3598,21 @@ function NewJobPageContent() {
       pass_criteria: "",
       is_default: false,
       category: "other",
-      order_index: screenQuestions.length
+      order_index: screenQuestions.length,
+      is_hard_filter: false,
     };
+    userHasEditedQuestionsRef.current = true;
     setScreenQuestions([...screenQuestions, newQuestion]);
     setQuestionIdCounter(questionIdCounter + 1);
   };
 
   const updateScreenQuestion = (id: number, field: keyof ScreenQuestion, value: any) => {
+    userHasEditedQuestionsRef.current = true;
     setScreenQuestions(prev => prev.map(q => q.id === id ? { ...q, [field]: value } : q));
   };
 
   const deleteScreenQuestion = (id: number) => {
+    userHasEditedQuestionsRef.current = true;
     setScreenQuestions(prev => prev.filter(q => q.id !== id));
   };
 
@@ -2736,7 +3623,7 @@ function NewJobPageContent() {
         <Filter className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight">Set Filters</h2>
-          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Each rubric item from Establish Rubric is evaluated here. Toggle, edit, or add filters for resume matching and the PAIR phone screen.</p>
+          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Each rubric item from Establish Rubric is evaluated here. Toggle, edit, or add filters for resume matching and the Hoonr-Curate phone screen.</p>
         </div>
       </div>
 
@@ -2749,7 +3636,7 @@ function NewJobPageContent() {
             <span className="text-[12px] font-normal text-slate-500">Hard filters applied during resume screening</span>
             <span className="ml-auto bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
               <Sparkles className="w-3 h-3 inline mr-1" />
-              PAIR pre-filled
+              Hoonr-Curate pre-filled
             </span>
           </div>
 
@@ -2758,7 +3645,8 @@ function NewJobPageContent() {
             <div className="w-[44px] flex-shrink-0"></div>
             <div className="w-[110px] flex-shrink-0">Category</div>
             <div className="flex-1">Value</div>
-            <div className="w-[100px] flex-shrink-0"></div>
+            <div className="w-[72px] flex-shrink-0 text-center" title="Relative weight for scoring. 1 = default, 2 = counts double, 0.5 = half.">Weight</div>
+            <div className="w-[220px] flex-shrink-0"></div>
           </div>
 
           {/* Active Filters */}
@@ -2777,21 +3665,58 @@ function NewJobPageContent() {
                   >
                     On
                   </button>
-                  <span className="w-[110px] flex-shrink-0 bg-slate-100 text-slate-600 text-[11px] font-semibold px-3 py-1 rounded-full text-center">
-                    {filter.category}
-                  </span>
+                  {filter.ai || filter.fromRubric ? (
+                    <span className="w-[110px] flex-shrink-0 bg-slate-100 text-slate-600 text-[11px] font-semibold px-3 py-1 rounded-full text-center">
+                      {filter.category}
+                    </span>
+                  ) : (
+                    <input
+                      type="text"
+                      value={filter.category}
+                      onChange={(e) => updateResumeFilterCategory(filter.id, e.target.value)}
+                      placeholder="Category"
+                      className="w-[110px] flex-shrink-0 bg-slate-50 border border-slate-200 text-slate-700 text-[11px] font-semibold px-3 py-1 rounded-full text-center outline-none focus:border-[#6366f1] focus:ring-1 focus:ring-[#6366f1]/30"
+                    />
+                  )}
                   <div className="flex-1 min-w-0">
                     <input
                       type="text"
                       value={filter.value}
                       onChange={(e) => updateResumeFilter(filter.id, e.target.value)}
+                      placeholder={filter.ai || filter.fromRubric ? "" : "Enter value..."}
                       className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium"
                     />
                   </div>
-                  <div className="w-[100px] flex-shrink-0 flex items-center justify-end gap-2">
+                  <div className="w-[72px] flex-shrink-0 flex items-center justify-center">
+                    <input
+                      type="number"
+                      min={0.1}
+                      max={5}
+                      step={0.1}
+                      value={filter.weight ?? 1}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        const parsed = raw === "" ? 1 : parseFloat(raw);
+                        const next = isFinite(parsed) ? parsed : 1;
+                        setResumeMatchFilters(prev =>
+                          prev.map(f => f.id === filter.id ? { ...f, weight: next } : f)
+                        );
+                      }}
+                      onBlur={(e) => {
+                        const parsed = parseFloat(e.target.value);
+                        const clamped = isFinite(parsed) ? Math.max(0.1, Math.min(5, parsed)) : 1;
+                        setResumeMatchFilters(prev =>
+                          prev.map(f => f.id === filter.id ? { ...f, weight: clamped } : f)
+                        );
+                      }}
+                      className="w-14 text-[13px] text-center bg-slate-50 border border-slate-200 rounded-md px-1 py-1 text-slate-900 font-semibold focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30 focus:border-[#6366f1]"
+                      title="Relative weight. 1 = default, 2 = counts double, 0.5 = half."
+                    />
+                  </div>
+                  <div className="w-[220px] flex-shrink-0 flex items-center justify-end gap-2">
                     {filter.ai && (
                       <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
-                        PAIR
+                        Hoonr-Curate
                       </span>
                     )}
                     {filter.fromRubric && (
@@ -2831,9 +3756,19 @@ function NewJobPageContent() {
                   >
                     Off
                   </button>
-                  <span className="w-[110px] flex-shrink-0 bg-slate-50 text-slate-400 text-[11px] font-semibold px-3 py-1 rounded-full text-center">
-                    {filter.category}
-                  </span>
+                  {filter.ai || filter.fromRubric ? (
+                    <span className="w-[110px] flex-shrink-0 bg-slate-50 text-slate-400 text-[11px] font-semibold px-3 py-1 rounded-full text-center">
+                      {filter.category}
+                    </span>
+                  ) : (
+                    <input
+                      type="text"
+                      value={filter.category}
+                      onChange={(e) => updateResumeFilterCategory(filter.id, e.target.value)}
+                      placeholder="Category"
+                      className="w-[110px] flex-shrink-0 bg-slate-50 border border-slate-200 text-slate-400 text-[11px] font-semibold px-3 py-1 rounded-full text-center outline-none focus:border-[#6366f1] focus:ring-1 focus:ring-[#6366f1]/30"
+                    />
+                  )}
                   <div className="flex-1 min-w-0">
                     <input
                       type="text"
@@ -2842,10 +3777,15 @@ function NewJobPageContent() {
                       className="w-full text-[13px] bg-transparent border-none outline-none text-slate-500 font-medium"
                     />
                   </div>
-                  <div className="w-[100px] flex-shrink-0 flex items-center justify-end gap-2">
+                  <div className="w-[72px] flex-shrink-0 flex items-center justify-center">
+                    <span className="text-[12px] text-slate-400 font-semibold">
+                      {(filter.weight ?? 1).toFixed(1)}×
+                    </span>
+                  </div>
+                  <div className="w-[220px] flex-shrink-0 flex items-center justify-end gap-2">
                     {filter.ai && (
                       <span className="bg-slate-100 text-slate-400 text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
-                        PAIR
+                        Hoonr-Curate
                       </span>
                     )}
                     {filter.fromRubric && (
@@ -2890,7 +3830,7 @@ function NewJobPageContent() {
           <div className="flex items-center gap-2 mb-4">
             <Users className="w-4 h-4 text-slate-900 flex-shrink-0" />
             <h3 className="text-[14px] font-bold text-slate-800">Screen</h3>
-            <span className="text-[12px] font-normal text-slate-500">Questions asked during PAIR phone screen</span>
+            <span className="text-[12px] font-normal text-slate-500">Questions asked during Hoonr-Curate phone screen</span>
             <span className="ml-auto text-slate-400 text-[11px] font-bold">
               {screenQuestions.length} / 12 questions
             </span>
@@ -2928,6 +3868,11 @@ function NewJobPageContent() {
               </div>
 
               <div className="flex-1 min-w-0">
+                {q.is_hard_filter && (
+                  <div className="inline-flex items-center gap-1 bg-rose-50 text-rose-700 border border-rose-200 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full mb-1">
+                    Hard filter
+                  </div>
+                )}
                 <textarea
                   value={q.question_text}
                   onChange={(e) => updateScreenQuestion(q.id, 'question_text', e.target.value)}
@@ -2990,7 +3935,7 @@ function NewJobPageContent() {
           <div className="flex-1 text-left">
             <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight mb-1">Source</h2>
             <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">
-              Build your candidate search using structured filters. PAIR generates the Boolean string, searches JobDiva applicants first, then uses JobDiva Talent Search if fewer than 3 applicants match.
+              Build your candidate search using structured filters. Hoonr-Curate generates the Boolean string, searches JobDiva applicants first, then uses JobDiva Talent Search if fewer than 3 applicants match.
             </p>
           </div>
         </div>
@@ -2999,182 +3944,13 @@ function NewJobPageContent() {
           {/* Inner Content Box - Exact Screenshot Structure */}
           <div className="border border-slate-200 rounded-2xl bg-white shadow-sm overflow-hidden p-7 space-y-8">
             <div className="space-y-8">
-              {/* First line: PAIR Badge and Run Search */}
+              {/* 5.5: Top row now shows only the Hoonr-Curate badge. Run/Stop
+                  buttons live below the Boolean string so the recruiter can
+                  inspect + edit the query before kicking off the search. */}
               <div className="flex items-center justify-between mb-2">
                 <div className="bg-[#ede9fe] text-[#6366f1] text-[11px] font-bold px-3 py-1 rounded-lg border border-[#ddd6fe] flex items-center gap-2">
-                  <Sparkles className="w-3.5 h-3.5" /> PAIR Pre-filled from Rubric
+                  <Sparkles className="w-3.5 h-3.5" /> Hoonr-Curate Pre-filled from Rubric
                 </div>
-                <Button
-                  className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
-                  onClick={async () => {
-                    setIsSearching(true);
-                    setHasSearched(true);
-
-                    try {
-                      const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-
-                      // Enhanced format: separate criteria arrays
-                      const titleCriteria = sourceTitles
-                        .map(t => ({
-                          value: t.value || "Title",
-                          match_type: t.matchType || "must",
-                          years: t.years || 0,
-                          recent: t.recent || false,
-                          similar_terms: t.selectedSimilarTitles || []
-                        }));
-
-                      const skillCriteria = sourceSkills
-                        .map(s => ({
-                          value: s.value || "Skill",
-                          match_type: s.matchType || "must",
-                          years: s.years || 0,
-                          recent: s.recent || false,
-                          similar_terms: s.selectedSimilarSkills || []
-                        }));
-
-                      const primaryLocation = sourceLocations[0];
-                      const withinMiles = primaryLocation?.radius?.match(/(\d+)/)?.[1]
-                        ? Number(primaryLocation.radius.match(/(\d+)/)?.[1])
-                        : 25;
-
-                      // Legacy format fallback (for compatibility)
-                      const skillsToSearch = [];
-                      sourceTitles.forEach(t => {
-                        if (t.matchType !== 'exclude') {
-                          skillsToSearch.push({
-                            value: t.value || "Title",
-                            priority: t.matchType === 'must' ? 'Must Have' : 'Flexible',
-                            years_experience: t.years || 0
-                          });
-                        }
-                      });
-
-                      sourceSkills.forEach(s => {
-                        if (s.matchType !== 'exclude') {
-                          skillsToSearch.push({
-                            value: s.value || "Skill",
-                            priority: s.matchType === 'must' ? 'Must Have' : 'Flexible',
-                            years_experience: s.years || 0
-                          });
-                        }
-                      });
-
-                      // Ensure we search something
-                      if (titleCriteria.length === 0 && skillCriteria.length === 0 && skillsToSearch.length === 0) {
-                        skillsToSearch.push({ value: jobTitle || "Role", priority: "Flexible", years_experience: 0 });
-                      }
-
-                      const selectedSourcesArray = Object.keys(searchSources)
-                        .filter(k => (searchSources as any)[k])
-                        .map(k => {
-                          // "JobDiva" checkbox → always queries Talent Search pool.
-                          // JobDiva Applicants are auto-assigned after Launch PAIR.
-                          if (k === 'jobdiva') return 'JobDiva-TalentSearch';
-                          if (k === 'jobdiva_hotlist') return 'JobDivaHotlist';
-                          if (k === 'linkedin') return 'LinkedIn';
-                          if (k === 'dice') return 'Dice';
-                          return k;
-                        });
-
-                      const booleanString = buildGeneratedBooleanString();
-                      setGeneratedBoolean(booleanString);
-                      setSearchStatus("Searching JobDiva applicants, then Talent Search if fewer than 3 match...");
-
-                      const searchPayload = {
-                        job_id: numericJobId || jobdivaId,
-                        // Enhanced criteria (new format)
-                        title_criteria: titleCriteria,
-                        skill_criteria: skillCriteria,
-                        keywords: sourceKeywords,
-                        companies: sourceCompanies,
-                        resume_match_filters: resumeMatchFilters
-                          .filter(filter => filter.active)
-                          .map(filter => ({
-                            category: filter.category,
-                            value: filter.value,
-                            active: filter.active
-                          })),
-                        // Legacy compatibility  
-                        skills: skillsToSearch,
-                        location: primaryLocation?.value || "",
-                        within_miles: withinMiles,
-                        sources: selectedSourcesArray,
-                        boolean_string: booleanString,
-                        page: 1,
-                        page_size: 100
-                      };
-
-                      console.log("🚀 Enhanced search payload:", searchPayload);
-
-                      if (searchAbortControllerRef.current) {
-                        searchAbortControllerRef.current.abort();
-                      }
-                      searchAbortControllerRef.current = new AbortController();
-
-                      const response = await fetch(`${apiUrl}/candidates/search`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(searchPayload),
-                        signal: searchAbortControllerRef.current.signal
-                      });
-
-                      if (response.ok && response.body) {
-                        const reader = response.body.getReader();
-                        const decoder = new TextDecoder();
-                        let buffer = "";
-                        setCandidates([]); // Clear existing results for new search
-                        setCurrentPage(1); // Reset to first page
-
-                        while (true) {
-                          const { done, value } = await reader.read();
-                          if (done) break;
-
-                          buffer += decoder.decode(value, { stream: true });
-                          const lines = buffer.split("\n");
-                          buffer = lines.pop() || "";
-
-                          for (const line of lines) {
-                            if (!line.trim()) continue;
-                            try {
-                              const event = JSON.parse(line);
-                              if (event.type === "candidate") {
-                                setCandidates(prev => [...prev, event.data]);
-                              } else if (event.type === "stage") {
-                                setSearchStatus(event.data);
-                              } else if (event.type === "summary") {
-                                console.log("✅ Search stream complete:", event.data);
-                              } else if (event.type === "error") {
-                                console.error("❌ Stream error:", event.message);
-                              }
-                            } catch (e) {
-                              console.error("Failed to parse stream line:", line, e);
-                            }
-                          }
-                        }
-                      } else {
-                        setCandidates([]);
-                        console.error("❌ Search failed:", response.status);
-                      }
-                    } catch (error: any) {
-                      if (error.name === 'AbortError') {
-                        console.log("⏹️ Search stream aborted by user");
-                      } else {
-                        console.error("Failed to search candidates:", error);
-                        setCandidates([]);
-                      }
-                    } finally {
-                      setIsSearching(false);
-                    }
-                  }}
-                  disabled={isSearching}
-                >
-                  {isSearching ? (
-                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  ) : (
-                    <Rocket className="w-4 h-4 fill-white" />
-                  )}
-                  Run Search
-                </Button>
               </div>
 
               <section>
@@ -3183,10 +3959,14 @@ function NewJobPageContent() {
                   <span className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Search Sources:</span>
                   <div className="flex items-center gap-5 ml-1">
                     {[
+                      // 5.1: JobDiva Applicants toggle removed — applicants
+                      // auto-enroll via jobdiva_applicant_auto_sync regardless
+                      // of this switchboard. Exposing it here implied they
+                      // were a gated source, which they aren't.
                       { id: 'jobdiva', label: 'JobDiva', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false },
-                      { id: 'jobdiva_hotlist', label: 'JobDiva Hotlist', icon: <Zap className="w-4 h-4 text-orange-500 fill-orange-500" />, disabled: false },
                       { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: false },
-                      { id: 'dice', label: 'Dice', icon: <Box className="w-4 h-4 text-slate-700" />, disabled: false }
+                      { id: 'dice', label: 'Dice', icon: <Box className="w-4 h-4 text-slate-700" />, disabled: false },
+                      { id: 'exa', label: 'Exa', icon: <Search className="w-4 h-4 text-pink-500" />, disabled: false }
                     ].map(source => (
                       <label key={source.id} className={`flex items-center gap-2 ${source.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer group'}`} title={source.disabled ? "Integration coming soon" : ""}>
                         <Checkbox
@@ -3202,6 +3982,33 @@ function NewJobPageContent() {
                       </label>
                     ))}
                   </div>
+                </div>
+                {/* 5.6 Recent-availability dropdown + 5.10 include-no-resume
+                    toggle. Both scope JobDiva Talent Search only — other
+                    sources ignore them server-side. */}
+                <div className="flex items-center gap-6 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Recent Availability:</span>
+                    <select
+                      value={recentDaysFilter}
+                      onChange={(e) => setRecentDaysFilter(Number(e.target.value))}
+                      className="h-8 px-2 text-[12px] font-medium text-slate-700 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30"
+                    >
+                      <option value={30}>Last 30 days</option>
+                      <option value={60}>Last 60 days</option>
+                      <option value={90}>Last 90 days</option>
+                      <option value={180}>Last 180 days</option>
+                      <option value={0}>Any</option>
+                    </select>
+                  </div>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <Checkbox
+                      checked={includeNoResume}
+                      onCheckedChange={(checked) => setIncludeNoResume(!!checked)}
+                      className="w-4 h-4 rounded border-slate-300 data-[state=checked]:bg-[#6366f1] data-[state=checked]:border-[#6366f1]"
+                    />
+                    <span className="text-[12px] font-medium text-slate-600">Include candidates without resumes</span>
+                  </label>
                 </div>
               </section>
 
@@ -3294,8 +4101,8 @@ function NewJobPageContent() {
                               <label key={i} className="flex items-center gap-2 cursor-pointer group">
                                 <div
                                   className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 border transition-all ${(title.selectedSimilarTitles || []).includes(st)
-                                    ? 'bg-[#6366f1] border-[#6366f1]'
-                                    : 'bg-white border-slate-300 group-hover:border-[#6366f1]'
+                                      ? 'bg-[#6366f1] border-[#6366f1]'
+                                      : 'bg-white border-slate-300 group-hover:border-[#6366f1]'
                                     }`}
                                   onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? {
                                     ...t,
@@ -3424,8 +4231,8 @@ function NewJobPageContent() {
                               <label key={i} className="flex items-center gap-2 cursor-pointer group">
                                 <div
                                   className={`w-4 h-4 rounded flex items-center justify-center flex-shrink-0 border transition-all ${(skill.selectedSimilarSkills || []).includes(ss)
-                                    ? 'bg-[#6366f1] border-[#6366f1]'
-                                    : 'bg-white border-slate-300 group-hover:border-[#6366f1]'
+                                      ? 'bg-[#6366f1] border-[#6366f1]'
+                                      : 'bg-white border-slate-300 group-hover:border-[#6366f1]'
                                     }`}
                                   onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? {
                                     ...s,
@@ -3501,9 +4308,11 @@ function NewJobPageContent() {
                         value={sourceLocationInput}
                         onChange={(e) => setSourceLocationInput(e.target.value)}
                         onKeyDown={(e) => {
-                          if (e.key === "Enter") addSourceLocation(sourceLocationInput);
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            addSourceLocation(sourceLocationInput);
+                          }
                         }}
-                        onBlur={() => addSourceLocation(sourceLocationInput)}
                         placeholder="City, state, or zip code..."
                         className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f5f3ff] rounded-xl font-medium"
                       />
@@ -3531,6 +4340,15 @@ function NewJobPageContent() {
                         ))}
                       </DropdownMenuContent>
                     </DropdownMenu>
+                    <Button
+                      type="button"
+                      onClick={() => addSourceLocation(sourceLocationInput)}
+                      disabled={!sourceLocationInput.trim()}
+                      className="h-11 px-4 bg-[#6366f1] hover:bg-[#4f46e5] text-white text-[13px] font-bold rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Plus className="w-4 h-4 mr-1" />
+                      Add
+                    </Button>
                   </div>
                 </div>
               </section>
@@ -3558,18 +4376,8 @@ function NewJobPageContent() {
                 {sourceCompanies.length > 0 && (
                   <div className="flex flex-wrap gap-2.5 mt-3">
                     {sourceCompanies.map((company) => (
-                      <div key={company} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[12.5px] font-bold text-slate-700 shadow-sm group">
-                        <span 
-                          className="cursor-pointer border-b border-transparent hover:border-slate-400 transition-colors"
-                          onClick={() => {
-                            setSourceCompanies(prev => prev.filter(item => item !== company));
-                            setSourceCompanyInput(company);
-                            setGeneratedBoolean("");
-                          }}
-                          title="Click to edit"
-                        >
-                          {company}
-                        </span>
+                      <div key={company} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[12.5px] font-bold text-slate-700 shadow-sm">
+                        {company}
                         <button
                           className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-5 h-5 flex items-center justify-center rounded-md transition-all duration-200"
                           onClick={() => {
@@ -3594,6 +4402,20 @@ function NewJobPageContent() {
                 </div>
 
                 <div className="space-y-4">
+                  <div className="flex flex-wrap gap-2.5">
+                    {sourceKeywords.map((tag) => (
+                      <div key={tag} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[12.5px] font-bold text-slate-700 shadow-sm">
+                        {tag}
+                        <button
+                          className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-5 h-5 flex items-center justify-center rounded-md transition-all duration-200"
+                          onClick={() => setSourceKeywords(prev => prev.filter(t => t !== tag))}
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
                   <div className="relative">
                     <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-300" />
                     <Input
@@ -3607,32 +4429,6 @@ function NewJobPageContent() {
                       className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f5f3ff] rounded-xl placeholder:italic font-medium"
                     />
                   </div>
-
-                  {sourceKeywords.length > 0 && (
-                    <div className="flex flex-wrap gap-2.5">
-                      {sourceKeywords.map((tag) => (
-                        <div key={tag} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-[12.5px] font-bold text-slate-700 shadow-sm group">
-                          <span 
-                            className="cursor-pointer border-b border-transparent hover:border-slate-400 transition-colors"
-                            onClick={() => {
-                              setSourceKeywords(prev => prev.filter(t => t !== tag));
-                              setSourceKeywordInput(tag);
-                              setGeneratedBoolean("");
-                            }}
-                            title="Click to edit"
-                          >
-                            {tag}
-                          </span>
-                          <button
-                            className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-5 h-5 flex items-center justify-center rounded-md transition-all duration-200"
-                            onClick={() => setSourceKeywords(prev => prev.filter(t => t !== tag))}
-                          >
-                            <X className="w-3 h-3" />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
 
                   <div className="bg-[#f5f3ff] border border-[#ddd6fe] rounded-xl overflow-hidden mt-3">
                     <button
@@ -3662,15 +4458,138 @@ function NewJobPageContent() {
                     {booleanStringOpen && (
                       <div className="px-6 pb-6 pt-1 animate-in fade-in slide-in-from-top-1">
                         {!isRefreshingBoolean ? (
-                          <div className="p-4 bg-white border border-slate-200 rounded-xl overflow-x-auto shadow-inner">
-                            <div className="flex items-center justify-between mb-2">
-                              <span className="text-[11px] font-bold uppercase tracking-widest text-[#5b21b6] bg-[#f5f3ff] px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">
-                                PAIR Generated
-                              </span>
+                          <div className="p-4 bg-white border border-slate-200 rounded-xl shadow-inner">
+                            <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-[11px] font-bold uppercase tracking-widest text-[#5b21b6] bg-[#f5f3ff] px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">
+                                  {booleanUserEdited ? "Edited" : "Hoonr-Curate Generated"}
+                                </span>
+                                {booleanAttempts.length > 0 && (
+                                  <span className="text-[11px] font-bold uppercase tracking-widest text-slate-500 bg-slate-50 px-2.5 py-0.5 rounded-full border border-slate-200">
+                                    Attempt {booleanAttempts.length}/{MAX_BOOLEAN_ATTEMPTS}
+                                  </span>
+                                )}
+                                {booleanAttempts.length > 1 && (
+                                  <span className="text-[11px] font-medium text-slate-500">
+                                    {booleanAttempts[booleanAttempts.length - 1].label}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-2">
+                                {booleanUserEdited && (
+                                  <button
+                                    onClick={() => {
+                                      setBooleanUserEdited(false);
+                                      setGeneratedBoolean(buildGeneratedBooleanString());
+                                    }}
+                                    className="text-[11px] font-bold text-slate-500 hover:text-[#6366f1] px-2.5 py-1 rounded-md border border-slate-200 bg-white hover:bg-slate-50 transition-colors"
+                                  >
+                                    Reset
+                                  </button>
+                                )}
+                                <button
+                                  onClick={handleExtendBoolean}
+                                  disabled={isSearching || booleanAttempts.length >= MAX_BOOLEAN_ATTEMPTS}
+                                  className="text-[11px] font-bold text-[#6366f1] hover:text-white hover:bg-[#6366f1] px-2.5 py-1 rounded-md border border-[#ddd6fe] bg-[#f5f3ff] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                                  title="Relax the boolean string and search again, appending new candidates"
+                                >
+                                  Make more lenient
+                                </button>
+                              </div>
                             </div>
-                            <code className="text-[13px] font-mono font-medium text-slate-700 whitespace-pre leading-relaxed tracking-tight break-all">
-                              {resolvedGeneratedBoolean}
-                            </code>
+                            <textarea
+                              value={resolvedGeneratedBoolean}
+                              onChange={(e) => {
+                                setBooleanUserEdited(true);
+                                setGeneratedBoolean(e.target.value);
+                              }}
+                              rows={Math.min(8, Math.max(2, resolvedGeneratedBoolean.split("\n").length))}
+                              className="w-full resize-y text-[13px] font-mono font-medium text-slate-700 leading-relaxed tracking-tight bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30 focus:border-[#6366f1]"
+                              spellCheck={false}
+                            />
+                            {/* Relaxation history: show every attempted boolean
+                                as a read-only card under the live textarea so
+                                the recruiter can audit what was widened and
+                                when. Only renders once auto/manual relaxation
+                                has actually produced >1 attempt. */}
+                            {booleanAttempts.length > 1 && (
+                              <div className="mt-4 space-y-2">
+                                <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500">
+                                  Relaxation history · {booleanAttempts.length} attempt{booleanAttempts.length === 1 ? "" : "s"}
+                                </p>
+                                {booleanAttempts.map((attempt, idx) => {
+                                  const isOriginal = idx === 0;
+                                  const isCurrent = idx === booleanAttempts.length - 1;
+                                  return (
+                                    <div
+                                      key={`${idx}-${attempt.query.slice(0, 24)}`}
+                                      className={`p-3 rounded-lg border ${
+                                        isCurrent
+                                          ? "bg-[#f5f3ff] border-[#ddd6fe]"
+                                          : "bg-slate-50 border-slate-200"
+                                      }`}
+                                    >
+                                      <div className="flex items-center justify-between gap-2 mb-1.5 flex-wrap">
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                          <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full border ${
+                                            isCurrent
+                                              ? "text-[#5b21b6] bg-white border-[#ddd6fe]"
+                                              : "text-slate-500 bg-white border-slate-200"
+                                          }`}>
+                                            Attempt {idx + 1}
+                                          </span>
+                                          <span className="text-[11px] font-bold text-slate-600">
+                                            {isOriginal ? "Original" : attempt.label}
+                                          </span>
+                                          {isCurrent && (
+                                            <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                                              Active
+                                            </span>
+                                          )}
+                                        </div>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            navigator.clipboard?.writeText(attempt.query).catch(() => {});
+                                          }}
+                                          className="text-[10px] font-bold text-slate-500 hover:text-[#6366f1] px-2 py-0.5 rounded-md border border-slate-200 bg-white hover:bg-slate-50 transition-colors"
+                                        >
+                                          Copy
+                                        </button>
+                                      </div>
+                                      <pre className="text-[12px] font-mono font-medium text-slate-700 leading-relaxed whitespace-pre-wrap break-words">
+                                        {attempt.query}
+                                      </pre>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                            {/* 5.5: Run/Stop moved here so the recruiter reviews
+                                the Boolean before kicking off a search. */}
+                            <div className="flex items-center justify-end gap-2 mt-4">
+                              {isSearching && (
+                                <Button
+                                  className="bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
+                                  onClick={handleStopSearch}
+                                >
+                                  <Ban className="w-4 h-4" />
+                                  Stop Search
+                                </Button>
+                              )}
+                              <Button
+                                className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
+                                onClick={handleRunSearch}
+                                disabled={isSearching}
+                              >
+                                {isSearching ? (
+                                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                                ) : (
+                                  <Rocket className="w-4 h-4 fill-white" />
+                                )}
+                                Run Search
+                              </Button>
+                            </div>
                           </div>
                         ) : (
                           <div className="p-4 bg-white border border-[#ddd6fe] rounded-xl overflow-x-auto shadow-inner flex items-center justify-center py-6 gap-3">
@@ -3703,9 +4622,33 @@ function NewJobPageContent() {
                   </h4>
                   <p className={`text-slate-500 text-[13px] font-medium tracking-tight transition-all ${isSearching ? 'animate-pulse text-[#6366f1]' : ''}`}>
                     {hasSearched ? (
-                      isSearching ? `Sourcing candidates... ${candidates.length} found so far` : `${candidates.length} candidates found`
+                        isSearching ? `Sourcing candidates... ${candidates.length} found so far` : `${candidates.length} candidates found${sourceFilter !== "all" ? ` · showing ${sortedCandidates.length}` : ""}`
                     ) : 'Run a search to find candidates.'}
                   </p>
+                  {candidates.length > 0 && (
+                    <div className="flex items-center gap-1.5 mt-3 flex-wrap">
+                      {([
+                        { id: "all", label: "All", count: candidates.length },
+                        { id: "jobdiva", label: "JobDiva", count: sourceCounts["jobdiva"] || 0 },
+                        { id: "linkedin-unipile", label: "LinkedIn-Unipile", count: sourceCounts["linkedin-unipile"] || 0 },
+                        { id: "linkedin-exa", label: "LinkedIn-Exa", count: sourceCounts["linkedin-exa"] || 0 },
+                        { id: "dice", label: "Dice", count: sourceCounts["dice"] || 0 },
+                        { id: "upload-resume", label: "Upload-Resume", count: sourceCounts["upload-resume"] || 0 }
+                      ] as const).map(pill => {
+                        if (pill.id !== "all" && pill.count === 0) return null;
+                        const active = sourceFilter === pill.id;
+                        return (
+                          <button
+                            key={pill.id}
+                            onClick={() => { setSourceFilter(pill.id as any); setCurrentPage(1); }}
+                            className={`px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider border transition-colors ${active ? 'bg-[#6366f1] text-white border-[#6366f1]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+                          >
+                            {pill.label} <span className={`ml-1 font-medium ${active ? 'text-white/80' : 'text-slate-400'}`}>{pill.count}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
                 {candidates.length > 0 && (
                   <div className="flex items-center gap-2">
@@ -3775,6 +4718,16 @@ function NewJobPageContent() {
                     </Button>
                   </div>
                 )}
+                {isExternal && (
+                  <Button
+                    variant="outline"
+                    className="h-8 px-4 text-[13px] font-bold border-[#6366f1] text-[#6366f1] bg-white shadow-sm flex items-center gap-2 hover:bg-[#f5f3ff]"
+                    onClick={() => setPasteResumeOpen(true)}
+                  >
+                    <FileText className="w-3.5 h-3.5" />
+                    Add via Resume
+                  </Button>
+                )}
               </div>
 
               {hasSearched ? (
@@ -3799,147 +4752,201 @@ function NewJobPageContent() {
 
                   {candidates.length > 0 ? (
                     <div className="space-y-4">
-                      {paginatedCandidates.map((candidate, idx) => {
-                        // Select random badges to show matching elements
-                        const badgeOptions = [
-                          sourceTitles[0]?.value,
-                          sourceSkills[0]?.value ? `${sourceSkills[0]?.value} certified` : null,
-                          sourceSkills[1]?.value,
-                          sourceLocations[0]?.value ? `Local to ${sourceLocations[0].value}` : null
-                        ].filter(Boolean);
+                    {paginatedCandidates.map((candidate, idx) => {
+                      // Select random badges to show matching elements
+                      const badgeOptions = [
+                        sourceTitles[0]?.value,
+                        sourceSkills[0]?.value ? `${sourceSkills[0]?.value} certified` : null,
+                        sourceSkills[1]?.value,
+                        sourceLocations[0]?.value ? `Local to ${sourceLocations[0].value}` : null
+                      ].filter(Boolean);
 
-                        return (
-                          <div key={`${candidate.candidate_id || candidate.id}-${idx}`} className="p-5 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-purple-200 hover:shadow-md transition-all flex items-center gap-4">
-                            <Checkbox
-                              className="w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600"
-                              checked={selectedCandidates.has(candidate.candidate_id || candidate.id)}
-                              onCheckedChange={(checked) => {
-                                setSelectedCandidates(prev => {
-                                  const next = new Set(prev);
-                                  const id = candidate.candidate_id || candidate.id;
-                                  if (checked) next.add(id);
-                                  else next.delete(id);
-                                  return next;
-                                });
-                              }}
-                            />
-                            <div className="flex-1 min-w-0">
-                              {(() => {
-                                const displayName = getCandidateDisplayName(candidate);
-                                return (
-                                  <div className="flex items-center justify-between gap-4">
-                                    <div className="flex items-center gap-3 min-w-0">
-                                      <a
-                                        href={candidate.source === 'LinkedIn' ? candidate.profile_url || '#' : '#'}
-                                        target={candidate.source === 'LinkedIn' ? "_blank" : undefined}
-                                        rel={candidate.source === 'LinkedIn' ? "noopener noreferrer" : undefined}
-                                        className={`text-[17px] font-bold text-slate-900 flex items-center gap-3 transition-colors group/name ${candidate.source === 'LinkedIn' ? 'hover:text-[#1d4ed8]' :
-                                            candidate.source === 'JobDiva-TalentSearch' ? 'hover:text-[#8B5A2B]' :
-                                              'hover:text-[#6366f1]'
-                                          }`}
-                                        onClick={(e) => {
-                                          if (candidate.source !== 'LinkedIn') {
-                                            e.preventDefault();
-                                            handleViewResume(candidate);
-                                          }
-                                        }}
-                                      >
-                                        <span className="flex items-center gap-2">
-                                          <span className={`text-[17px] font-bold text-slate-900 transition-colors ${candidate.source === 'LinkedIn' ? 'group-hover/name:text-[#1d4ed8]' :
-                                              candidate.source === 'JobDiva-TalentSearch' ? 'group-hover/name:text-[#8B5A2B]' :
-                                                'group-hover/name:text-[#6366f1]'
-                                            }`}>
-                                            {displayName}
-                                          </span>
-                                          <span
-                                            className={`h-7 w-7 flex items-center justify-center border border-slate-200 bg-white text-slate-400 rounded-lg shadow-sm transition-all ${candidate.source === 'LinkedIn'
-                                                ? 'group-hover/name:border-[#bfdbfe] group-hover/name:bg-[#eff6ff] group-hover/name:text-[#1d4ed8]' :
-                                                candidate.source === 'JobDiva-TalentSearch'
-                                                  ? 'group-hover/name:border-[#D2B48C] group-hover/name:bg-[#FDF8F5] group-hover/name:text-[#8B5A2B]' :
-                                                  'group-hover/name:border-[#c7d2fe] group-hover/name:bg-[#f5f3ff] group-hover/name:text-[#6366f1]'
-                                              }`}
-                                            title={candidate.source === 'LinkedIn' ? "View LinkedIn Profile" : "Click to view resume"}
-                                          >
-                                            <ExternalLink className="w-3.5 h-3.5" />
-                                          </span>
-                                        </span>
-                                      </a>
-                                      <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow-sm h-fit border ${candidate.source === 'LinkedIn'
-                                        ? 'bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]'
-                                        : candidate.source === 'JobDiva-TalentSearch'
-                                          ? 'bg-[#FDF8F5] text-[#8B5A2B] border-[#D2B48C]'
-                                          : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]'
-                                        }`}>
-                                        {candidate.source === 'LinkedIn' ? <Linkedin className="w-3 h-3 fill-current" /> : candidate.source === 'JobDiva-TalentSearch' ? <Zap className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
-                                        {candidate.source || "JobDiva"}
-                                      </span>
-                                    </div>
+                      return (
+                        <div key={`${candidate.candidate_id || candidate.id}-${idx}`} className="p-5 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-purple-200 hover:shadow-md transition-all flex items-center gap-4">
+                          <Checkbox
+                            className="w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600"
+                            checked={selectedCandidates.has(candidate.candidate_id || candidate.id)}
+                            onCheckedChange={(checked) => {
+                              setSelectedCandidates(prev => {
+                                const next = new Set(prev);
+                                const id = candidate.candidate_id || candidate.id;
+                                if (checked) next.add(id);
+                                else next.delete(id);
+                                return next;
+                              });
+                            }}
+                          />
+                        <div className="flex-1 min-w-0">
+                          {(() => {
+                            const displayName = getCandidateDisplayName(candidate);
+                            return (
+                            <div className="flex items-center justify-between gap-4">
+                              <div className="flex items-center gap-3 min-w-0">
+                                <a
+                                  href={candidate.source?.startsWith('LinkedIn') ? candidate.profile_url || '#' : '#'}
+                                  target={candidate.source?.startsWith('LinkedIn') ? "_blank" : undefined}
+                                  rel={candidate.source?.startsWith('LinkedIn') ? "noopener noreferrer" : undefined}
+                                  className={`text-[17px] font-bold text-slate-900 flex items-center gap-3 transition-colors group/name ${
+                                    candidate.source?.startsWith('LinkedIn') ? 'hover:text-[#1d4ed8]' : 
+                                    candidate.source === 'JobDiva-TalentSearch' ? 'hover:text-[#c2410c]' : 
+                                    'hover:text-[#6366f1]'
+                                  }`}
+                                  onClick={async (e) => {
+                                    if (candidate.source?.startsWith('LinkedIn')) return;
+                                    e.preventDefault();
+                                    // 5.8: prefer JobDiva profile URL when
+                                    // available (opens in new tab); fall back
+                                    // to the resume modal so the name is
+                                    // never a dead click.
+                                    const opened = await fetchAndOpenProfileUrl(candidate);
+                                    if (!opened) handleViewResume(candidate);
+                                  }}
+                                >
+                                   <span className="flex items-center gap-2">
+                                     <span className={`text-[17px] font-bold text-slate-900 transition-colors ${
+                                       candidate.source?.startsWith('LinkedIn') ? 'group-hover/name:text-[#1d4ed8]' : 
+                                       candidate.source === 'JobDiva-TalentSearch' ? 'group-hover/name:text-[#c2410c]' : 
+                                       'group-hover/name:text-[#6366f1]'
+                                     }`}>
+                                       {displayName}
+                                     </span>
+                                     <span 
+                                       className={`h-7 w-7 flex items-center justify-center border border-slate-200 bg-white text-slate-400 rounded-lg shadow-sm transition-all ${
+                                         candidate.source?.startsWith('LinkedIn') 
+                                           ? 'group-hover/name:border-[#bfdbfe] group-hover/name:bg-[#eff6ff] group-hover/name:text-[#1d4ed8]' : 
+                                         candidate.source === 'JobDiva-TalentSearch' 
+                                           ? 'group-hover/name:border-[#fed7aa] group-hover/name:bg-[#fff7ed] group-hover/name:text-[#c2410c]' : 
+                                         'group-hover/name:border-[#c7d2fe] group-hover/name:bg-[#f5f3ff] group-hover/name:text-[#6366f1]'
+                                       }`}
+                                       title={candidate.source?.startsWith('LinkedIn') ? "View LinkedIn Profile" : "Click to view resume"}
+                                     >
+                                       <ExternalLink className="w-3.5 h-3.5" />
+                                     </span>
+                                   </span>
+                                </a>
+                                <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow-sm h-fit border ${candidate.source?.startsWith('LinkedIn')
+                                    ? 'bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]'
+                                    : candidate.source === 'JobDiva-TalentSearch'
+                                      ? 'bg-[#fff7ed] text-[#c2410c] border-[#fed7aa]'
+                                      : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]'
+                                  }`}>
+                                  {candidate.source?.startsWith('LinkedIn') ? <Linkedin className="w-3 h-3 fill-current" /> : candidate.source === 'JobDiva-TalentSearch' ? <Zap className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
+                                  {candidate.source || "JobDiva"}
+                                </span>
+                              </div>
 
-                                    <div className="flex items-center gap-3 shrink-0">
-                                      {candidate.match_score !== undefined && (
-                                        <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center shadow-sm h-fit border ${candidate.match_score >= 80 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
-                                            candidate.match_score >= 60 ? 'bg-amber-50 text-amber-700 border-amber-200' :
-                                              'bg-rose-50 text-rose-700 border-rose-200'
-                                          }`}>
-                                          {candidate.match_score}% Match
-                                        </span>
-                                      )}
-                                      <Button
-                                        size="sm"
-                                        className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 min-w-[70px]"
-                                        onClick={() => {
-                                          setSelectedCandidateForDetails({
-                                            name: displayName,
-                                            profileUrl: candidate.profile_url,
-                                            imageUrl: candidate.image_url,
-                                            jobTitle: candidate.title || candidate.headline || "",
-                                            location: candidate.location || (candidate.city ? `${candidate.city}, ${candidate.state}` : ""),
-                                            experienceYears: candidate.experience_years || candidate.yearsExtracted || candidate.enhanced_info?.years_of_experience || null,
-                                            tags: badgeOptions,
-                                            matchScore: candidate.match_score,
-                                            missingSkills: candidate.missing_skills,
-                                            explainability: candidate.explainability,
-                                            matchScoreDetails: candidate.match_score_details,
-                                            matchedSkills: candidate.matched_skills,
-                                          });
-                                          setDetailsModalOpen(true);
-                                        }}
-                                      >
-                                        <Eye className="w-3.5 h-3.5" />
-                                        View
-                                      </Button>
-                                    </div>
-                                  </div>
-                                );
-                              })()}
+                              <div className="flex items-center gap-3 shrink-0">
+                                {candidate.match_score !== undefined && (
+                                  <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center shadow-sm h-fit border ${
+                                    candidate.match_score >= 80 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 
+                                    candidate.match_score >= 60 ? 'bg-amber-50 text-amber-700 border-amber-200' : 
+                                    'bg-rose-50 text-rose-700 border-rose-200'
+                                  }`}>
+                                    {candidate.match_score}% Match
+                                  </span>
+                                )}
+                                {!candidate.source?.startsWith('LinkedIn') && (
+                                  <Button
+                                    size="sm"
+                                    className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2"
+                                    onClick={() => handleViewResume({ ...candidate, firstName: displayName.split(" ")[0] || displayName, lastName: displayName.split(" ").slice(1).join(" ") })}
+                                    title="Open candidate resume"
+                                  >
+                                    <FileText className="w-3.5 h-3.5" />
+                                    Resume
+                                    <ExternalLink className="w-3 h-3 opacity-70" />
+                                  </Button>
+                                )}
+                                <Button
+                                  size="sm"
+                                  className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 min-w-[70px]"
+                                  onClick={() => {
+                                    setSelectedCandidateForDetails({
+                                      name: displayName,
+                                      profileUrl: candidate.profile_url,
+                                      imageUrl: candidate.image_url,
+                                      jobTitle: candidate.title || candidate.headline || "",
+                                      location: candidate.location || (candidate.city ? `${candidate.city}, ${candidate.state}` : ""),
+                                      experienceYears: candidate.experience_years || candidate.yearsExtracted || candidate.enhanced_info?.years_of_experience || null,
+                                      tags: badgeOptions,
+                                      matchScore: candidate.match_score,
+                                      missingSkills: candidate.missing_skills,
+                                      explainability: candidate.explainability,
+                                      matchScoreDetails: candidate.match_score_details,
+                                      matchedSkills: candidate.matched_skills,
+                                    });
+                                    setDetailsModalOpen(true);
+                                  }}
+                                >
+                                  <Eye className="w-3.5 h-3.5" />
+                                  View
+                                </Button>
+                              </div>
                             </div>
+                            );
+                          })()}
+                          {/* 5.7: availability pill + abstract + location row.
+                              Fields populated by jobdiva.py Talent Search
+                              mapper. All three are optional — only render the
+                              strip if at least one is present. */}
+                          {(() => {
+                            const availability = candidate.availability_status || candidate.available;
+                            const abstract = candidate.abstract || "";
+                            const locationStr = candidate.location || (candidate.city || candidate.state ? `${candidate.city || ""}${candidate.city && candidate.state ? ", " : ""}${candidate.state || ""}` : "");
+                            if (!availability && !abstract && !locationStr) return null;
+                            const availabilityColor =
+                              String(availability || "").toLowerCase().includes("available") ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
+                              String(availability || "").toLowerCase().includes("placed") ? "bg-slate-100 text-slate-600 border-slate-200" :
+                              "bg-amber-50 text-amber-700 border-amber-200";
+                            return (
+                              <div className="flex items-center gap-3 mt-2 text-[12px] text-slate-600">
+                                {availability && (
+                                  <span className={`px-2 py-0.5 rounded-full text-[10.5px] font-bold uppercase tracking-wider border ${availabilityColor}`}>
+                                    {availability}
+                                  </span>
+                                )}
+                                {locationStr && (
+                                  <span className="inline-flex items-center gap-1 text-slate-500">
+                                    <MapPin className="w-3 h-3" />
+                                    {locationStr}
+                                  </span>
+                                )}
+                                {abstract && (
+                                  <span className="text-slate-500 truncate" title={abstract}>
+                                    {abstract.length > 90 ? `${abstract.slice(0, 90).trimEnd()}…` : abstract}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })()}
                           </div>
-                        )
-                      })}
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : isSearching ? (
+                  <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-pulse mt-4">
+                    <div className="flex flex-col items-center gap-3">
+                      <div className="w-12 h-12 border-4 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-2" />
+                      <p className="text-slate-600 text-sm font-bold animate-pulse">{searchStatus}</p>
+                      <p className="text-slate-400 text-[12px] font-medium italic">Retrieving candidate records associated with Job ID {numericJobId || jobdivaId}...</p>
                     </div>
-                  ) : isSearching ? (
-                    <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-pulse mt-4">
-                      <div className="flex flex-col items-center gap-3">
-                        <div className="w-12 h-12 border-4 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-2" />
-                        <p className="text-slate-600 text-sm font-bold animate-pulse">{searchStatus}</p>
-                        <p className="text-slate-400 text-[12px] font-medium italic">Retrieving candidate records associated with Job ID {numericJobId || jobdivaId}...</p>
-                      </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
+                    <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-6 shadow-inner">
+                      <Users className="w-8 h-8 text-slate-300" />
                     </div>
-                  ) : (
-                    <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
-                      <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-6 shadow-inner">
-                        <Users className="w-8 h-8 text-slate-300" />
-                      </div>
-                      <p className="text-slate-600 text-base font-bold">No candidates found with the current filters.</p>
-                      <p className="text-slate-400 text-[13px] mt-2 font-medium">Try broadening your criteria or adding more titles/skills.</p>
-                    </div>
-                  )}
+                    <p className="text-slate-600 text-base font-bold">No candidates found with the current filters.</p>
+                    <p className="text-slate-400 text-[13px] mt-2 font-medium">Try broadening your criteria or adding more titles/skills.</p>
+                  </div>
+                )}
 
-                  {/* Pagination Controls */}
-                  {/* Pagination Controls */}
-                  {candidates.length > 0 && (
+                {/* Pagination Controls */}
+                {/* Pagination Controls */}
+                {candidates.length > 0 && (
                     <div className="mt-8 flex items-center justify-between bg-white/70 backdrop-blur-xl p-3.5 px-5 rounded-2xl border border-slate-200/60 shadow-[0_8px_30px_rgb(0,0,0,0.04)] animate-in fade-in slide-in-from-bottom-2 duration-500 sticky bottom-6 z-10">
-
+                      
                       {/* Context & Rows Selection */}
                       <div className="flex items-center gap-4">
                         <div className="flex items-center gap-2 text-[13px]">
@@ -3951,9 +4958,9 @@ function NewJobPageContent() {
                             of {candidates.length} {isSearching ? <span className="italic text-slate-400 font-normal ml-0.5">(sourcing...)</span> : 'candidates'}
                           </span>
                         </div>
-
+                        
                         <div className="h-4 w-[1px] bg-slate-200/80"></div>
-
+                        
                         <select
                           value={candidatesPerPage}
                           onChange={(e) => {
@@ -3981,7 +4988,7 @@ function NewJobPageContent() {
                           <ChevronLeft className="w-4 h-4 shrink-0" />
                           <span className="sr-only">Previous</span>
                         </Button>
-
+                        
                         <div className="flex items-center gap-1 mx-0.5">
                           {visiblePages.map((pageNum, idx) => (
                             pageNum === "..." ? (
@@ -3993,10 +5000,11 @@ function NewJobPageContent() {
                                 key={`page-${pageNum}`}
                                 disabled={currentPage === pageNum}
                                 onClick={() => setCurrentPage(pageNum as number)}
-                                className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[13px] transition-all duration-200 ${currentPage === pageNum
-                                    ? 'bg-[#6366f1] text-white shadow-md transform scale-105 cursor-default'
+                                className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[13px] transition-all duration-200 ${
+                                  currentPage === pageNum 
+                                    ? 'bg-[#6366f1] text-white shadow-md transform scale-105 cursor-default' 
                                     : 'text-slate-600 hover:bg-slate-100/80 cursor-pointer'
-                                  }`}
+                                }`}
                               >
                                 {pageNum}
                               </button>
@@ -4016,66 +5024,91 @@ function NewJobPageContent() {
                         </Button>
                       </div>
                     </div>
-                  )}
-                </>
-              ) : (
-                <div className="h-4 flex items-center justify-center opacity-0 mt-4">
-                </div>
-              )}
+                )}
+              </>
+            ) : (
+              <div className="h-4 flex items-center justify-center opacity-0 mt-4">
+              </div>
+            )}
+
+            {/* Bulk Resume Upload */}
+            <BulkUploadSection
+              jobRef={numericJobId || jobdivaId}
+              bulkFiles={bulkFiles}
+              onBulkFilesChange={setBulkFiles}
+              onClearProgress={() => setBulkProgress(null)}
+              isUploadingBulk={isUploadingBulk}
+              bulkProgress={bulkProgress}
+              bulkFileInputRef={bulkFileInputRef}
+              onUpload={handleBulkUpload}
+            />
             </div>
 
             {/* Launch Footer */}
             <div className="border-t border-slate-200 pt-6 mt-2 flex items-center justify-between">
               <span className="text-[13px] font-medium text-slate-400">
-                {hasSearched ? `${selectedCandidates.size} candidates selected` : ''}
+                {hasSearched && !isSearching ? `${selectedCandidates.size} candidates selected` : ''}
               </span>
               <Button
                 className={`h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group ${candidates.length > 0 && selectedCandidates.size > 0 ? "bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98]" : "bg-slate-300 cursor-not-allowed"}`}
                 onClick={async () => {
                   if (selectedCandidates.size === 0) return;
 
-                  // Stop the live search stream immediately if running
-                  if (isSearching && searchAbortControllerRef.current) {
-                    console.log("🛑 Launch PAIR triggered - aborting live search stream...");
-                    searchAbortControllerRef.current.abort();
-                    setIsSearching(false);
-                  }
-
                   try {
-                    // Prepare candidates payload with proper structure
-                    const candidatesPayload = candidates.map((c: any) => ({
-                      candidate_id: String(c.candidate_id || c.id),  // Use candidate_id from API, fallback to id
-                      name: c.name,
-                      email: c.email || null,
-                      phone: c.phone || null,
-                      skills: c.skills || [],
-                      experience_years: c.yearsExtracted || c.experience_years || 0,
-                      source: c.source || "JobDiva-Applicants",
-                      headline: c.title || c.headline,
-                      location: c.location,
-                      profile_url: c.profile_url,
-                      image_url: c.image_url,
-                      resume_text: c.resume_text || c.resumeText || "",  // Support both snake_case and camelCase
-                      resume_id: c.resumeId || c.resume_id,
-                      is_selected: selectedCandidates.has(c.candidate_id || c.id),
-                      // Include ALL LLM-enriched data from enhanced_info
-                      education: c.education || c.candidate_education || [],
-                      certifications: c.certifications || c.candidate_certification || [],
-                      company_experience: c.company_experience || c.enhanced_info?.company_experience || [],
-                      urls: c.urls || c.enhanced_info?.urls || {},
-                      match_score: c.match_score || 0,
-                      enhanced_info: c.enhanced_info || null  // Include full enhanced info for reference
-                    }));
+                    // Prepare candidates payload only for SELECTED candidates
+                    const candidatesPayload = candidates
+                      .filter(c => selectedCandidates.has(c.candidate_id || c.id))
+                      .map(c => {
+                        // Ensure name is never null or undefined for Pydantic validation
+                        const displayName = getCandidateDisplayName(c);
+                        
+                        // Ensure skills is always a list
+                        let skillList = [];
+                        if (Array.isArray(c.skills)) {
+                          skillList = c.skills;
+                        } else if (typeof c.skills === 'string' && c.skills.trim()) {
+                          try {
+                            const parsed = JSON.parse(c.skills);
+                            skillList = Array.isArray(parsed) ? parsed : [c.skills];
+                          } catch (e) {
+                            skillList = [c.skills];
+                          }
+                        }
 
-                    const selectedCount = candidatesPayload.filter((c: any) => c.is_selected).length;
-                    console.log(`🚀 Launching PAIR with ${selectedCount} selected candidates out of ${candidatesPayload.length} total`);
+                        return {
+                          candidate_id: String(c.candidate_id || c.id || "unknown"),
+                          name: displayName || "Unnamed Candidate",
+                          email: c.email || null,
+                          phone: c.phone || null,
+                          skills: skillList,
+                          experience_years: c.yearsExtracted || c.experience_years || 0,
+                          source: c.source || "JobDiva-Applicants",
+                          headline: c.title || c.headline || "",
+                          location: c.location || "",
+                          profile_url: c.profile_url || null,
+                          image_url: c.image_url || null,
+                          resume_text: c.resume_text || c.resumeText || "",
+                          resume_id: String(c.resumeId || c.resume_id || ""),
+                          is_selected: true,
+                          education: Array.isArray(c.education || c.candidate_education) ? (c.education || c.candidate_education) : [],
+                          certifications: Array.isArray(c.certifications || c.candidate_certification) ? (c.certifications || c.candidate_certification) : [],
+                          company_experience: Array.isArray(c.company_experience || c.enhanced_info?.company_experience) ? (c.company_experience || c.enhanced_info?.company_experience) : [],
+                          urls: (c.urls && typeof c.urls === 'object' && !Array.isArray(c.urls)) ? c.urls : (c.enhanced_info?.urls || {}),
+                          match_score: typeof c.match_score === 'number' ? c.match_score : 0,
+                          enhanced_info: (c.enhanced_info && typeof c.enhanced_info === 'object' && !Array.isArray(c.enhanced_info)) ? c.enhanced_info : null
+                        };
+                      });
+
+                    const selectedCount = candidatesPayload.filter(c => c.is_selected).length;
+                    console.log(`🚀 Launching Hoonr-Curate with ${selectedCount} selected candidates out of ${candidatesPayload.length} total`);
 
                     const apiUrl = process.env.NEXT_PUBLIC_API_URL;
                     const response = await fetch(`${apiUrl}/candidates/save`, {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify({
-                        jobdiva_id: numericJobId || jobdivaId,
+                        // Always send the ALPHANUMERIC jobdiva_id (e.g. '26-05172'), not the numeric job_id PK.
+                        jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId,
                         candidates: candidatesPayload
                       })
                     });
@@ -4085,48 +5118,22 @@ function NewJobPageContent() {
                     if (response.ok && result.status === 'success') {
                       const saved = result.saved_count || selectedCount;
                       showToast(`${saved} candidates saved to Master Pool — redirecting...`, "success");
-                      
-                      // NEW: Sync filters first to ensure background task has the latest criteria
-                      try {
-                        const syncPayload = {
-                          resume_match_filters: resumeMatchFilters,
-                          sourcing_filters: {
-                            titles: sourceTitles,
-                            skills: sourceSkills,
-                            keywords: sourceKeywords,
-                            locations: sourceLocations,
-                            companies: sourceCompanies
-                          }
-                        };
-                        
-                        await fetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/sync-filters`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify(syncPayload)
-                        });
-                        console.log("✅ Job filters synced for auto-assignment");
-                      } catch (syncErr) {
-                        console.error("❌ Failed to sync filters before auto-assign:", syncErr);
-                      }
-
-                      // Background: trigger auto-assign for all applicants
-                      fetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/auto-assign-applicants`, {
-                        method: "POST"
-                      }).catch(err => console.error("Auto-assign trigger failed:", err));
-
                       setTimeout(() => {
                         router.push(`/candidates`);
                       }, 1500);
                     } else {
-                      console.error('Save failed:', result);
-                      showToast(`Error saving candidates: ${result.message || 'Unknown error'}`, "error");
+                      console.error('Save failed details:', JSON.stringify(result, null, 2));
+                      const errorMsg = result.detail 
+                        ? (Array.isArray(result.detail) ? JSON.stringify(result.detail) : result.detail)
+                        : (result.message || 'Unknown error');
+                      showToast(`Error saving candidates: ${errorMsg}`, "error");
                     }
                   } catch (e) {
                     console.error("Failed to save candidates:", e);
                     showToast("Failed to save candidates. Please try again.", "error");
                   }
                 }}
-                disabled={!hasSearched || selectedCandidates.size === 0}
+                disabled={!hasSearched || isSearching || selectedCandidates.size === 0}
               >
                 <Rocket className="w-4 h-4 fill-white" />
                 Launch PAIR
@@ -4149,6 +5156,20 @@ function NewJobPageContent() {
     }
   };
 
+  // Full-page loader while we hydrate a saved draft. Prevents the flash-of-
+  // empty-form that recruiters see on Resume Setup while /jobs/{id}/draft
+  // (plus rubric / screen questions) resolve.
+  if (isLoadingDraft) {
+    return (
+      <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3 text-slate-500">
+          <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
+          <div className="text-[15px] font-medium">Loading draft…</div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="p-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
       {/* Breadcrumb */}
@@ -4163,9 +5184,13 @@ function NewJobPageContent() {
       <div className="mb-7">
         <h1 className="text-[32px] font-bold text-slate-900 leading-tight">New Job</h1>
         <p className="text-slate-500 text-[16px] font-medium mt-1">
-          {jobData
-            ? `${jobData.title || jobTitle} · ${jobData.customer_name || jobData.customer || "Unknown Customer"}`
-            : "Enter a JobDiva Job ID to get started."}
+          {(() => {
+            const title = jobData?.title || jobTitle;
+            const customer = jobData?.customer_name || jobData?.customer || "";
+            if (!title && !customer) return "Enter a JobDiva Job ID to get started.";
+            if (title && customer) return `${title} · ${customer}`;
+            return title || customer;
+          })()}
         </p>
       </div>
 
@@ -4263,7 +5288,7 @@ function NewJobPageContent() {
                       });
                       if (res.ok) {
                         const data = await res.json();
-                        setRubricData(data);
+                        setRubricData(applyTitleRequiredSafetyNet(data));
                         showToast("Step 2 saved and rubric generated!", "success");
                       } else {
                         throw new Error("API failed");
@@ -4283,7 +5308,12 @@ function NewJobPageContent() {
                 } else if (currentStep === 4) {
                   const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
                   if (!saved) return;
-                  initializeSourceFromRubric();
+                  // Only derive sourcing criteria on first entry (5.3). The
+                  // sync effect below won't override it on subsequent visits.
+                  if (!sourcingCriteriaInitializedRef.current) {
+                    initializeSourceFromRubric();
+                    sourcingCriteriaInitializedRef.current = true;
+                  }
                 }
 
                 if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
@@ -4344,6 +5374,20 @@ function NewJobPageContent() {
           }}
         />
       )}
+
+      {/* Paste Resume Modal (External requirement) */}
+      <PasteResumeModal
+        open={pasteResumeOpen}
+        onClose={() => setPasteResumeOpen(false)}
+        name={pasteName}
+        onNameChange={setPasteName}
+        email={pasteEmail}
+        onEmailChange={setPasteEmail}
+        resumeText={pasteResumeText}
+        onResumeTextChange={setPasteResumeText}
+        isSaving={isSavingPasteResume}
+        onSubmit={handleSubmitPasteResume}
+      />
 
       {selectedCandidateForDetails && (
         <CandidateDetailsModal

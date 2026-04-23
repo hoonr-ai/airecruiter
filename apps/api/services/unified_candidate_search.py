@@ -9,13 +9,25 @@ from pydantic import BaseModel
 from services.jobdiva import JobDivaService
 from services.unipile import unipile_service
 from services.vetted import vetted_service
+from services.exa_service import exa_service
+from core.config import (
+    SCORING_REQUIRED_WEIGHT,
+    SCORING_PREFERRED_WEIGHT,
+    SCORING_YEARS_UNKNOWN_MULT,
+    SCORING_YEARS_FLOOR,
+    SCORING_RECENT_PENALTY,
+    SCORING_EXCLUSION_CAP,
+    SCORING_EXCLUSION_PER_HIT,
+    SCORING_UNMATCHED_REQUIRED_FLOOR,
+    SCORING_UNMATCHED_PREFERRED_FLOOR,
+    SCORING_PARSING_GAP_FLOOR,
+    SCORING_COVERAGE_BLEND_THRESHOLD,
+)
 
 logger = logging.getLogger(__name__)
 
 class SearchCriteria(BaseModel):
     job_id: str
-    titles: List[str] = []
-    skills: List[str] = []
     title_criteria: List[Dict[str, Any]] = []
     skill_criteria: List[Dict[str, Any]] = []
     keywords: List[str] = []
@@ -24,16 +36,45 @@ class SearchCriteria(BaseModel):
     within_miles: int = 25
     companies: List[str] = []
     page_size: int = 100
-    sources: List[str] = ["JobDiva"]
+    sources: List[str] = ["JobDiva", "LinkedIn", "Exa"]
     open_to_work: bool = True
     boolean_string: str = ""
     bypass_screening: bool = False
+    # 5.6: limit JobDiva Talent Search to candidates whose record was touched in
+    # the last N days. None / 0 means "no freshness filter".
+    recent_days: Optional[int] = None
+    # 5.10: by default JobDiva Talent Search drops profile-only candidates
+    # (no resume attached). Set false to opt back in to the full signal.
+    require_resume: bool = True
+
+    def sourcing_skill_values(self) -> List[str]:
+        """Flat skill-like strings for sources that only accept a plain list
+        (LinkedIn-Unipile, Exa, Dice, Vetted). Pulls from skill_criteria +
+        title_criteria, skipping excludes and empty values."""
+        values: List[str] = []
+        seen = set()
+        for item in (self.skill_criteria or []) + (self.title_criteria or []):
+            if not isinstance(item, dict):
+                continue
+            if item.get("match_type") == "exclude":
+                continue
+            value = str(item.get("value", "")).strip()
+            if not value:
+                continue
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            values.append(value)
+        return values
 
 class UnifiedCandidateSearch:
     def __init__(self):
         self.jobdiva_service = JobDivaService()
         self.unipile_service = unipile_service
         self.vetted_service = vetted_service
+        self.exa_service = exa_service
+
 
     def _log_stage(self, stage: str, message: str) -> None:
         logger.info("[CandidateSearch] %s | %s", stage, message)
@@ -53,6 +94,7 @@ class UnifiedCandidateSearch:
             "linkedin_count": 0,
             "dice_count": 0,
             "vetted_count": 0,
+            "exa_count": 0,
             "talent_search_count": 0,
             "new_extractions": 0,
             "qualified_applicants": 0,
@@ -65,6 +107,14 @@ class UnifiedCandidateSearch:
             if cand.get("name"):
                 cand["name"] = str(cand["name"]).title()
             
+            if criteria.bypass_screening:
+                cand["match_score"] = 0
+                cand["missing_skills"] = []
+                cand["matched_skills"] = []
+                cand["explainability"] = ["Scoring skipped (auto-assignment)"]
+                cand["match_score_details"] = {}
+                return cand
+
             score_result = self._score_candidate(cand, criteria)
             cand["match_score"] = score_result["score"]
             cand["missing_skills"] = score_result["missing_skills"]
@@ -73,176 +123,231 @@ class UnifiedCandidateSearch:
             cand["match_score_details"] = score_result.get("score_details", {})
             return cand
 
-        jobdiva_selected = "JobDiva" in criteria.sources
-        talent_search_selected = "JobDiva-TalentSearch" in criteria.sources
-        hotlist_selected = "JobDiva Hotlist" in criteria.sources
-
-        # --- STEP 1: JOBDIVA APPLICANTS (legacy / backward-compat only) ---
-        # Triggered only when the old 'JobDiva' source key is explicitly used.
-        # The UI now maps the "JobDiva" checkbox → 'JobDiva-TalentSearch', so
-        # this path is reserved for programmatic / legacy callers.
-        if jobdiva_selected:
-            yield {"type": "stage", "data": "Searching JobDiva applicants..."}
-            applicants_res = await self._search_jobdiva_applicants(criteria)
-            applicants = applicants_res.get("candidates", [])
-            summary["job_applicants_count"] = len(applicants)
-
-            if applicants:
-                self._log_stage("Applicants", f"Found {len(applicants)} applicants; starting resume screen...")
-                self._attach_cached_enhanced_info(applicants)
-
-                async for cand in self._enrich_filtered_jobdiva_candidates(applicants, criteria):
-                    assessment = self._filter_assessment(cand, criteria, enforce_years=True)
-                    # Yield if it passes screening OR if bypass_screening is requested (e.g. auto-assign all applicants)
-                    if assessment["passes"] or criteria.bypass_screening:
-                        cand["screening_summary"] = {
-                            "matched": assessment["matched"][:10],
-                            "missing": [],
-                            "excluded": [],
-                        }
-                        cand = finalize_candidate(cand)
-                        cid = str(cand.get("candidate_id") or cand.get("id"))
-                        if cid not in seen_ids:
-                            seen_ids.add(cid)
-                            if assessment["passes"]:
-                                summary["qualified_applicants"] += 1
-                            summary["total_candidates"] += 1
-                            yield {"type": "candidate", "data": cand}
-            else:
-                self._log_stage("Applicants", "No applicants found.")
-
-        # --- STEP 2: JOBDIVA TALENT SEARCH ---
-        # Triggered when the recruiter explicitly selects "JobDiva" in the UI
-        # (which maps to 'JobDiva-TalentSearch'), OR as a tiered fallback when
-        # the legacy applicants path found fewer than 3 qualified candidates.
-        should_search_talent = (
-            talent_search_selected  # Direct: recruiter chose "JobDiva" in the UI
-            or (jobdiva_selected and not criteria.bypass_screening and summary["qualified_applicants"] < 3)  # Fallback
+        # JobDiva is now two independent sources that run in parallel:
+        #   - "JobDiva Applicants": all people who applied to this job_id (no boolean)
+        #   - "JobDiva": talent-pool boolean search
+        # Back-compat: if only "JobDiva" is selected, we still run Applicants too
+        # (the previous behaviour — Applicants first, Talent only if <3 qualified —
+        # has been replaced with unconditional parallel execution of both).
+        applicants_selected = (
+            "JobDiva Applicants" in criteria.sources
+            or "JobDiva" in criteria.sources
         )
-        if should_search_talent:
-            yield {"type": "stage", "data": "Searching JobDiva Talent Search..."}
-            if talent_search_selected:
-                self._log_stage("TalentSearch", "Direct talent search requested by recruiter.")
-            else:
-                reason = f"only {summary['qualified_applicants']} qualified applicants" if summary["qualified_applicants"] > 0 else "no qualified applicants"
-                self._log_stage("TalentSearch", f"Triggering talent search as fallback: {reason}")
+        talent_selected = "JobDiva" in criteria.sources
 
-            talent_res = await self._search_jobdiva_talent(criteria)
-            talent_pool = talent_res.get("candidates", [])
-            summary["talent_search_count"] = len(talent_pool)
+        queue: asyncio.Queue = asyncio.Queue()
+        SENTINEL = object()
 
-            if talent_pool:
+        def build_screening(assessment):
+            return {
+                "matched": assessment["matched"][:10],
+                "missing": assessment["missing"][:10],
+                "excluded": assessment["excluded"][:10],
+                "passes_strict": assessment["passes"],
+            }
+
+        async def emit_candidate(cand, assessment, qualified_counter_key=None):
+            cand["screening_summary"] = build_screening(assessment)
+            cand = finalize_candidate(cand)
+            cid = str(cand.get("candidate_id") or cand.get("id"))
+            if cid and cid in seen_ids:
+                return
+            if cid:
+                seen_ids.add(cid)
+            if qualified_counter_key and assessment["passes"]:
+                summary[qualified_counter_key] += 1
+            summary["total_candidates"] += 1
+            await queue.put({"type": "candidate", "data": cand})
+
+        async def produce_jobdiva_applicants():
+            """
+            Fetch every candidate who has applied to this job_id in JobDiva
+            (no boolean string). Emitted under source=JobDiva-Applicants.
+            Skipped for external jobs (negative job_id / EXT-), which have
+            no JobDiva applicants.
+            """
+            try:
+                if not applicants_selected:
+                    return
+                job_id_str = str(criteria.job_id or "")
+                is_external_job = job_id_str.startswith("-") or job_id_str.startswith("EXT-")
+                if is_external_job:
+                    self._log_stage(
+                        "Applicants",
+                        f"External job {job_id_str} — no JobDiva applicants to fetch.",
+                    )
+                    return
+
+                await queue.put({"type": "stage", "data": "Searching JobDiva applicants..."})
+                applicants_res = await self._search_jobdiva_applicants(criteria)
+                applicants = applicants_res.get("candidates", [])
+                summary["job_applicants_count"] = len(applicants)
+
+                if not applicants:
+                    self._log_stage("Applicants", "No applicants found.")
+                    return
+
+                self._log_stage(
+                    "Applicants",
+                    f"Found {len(applicants)} applicants; starting resume screen...",
+                )
+                self._attach_cached_enhanced_info(applicants)
+                async for cand in self._enrich_filtered_jobdiva_candidates(applicants, criteria):
+                    # From feature/job-diva-sync-optimization (2c287a1): in
+                    # bypass_screening mode (auto-assign sync), skip the
+                    # filter assessment — scoring is already short-circuited
+                    # upstream in finalize_candidate, so every applicant
+                    # should flow through unaltered.
+                    if criteria.bypass_screening:
+                        assessment = {"passes": True, "matched": [], "missing": [], "excluded": []}
+                        await emit_candidate(cand, assessment, "qualified_applicants")
+                        continue
+
+                    assessment = self._filter_assessment(cand, criteria, enforce_years=True)
+                    if not assessment["passes"]:
+                        self._log_stage(
+                            "Applicants",
+                            f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
+                        )
+                    await emit_candidate(cand, assessment, "qualified_applicants")
+            except Exception as e:
+                logger.error(f"JobDiva Applicants stage failed: {e}", exc_info=True)
+            finally:
+                await queue.put(SENTINEL)
+
+        async def produce_jobdiva_talent():
+            """
+            Run the boolean-string Talent Search against the JobDiva talent pool.
+            Independent of Applicants — runs whenever "JobDiva" is in sources.
+            """
+            try:
+                if not talent_selected:
+                    return
+                await queue.put({"type": "stage", "data": "Searching JobDiva Talent Search..."})
+                self._log_stage("TalentSearch", "Running JobDiva Talent boolean search...")
+                talent_res = await self._search_jobdiva_talent(criteria)
+                talent_pool = talent_res.get("candidates", [])
+                summary["talent_search_count"] = len(talent_pool)
+                if not talent_pool:
+                    self._log_stage("TalentSearch", "No talent-pool candidates returned.")
+                    return
                 self._attach_cached_enhanced_info(talent_pool)
                 async for cand in self._enrich_filtered_jobdiva_candidates(talent_pool, criteria):
                     assessment = self._filter_assessment(cand, criteria, enforce_years=True)
-                    # Yield if it passes screening OR if bypass_screening is requested
-                    if assessment["passes"] or criteria.bypass_screening:
-                        cand["screening_summary"] = {
-                            "matched": assessment["matched"][:10],
-                            "missing": [],
-                            "excluded": [],
-                        }
-                        cand = finalize_candidate(cand)
-                        cid = str(cand.get("candidate_id") or cand.get("id"))
-                        if cid not in seen_ids:
-                            seen_ids.add(cid)
-                            if assessment["passes"]:
-                                summary["qualified_talent"] += 1
-                            summary["total_candidates"] += 1
-                            yield {"type": "candidate", "data": cand}
+                    if not assessment["passes"]:
+                        self._log_stage(
+                            "TalentSearch",
+                            f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
+                        )
+                    await emit_candidate(cand, assessment, "qualified_talent")
+            except Exception as e:
+                logger.error(f"JobDiva Talent stage failed: {e}", exc_info=True)
+            finally:
+                await queue.put(SENTINEL)
 
-        # --- STEP 3: JOBDIVA HOTLIST ---
-        if hotlist_selected:
-            yield {"type": "stage", "data": "Searching JobDiva Hotlist..."}
-            # Placeholder for Hotlist logic
-            self._log_stage("Hotlist", "Hotlist search requested but not yet implemented.")
+        async def produce_external(name, search_method):
+            try:
+                await queue.put({"type": "stage", "data": f"Searching {name}..."})
+                res = await search_method(criteria)
+                if not res:
+                    return
+                ext_candidates = res.get("candidates", [])
+                source_type = res.get("source_type", name)
+                summary[f"{source_type.lower()}_count"] = len(ext_candidates)
+                self._log_stage(source_type, f"Found {len(ext_candidates)} profiles; starting streaming enrichment...")
 
-        # --- STEP 4 & 5: EXTERNAL SOURCES (LinkedIn, Dice) ---
-        # Refactored to be SEQUENTIAL for clear UI status updates
-        external_order = [("LinkedIn", self._search_linkedin), ("Dice", self._search_dice)]
-        
-        for name, search_method in external_order:
-            if name in criteria.sources:
-                yield {"type": "stage", "data": f"Searching {name}..."}
-                
-                try:
-                    res = await search_method(criteria)
-                    if not res: continue
-                    
-                    ext_candidates = res.get("candidates", [])
-                    source_type = res.get("source_type", name)
-                    summary[f"{source_type.lower()}_count"] = len(ext_candidates)
-                    
-                    self._log_stage(source_type, f"Found {len(ext_candidates)} profiles; starting streaming enrichment...")
-                    
-                    # Concurrent extraction/scoring per source
-                    semaphore = asyncio.Semaphore(5)
-                    
-                    async def _process_external_single(cand):
-                        async with semaphore:
-                            cand["source"] = source_type
-                            
-                            # 1. Swiftly fetch full profile in parallel
-                            if source_type == "LinkedIn":
-                                provider_id = cand.get("provider_id")
-                                if provider_id:
-                                    try:
-                                        full_profile = await self.unipile_service.get_candidate_profile(provider_id)
-                                        if full_profile:
-                                            cand.update(self._extract_linkedin_profile_data(full_profile))
-                                    except Exception as e:
-                                        logger.warning(f"Failed to fetch full profile for LinkedIn candidate {provider_id}: {e}")
+                semaphore = asyncio.Semaphore(5)
 
-                            # 2. Heuristic Filter Screen AGAINST FULL PROFILE before calling expensive LLM
-                            assessment = self._filter_assessment(cand, criteria, enforce_years=False)
-                            if not assessment["passes"]:
-                                return {"status": "failed_filter"}
+                async def _process_external_single(cand):
+                    async with semaphore:
+                        cand["source"] = source_type
+                        is_linkedin = source_type.startswith("LinkedIn")
+                        if source_type == "LinkedIn-Unipile":
+                            provider_id = cand.get("provider_id")
+                            if provider_id:
+                                try:
+                                    full_profile = await self.unipile_service.get_candidate_profile(provider_id)
+                                    if full_profile:
+                                        cand.update(self._extract_linkedin_profile_data(full_profile))
+                                except Exception as e:
+                                    logger.warning(f"Failed to fetch full profile for LinkedIn candidate {provider_id}: {e}")
 
-                            # 3. LLM Extraction
-                            from services.sourced_candidates_storage import process_linkedin_candidate, process_dice_candidate
-                            
-                            if source_type == "LinkedIn":
-                                enhanced = await process_linkedin_candidate(cand)
-                            else:
-                                enhanced = await process_dice_candidate(cand)
-                                
-                            if isinstance(enhanced, dict) and enhanced is not cand:
-                                cand["enhanced_info"] = enhanced.get("raw", enhanced)
-                            else:
-                                cand["enhanced_info"] = {}
-                                
-                            cand["enhanced_info_status"] = "completed"
-                            
-                            # Map standard fields back to candidate object for UI
-                            cand["name"] = cand["enhanced_info"].get("candidate_name") or cand.get("name")
-                            cand["email"] = cand["enhanced_info"].get("email") or cand.get("email")
-                            cand["phone"] = cand["enhanced_info"].get("phone") or cand.get("phone")
-                            cand["title"] = cand["enhanced_info"].get("job_title") or cand.get("title")
-                            cand["location"] = cand["enhanced_info"].get("current_location") or cand.get("location")
-                            
-                            # Use LLM skills if available, ensuring match scorer sees them
-                            if cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills"):
-                                cand["skills"] = cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills")
+                        assessment = self._filter_assessment(cand, criteria, enforce_years=False)
+                        if not assessment["passes"]:
+                            return {"status": "failed_filter"}
 
-                            return {"status": "success", "candidate": cand}
+                        from services.sourced_candidates_storage import process_linkedin_candidate, process_dice_candidate
+                        if is_linkedin:
+                            enhanced = await process_linkedin_candidate(cand)
+                        elif source_type == "Dice":
+                            enhanced = await process_dice_candidate(cand)
+                        else:
+                            enhanced = cand
 
-                    # Stream external results
-                    process_tasks = [asyncio.create_task(_process_external_single(c)) for c in ext_candidates]
-                    for task in asyncio.as_completed(process_tasks):
-                        result = await task
-                        if result["status"] == "success":
-                            cand = result["candidate"]
-                            cand = finalize_candidate(cand)
-                            cid = str(cand.get("candidate_id") or cand.get("id"))
-                            if cid not in seen_ids:
-                                seen_ids.add(cid)
-                                summary["total_candidates"] += 1
-                                yield {"type": "candidate", "data": cand}
-                                
-                except Exception as e:
-                    logger.error(f"{name} search stage failed: {e}")
+                        if isinstance(enhanced, dict) and enhanced is not cand:
+                            cand["enhanced_info"] = enhanced.get("raw", enhanced)
+                        else:
+                            cand["enhanced_info"] = cand.get("enhanced_info") or {}
 
-        # --- STEP 6: FINAL SUMMARY ---
+                        cand["enhanced_info_status"] = "completed"
+                        cand["name"] = cand["enhanced_info"].get("candidate_name") or cand.get("name")
+                        cand["email"] = cand["enhanced_info"].get("email") or cand.get("email")
+                        cand["phone"] = cand["enhanced_info"].get("phone") or cand.get("phone")
+                        cand["title"] = cand["enhanced_info"].get("job_title") or cand.get("title")
+                        cand["location"] = cand["enhanced_info"].get("current_location") or cand.get("location")
+                        if cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills"):
+                            cand["skills"] = cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills")
+                        return {"status": "success", "candidate": cand}
+
+                process_tasks = [asyncio.create_task(_process_external_single(c)) for c in ext_candidates]
+                for task in asyncio.as_completed(process_tasks):
+                    result = await task
+                    if result["status"] == "success":
+                        cand = result["candidate"]
+                        assessment = self._filter_assessment(cand, criteria, enforce_years=False)
+                        await emit_candidate(cand, assessment)
+            except Exception as e:
+                logger.error(f"{name} search stage failed: {e}", exc_info=True)
+            finally:
+                await queue.put(SENTINEL)
+
+        # Build producer tasks for all selected sources — run in parallel.
+        # JobDiva Applicants and JobDiva Talent are now independent producers,
+        # each with its own SENTINEL, so they stream concurrently alongside Exa/Unipile/Dice.
+        producers = []
+        if applicants_selected:
+            producers.append(asyncio.create_task(produce_jobdiva_applicants()))
+        if talent_selected:
+            producers.append(asyncio.create_task(produce_jobdiva_talent()))
+
+        external_order = [
+            ("LinkedIn", self._search_linkedin),
+            ("Dice", self._search_dice),
+            ("Exa", self._search_exa),
+        ]
+        for ext_name, ext_method in external_order:
+            if ext_name in criteria.sources:
+                producers.append(asyncio.create_task(produce_external(ext_name, ext_method)))
+
+        # Drain the queue until every producer emits its SENTINEL
+        active = len(producers)
+        try:
+            while active > 0:
+                event = await queue.get()
+                if event is SENTINEL:
+                    active -= 1
+                    continue
+                yield event
+        finally:
+            # If the generator is closed (e.g. client disconnect), cancel all background producers
+            for task in producers:
+                if not task.done():
+                    task.cancel()
+            
+            if producers:
+                # Wait for tasks to acknowledge cancellation (optional but good practice)
+                await asyncio.gather(*producers, return_exceptions=True)
+
         duration = time.time() - start_time
         yield {
             "type": "summary",
@@ -257,12 +362,18 @@ class UnifiedCandidateSearch:
         
     async def _search_jobdiva_talent(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
+            # Pass through the freshness window (5.6) and profile-only filter
+            # (5.10). The JobDiva service handles both — Boolean prepends a
+            # LASTMODIFIED cutoff when recent_days is set, and drops profile-
+            # only candidates when require_resume is true.
             candidates = await self.jobdiva_service.search_candidates(
                 skills=self._jobdiva_search_terms(criteria),
                 location=criteria.location,
                 limit=criteria.page_size,
                 job_id=None,
-                boolean_string=criteria.boolean_string or self._build_boolean_string(criteria)
+                boolean_string=criteria.boolean_string or self._build_boolean_string(criteria),
+                recent_days=getattr(criteria, "recent_days", None),
+                require_resume=getattr(criteria, "require_resume", True),
             )
             self._log_stage("TalentSearch", f"JobDiva returned {len(candidates)} candidate(s)")
             for c in candidates:
@@ -643,30 +754,60 @@ class UnifiedCandidateSearch:
             candidate.get("headline", ""),
         ])
 
+        # Fix 1 (Path A / A′): when enhanced_info is missing or the LLM
+        # extraction returned an empty shell (error case), fall back to
+        # source-native candidate fields. LinkedIn/Unipile and certain JobDiva
+        # paths already populate these at the candidate root, so we give them a
+        # non-zero profile even when LLM extraction silently degraded.
+        company_sources: List[Any] = [
+            enhanced.get("company_experience") or [],
+            candidate.get("company_experience") or [],
+            candidate.get("experience") or [],
+            candidate.get("work_experience") or [],
+        ]
         company_terms: List[str] = []
-        for item in enhanced.get("company_experience", []) or []:
-            if isinstance(item, dict):
-                for key in ["company", "company_name", "employer", "name"]:
-                    if item.get(key):
-                        company_terms.append(str(item.get(key)))
+        for source in company_sources:
+            if not isinstance(source, list):
+                continue
+            for item in source:
+                if isinstance(item, dict):
+                    for key in ["company", "company_name", "employer", "name"]:
+                        if item.get(key):
+                            company_terms.append(str(item.get(key)))
+                elif isinstance(item, str):
+                    company_terms.append(item)
 
+        education_sources: List[Any] = [
+            enhanced.get("candidate_education") or [],
+            candidate.get("education") or [],
+        ]
         education_terms: List[str] = []
-        for item in enhanced.get("candidate_education", []) or []:
-            if isinstance(item, dict):
-                for key in ["degree", "field", "institution", "school", "specialization"]:
-                    if item.get(key):
-                        education_terms.append(str(item.get(key)))
-            elif isinstance(item, str):
-                education_terms.append(item)
+        for source in education_sources:
+            if not isinstance(source, list):
+                continue
+            for item in source:
+                if isinstance(item, dict):
+                    for key in ["degree", "field", "institution", "school", "specialization"]:
+                        if item.get(key):
+                            education_terms.append(str(item.get(key)))
+                elif isinstance(item, str):
+                    education_terms.append(item)
 
+        certification_sources: List[Any] = [
+            enhanced.get("candidate_certification") or [],
+            candidate.get("certifications") or [],
+        ]
         certification_terms: List[str] = []
-        for item in enhanced.get("candidate_certification", []) or []:
-            if isinstance(item, dict):
-                for key in ["name", "certification", "title", "issuer"]:
-                    if item.get(key):
-                        certification_terms.append(str(item.get(key)))
-            elif isinstance(item, str):
-                certification_terms.append(item)
+        for source in certification_sources:
+            if not isinstance(source, list):
+                continue
+            for item in source:
+                if isinstance(item, dict):
+                    for key in ["name", "certification", "title", "issuer"]:
+                        if item.get(key):
+                            certification_terms.append(str(item.get(key)))
+                elif isinstance(item, str):
+                    certification_terms.append(item)
 
         location_terms = unique_terms([
             enhanced.get("current_location", ""),
@@ -822,15 +963,18 @@ class UnifiedCandidateSearch:
         if min_years > 0:
             years = float(profile.get("years_of_experience") or 0)
             if years <= 0:
-                score *= 0.75
+                # T2: years-unknown multiplier (was 0.75, softened via env).
+                score *= SCORING_YEARS_UNKNOWN_MULT
             elif years < min_years:
-                score *= max(0.35, years / min_years)
+                # T2: years-below-min floor (was 0.35, softened via env).
+                score *= max(SCORING_YEARS_FLOOR, years / min_years)
 
         if self._group_recent(group):
             terms = self._group_terms(group)
             recent_text = profile.get("recent_text", "")
             if terms and not any(term in recent_text for term in terms):
-                score *= 0.85
+                # T2: not-recent penalty (was 0.85, softened via env).
+                score *= SCORING_RECENT_PENALTY
 
         return score
 
@@ -944,21 +1088,78 @@ class UnifiedCandidateSearch:
             preferred_matches = self._matched_term_groups(profile, preferred_groups, dimension["collections"])
             excluded_matches = self._matched_term_groups(profile, excluded_groups, dimension["collections"])
 
-            required_ratio = (
-                sum(self._term_group_score(profile, group, dimension["collections"]) for group in required_groups)
-                / len(required_groups)
-            ) if required_groups else 1.0
-            preferred_ratio = (
-                sum(self._term_group_score(profile, group, dimension["collections"]) for group in preferred_groups)
-                / len(preferred_groups)
-            ) if preferred_groups else 1.0
+            # Part 3: weighted mean across groups so recruiters can flag
+            # individual filters as 2x or 0.5x in the UI. Default weight is
+            # 1.0, which reproduces the previous arithmetic-mean formula.
+            # L4: unmatched groups floor at SCORING_UNMATCHED_*_FLOOR instead
+            # of 0 — many "misses" are really synonym/parsing artifacts (the
+            # rubric may list "CS degree" and "Engineering degree" as two
+            # groups even though either satisfies the recruiter), and strong
+            # candidates shouldn't be zeroed on every such item.
+            # L5: Coverage-based quality lift. When the candidate hits at
+            # least SCORING_COVERAGE_BLEND_THRESHOLD of the groups at decent
+            # quality, blend toward the hits-only mean. A candidate who
+            # nails 7 of 10 required items at ~0.9 each shouldn't be
+            # dragged to ~0.7 by three misses — especially when those
+            # misses are rubric redundancies. Weak coverage (< threshold)
+            # falls through to the ordinary floored mean, preserving
+            # "weak fit = weak score" ordering.
+            def _weighted_ratio(groups, is_required: bool):
+                if not groups:
+                    return 1.0
+                floor = (
+                    SCORING_UNMATCHED_REQUIRED_FLOOR if is_required
+                    else SCORING_UNMATCHED_PREFERRED_FLOOR
+                )
+                collections_for_group = dimension["collections"]
+                tuples: List[tuple] = []
+                for g in groups:
+                    raw = self._term_group_score(profile, g, collections_for_group)
+                    w = float(g.get("weight") or 1.0)
+                    tuples.append((raw, w))
+
+                total_w = sum(w for _, w in tuples) or float(len(tuples))
+                floored_mean = sum(
+                    (raw if raw > 0 else floor) * w for raw, w in tuples
+                ) / total_w
+
+                # Hits = groups that match decently (matches the
+                # _term_group_matches threshold of > 0.5).
+                hits = [(raw, w) for raw, w in tuples if raw > 0.5]
+                if hits and len(hits) / len(tuples) >= SCORING_COVERAGE_BLEND_THRESHOLD:
+                    hit_w = sum(w for _, w in hits) or 1.0
+                    hit_mean = sum(raw * w for raw, w in hits) / hit_w
+                    coverage = len(hits) / len(tuples)
+                    # Higher coverage → lean harder on hit_mean. Full
+                    # coverage collapses to hit_mean; half coverage is a
+                    # 50/50 blend. Never drop below floored_mean.
+                    blend = (1.0 - coverage) * floored_mean + coverage * hit_mean
+                    return max(floored_mean, blend)
+                return floored_mean
+
+            required_ratio = _weighted_ratio(required_groups, True) if required_groups else 1.0
+            preferred_ratio = _weighted_ratio(preferred_groups, False) if preferred_groups else 1.0
             base_ratio = 0.0
             if required_groups and preferred_groups:
-                base_ratio = (required_ratio * 0.75) + (preferred_ratio * 0.25)
+                # T1: rebalance required-vs-preferred (was 0.75/0.25, softened via env).
+                base_ratio = (required_ratio * SCORING_REQUIRED_WEIGHT) + (preferred_ratio * SCORING_PREFERRED_WEIGHT)
             elif required_groups:
                 base_ratio = required_ratio
             elif preferred_groups:
                 base_ratio = preferred_ratio
+
+            # L4: Parsing-gap rescue. If the structured collections this
+            # dimension scores against are entirely empty on the profile
+            # (classic LinkedIn/JobDiva parsing gap — e.g. no `companies`
+            # extracted), but the candidate does have resume_text, floor
+            # base_ratio so a single missing field can't torpedo the score.
+            # Clear non-fits (candidate with real data that still doesn't
+            # match) are unaffected because they'll have something in the
+            # collection even if it's wrong.
+            collections = dimension["collections"]
+            has_structured_data = any(profile.get(c) for c in collections)
+            if not has_structured_data and profile.get("text"):
+                base_ratio = max(base_ratio, SCORING_PARSING_GAP_FLOOR)
 
             dimension_score = total_weight * base_ratio
             weighted_scores.append(dimension_score)
@@ -973,7 +1174,11 @@ class UnifiedCandidateSearch:
             }
 
             if excluded_matches:
-                penalty = min(total_weight * 0.6, len(excluded_matches) * max(4.0, total_weight * 0.25))
+                # T3: cap exclusion penalty (was 0.6 / 0.25, softened via env).
+                penalty = min(
+                    total_weight * SCORING_EXCLUSION_CAP,
+                    len(excluded_matches) * max(4.0, total_weight * SCORING_EXCLUSION_PER_HIT),
+                )
                 weighted_scores.append(-penalty)
                 score_details[dimension["label"]]["exclusion_penalty"] = round(penalty, 2)
                 explainability.append(
@@ -1007,8 +1212,11 @@ class UnifiedCandidateSearch:
                     f"{dimension['label']}: matched {len(preferred_matches)}/{len(preferred_groups)} preferred"
                 )
 
-            if dimension["label"] == "Skills":
-                matched_required_skills.extend(required_matches)
+            dim_label = dimension["label"]
+            for item in required_matches + preferred_matches:
+                matched_required_skills.append(
+                    item if dim_label == "Skills" else f"{dim_label}: {item}"
+                )
 
         score = 0
         if weighted_max > 0:
@@ -1227,6 +1435,7 @@ class UnifiedCandidateSearch:
             label: str = "",
             years: int = 0,
             recent: bool = False,
+            weight: float = 1.0,
         ) -> None:
             clean_values = [value for value in values if str(value).strip()]
             if not clean_values:
@@ -1237,17 +1446,32 @@ class UnifiedCandidateSearch:
                 target = "excluded"
             elif match_type in {"can", "preferred", "nice to have", "nice-to-have"}:
                 target = "preferred"
-            
-            # Avoid duplicate identical groups in the same dimension
+
+            # Clamp weight to the same [0.1, 5] band the UI enforces, with a
+            # 1.0 default so legacy payloads behave identically to before.
+            try:
+                w = float(weight)
+            except (TypeError, ValueError):
+                w = 1.0
+            w = max(0.1, min(5.0, w)) if w > 0 else 1.0
+
+            # Avoid duplicate identical groups in the same dimension. If the
+            # same term re-enters with a different weight (e.g. once via the
+            # sourcing criteria at weight 1.0, once via a resume-match filter
+            # at weight 2.0), keep the higher weight — recruiter intent.
             existing_groups = dimensions[bucket][f"{target}_groups"]
-            if any(set(g["terms"]) == set(clean_values) and g["label"] == (label or clean_values[0]) for g in existing_groups):
-                return
+            for g in existing_groups:
+                if set(g["terms"]) == set(clean_values) and g["label"] == (label or clean_values[0]):
+                    if w > float(g.get("weight") or 1.0):
+                        g["weight"] = w
+                    return
 
             dimensions[bucket][f"{target}_groups"].append({
                 "terms": clean_values,
                 "label": label or clean_values[0],
                 "years": years or 0,
                 "recent": recent,
+                "weight": w,
             })
 
         # 1. Include Page 5 Sourcing Criteria (as baseline relevance)
@@ -1265,7 +1489,7 @@ class UnifiedCandidateSearch:
         for filter_item in criteria.resume_match_filters:
             if not filter_item.get("active", True):
                 continue
-                
+
             category = str(filter_item.get("category", "")).lower()
             raw_value = str(filter_item.get("value", "")).strip()
             if not raw_value:
@@ -1275,23 +1499,30 @@ class UnifiedCandidateSearch:
             if not term:
                 continue
 
+            # Part 3: per-filter weight from the Step-5 UI. Default 1.0 preserves
+            # the pre-weight behaviour for legacy payloads.
+            try:
+                fw = float(filter_item.get("weight") if filter_item.get("weight") is not None else 1.0)
+            except (TypeError, ValueError):
+                fw = 1.0
+
             if "customer" in category or raw_value.lower().startswith("must not"):
-                add_terms("companies", "exclude", [term])
+                add_terms("companies", "exclude", [term], weight=fw)
             elif "title" in category:
-                add_terms("titles", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term])
+                add_terms("titles", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
             elif "skill" in category:
-                add_terms("skills", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term])
+                add_terms("skills", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
             elif "edu" in category:
-                add_terms("education", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term])
+                add_terms("education", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
             elif "cert" in category or "license" in category:
-                add_terms("certifications", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term])
+                add_terms("certifications", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
             elif "domain" in category:
-                add_terms("companies", "can", [term])
-                add_terms("keywords", "can", [term])
+                add_terms("companies", "can", [term], weight=fw)
+                add_terms("keywords", "can", [term], weight=fw)
             elif "local" in term.lower() or "location" in category:
-                add_terms("location", "must", [term])
+                add_terms("location", "must", [term], weight=fw)
             else:
-                add_terms("keywords", "must", [term])
+                add_terms("keywords", "must", [term], weight=fw)
 
         return list(dimensions.values())
 
@@ -1313,7 +1544,7 @@ class UnifiedCandidateSearch:
         self._log_stage("ResumeScreen", f"checking {len(jobdiva_candidates)} JobDiva candidate resume(s) before LLM")
 
         semaphore = asyncio.Semaphore(5)
-        counters = {"screened": 0, "skipped": 0, "no_resume": 0, "failed_filter": 0}
+        counters = {"screened": 0, "skipped": 0, "no_resume": 0, "failed_filter": 0, "llm_extraction_errors": 0}
 
         async def _process_single(candidate, index):
             async with semaphore:
@@ -1348,6 +1579,14 @@ class UnifiedCandidateSearch:
                         self._log_stage("ResumeScreen", f"skipped candidate_id={candidate_id}; no resume text available")
                         return {"status": "no_resume", "candidate": None}
 
+                    if criteria.bypass_screening:
+                        self._log_stage("ResumeScreen", f"Bypassing LLM extraction for candidate_id={candidate_id} (auto-sync mode)")
+                        # In bypass mode, we still ensure name/title/location are basic-hydrated
+                        # even without LLM if JobDiva already has them.
+                        candidate["enhanced_info"] = {}
+                        candidate["enhanced_info_status"] = "skipped"
+                        return {"status": "success", "candidate": candidate}
+
                     self._log_stage("ResumeScreen", f"running quick filter for candidate_id={candidate_id}")
                     assessment = self._filter_assessment(candidate, criteria, enforce_years=False)
                     if not assessment["passes"]:
@@ -1372,10 +1611,25 @@ class UnifiedCandidateSearch:
                     self._log_stage("LLM", f"STARTING LLM extraction for candidate_id={candidate_id}, resume_id={candidate.get('resume_id') or 'unknown'}")
                     
                     enhanced = await process_jobdiva_candidate(candidate)
+                    # Fix 2: detect silent LLM extraction failures and surface
+                    # them via a dedicated counter + stage log, so operators can
+                    # tell "LLM failed on N candidates" from "valid empty
+                    # profile".
+                    extraction_error = (
+                        enhanced.get("_extraction_error")
+                        if isinstance(enhanced, dict) else None
+                    )
+                    if extraction_error:
+                        logger.warning(
+                            "LLM extraction degraded for candidate_id=%s (%s); scoring from resume_text + source-native fields only",
+                            candidate_id, extraction_error,
+                        )
                     if isinstance(enhanced, dict) and enhanced is not candidate:
                         candidate["enhanced_info"] = enhanced.get("raw", enhanced)
                     else:
                         candidate["enhanced_info"] = {}
+                    if extraction_error and isinstance(candidate.get("enhanced_info"), dict):
+                        candidate["enhanced_info"]["_extraction_error"] = extraction_error
                         
                     candidate["enhanced_info_status"] = "completed"
                     candidate["name"] = candidate["enhanced_info"].get("candidate_name") or candidate.get("name")
@@ -1405,7 +1659,11 @@ class UnifiedCandidateSearch:
             status = result["status"]
             if status == "success":
                 counters["screened"] += 1
-                yield result["candidate"]
+                cand = result["candidate"]
+                if isinstance(cand, dict) and isinstance(cand.get("enhanced_info"), dict) \
+                        and cand["enhanced_info"].get("_extraction_error"):
+                    counters["llm_extraction_errors"] += 1
+                yield cand
             elif status == "no_resume":
                 counters["no_resume"] += 1
                 counters["skipped"] += 1
@@ -1417,12 +1675,13 @@ class UnifiedCandidateSearch:
 
         self._log_stage(
             "ResumeScreen",
-            "RESULTS: kept %s of %s JobDiva candidate(s); skipped %s total (no_resume=%s, failed_filter=%s)" % (
+            "RESULTS: kept %s of %s JobDiva candidate(s); skipped %s total (no_resume=%s, failed_filter=%s, llm_extraction_errors=%s)" % (
                 counters["screened"],
                 len(jobdiva_candidates),
                 counters["skipped"],
                 counters["no_resume"],
                 counters["failed_filter"],
+                counters["llm_extraction_errors"],
             ),
         )
 
@@ -1529,8 +1788,11 @@ class UnifiedCandidateSearch:
 
     async def _search_linkedin(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
-            # Unipile expects skills as a list of dicts or strings
-            skills = [{"value": s, "priority": "Must Have"} for s in criteria.skills]
+            # Unipile expects skills as a list of dicts or strings. Derive from
+            # skill_criteria + title_criteria so callers don't have to send a
+            # redundant flat list.
+            skill_values = criteria.sourcing_skill_values()
+            skills = [{"value": s, "priority": "Must Have"} for s in skill_values]
             candidates = await self.unipile_service.search_candidates(
                 skills=skills,
                 location=criteria.location,
@@ -1538,11 +1800,11 @@ class UnifiedCandidateSearch:
                 limit=criteria.page_size,
                 boolean_string=criteria.boolean_string or self._build_boolean_string(criteria)
             )
-            
-            return {"candidates": candidates, "source_type": "LinkedIn"}
+
+            return {"candidates": candidates, "source_type": "LinkedIn-Unipile"}
         except Exception as e:
             logger.error(f"LinkedIn search failed: {e}")
-            return {"candidates": [], "source_type": "LinkedIn"}
+            return {"candidates": [], "source_type": "LinkedIn-Unipile"}
     
     def _extract_linkedin_profile_data(self, profile: Dict[str, Any]) -> Dict[str, Any]:
         """Extract detailed data from full LinkedIn profile for enrichment."""
@@ -1597,13 +1859,24 @@ class UnifiedCandidateSearch:
         return extracted
 
     async def _search_dice(self, criteria: SearchCriteria) -> Dict[str, Any]:
-        return {"candidates": [], "source_type": "Dice"}
+        try:
+            skills_values = criteria.sourcing_skill_values()
+            boolean_string = criteria.boolean_string or self._build_boolean_string(criteria)
+            candidates = await self.exa_service.search_dice_candidates(
+                skills=skills_values,
+                location=criteria.location,
+                limit=min(criteria.page_size, 20),
+                boolean_string=boolean_string,
+            )
+            return {"candidates": candidates, "source_type": "Dice"}
+        except Exception as e:
+            logger.error(f"Dice search failed: {e}")
+            return {"candidates": [], "source_type": "Dice"}
 
     async def _search_vetted(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
-            # Simple vetted search
             candidates = await self.vetted_service.search_candidates(
-                skills=criteria.skills,
+                skills=criteria.sourcing_skill_values(),
                 location=criteria.location,
                 limit=criteria.page_size
             )
@@ -1611,6 +1884,21 @@ class UnifiedCandidateSearch:
         except Exception as e:
             logger.error(f"VettedDB search failed: {e}")
             return {"candidates": [], "source_type": "VettedDB"}
+
+    async def _search_exa(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        try:
+            skills_values = criteria.sourcing_skill_values()
+            boolean_string = criteria.boolean_string or self._build_boolean_string(criteria)
+            candidates = await self.exa_service.search_candidates(
+                skills=skills_values,
+                location=criteria.location,
+                limit=min(criteria.page_size, 20),
+                boolean_string=boolean_string,
+            )
+            return {"candidates": candidates, "source_type": "LinkedIn-Exa"}
+        except Exception as e:
+            logger.error(f"Exa search failed: {e}")
+            return {"candidates": [], "source_type": "LinkedIn-Exa"}
 
     def _deduplicate_candidates(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen = {}
