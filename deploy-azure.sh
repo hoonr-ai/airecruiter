@@ -5,9 +5,7 @@
 #
 # 🔄 REDEPLOYMENT USAGE:
 # Normal redeploy:    ./deploy-azure.sh
-# Force env update:   FORCE_ENV_UPDATE=true ./deploy-azure.sh  
-# Force nginx update: FORCE_NGINX_UPDATE=true ./deploy-azure.sh
-# Force both:         FORCE_ENV_UPDATE=true FORCE_NGINX_UPDATE=true ./deploy-azure.sh
+# Force env update:   FORCE_ENV_UPDATE=true ./deploy-azure.sh
 
 set -e
 
@@ -157,22 +155,21 @@ echo -e "${BLUE}🌐 Configuring Nginx reverse proxy...${NC}"
 # Update nginx config with the correct domain
 sed -i "s/qacurate.hoonr.ai/$DOMAIN_NAME/g" "$PROJECT_DIR/nginx.conf"
 
-# Only copy nginx config if it doesn't exist or if explicitly requested
-if [ ! -f /etc/nginx/sites-available/airecruiter ] || [ "$FORCE_NGINX_UPDATE" = "true" ]; then
-    sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
-    print_status "Nginx configuration updated"
-    
-    # Enable airecruiter site and disable default
-    sudo ln -sf /etc/nginx/sites-available/airecruiter /etc/nginx/sites-enabled/
-    sudo rm -f /etc/nginx/sites-enabled/default
-    print_status "Nginx airecruiter site enabled"
-    
-    # Test and reload nginx configuration
-    if sudo nginx -t; then
-        sudo systemctl reload nginx
-        print_status "Nginx configuration reloaded"
-    else
-        print_error "Nginx configuration test failed"
+# Always copy and update nginx config
+sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
+print_status "Nginx configuration updated"
+
+# Enable airecruiter site and disable default
+sudo ln -sf /etc/nginx/sites-available/airecruiter /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/default
+print_status "Nginx airecruiter site enabled"
+
+# Test and reload nginx configuration
+if sudo nginx -t; then
+    sudo systemctl reload nginx
+    print_status "Nginx configuration reloaded"
+else
+    print_error "Nginx configuration test failed"
     fi
 else
     print_status "Nginx configuration already exists (skipping update)"
