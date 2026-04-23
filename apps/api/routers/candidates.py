@@ -705,27 +705,71 @@ async def save_candidates(request: CandidatesSaveRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/candidates")
-async def get_all_candidates(limit: int = Query(100, ge=1, le=1000)):
-    """Get all sourced candidates across all jobs."""
+async def get_all_candidates(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    search: Optional[str] = Query(None),
+    job_id: Optional[str] = Query(None),
+    source: Optional[str] = Query(None),
+    location: Optional[str] = Query(None),
+    match_band: Optional[str] = Query(None, pattern="^(strong|good|low|unscored)$"),
+    sort_key: Optional[str] = Query(None, pattern="^(name|match|job|source|location|created_at)$"),
+    sort_dir: Optional[str] = Query(None, pattern="^(asc|desc)$"),
+):
+    """Paginated master candidate pool.
+
+    Pagination + filtering + sorting is server-side so the endpoint operates
+    across the full table (~8k rows) without returning the whole set. Filter
+    dropdowns source their options from `/candidates/filter-options` so they
+    reflect the entire DB, not just the current page.
+    """
     try:
         import services.sourced_candidates_storage as scs
         storage = scs.SourcedCandidatesStorage()
-        candidates = storage.get_all_candidates(limit=limit)
+        result = storage.get_all_candidates(
+            limit=limit,
+            offset=offset,
+            search=search,
+            job_id=job_id,
+            source=source,
+            location=location,
+            match_band=match_band,
+            sort_key=sort_key,
+            sort_dir=sort_dir,
+        )
 
-        # Map jobdiva_id to job_id in the response for backwards compatibility
-        for candidate in candidates:
-            if 'jobdiva_id' in candidate:
-                candidate['job_id'] = candidate['jobdiva_id']  # Backend compatibility
-                # Keep jobdiva_id for frontend
+        # BC: older FE consumers read job_id; mirror from jobdiva_id.
+        for candidate in result["candidates"]:
+            if candidate.get("jobdiva_id"):
+                candidate["job_id"] = candidate["jobdiva_id"]
 
         return {
             "status": "success",
-            "candidates": candidates,
-            "total": len(candidates)
+            "candidates": result["candidates"],
+            "total": result["total"],
+            "limit": limit,
+            "offset": offset,
         }
     except Exception as e:
         logger.error(f"Error fetching all candidates: {e}")
-        return {"status": "error", "candidates": [], "message": str(e)}
+        return {"status": "error", "candidates": [], "total": 0, "message": str(e)}
+
+
+@router.get("/candidates/filter-options")
+async def get_candidate_filter_options():
+    """Distinct jobs/sources/locations used by the FE filter dropdowns.
+
+    Returning DB-wide distinct values (not current-page) means filters still
+    work correctly across a paginated backend.
+    """
+    try:
+        import services.sourced_candidates_storage as scs
+        storage = scs.SourcedCandidatesStorage()
+        options = storage.get_filter_options()
+        return {"status": "success", **options}
+    except Exception as e:
+        logger.error(f"Error fetching candidate filter options: {e}")
+        return {"status": "error", "jobs": [], "sources": [], "locations": [], "message": str(e)}
 
 @router.post("/candidates/enhanced-fetch")
 async def fetch_enhanced_candidates(request: Dict[str, str]):
