@@ -10,9 +10,10 @@ from services.jobdiva import jobdiva_service
 from services.job_skills_extractor import JobSkillsExtractor, ExtractedSkill
 from services.job_skills_db import JobSkillsDB
 from services.job_rubric_db import JobRubricDB
+from services.screening_question_generator import generate_screening_questions
 from openai import AsyncOpenAI
 from core import (
-    OPENAI_API_KEY, 
+    OPENAI_API_KEY,
     JOBDIVA_AI_JD_UDF_ID, JOBDIVA_JOB_NOTES_UDF_ID,
     OPENAI_MODEL
 )
@@ -383,6 +384,57 @@ async def generate_rubric(req: RubricGenerationRequest):
             "customer_requirements": [],
             "other_requirements": []
         }
+
+class ScreeningQuestionsRequest(BaseModel):
+    """
+    Request model for the new depth-aware screening-question generator
+    (Step 4 of the New Job wizard). Replaces the frontend's boilerplate
+    "Can you describe your experience with {skill}?" template with
+    role + seniority-aware questions produced by an LLM.
+    """
+    jobTitle: str
+    rubric: dict
+    screeningLevel: str = "medium"      # light | medium | intensive
+    customerName: str = ""
+    workArrangement: str = "on-site"    # on-site | onsite | hybrid | remote
+    address: str = ""
+    totalYears: int = 0
+
+
+@router.post("/jobs/{job_id}/screening-questions/generate")
+async def generate_screening_questions_endpoint(job_id: str, req: ScreeningQuestionsRequest):
+    """
+    Generate role + seniority-aware screening questions for Step 4.
+
+    Returns a list of question objects the frontend maps onto its
+    `screenQuestions` state. Questions are NOT persisted here — the
+    frontend drives persistence via the existing save-draft flow.
+
+    Front-matter questions (intro / total-years / work-arrangement) are
+    always included. Role-specific questions come from the LLM in
+    numbers scaled by screening_level.
+    """
+    if not client:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not set")
+
+    try:
+        questions = await generate_screening_questions(
+            openai_client=client,
+            model=OPENAI_MODEL or "gpt-4o-mini",
+            job_title=req.jobTitle or "",
+            rubric=req.rubric or {},
+            screening_level=req.screeningLevel,
+            customer_name=req.customerName,
+            work_arrangement=req.workArrangement,
+            address=req.address,
+            total_years=req.totalYears or 0,
+        )
+        return {"questions": questions}
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).error(f"screening-questions generate failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
 
 @router.get("/jobs/{job_id}/rubric")
 async def get_job_rubric(job_id: str):
