@@ -109,6 +109,43 @@ type ScreenQuestion = {
   is_hard_filter?: boolean;
 };
 
+// F2: availability screening question needs a date-aware control, not free text.
+// The default question is generated with category "default" (not a dedicated
+// category), so we detect it via a phrase regex on the question text.
+const AVAILABILITY_RE = /earliest availability|available by|start (a )?new role/i;
+const isAvailabilityQuestion = (q: Pick<ScreenQuestion, "question_text">) =>
+  AVAILABILITY_RE.test(q.question_text ?? "");
+
+// Parse an existing `pass_criteria` into either {mode:'asap'} or {mode:'date',iso}.
+// Falls back to 'asap' when the string isn't recognizable so the UI never renders
+// an invalid date.
+function parseAvailabilityCriteria(s: string): { mode: "asap" | "date"; iso?: string } {
+  const raw = (s ?? "").trim();
+  if (!raw) return { mode: "asap" };
+  if (/ASAP/i.test(raw)) return { mode: "asap" };
+  const m = raw.match(/by\s+(.+?)\s*$/i);
+  if (!m) return { mode: "asap" };
+  const d = new Date(m[1]);
+  if (isNaN(+d)) return { mode: "asap" };
+  // Normalize to ISO yyyy-mm-dd for <input type="date">.
+  return { mode: "date", iso: d.toISOString().slice(0, 10) };
+}
+
+function formatAvailabilityCriteria(v: { mode: "asap" | "date"; iso?: string }): string {
+  if (v.mode === "asap" || !v.iso) return "Must be available ASAP";
+  // Build a human-friendly "Mar 09, 2026" style string.
+  // Use UTC to avoid off-by-one from the picker's local-time parse.
+  const d = new Date(`${v.iso}T00:00:00Z`);
+  if (isNaN(+d)) return "Must be available ASAP";
+  const formatted = d.toLocaleDateString("en-US", {
+    month: "short",
+    day: "2-digit",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+  return `Must be available by ${formatted}`;
+}
+
 const STEP_LABELS = {
   1: "Intake",
   2: "Publish",
@@ -2259,7 +2296,7 @@ function NewJobPageContent() {
                   </div>
                   <div className="w-[170px] flex-shrink-0">
                     <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[118px] bg-white cursor-pointer select-none">
-                      <button disabled className="flex-1 py-[3px] rounded-full transition-all text-slate-500 cursor-not-allowed">Exact</button>
+                      <button onClick={() => updateRubricItem('skills', idx, 'matchType', 'Exact')} className={`flex-1 py-[3px] rounded-full transition-all ${skill.matchType === 'Exact' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}>Exact</button>
                       <button onClick={() => updateRubricItem('skills', idx, 'matchType', 'Similar')} className={`flex-1 py-[3px] rounded-full transition-all ${skill.matchType === 'Similar' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}>Similar</button>
                     </div>
                   </div>
@@ -3645,7 +3682,6 @@ function NewJobPageContent() {
             <div className="w-[44px] flex-shrink-0"></div>
             <div className="w-[110px] flex-shrink-0">Category</div>
             <div className="flex-1">Value</div>
-            <div className="w-[72px] flex-shrink-0 text-center" title="Relative weight for scoring. 1 = default, 2 = counts double, 0.5 = half.">Weight</div>
             <div className="w-[220px] flex-shrink-0"></div>
           </div>
 
@@ -3685,32 +3721,6 @@ function NewJobPageContent() {
                       onChange={(e) => updateResumeFilter(filter.id, e.target.value)}
                       placeholder={filter.ai || filter.fromRubric ? "" : "Enter value..."}
                       className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium"
-                    />
-                  </div>
-                  <div className="w-[72px] flex-shrink-0 flex items-center justify-center">
-                    <input
-                      type="number"
-                      min={0.1}
-                      max={5}
-                      step={0.1}
-                      value={filter.weight ?? 1}
-                      onChange={(e) => {
-                        const raw = e.target.value;
-                        const parsed = raw === "" ? 1 : parseFloat(raw);
-                        const next = isFinite(parsed) ? parsed : 1;
-                        setResumeMatchFilters(prev =>
-                          prev.map(f => f.id === filter.id ? { ...f, weight: next } : f)
-                        );
-                      }}
-                      onBlur={(e) => {
-                        const parsed = parseFloat(e.target.value);
-                        const clamped = isFinite(parsed) ? Math.max(0.1, Math.min(5, parsed)) : 1;
-                        setResumeMatchFilters(prev =>
-                          prev.map(f => f.id === filter.id ? { ...f, weight: clamped } : f)
-                        );
-                      }}
-                      className="w-14 text-[13px] text-center bg-slate-50 border border-slate-200 rounded-md px-1 py-1 text-slate-900 font-semibold focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30 focus:border-[#6366f1]"
-                      title="Relative weight. 1 = default, 2 = counts double, 0.5 = half."
                     />
                   </div>
                   <div className="w-[220px] flex-shrink-0 flex items-center justify-end gap-2">
@@ -3776,11 +3786,6 @@ function NewJobPageContent() {
                       onChange={(e) => updateResumeFilter(filter.id, e.target.value)}
                       className="w-full text-[13px] bg-transparent border-none outline-none text-slate-500 font-medium"
                     />
-                  </div>
-                  <div className="w-[72px] flex-shrink-0 flex items-center justify-center">
-                    <span className="text-[12px] text-slate-400 font-semibold">
-                      {(filter.weight ?? 1).toFixed(1)}×
-                    </span>
                   </div>
                   <div className="w-[220px] flex-shrink-0 flex items-center justify-end gap-2">
                     {filter.ai && (
@@ -3882,13 +3887,60 @@ function NewJobPageContent() {
               </div>
 
               <div className="flex-1 min-w-0 border-l border-slate-100 pl-3">
-                <input
-                  type="text"
-                  value={q.pass_criteria}
-                  onChange={(e) => updateScreenQuestion(q.id, 'pass_criteria', e.target.value)}
-                  className={`w-full text-[13px] bg-transparent border-none outline-none font-medium ${q.pass_criteria ? 'text-[#4f46e5]' : 'text-slate-300 italic'}`}
-                  placeholder="No hard filter"
-                />
+                {isAvailabilityQuestion(q) ? (() => {
+                  // F2: availability question renders a date picker + ASAP
+                  // toggle so recruiters don't have to free-type a date and
+                  // can't end up with a stale baked-in value.
+                  const parsed = parseAvailabilityCriteria(q.pass_criteria);
+                  const isASAP = parsed.mode === "asap";
+                  return (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <input
+                        type="date"
+                        value={parsed.iso ?? ""}
+                        disabled={isASAP}
+                        onChange={(e) => {
+                          const iso = e.target.value;
+                          updateScreenQuestion(
+                            q.id,
+                            "pass_criteria",
+                            formatAvailabilityCriteria(iso ? { mode: "date", iso } : { mode: "asap" })
+                          );
+                        }}
+                        className={`text-[13px] bg-white border border-slate-200 rounded-md px-2 py-1 font-medium focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30 focus:border-[#6366f1] ${isASAP ? "text-slate-400" : "text-[#4f46e5]"}`}
+                      />
+                      <label className="inline-flex items-center gap-1.5 text-[12px] text-slate-600 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={isASAP}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              updateScreenQuestion(q.id, "pass_criteria", formatAvailabilityCriteria({ mode: "asap" }));
+                            } else {
+                              // Uncheck → default to today so the picker has a sensible value.
+                              const today = new Date().toISOString().slice(0, 10);
+                              updateScreenQuestion(
+                                q.id,
+                                "pass_criteria",
+                                formatAvailabilityCriteria({ mode: "date", iso: today })
+                              );
+                            }
+                          }}
+                          className="w-3.5 h-3.5 rounded border-slate-300 text-[#6366f1] focus:ring-[#6366f1]/30"
+                        />
+                        ASAP
+                      </label>
+                    </div>
+                  );
+                })() : (
+                  <input
+                    type="text"
+                    value={q.pass_criteria}
+                    onChange={(e) => updateScreenQuestion(q.id, 'pass_criteria', e.target.value)}
+                    className={`w-full text-[13px] bg-transparent border-none outline-none font-medium ${q.pass_criteria ? 'text-[#4f46e5]' : 'text-slate-300 italic'}`}
+                    placeholder="No hard filter"
+                  />
+                )}
               </div>
 
               <div className="w-10 flex-shrink-0 flex flex-col items-end gap-2 pr-1">
