@@ -4507,6 +4507,64 @@ function NewJobPageContent() {
                               className="w-full resize-y text-[13px] font-mono font-medium text-slate-700 leading-relaxed tracking-tight bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30 focus:border-[#6366f1]"
                               spellCheck={false}
                             />
+                            {/* Relaxation history: show every attempted boolean
+                                as a read-only card under the live textarea so
+                                the recruiter can audit what was widened and
+                                when. Only renders once auto/manual relaxation
+                                has actually produced >1 attempt. */}
+                            {booleanAttempts.length > 1 && (
+                              <div className="mt-4 space-y-2">
+                                <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500">
+                                  Relaxation history · {booleanAttempts.length} attempt{booleanAttempts.length === 1 ? "" : "s"}
+                                </p>
+                                {booleanAttempts.map((attempt, idx) => {
+                                  const isOriginal = idx === 0;
+                                  const isCurrent = idx === booleanAttempts.length - 1;
+                                  return (
+                                    <div
+                                      key={`${idx}-${attempt.query.slice(0, 24)}`}
+                                      className={`p-3 rounded-lg border ${
+                                        isCurrent
+                                          ? "bg-[#f5f3ff] border-[#ddd6fe]"
+                                          : "bg-slate-50 border-slate-200"
+                                      }`}
+                                    >
+                                      <div className="flex items-center justify-between gap-2 mb-1.5 flex-wrap">
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                          <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full border ${
+                                            isCurrent
+                                              ? "text-[#5b21b6] bg-white border-[#ddd6fe]"
+                                              : "text-slate-500 bg-white border-slate-200"
+                                          }`}>
+                                            Attempt {idx + 1}
+                                          </span>
+                                          <span className="text-[11px] font-bold text-slate-600">
+                                            {isOriginal ? "Original" : attempt.label}
+                                          </span>
+                                          {isCurrent && (
+                                            <span className="text-[10px] font-bold uppercase tracking-widest text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                                              Active
+                                            </span>
+                                          )}
+                                        </div>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            navigator.clipboard?.writeText(attempt.query).catch(() => {});
+                                          }}
+                                          className="text-[10px] font-bold text-slate-500 hover:text-[#6366f1] px-2 py-0.5 rounded-md border border-slate-200 bg-white hover:bg-slate-50 transition-colors"
+                                        >
+                                          Copy
+                                        </button>
+                                      </div>
+                                      <pre className="text-[12px] font-mono font-medium text-slate-700 leading-relaxed whitespace-pre-wrap break-words">
+                                        {attempt.query}
+                                      </pre>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
                             {/* 5.5: Run/Stop moved here so the recruiter reviews
                                 the Boolean before kicking off a search. */}
                             <div className="flex items-center justify-end gap-2 mt-4">
