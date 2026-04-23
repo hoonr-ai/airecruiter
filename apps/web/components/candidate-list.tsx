@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { MessageSquare, ClipboardCheck, CheckCircle2, Loader2 } from "lucide-react";
+import { API_BASE } from "@/lib/api";
 
 interface Candidate {
     id: string;
@@ -33,7 +34,7 @@ export function CandidateList({ candidates }: CandidateListProps) {
         const handleEngage = async () => {
             setEngaging(true);
             try {
-                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates/${candidate.id}/engage`, {
+                const res = await fetch(`${API_BASE}/candidates/${candidate.id}/engage`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ candidate_id: candidate.id })
@@ -49,7 +50,7 @@ export function CandidateList({ candidates }: CandidateListProps) {
         const handleAssess = async () => {
             setAssessing(true);
             try {
-                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/candidates/${candidate.id}/assess`, {
+                const res = await fetch(`${API_BASE}/candidates/${candidate.id}/assess`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ candidate_id: candidate.id })

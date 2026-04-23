@@ -36,8 +36,8 @@ echo -e "${BLUE}🔒 Installing Certbot for SSL certificates...${NC}"
 sudo apt install -y certbot python3-certbot-nginx
 print_status "Certbot installed"
 
-# Check if SSL certificate already exists
-if [ -f /etc/letsencrypt/live/$DOMAIN_NAME/fullchain.pem ]; then
+# Check if SSL certificate already exists using Certbot's records (more reliable)
+if sudo certbot certificates | grep -q "$DOMAIN_NAME"; then
     echo -e "${BLUE}🔐 SSL certificate already exists for $DOMAIN_NAME${NC}"
     print_status "Using existing SSL certificate"
     # Update domain in nginx config

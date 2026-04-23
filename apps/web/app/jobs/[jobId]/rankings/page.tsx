@@ -39,6 +39,7 @@ import {
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
+import { API_BASE } from "@/lib/api";
 
 // Utility function to format dates
 const formatDate = (dateStr: string) => {
@@ -246,7 +247,7 @@ export default function CandidateRankingsPage() {
   const fetchData = async () => {
     setIsLoading(true);
     try {
-      const apiBase = process.env.NEXT_PUBLIC_API_URL;
+      const apiBase = API_BASE;
 
       // Fetch job details
       const jobRes = await fetch(`${apiBase}/jobs/${jobId}/monitored-data`);

@@ -135,9 +135,28 @@ async def lifespan(app: FastAPI):
 
     # Interval: Every 15 minutes
     scheduler.add_job(auto_sync_all_jobs, "interval", minutes=15, id="always_on_sync")
-    
-    # Trigger first run immediately on startup
-    asyncio.create_task(auto_sync_all_jobs())
+
+    # 3. Initialize engagement audit table (moved out of module import in
+    # engagement.py so a slow/locked DB can no longer crash-loop the app).
+    # Wrapped in wait_for so even a hung DB does not block readiness.
+    if engagement is not None and hasattr(engagement, "init_engagement_tables"):
+        try:
+            await asyncio.wait_for(engagement.init_engagement_tables(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error("engagement_audit_init_timeout (10s); continuing without init")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"engagement_audit_init_failed: {e}; continuing")
+
+    # Delay first auto-sync 60s. Previously the sync ran immediately and held
+    # the DB pool for minutes, while fresh user requests queued behind it —
+    # manifesting as site-wide slowness right after every deploy. The 15-min
+    # interval schedule above still catches everything; the delay just keeps
+    # the cold-start window uncontested.
+    async def _delayed_first_sync():
+        await asyncio.sleep(60)
+        await auto_sync_all_jobs()
+
+    asyncio.create_task(_delayed_first_sync())
 
     yield
     
@@ -145,31 +164,70 @@ async def lifespan(app: FastAPI):
     logger.info("📋 Stopping scheduler...")
     scheduler.shutdown()
     
-from routers import engagement, ai_generation, voice_agent, boolean_agent, candidate_processing, job_archive
-from routers import chat as chat_router
-from routers import tira as tira_router
-from routers import job_criteria as job_criteria_router
-from routers import manual_candidates as manual_candidates_router
-from routers import candidates as candidates_router
-from routers import jobs as jobs_router
+# Defensive router import. Previously a single `from routers import engagement,
+# ai_generation, voice_agent, boolean_agent, candidate_processing, job_archive`
+# meant one broken module (e.g. engagement's `_ensure_audit_table()` raising at
+# import time on a slow/locked DB) blew up the whole import — so all six
+# routers failed to register and FastAPI answered 404 for every `/api/v1/*`
+# route beneath them. Load each module in isolation; log and continue on
+# failure so an isolated outage in one router does not black-hole unrelated
+# traffic (e.g. the AI-JD generator on `/api/v1/ai-generation`).
+def _safe_import(module_name: str):
+    try:
+        return __import__(f"routers.{module_name}", fromlist=["router"])
+    except Exception as e:  # noqa: BLE001 — broad by design; we never want import errors to crash boot
+        logger.error(
+            "router_import_failed",
+            extra={"router": module_name, "error": str(e)},
+            exc_info=True,
+        )
+        return None
+
+engagement = _safe_import("engagement")
+ai_generation = _safe_import("ai_generation")
+voice_agent = _safe_import("voice_agent")
+boolean_agent = _safe_import("boolean_agent")
+candidate_processing = _safe_import("candidate_processing")
+job_archive = _safe_import("job_archive")
+chat_router = _safe_import("chat")
+tira_router = _safe_import("tira")
+job_criteria_router = _safe_import("job_criteria")
+manual_candidates_router = _safe_import("manual_candidates")
+candidates_router = _safe_import("candidates")
+jobs_router = _safe_import("jobs")
 
 app = FastAPI(title="Hoonr.ai API", lifespan=lifespan)
 # Request-correlation middleware. Must wrap every route so downstream
 # handlers and services see the same request_id via contextvars.
 app.add_middleware(RequestIDMiddleware)
-app.include_router(ai_generation.router, prefix="/api/v1/ai-generation")
-app.include_router(ai_generation.router, prefix="/api/v1/gemini")
-app.include_router(voice_agent.router, prefix="/api/v1/voice")
-app.include_router(boolean_agent.router, prefix="/api/v1/boolean")
-app.include_router(candidate_processing.router, prefix="/api/v1/candidates")
-app.include_router(job_archive.router)
-app.include_router(chat_router.router)
-app.include_router(tira_router.router)
-app.include_router(job_criteria_router.router)
-app.include_router(manual_candidates_router.router)
-app.include_router(candidates_router.router)
-app.include_router(jobs_router.router)
-app.include_router(engagement.router, prefix="/api/v1/engagement")
+
+def _mount(module, label: str, **kwargs) -> None:
+    """Mount a router defensively. Same rationale as _safe_import."""
+    if module is None or not hasattr(module, "router"):
+        logger.warning("router_skip_not_loaded", extra={"router": label})
+        return
+    try:
+        app.include_router(module.router, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            "router_mount_failed",
+            extra={"router": label, "error": str(e)},
+            exc_info=True,
+        )
+
+_mount(ai_generation, "ai_generation", prefix="/api/v1/ai-generation")
+_mount(ai_generation, "ai_generation(gemini)", prefix="/api/v1/gemini")
+_mount(voice_agent, "voice_agent", prefix="/api/v1/voice")
+_mount(boolean_agent, "boolean_agent", prefix="/api/v1/boolean")
+_mount(candidate_processing, "candidate_processing", prefix="/api/v1/candidates")
+_mount(job_archive, "job_archive")
+_mount(chat_router, "chat")
+_mount(tira_router, "tira")
+_mount(job_criteria_router, "job_criteria")
+_mount(manual_candidates_router, "manual_candidates")
+_mount(candidates_router, "candidates")
+_mount(jobs_router, "jobs")
+_mount(engagement, "engagement", prefix="/api/v1/engagement")
 
 app.add_middleware(
     CORSMiddleware,
