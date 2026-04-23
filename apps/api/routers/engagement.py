@@ -10,6 +10,7 @@ Provides endpoints for:
 Auto-creates the engage_interview_audit table on startup.
 """
 
+import asyncio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Any, Dict
@@ -37,7 +38,11 @@ EXTERNAL_INTERVIEW_API_URL = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pa
 def _ensure_audit_table():
     """Create engage_interview_audit table if it doesn't exist, and patch any missing columns."""
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        # connect_timeout=5 → slow/unreachable DB must fail fast. Previously an
+        # unbounded wait here (called at module import) could hang FastAPI
+        # startup past systemd's TimeoutStartSec, triggering a restart loop
+        # that returned 404 for every route until the DB recovered.
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
         cur = conn.cursor()
         # Create table (no-op if already exists)
         cur.execute("""
@@ -86,14 +91,22 @@ def _ensure_audit_table():
     except Exception as e:
         logger.error(f"❌ Failed to create engage_interview_audit table: {e}")
 
-# Run migration on module load
-_ensure_audit_table()
+# NOTE: _ensure_audit_table used to run at module import. That meant any
+# DB slowness or lock blocked `from routers import engagement, ai_generation, …`
+# in main.py — which in turn prevented every other router in that import
+# statement from registering, producing 404s across the API. The call has
+# been moved to `init_engagement_tables` which main.py awaits from lifespan
+# with a timeout.
+
+async def init_engagement_tables() -> None:
+    """Async wrapper for the sync migration. Called from main.py lifespan."""
+    await asyncio.to_thread(_ensure_audit_table)
 
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
 def _get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    return psycopg2.connect(DATABASE_URL, connect_timeout=5)
 
 # ---------------------------------------------------------------------------
 # Request / Response Models
