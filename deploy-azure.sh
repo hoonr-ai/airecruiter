@@ -181,23 +181,19 @@ fi
 # Create systemd services
 echo -e "${BLUE}🔧 Setting up systemd services...${NC}"
 
-# Copy systemd service files if they don't exist
-if [ ! -f /etc/systemd/system/airecruiter-api.service ]; then
-    if [ -f "$PROJECT_DIR/systemd/airecruiter-api.service" ]; then
-        sudo cp "$PROJECT_DIR/systemd/airecruiter-api.service" /etc/systemd/system/
-        print_status "API service file installed"
-    else
-        print_warning "API service file not found in systemd/ directory"
-    fi
+# Copy systemd service files
+if [ -f "$PROJECT_DIR/systemd/airecruiter-api.service" ]; then
+    sudo cp "$PROJECT_DIR/systemd/airecruiter-api.service" /etc/systemd/system/
+    print_status "API service file installed"
+else
+    print_warning "API service file not found in systemd/ directory"
 fi
 
-if [ ! -f /etc/systemd/system/airecruiter-web.service ]; then
-    if [ -f "$PROJECT_DIR/systemd/airecruiter-web.service" ]; then
-        sudo cp "$PROJECT_DIR/systemd/airecruiter-web.service" /etc/systemd/system/
-        print_status "Web service file installed"
-    else
-        print_warning "Web service file not found in systemd/ directory"
-    fi
+if [ -f "$PROJECT_DIR/systemd/airecruiter-web.service" ]; then
+    sudo cp "$PROJECT_DIR/systemd/airecruiter-web.service" /etc/systemd/system/
+    print_status "Web service file installed"
+else
+    print_warning "Web service file not found in systemd/ directory"
 fi
 
 print_status "Systemd services configured"
