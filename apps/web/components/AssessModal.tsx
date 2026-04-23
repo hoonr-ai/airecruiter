@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { API_BASE } from "@/lib/api";
 import {
   Dialog,
   DialogContent,
@@ -68,10 +69,8 @@ export function AssessModal({
     setLoading(true);
     setError(null);
     try {
-      const apiUrl =
-        process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
       const response = await fetch(
-        `${apiUrl}/api/v1/engagement/assess/${interviewId}`
+        `${API_BASE}/api/v1/engagement/assess/${interviewId}`
       );
       if (!response.ok) throw new Error("Failed to fetch assessment data");
       const result = await response.json();
@@ -491,8 +490,7 @@ export function AssessModal({
                     size="sm"
                     className="h-7 text-[11px] gap-1.5 border-slate-200 text-slate-600 hover:bg-slate-50"
                     onClick={() => {
-                      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8001";
-                      window.open(`${apiUrl}/api/v1/engagement/interviews/${interviewId}/transcriptions/download`, "_blank");
+                      window.open(`${API_BASE}/api/v1/engagement/interviews/${interviewId}/transcriptions/download`, "_blank");
                     }}
                   >
                     <Download className="w-3.5 h-3.5" />
