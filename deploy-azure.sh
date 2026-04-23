@@ -170,9 +170,6 @@ if sudo nginx -t; then
     print_status "Nginx configuration reloaded"
 else
     print_error "Nginx configuration test failed"
-    fi
-else
-    print_status "Nginx configuration already exists (skipping update)"
 fi
 
 # Create systemd services
