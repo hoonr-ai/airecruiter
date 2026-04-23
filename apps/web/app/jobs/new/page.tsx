@@ -2113,8 +2113,7 @@ function NewJobPageContent() {
                     <div className="border border-slate-200 rounded-full p-[1.5px] flex items-center text-[11px] font-medium w-[118px] bg-white cursor-pointer select-none">
                       <button
                         onClick={() => updateRubricItem('titles', idx, 'matchType', 'Exact')}
-                        disabled
-                        className="flex-1 py-[3px] rounded-full transition-all text-slate-500 cursor-not-allowed"
+                        className={`flex-1 py-[3px] rounded-full transition-all ${title.matchType === 'Exact' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}
                       >
                         Exact
                       </button>
@@ -2420,7 +2419,6 @@ function NewJobPageContent() {
                       value={dom.value}
                       onChange={(e) => updateRubricItem('domain', idx, 'value', e.target.value)}
                       className="flex-1 h-[34px] text-[13px] font-medium text-slate-700 bg-white border-slate-200"
-                      readOnly
                     />
                     <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight whitespace-nowrap ml-2 uppercase">Hoonr-Curate</span>
                   </div>
@@ -2615,17 +2613,15 @@ function NewJobPageContent() {
   };
 
   const addResumeFilter = () => {
-    const category = prompt('Filter category (e.g. Skills, Location, Certification):');
-    if (!category || !category.trim()) return;
-    const value = prompt(`Value for "${category.trim()}":`);
-    if (!value || !value.trim()) return;
-
+    // Inline-editable draft row. User fills category + value directly inside
+    // the filter card (no native prompt). Manual filters (ai=false,
+    // fromRubric=false) render the category as an editable <input>.
     setResumeMatchFilters(prev => [
       ...prev,
       {
         id: filterIdCounter,
-        category: category.trim(),
-        value: value.trim(),
+        category: 'Custom',
+        value: '',
         active: true,
         ai: false,
         fromRubric: false,
@@ -2633,6 +2629,12 @@ function NewJobPageContent() {
       }
     ]);
     setFilterIdCounter(prev => prev + 1);
+  };
+
+  const updateResumeFilterCategory = (id: number, category: string) => {
+    setResumeMatchFilters(prev =>
+      prev.map(filter => (filter.id === id ? { ...filter, category } : filter))
+    );
   };
 
   // Initialize filters from rubric data when moving to step 4
@@ -3644,7 +3646,7 @@ function NewJobPageContent() {
             <div className="w-[110px] flex-shrink-0">Category</div>
             <div className="flex-1">Value</div>
             <div className="w-[72px] flex-shrink-0 text-center" title="Relative weight for scoring. 1 = default, 2 = counts double, 0.5 = half.">Weight</div>
-            <div className="w-[100px] flex-shrink-0"></div>
+            <div className="w-[220px] flex-shrink-0"></div>
           </div>
 
           {/* Active Filters */}
@@ -3663,14 +3665,25 @@ function NewJobPageContent() {
                   >
                     On
                   </button>
-                  <span className="w-[110px] flex-shrink-0 bg-slate-100 text-slate-600 text-[11px] font-semibold px-3 py-1 rounded-full text-center">
-                    {filter.category}
-                  </span>
+                  {filter.ai || filter.fromRubric ? (
+                    <span className="w-[110px] flex-shrink-0 bg-slate-100 text-slate-600 text-[11px] font-semibold px-3 py-1 rounded-full text-center">
+                      {filter.category}
+                    </span>
+                  ) : (
+                    <input
+                      type="text"
+                      value={filter.category}
+                      onChange={(e) => updateResumeFilterCategory(filter.id, e.target.value)}
+                      placeholder="Category"
+                      className="w-[110px] flex-shrink-0 bg-slate-50 border border-slate-200 text-slate-700 text-[11px] font-semibold px-3 py-1 rounded-full text-center outline-none focus:border-[#6366f1] focus:ring-1 focus:ring-[#6366f1]/30"
+                    />
+                  )}
                   <div className="flex-1 min-w-0">
                     <input
                       type="text"
                       value={filter.value}
                       onChange={(e) => updateResumeFilter(filter.id, e.target.value)}
+                      placeholder={filter.ai || filter.fromRubric ? "" : "Enter value..."}
                       className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium"
                     />
                   </div>
@@ -3700,7 +3713,7 @@ function NewJobPageContent() {
                       title="Relative weight. 1 = default, 2 = counts double, 0.5 = half."
                     />
                   </div>
-                  <div className="w-[100px] flex-shrink-0 flex items-center justify-end gap-2">
+                  <div className="w-[220px] flex-shrink-0 flex items-center justify-end gap-2">
                     {filter.ai && (
                       <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
                         Hoonr-Curate
@@ -3743,9 +3756,19 @@ function NewJobPageContent() {
                   >
                     Off
                   </button>
-                  <span className="w-[110px] flex-shrink-0 bg-slate-50 text-slate-400 text-[11px] font-semibold px-3 py-1 rounded-full text-center">
-                    {filter.category}
-                  </span>
+                  {filter.ai || filter.fromRubric ? (
+                    <span className="w-[110px] flex-shrink-0 bg-slate-50 text-slate-400 text-[11px] font-semibold px-3 py-1 rounded-full text-center">
+                      {filter.category}
+                    </span>
+                  ) : (
+                    <input
+                      type="text"
+                      value={filter.category}
+                      onChange={(e) => updateResumeFilterCategory(filter.id, e.target.value)}
+                      placeholder="Category"
+                      className="w-[110px] flex-shrink-0 bg-slate-50 border border-slate-200 text-slate-400 text-[11px] font-semibold px-3 py-1 rounded-full text-center outline-none focus:border-[#6366f1] focus:ring-1 focus:ring-[#6366f1]/30"
+                    />
+                  )}
                   <div className="flex-1 min-w-0">
                     <input
                       type="text"
@@ -3759,7 +3782,7 @@ function NewJobPageContent() {
                       {(filter.weight ?? 1).toFixed(1)}×
                     </span>
                   </div>
-                  <div className="w-[100px] flex-shrink-0 flex items-center justify-end gap-2">
+                  <div className="w-[220px] flex-shrink-0 flex items-center justify-end gap-2">
                     {filter.ai && (
                       <span className="bg-slate-100 text-slate-400 text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
                         Hoonr-Curate
@@ -4285,9 +4308,11 @@ function NewJobPageContent() {
                         value={sourceLocationInput}
                         onChange={(e) => setSourceLocationInput(e.target.value)}
                         onKeyDown={(e) => {
-                          if (e.key === "Enter") addSourceLocation(sourceLocationInput);
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            addSourceLocation(sourceLocationInput);
+                          }
                         }}
-                        onBlur={() => addSourceLocation(sourceLocationInput)}
                         placeholder="City, state, or zip code..."
                         className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f5f3ff] rounded-xl font-medium"
                       />
@@ -4315,6 +4340,15 @@ function NewJobPageContent() {
                         ))}
                       </DropdownMenuContent>
                     </DropdownMenu>
+                    <Button
+                      type="button"
+                      onClick={() => addSourceLocation(sourceLocationInput)}
+                      disabled={!sourceLocationInput.trim()}
+                      className="h-11 px-4 bg-[#6366f1] hover:bg-[#4f46e5] text-white text-[13px] font-bold rounded-xl transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Plus className="w-4 h-4 mr-1" />
+                      Add
+                    </Button>
                   </div>
                 </div>
               </section>
@@ -5069,7 +5103,7 @@ function NewJobPageContent() {
   // (plus rubric / screen questions) resolve.
   if (isLoadingDraft) {
     return (
-      <div className="p-8 max-w-7xl mx-auto min-h-[60vh] flex items-center justify-center">
+      <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center">
         <div className="flex flex-col items-center gap-3 text-slate-500">
           <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
           <div className="text-[15px] font-medium">Loading draft…</div>
@@ -5092,9 +5126,13 @@ function NewJobPageContent() {
       <div className="mb-7">
         <h1 className="text-[32px] font-bold text-slate-900 leading-tight">New Job</h1>
         <p className="text-slate-500 text-[16px] font-medium mt-1">
-          {jobData
-            ? `${jobData.title || jobTitle} · ${jobData.customer_name || jobData.customer || "Unknown Customer"}`
-            : "Enter a JobDiva Job ID to get started."}
+          {(() => {
+            const title = jobData?.title || jobTitle;
+            const customer = jobData?.customer_name || jobData?.customer || "";
+            if (!title && !customer) return "Enter a JobDiva Job ID to get started.";
+            if (title && customer) return `${title} · ${customer}`;
+            return title || customer;
+          })()}
         </p>
       </div>
 
