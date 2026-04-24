@@ -212,7 +212,7 @@ export default function CandidatesPage() {
     }
 
     try {
-      const response = await fetch(`${API_BASE}/candidates?${qs.toString()}`, {
+      const response = await fetch(`${API_BASE}/candidates/list?${qs.toString()}`, {
         signal: controller.signal,
       });
       const data = await response.json();
