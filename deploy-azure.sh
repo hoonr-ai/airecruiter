@@ -209,26 +209,31 @@ print_status "Next.js application built"
 # Configure Nginx reverse proxy
 echo -e "${BLUE}🌐 Configuring Nginx reverse proxy...${NC}"
 
-# Check if SSL certificates exist for this domain
-if sudo test -f "/etc/letsencrypt/live/$DOMAIN_NAME/fullchain.pem" && sudo test -f "/etc/letsencrypt/live/$DOMAIN_NAME/privkey.pem"; then
-    echo -e "${BLUE}🔒 SSL certificates found, using HTTPS configuration${NC}"
-    # Update nginx config with the correct domain (replace template placeholder)
-    sed -i "s/{{DOMAIN_NAME}}/$DOMAIN_NAME/g" "$PROJECT_DIR/nginx.conf"
-    sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
-    # Restore template for next deployment
-    sed -i "s/$DOMAIN_NAME/{{DOMAIN_NAME}}/g" "$PROJECT_DIR/nginx.conf"
-    print_status "HTTPS Nginx configuration applied"
-else
-    echo -e "${BLUE}📄 SSL certificates not found, using HTTP-only configuration${NC}"
-    # Create temporary HTTP-only configuration for initial deployment
-    cat > /tmp/nginx-http-only.conf << EOF
-# Temporary HTTP-only configuration - use setup-ssl.sh to enable HTTPS
-upstream airecruiter_api {
-    server 127.0.0.1:8000;
-    keepalive 32;
-}
+# Update nginx config with the correct domain (simple replacement like the old version)
+sed -i "s/qacurate.hoonr.ai/$DOMAIN_NAME/g" "$PROJECT_DIR/nginx.conf"
 
-upstream airecruiter_web {
+# Always copy and update nginx config
+sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
+print_status "Nginx configuration updated"
+
+# Enable airecruiter site and disable default
+sudo ln -sf /etc/nginx/sites-available/airecruiter /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/default
+print_status "Nginx airecruiter site enabled"
+
+# Test and reload nginx configuration
+if sudo nginx -t; then
+    sudo systemctl reload nginx
+    print_status "Nginx configuration reloaded"
+else
+    print_error "Nginx configuration test failed"
+fi
+fi
+
+# Create systemd services
+echo -e "${BLUE}🔧 Setting up systemd services...${NC}"
+
+# Copy systemd service files
     server 127.0.0.1:3000;
     keepalive 32;
 }

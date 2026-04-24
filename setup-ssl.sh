@@ -17,6 +17,8 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
+PROJECT_DIR="/home/ubuntu/codebase/airecruiter"
+
 print_status() {
     echo -e "${GREEN}✓${NC} $1"
 }
@@ -75,100 +77,32 @@ print_status "Certbot installed"
 sudo mkdir -p /var/www/html
 print_status "Webroot directory prepared"
 
-# Check if SSL certificate already exists
-if sudo certbot certificates 2>/dev/null | grep -q "$DOMAIN_NAME"; then
+# Check if SSL certificate already exists using Certbot's records (more reliable)
+if sudo certbot certificates | grep -q "$DOMAIN_NAME"; then
     echo -e "${BLUE}🔐 SSL certificate already exists for $DOMAIN_NAME${NC}"
     print_status "Using existing SSL certificate"
-    
-    # Show certificate info
-    echo -e "${BLUE}ℹ${NC} Certificate details:"
-    sudo certbot certificates | grep -A 10 "$DOMAIN_NAME"
+    # Update domain in nginx config  
+    sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
+    print_status "Nginx SSL configuration updated"
 else
-    # Obtain SSL certificate from Let's Encrypt using webroot validation
+    # Obtain SSL certificate from Let's Encrypt
     echo -e "${BLUE}🔐 Obtaining SSL certificate for $DOMAIN_NAME...${NC}"
-    echo -e "${BLUE}ℹ${NC} Using webroot validation method"
-    
-    if sudo certbot certonly \
-        --webroot \
-        -w /var/www/html \
-        -d $DOMAIN_NAME \
-        --non-interactive \
-        --agree-tos \
-        --email Pragati.Raj@celsiortech.com \
-        --expand; then
-        
-        print_status "SSL certificate obtained successfully"
-        echo -e "${BLUE}ℹ${NC} Certificate stored in: /etc/letsencrypt/live/$DOMAIN_NAME/"
+    if sudo certbot --nginx -d $DOMAIN_NAME --non-interactive --agree-tos --email Pragati.Raj@celsiortech.com; then
+        print_status "SSL certificate obtained and configured successfully"
     else
-        print_error "Failed to obtain SSL certificate"
-        echo -e "${YELLOW}ℹ${NC} Common issues:"
-        echo -e "  • Domain not pointing to this server"
-        echo -e "  • Port 80 not accessible from internet"  
-        echo -e "  • nginx not serving /.well-known/acme-challenge/"
-        exit 1
+        print_warning "Certbot failed to configure SSL automatically, applying manual configuration..."
+        # Force update nginx config with SSL settings
+        sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
+        print_status "Nginx SSL configuration updated manually"
     fi
 fi
 
-# Set up automatic renewal if not already configured
-echo -e "${BLUE}🔄 Setting up automatic SSL renewal...${NC}"
-if ! crontab -l 2>/dev/null | grep -q certbot; then
-    (crontab -l 2>/dev/null; echo "0 12 * * * /usr/bin/certbot renew --quiet && /bin/systemctl reload nginx") | crontab -
-    print_status "Automatic renewal configured"
-else
-    print_status "Automatic renewal already configured"
-fi
-
-# Reload nginx to apply SSL configuration (assuming deploy-azure.sh already set up nginx config)
-echo -e "${BLUE}🔄 Switching to HTTPS nginx configuration...${NC}"
-
-# Now that we have SSL certificates, apply the full HTTPS configuration
-PROJECT_DIR="/home/ubuntu/codebase/airecruiter"
-if [ -f "$PROJECT_DIR/nginx.conf" ]; then
-    # Update nginx config with the correct domain (replace template placeholder)
-    sed -i "s/{{DOMAIN_NAME}}/$DOMAIN_NAME/g" "$PROJECT_DIR/nginx.conf"
-    sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
-    # Restore template for next deployment
-    sed -i "s/$DOMAIN_NAME/{{DOMAIN_NAME}}/g" "$PROJECT_DIR/nginx.conf"
-    print_status "HTTPS configuration applied"
-else
-    print_error "nginx.conf template not found at $PROJECT_DIR/nginx.conf"
-    exit 1
-fi
-
+# Test and reload nginx configuration after SSL setup
 if sudo nginx -t; then
     sudo systemctl reload nginx
-    print_status "Nginx reloaded with HTTPS configuration"
+    print_status "Nginx configuration reloaded with SSL"
 else
-    print_warning "Nginx configuration test failed - please check nginx config manually"
-    echo -e "${BLUE}ℹ${NC} You may need to update nginx configuration to use the SSL certificate"
+    print_error "Nginx configuration test failed after SSL setup"
 fi
 
-# Verify SSL certificate installation
-echo -e "${BLUE}🔍 Verifying SSL certificate...${NC}"
-sleep 2  # Give nginx a moment to reload
-
-if timeout 10 openssl s_client -connect $DOMAIN_NAME:443 -servername $DOMAIN_NAME < /dev/null 2>/dev/null | grep -q 'Certificate chain'; then
-    print_status "SSL certificate is working correctly"
-    
-    # Show certificate expiry
-    expiry=$(echo | openssl s_client -servername $DOMAIN_NAME -connect $DOMAIN_NAME:443 2>/dev/null | openssl x509 -noout -dates | grep notAfter | cut -d= -f2)
-    echo -e "${BLUE}ℹ${NC} Certificate expires: $expiry"
-else
-    print_warning "SSL certificate verification failed"
-    echo -e "${YELLOW}ℹ${NC} This could be due to:"
-    echo -e "  • DNS propagation delay"
-    echo -e "  • Firewall blocking port 443"
-    echo -e "  • nginx configuration issues"
-fi
-
-echo ""
 echo -e "${GREEN}🎉 SSL setup completed for $DOMAIN_NAME!${NC}"
-echo -e "${BLUE}🌐 Your application should now be available at:${NC}"
-echo -e "  • Web App: https://$DOMAIN_NAME"  
-echo -e "  • API Docs: https://$DOMAIN_NAME/api/docs"
-echo ""
-echo -e "${YELLOW}📋 Useful commands:${NC}"
-echo -e "  • Test HTTPS: curl -I https://$DOMAIN_NAME"
-echo -e "  • Check certificates: sudo certbot certificates"
-echo -e "  • Renew manually: sudo certbot renew"
-echo -e "  • View nginx logs: sudo journalctl -u nginx -f"
