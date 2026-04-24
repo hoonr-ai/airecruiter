@@ -70,6 +70,8 @@ import { ResumeModal } from "@/components/ResumeModal";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { PasteResumeModal } from "@/components/jobs/PasteResumeModal";
 import { BulkUploadSection } from "@/components/jobs/BulkUploadSection";
+import { PhoneIndicator } from "@/components/phone-indicator";
+import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
 import { API_BASE } from "@/lib/api";
 import { logger } from "@/lib/logger";
 
@@ -483,6 +485,13 @@ function NewJobPageContent() {
   };
   const [selectedCandidates, setSelectedCandidates] = useState<Set<string>>(new Set());
   const [searchStatus, setSearchStatus] = useState("Fetching applicants...");
+
+  // Missing-phones gate for Launch PAIR. Sourcing returns candidates without
+  // phone (Unipile/Exa don't expose phone; JobDiva sometimes does). PAIR
+  // rejects phone-less candidates, so we intercept Launch PAIR, collect the
+  // numbers inline, then proceed.
+  const [missingPhonesOpen, setMissingPhonesOpen] = useState(false);
+  const [missingPhoneCandidates, setMissingPhoneCandidates] = useState<MissingPhoneCandidate[]>([]);
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
@@ -4097,6 +4106,123 @@ function NewJobPageContent() {
     </div>
   );
 
+  // Launch PAIR runs after missing-phone gating. `phoneOverrides` is a map of
+  // candidate_id → phone captured in the MissingPhonesModal; we merge those
+  // into the local `candidates` array before building the save payload so the
+  // saved rows carry the numbers we just collected.
+  const runLaunchPair = async (phoneOverrides?: Record<string, string>) => {
+    if (selectedCandidates.size === 0) return;
+    try {
+      const effective = phoneOverrides
+        ? candidates.map(c => {
+            const id = c.candidate_id || c.id;
+            return phoneOverrides[id] ? { ...c, phone: phoneOverrides[id] } : c;
+          })
+        : candidates;
+
+      if (phoneOverrides) {
+        setCandidates(effective);
+      }
+
+      const candidatesPayload = effective
+        .filter(c => selectedCandidates.has(c.candidate_id || c.id))
+        .map(c => {
+          const displayName = getCandidateDisplayName(c);
+          let skillList: any[] = [];
+          if (Array.isArray(c.skills)) {
+            skillList = c.skills;
+          } else if (typeof c.skills === 'string' && c.skills.trim()) {
+            try {
+              const parsed = JSON.parse(c.skills);
+              skillList = Array.isArray(parsed) ? parsed : [c.skills];
+            } catch (e) {
+              skillList = [c.skills];
+            }
+          }
+          return {
+            candidate_id: String(c.candidate_id || c.id || "unknown"),
+            name: displayName || "Unnamed Candidate",
+            email: c.email || null,
+            phone: c.phone || null,
+            skills: skillList,
+            experience_years: c.yearsExtracted || c.experience_years || 0,
+            source: c.source || "JobDiva-Applicants",
+            headline: c.title || c.headline || "",
+            location: c.location || "",
+            profile_url: c.profile_url || null,
+            image_url: c.image_url || null,
+            resume_text: c.resume_text || c.resumeText || "",
+            resume_id: String(c.resumeId || c.resume_id || ""),
+            is_selected: true,
+            education: Array.isArray(c.education || c.candidate_education) ? (c.education || c.candidate_education) : [],
+            certifications: Array.isArray(c.certifications || c.candidate_certification) ? (c.certifications || c.candidate_certification) : [],
+            company_experience: Array.isArray(c.company_experience || c.enhanced_info?.company_experience) ? (c.company_experience || c.enhanced_info?.company_experience) : [],
+            urls: (c.urls && typeof c.urls === 'object' && !Array.isArray(c.urls)) ? c.urls : (c.enhanced_info?.urls || {}),
+            match_score: typeof c.match_score === 'number' ? c.match_score : 0,
+            enhanced_info: (c.enhanced_info && typeof c.enhanced_info === 'object' && !Array.isArray(c.enhanced_info)) ? c.enhanced_info : null
+          };
+        });
+
+      const selectedCount = candidatesPayload.filter(c => c.is_selected).length;
+      console.log(`🚀 Launching Hoonr-Curate with ${selectedCount} selected candidates out of ${candidatesPayload.length} total`);
+
+      const response = await fetch(`${API_BASE}/candidates/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId,
+          candidates: candidatesPayload
+        })
+      });
+
+      const result = await response.json();
+
+      if (response.ok && result.status === 'success') {
+        const saved = result.saved_count || selectedCount;
+        showToast(`${saved} candidates saved to Master Pool — redirecting...`, "success");
+        setTimeout(() => { router.push(`/candidates`); }, 1500);
+      } else {
+        console.error('Save failed details:', JSON.stringify(result, null, 2));
+        const errorMsg = result.detail
+          ? (Array.isArray(result.detail) ? JSON.stringify(result.detail) : result.detail)
+          : (result.message || 'Unknown error');
+        showToast(`Error saving candidates: ${errorMsg}`, "error");
+      }
+    } catch (e) {
+      console.error("Failed to save candidates:", e);
+      showToast("Failed to save candidates. Please try again.", "error");
+    }
+  };
+
+  // Entry point wired to the Launch PAIR button. Filters selected candidates
+  // with no valid phone into the modal; if everyone already has one, skips
+  // straight to runLaunchPair.
+  const handleLaunchPairClick = async () => {
+    if (selectedCandidates.size === 0) return;
+    const missing: MissingPhoneCandidate[] = [];
+    for (const c of candidates) {
+      const id = c.candidate_id || c.id;
+      if (!selectedCandidates.has(id)) continue;
+      const digits = String(c.phone || "").replace(/\D/g, "");
+      if (digits.length < 7) {
+        missing.push({
+          candidate_id: String(id),
+          name: getCandidateDisplayName(c) || "Unnamed",
+          headline: c.title || c.headline || "",
+          location: c.location || "",
+          source: c.source || "",
+          jobdiva_id: jobdivaId || jobData?.jobdiva_id || String(numericJobId || ""),
+        });
+      }
+    }
+    if (missing.length > 0) {
+      setMissingPhoneCandidates(missing);
+      setMissingPhonesOpen(true);
+      return;
+    }
+    await runLaunchPair();
+  };
+
   const sourceStep = (
     <div className="space-y-6">
       <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
@@ -5013,6 +5139,22 @@ function NewJobPageContent() {
                                   {candidate.source?.startsWith('LinkedIn') ? <Linkedin className="w-3 h-3 fill-current" /> : candidate.source === 'JobDiva-TalentSearch' ? <Zap className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
                                   {candidate.source || "JobDiva"}
                                 </span>
+                                <PhoneIndicator
+                                  candidateId={String(candidate.candidate_id || candidate.id || "")}
+                                  jobdivaId={jobdivaId || jobData?.jobdiva_id || String(numericJobId || "")}
+                                  phone={candidate.phone}
+                                  persist={false}
+                                  onSaved={(normalised) => {
+                                    const cid = candidate.candidate_id || candidate.id;
+                                    setCandidates(prev =>
+                                      prev.map(c =>
+                                        (c.candidate_id || c.id) === cid
+                                          ? { ...c, phone: normalised }
+                                          : c
+                                      )
+                                    );
+                                  }}
+                                />
                               </div>
 
                               <div className="flex items-center gap-3 shrink-0">
@@ -5222,88 +5364,7 @@ function NewJobPageContent() {
               </span>
               <Button
                 className={`h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group ${candidates.length > 0 && selectedCandidates.size > 0 ? "bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98]" : "bg-slate-300 cursor-not-allowed"}`}
-                onClick={async () => {
-                  if (selectedCandidates.size === 0) return;
-
-                  try {
-                    // Prepare candidates payload only for SELECTED candidates
-                    const candidatesPayload = candidates
-                      .filter(c => selectedCandidates.has(c.candidate_id || c.id))
-                      .map(c => {
-                        // Ensure name is never null or undefined for Pydantic validation
-                        const displayName = getCandidateDisplayName(c);
-                        
-                        // Ensure skills is always a list
-                        let skillList = [];
-                        if (Array.isArray(c.skills)) {
-                          skillList = c.skills;
-                        } else if (typeof c.skills === 'string' && c.skills.trim()) {
-                          try {
-                            const parsed = JSON.parse(c.skills);
-                            skillList = Array.isArray(parsed) ? parsed : [c.skills];
-                          } catch (e) {
-                            skillList = [c.skills];
-                          }
-                        }
-
-                        return {
-                          candidate_id: String(c.candidate_id || c.id || "unknown"),
-                          name: displayName || "Unnamed Candidate",
-                          email: c.email || null,
-                          phone: c.phone || null,
-                          skills: skillList,
-                          experience_years: c.yearsExtracted || c.experience_years || 0,
-                          source: c.source || "JobDiva-Applicants",
-                          headline: c.title || c.headline || "",
-                          location: c.location || "",
-                          profile_url: c.profile_url || null,
-                          image_url: c.image_url || null,
-                          resume_text: c.resume_text || c.resumeText || "",
-                          resume_id: String(c.resumeId || c.resume_id || ""),
-                          is_selected: true,
-                          education: Array.isArray(c.education || c.candidate_education) ? (c.education || c.candidate_education) : [],
-                          certifications: Array.isArray(c.certifications || c.candidate_certification) ? (c.certifications || c.candidate_certification) : [],
-                          company_experience: Array.isArray(c.company_experience || c.enhanced_info?.company_experience) ? (c.company_experience || c.enhanced_info?.company_experience) : [],
-                          urls: (c.urls && typeof c.urls === 'object' && !Array.isArray(c.urls)) ? c.urls : (c.enhanced_info?.urls || {}),
-                          match_score: typeof c.match_score === 'number' ? c.match_score : 0,
-                          enhanced_info: (c.enhanced_info && typeof c.enhanced_info === 'object' && !Array.isArray(c.enhanced_info)) ? c.enhanced_info : null
-                        };
-                      });
-
-                    const selectedCount = candidatesPayload.filter(c => c.is_selected).length;
-                    console.log(`🚀 Launching Hoonr-Curate with ${selectedCount} selected candidates out of ${candidatesPayload.length} total`);
-
-                    const apiUrl = API_BASE;
-                    const response = await fetch(`${apiUrl}/candidates/save`, {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        // Always send the ALPHANUMERIC jobdiva_id (e.g. '26-05172'), not the numeric job_id PK.
-                        jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId,
-                        candidates: candidatesPayload
-                      })
-                    });
-
-                    const result = await response.json();
-
-                    if (response.ok && result.status === 'success') {
-                      const saved = result.saved_count || selectedCount;
-                      showToast(`${saved} candidates saved to Master Pool — redirecting...`, "success");
-                      setTimeout(() => {
-                        router.push(`/candidates`);
-                      }, 1500);
-                    } else {
-                      console.error('Save failed details:', JSON.stringify(result, null, 2));
-                      const errorMsg = result.detail 
-                        ? (Array.isArray(result.detail) ? JSON.stringify(result.detail) : result.detail)
-                        : (result.message || 'Unknown error');
-                      showToast(`Error saving candidates: ${errorMsg}`, "error");
-                    }
-                  } catch (e) {
-                    console.error("Failed to save candidates:", e);
-                    showToast("Failed to save candidates. Please try again.", "error");
-                  }
-                }}
+                onClick={handleLaunchPairClick}
                 disabled={!hasSearched || isSearching || selectedCandidates.size === 0}
               >
                 <Rocket className="w-4 h-4 fill-white" />
@@ -5313,6 +5374,19 @@ function NewJobPageContent() {
           </div>
         </div>
       </div>
+
+      <MissingPhonesModal
+        open={missingPhonesOpen}
+        candidates={missingPhoneCandidates}
+        onClose={() => setMissingPhonesOpen(false)}
+        onAllProvided={async (phones) => {
+          setMissingPhonesOpen(false);
+          await runLaunchPair(phones);
+        }}
+        persist={false}
+        primaryLabel="Save & Launch PAIR"
+        description="These candidates don't have a phone number yet — PAIR calls require one. Add them below to include them in this launch."
+      />
     </div>
   );
 

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import asyncio
 import json
@@ -705,6 +706,67 @@ async def save_candidates(request: CandidatesSaveRequest):
         import logging
         logging.getLogger(__name__).error(f"Error saving candidates: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Lightweight phone update. Called from the sourcing UI when a recruiter fills
+# in a missing number inline. Normalises to digits + optional leading '+' and
+# requires at least 7 digits — PAIR's bulk-interviews API rejects clearly
+# malformed numbers, which is the root cause of most "launch pair failed"
+# errors for candidates sourced from Unipile/Exa (neither returns phone).
+class UpdateCandidatePhoneRequest(BaseModel):
+    phone: str
+    jobdiva_id: Optional[str] = None
+
+
+def _normalise_phone(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    plus = "+" if raw.startswith("+") else ""
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    return f"{plus}{digits}" if digits else ""
+
+
+@router.patch("/candidates/{candidate_id}/phone")
+async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhoneRequest):
+    normalised = _normalise_phone(request.phone)
+    digit_count = sum(1 for ch in normalised if ch.isdigit())
+    if digit_count < 7:
+        raise HTTPException(status_code=400, detail="Phone number must contain at least 7 digits")
+
+    import psycopg2
+    from core.config import DATABASE_URL
+
+    try:
+        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                if request.jobdiva_id:
+                    cur.execute(
+                        """
+                        UPDATE sourced_candidates
+                        SET phone = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE candidate_id = %s AND jobdiva_id = %s
+                        """,
+                        (normalised, candidate_id, request.jobdiva_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE sourced_candidates
+                        SET phone = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE candidate_id = %s
+                        """,
+                        (normalised, candidate_id),
+                    )
+                updated = cur.rowcount
+            conn.commit()
+        return {"status": "success", "candidate_id": candidate_id, "phone": normalised, "updated_rows": updated}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"update_candidate_phone failed for {candidate_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/candidates/list")
 async def get_all_candidates(
