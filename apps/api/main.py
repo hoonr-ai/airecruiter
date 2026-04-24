@@ -147,6 +147,19 @@ async def lifespan(app: FastAPI):
         except Exception as e:  # noqa: BLE001
             logger.error(f"engagement_audit_init_failed: {e}; continuing")
 
+    # 4. Provision monitored_jobs columns once at startup. Previously two
+    # handlers in routers/jobs.py ran `ALTER TABLE monitored_jobs ADD COLUMN
+    # IF NOT EXISTS ...` on every request — ACCESS EXCLUSIVE lock queued
+    # behind the auto-sync's shared lock, so `GET /jobs/monitored` could
+    # stall for 60-90+ seconds. Run it once here; skip it in the hot path.
+    if jobs_router is not None and hasattr(jobs_router, "init_monitored_jobs_schema"):
+        try:
+            await asyncio.wait_for(jobs_router.init_monitored_jobs_schema(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error("monitored_jobs_schema_init_timeout (10s); continuing")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"monitored_jobs_schema_init_failed: {e}; continuing")
+
     # Delay first auto-sync 60s. Previously the sync ran immediately and held
     # the DB pool for minutes, while fresh user requests queued behind it —
     # manifesting as site-wide slowness right after every deploy. The 15-min
