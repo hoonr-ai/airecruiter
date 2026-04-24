@@ -2,7 +2,11 @@
 
 # SSL Setup Script for AI Recruiter
 # Run this after deploy-azure.sh if SSL is needed
-# Ensure DOMAIN_NAME is set, e.g., export DOMAIN_NAME=qacurate.hoonr.ai
+# 
+# 🔄 USAGE:
+# Auto-detect (based on git branch):   ./setup-ssl.sh
+# Explicit domain:                     ./setup-ssl.sh curate.hoonr.ai
+# Environment variable:                DOMAIN_NAME=domain.com ./setup-ssl.sh
 
 set -e
 
@@ -27,20 +31,57 @@ print_error() {
     echo -e "${RED}❌${NC} $1"
 }
 
+# Function to detect environment domain (same logic as deploy-azure.sh)
+detect_domain() {
+    if [ -n "$1" ]; then
+        echo "$1"
+        return
+    fi
+    
+    if [ -n "$DOMAIN_NAME" ]; then
+        echo "$DOMAIN_NAME"
+        return
+    fi
+    
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    case "$current_branch" in
+        "main"|"master")
+            echo "curate.hoonr.ai"
+            ;;
+        "develop"|"development")
+            echo "qacurate.hoonr.ai"
+            ;;
+        *)
+            echo "qacurate.hoonr.ai"
+            ;;
+    esac
+}
+
+# Detect and set domain
+DOMAIN_NAME=$(detect_domain "$1")
+
 if [ -z "$DOMAIN_NAME" ]; then
-    print_error "DOMAIN_NAME is not set. Please export DOMAIN_NAME=yourdomain.com"
+    print_error "DOMAIN_NAME could not be determined"
     exit 1
 fi
 
-echo -e "${BLUE}🔒 Installing Certbot for SSL certificates...${NC}"
+echo -e "${BLUE}🔒 Setting up SSL certificate for domain: ${YELLOW}$DOMAIN_NAME${NC}"
+
+# Install Certbot if not already installed
+echo -e "${BLUE}📦 Installing Certbot for SSL certificates...${NC}"
+sudo apt update
 sudo apt install -y certbot python3-certbot-nginx
 print_status "Certbot installed"
+
+# Ensure webroot directory exists for certificate validation
+sudo mkdir -p /var/www/html
+print_status "Webroot directory prepared"
 
 # Check if SSL certificate already exists using Certbot's records (more reliable)
 if sudo certbot certificates | grep -q "$DOMAIN_NAME"; then
     echo -e "${BLUE}🔐 SSL certificate already exists for $DOMAIN_NAME${NC}"
     print_status "Using existing SSL certificate"
-    # Update domain in nginx config
+    # Update domain in nginx config  
     sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
     print_status "Nginx SSL configuration updated"
 else
