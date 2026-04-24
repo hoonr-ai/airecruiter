@@ -209,8 +209,8 @@ print_status "Next.js application built"
 # Configure Nginx reverse proxy
 echo -e "${BLUE}🌐 Configuring Nginx reverse proxy...${NC}"
 
-# Update nginx config with the correct domain
-sed -i "s/qacurate.hoonr.ai/$DOMAIN_NAME/g" "$PROJECT_DIR/nginx.conf"
+# Update nginx config with the correct domain (replace template placeholder)
+sed -i "s/{{DOMAIN_NAME}}/$DOMAIN_NAME/g" "$PROJECT_DIR/nginx.conf"
 
 # Always copy and update nginx config
 sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
@@ -315,6 +315,20 @@ if curl -s --max-time 5 http://localhost:3000 > /dev/null 2>&1; then
     print_status "Web responding on localhost:3000"  
 else
     print_warning "Web not responding on localhost:3000"
+fi
+
+# Update API environment with correct domain for CORS
+if [ -f "$API_DIR/.env" ]; then
+    echo -e "${BLUE}🔧 Updating API environment configuration...${NC}"
+    # Update ALLOWED_ORIGINS to include the new domain
+    if grep -q "ALLOWED_ORIGINS=" "$API_DIR/.env"; then
+        sed -i "s#ALLOWED_ORIGINS=.*#ALLOWED_ORIGINS=*,https://$DOMAIN_NAME,http://$DOMAIN_NAME#" "$API_DIR/.env"
+    else
+        echo "ALLOWED_ORIGINS=*,https://$DOMAIN_NAME,http://$DOMAIN_NAME" >> "$API_DIR/.env"
+    fi
+    print_status "API CORS configuration updated"
+else
+    print_warning "API .env file not found, CORS configuration skipped"
 fi
 
 echo -e "${GREEN}🎉 Azure deployment completed successfully!${NC}"

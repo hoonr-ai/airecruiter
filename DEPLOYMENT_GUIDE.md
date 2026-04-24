@@ -107,10 +107,6 @@ DOMAIN_NAME=curate.hoonr.ai ./deploy-azure.sh
   - `./manage.sh env` - Show environment information
   - `./manage.sh status` - Service status with environment context
 
-### `setup-production.sh` - Legacy Production Setup
-- **Purpose**: Alternative production setup script
-- **Note**: Use `deploy-azure.sh` + `setup-ssl.sh` instead for better automation
-
 ## 🔧 Configuration Templates
 
 ### nginx.conf Template
@@ -272,7 +268,7 @@ airecruiter/
 ├── deploy-azure.sh           # Main deployment script
 ├── setup-ssl.sh             # SSL setup script  
 ├── manage.sh                 # Application management
-├── setup-production.sh       # Legacy production setup
+
 ├── nginx.conf                # Nginx template configuration
 ├── DEPLOYMENT_GUIDE.md       # This guide
 └── systemd/
