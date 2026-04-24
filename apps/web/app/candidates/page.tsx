@@ -826,7 +826,7 @@ export default function CandidatesPage() {
                            disabled={engageLoading}
                          >
                            <MessageSquare className="w-3.5 h-3.5" />
-                           {engageLoading ? 'Loading...' : 'Engage'}
+                           {engageLoading ? 'Loading...' : 'Screen'}
                          </Button>
                          <Button
                            size="sm"
@@ -1016,7 +1016,7 @@ export default function CandidatesPage() {
         }}
         title="Phone number required"
         description="PAIR can only call candidates with a phone number on file. Add it below to continue."
-        primaryLabel="Save & Engage"
+        primaryLabel="Save & Screen"
       />
     </div>
   );

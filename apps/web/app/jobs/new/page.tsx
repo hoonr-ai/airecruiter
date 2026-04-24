@@ -2917,17 +2917,18 @@ function NewJobPageContent() {
     // which produces depth-probing, seniority-aware questions. Fall back to
     // the legacy per-skill template only if the endpoint fails, so we
     // never leave the recruiter empty-handed.
-    let roleSpecific: ScreenQuestion[] = [];
+    const roleSpecific: ScreenQuestion[] = [];
     try {
       const apiUrl = API_BASE;
       const jobRef = numericJobId || jobdivaId || "new";
+      const levelForApi = screeningLevel === "L1" ? "light" : screeningLevel === "L2" ? "intensive" : "medium";
       const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobRef}/screening-questions/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           jobTitle: (enhancedTitle || jobTitle || "").trim(),
           rubric: rubricData || {},
-          screeningLevel: screeningLevel,
+          screeningLevel: levelForApi,
           customerName: jobData?.customer_name || "",
           workArrangement: jobData?.location_type || "",
           address: addressStr,
@@ -2961,14 +2962,36 @@ function NewJobPageContent() {
       console.warn("screening-questions/generate failed, using template fallback", e);
     }
 
-    // Fallback path: legacy per-skill template so Step 4 is never empty.
+    // Fallback path: skill-aware technical prompts so Step 4 is never empty
+    // with generic questions even if the LLM endpoint fails.
     if (roleSpecific.length === 0 && rubricData?.skills) {
       rubricData.skills.forEach((skill: any) => {
         if (questions.length + roleSpecific.length >= 12) return;
+        const skillName = skill.value || "this technology";
+        const minYears = skill.minYears || 3;
+        const promptVariant = roleSpecific.length % 4;
+
+        let questionText = "";
+        let passCriteria = "";
+
+        if (promptVariant === 0) {
+          questionText = `Walk me through the most complex production implementation you built with ${skillName}. What design trade-off did you make and why?`;
+          passCriteria = `Candidate explains a real production use-case for ${skillName}, including one concrete trade-off and outcome.`;
+        } else if (promptVariant === 1) {
+          questionText = `Describe a difficult issue you debugged in ${skillName}. How did you isolate root cause, and what preventive guardrail did you add?`;
+          passCriteria = `Candidate describes root-cause analysis steps in ${skillName} and a specific prevention strategy beyond a one-time fix.`;
+        } else if (promptVariant === 2) {
+          questionText = `If you had to improve performance or scalability in a ${skillName}-based system, what metrics would you inspect first and what would you tune?`;
+          passCriteria = `Candidate names relevant performance metrics for ${skillName} and proposes a technically sound tuning approach.`;
+        } else {
+          questionText = `In your recent ${skillName} project, how did you ensure code quality and deployment safety (testing, CI/CD, rollback, monitoring)?`;
+          passCriteria = `Candidate links ${skillName} delivery to practical quality controls (tests, pipeline checks, rollback and monitoring).`;
+        }
+
         roleSpecific.push({
           id: idCounter++,
-          question_text: `Can you describe your experience with ${skill.value}? We're looking for ${skill.minYears || 3}+ years of experience.`,
-          pass_criteria: `Must have ${skill.minYears || 3}+ yrs of ${skill.value} experience`,
+          question_text: questionText,
+          pass_criteria: `${passCriteria} Must demonstrate at least ${minYears}+ years of hands-on ${skillName} experience.`,
           is_default: false,
           category: "role-specific",
           order_index: questions.length + roleSpecific.length,
@@ -3823,7 +3846,7 @@ function NewJobPageContent() {
           <div className="flex items-center gap-2 mb-4">
             <FileText className="w-4 h-4 text-slate-900 flex-shrink-0" />
             <h3 className="text-[14px] font-bold text-slate-800">Resume Match</h3>
-            <span className="text-[12px] font-normal text-slate-500">Hard filters applied during resume screening</span>
+            <span className="text-[12px] font-normal text-slate-500">Hard filters applied during resume matching</span>
             <span className="ml-auto bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
               <Sparkles className="w-3 h-3 inline mr-1" />
               Hoonr-Curate pre-filled
@@ -4202,7 +4225,14 @@ function NewJobPageContent() {
       if (response.ok && result.status === 'success') {
         const saved = result.saved_count || selectedCount;
         showToast(`${saved} candidates saved to Master Pool — redirecting...`, "success");
-        setTimeout(() => { router.push(`/candidates`); }, 1500);
+        const redirectJobRef = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
+        setTimeout(() => {
+          if (redirectJobRef) {
+            router.push(`/jobs/${encodeURIComponent(redirectJobRef)}/rankings`);
+          } else {
+            router.push(`/candidates`);
+          }
+        }, 1500);
       } else {
         console.error('Save failed details:', JSON.stringify(result, null, 2));
         const errorMsg = result.detail
