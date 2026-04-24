@@ -870,73 +870,63 @@ async def create_external_job(req: ExternalJobCreateRequest):
         logger.error(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Failed to create external job: {str(e)}")
 
-@router.get("/jobs/{job_id}/draft")
-async def get_job_draft(job_id: str, user_session: str = "default"):
-    """
-    Retrieve existing job data from monitored_jobs.
-    Tries job_id first, then falls back to jobdiva_id to handle both
-    numeric PK and reference string formats.
-    """
+def _get_job_draft_sync(job_id: str) -> dict:
+    import json
+
+    def parse_json(val):
+        if not val: return []
+        if isinstance(val, (list, dict)): return val
+        try: return json.loads(val)
+        except: return []
+
+    conn = get_dict_cursor_connection()
+    cursor = conn.cursor()
     try:
-        db_job_id = job_id
-        
-        conn = get_db_connection()
-        import psycopg2.extras
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        
-        # Primary lookup: by job_id (numeric PK stored as text)
-        cursor.execute(
-            "SELECT * FROM monitored_jobs WHERE job_id = %s OR job_id = %s",
-            (db_job_id, db_job_id.lstrip('0'))
-        )
-        job_row = cursor.fetchone()
-        
-        # Fallback: try jobdiva_id (the ref string like '26-06182')
-        if not job_row:
-            logger.info(f"No match on job_id={db_job_id}, trying jobdiva_id fallback")
+        # jobdiva_id format contains '-' (e.g. '26-08807'); pure numeric → job_id PK
+        if '-' in job_id:
             cursor.execute(
                 "SELECT * FROM monitored_jobs WHERE jobdiva_id = %s",
-                (db_job_id,)
+                (job_id,)
             )
-            job_row = cursor.fetchone()
-
+        else:
+            cursor.execute(
+                "SELECT * FROM monitored_jobs WHERE job_id = %s OR job_id = %s",
+                (job_id, job_id.lstrip('0'))
+            )
+        job_row = cursor.fetchone()
+    finally:
         cursor.close()
         conn.close()
-        
-        if not job_row:
-             return {"status": "error", "message": f"No data found for job {db_job_id}"}
-        
-        import json
-        
-        # Helper to safely parse JSON from DB
-        def parse_json(val):
-            if not val: return []
-            if isinstance(val, (list, dict)): return val
-            try: return json.loads(val)
-            except: return []
 
-        # Map database columns back to JobDraftData format
-        return {
-            "status": "success",
-            "data": {
-                "id": db_job_id,                      # 26-06182
-                "job_id": db_job_id,                  # 26-06182
-                "title": job_row.get("title") or "",
-                "enhanced_title": job_row.get("enhanced_title") or job_row.get("title") or "",
-                "ai_description": job_row.get("ai_description") or "",
-                "recruiter_notes": job_row.get("recruiter_notes") or "",
-                "work_authorization": job_row.get("work_authorization") or "",
-                "selected_job_boards": parse_json(job_row.get("selected_job_boards")),
-                "recruiter_emails": parse_json(job_row.get("recruiter_emails")),
-                "selected_employment_types": parse_json(job_row.get("selected_employment_types")),
-                "current_step": job_row.get("current_step") or 1,
-                "screening_level": job_row.get("screening_level") or "L1.5",
-                "bot_introduction": job_row.get("bot_introduction") or "",
-                "resume_match_filters": parse_json(job_row.get("resume_match_filters")),
-                "sourcing_filters": job_row.get("sourcing_filters") or {}
-            }
+    if not job_row:
+        return {"status": "error", "message": f"No data found for job {job_id}"}
+
+    return {
+        "status": "success",
+        "data": {
+            "id": job_id,
+            "job_id": job_id,
+            "title": job_row.get("title") or "",
+            "enhanced_title": job_row.get("enhanced_title") or job_row.get("title") or "",
+            "ai_description": job_row.get("ai_description") or "",
+            "recruiter_notes": job_row.get("recruiter_notes") or "",
+            "work_authorization": job_row.get("work_authorization") or "",
+            "selected_job_boards": parse_json(job_row.get("selected_job_boards")),
+            "recruiter_emails": parse_json(job_row.get("recruiter_emails")),
+            "selected_employment_types": parse_json(job_row.get("selected_employment_types")),
+            "current_step": job_row.get("current_step") or 1,
+            "screening_level": job_row.get("screening_level") or "L1.5",
+            "bot_introduction": job_row.get("bot_introduction") or "",
+            "resume_match_filters": parse_json(job_row.get("resume_match_filters")),
+            "sourcing_filters": job_row.get("sourcing_filters") or {}
         }
-        
+    }
+
+
+@router.get("/jobs/{job_id}/draft")
+async def get_job_draft(job_id: str, user_session: str = "default"):
+    try:
+        return await asyncio.to_thread(_get_job_draft_sync, job_id)
     except Exception as e:
         logger.error(f"Get Job Data Error: {e}")
         import traceback
