@@ -137,16 +137,15 @@ export default function JobDetailPage() {
   const fetchJobDetail = async () => {
     setIsLoading(true);
     try {
-      // F3d: was two sequential fetches (active-only, then archived on miss).
-      // One request with include_archived=true covers both cases and halves
-      // the round-trip count for any job that's been archived.
-      const response = await fetch(`${API_BASE}/jobs/monitored?include_archived=true`);
+      // Fetch only the requested job detail to avoid loading the entire
+      // monitored_jobs dataset for a single job view.
+      const response = await fetch(`${API_BASE}/jobs/${jobId}/monitored-data`);
       const data = await response.json();
-      const job = data.jobs?.[jobId];
+      const job = data?.data;
 
       if (job) {
         const jobDetail = {
-          id: jobId,
+          id: String(job.jobdiva_id || job.job_id || jobId),
           ...job
         };
         setJobData(jobDetail);
