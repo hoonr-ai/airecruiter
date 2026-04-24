@@ -12,17 +12,27 @@ DB_PASS = DB_PASSWORD
 
 
 def get_db_connection():
-    """Canonical psycopg2 connection to the application database."""
+    """Canonical psycopg2 connection to the application database.
+
+    connect_timeout=5 → slow or unreachable Postgres must fail fast. Without a
+    bound, a contested DB (locks, pool saturation, network blip) can hang
+    uvicorn workers for the full TCP default (~2 min), which is what the v21
+    QA slowness report on `/jobs/monitored` tracked back to.
+    """
     if not DATABASE_URL:
         raise Exception("DATABASE_URL not configured")
-    return psycopg2.connect(DATABASE_URL)
+    return psycopg2.connect(DATABASE_URL, connect_timeout=5)
 
 
 def get_dict_cursor_connection():
     """psycopg2 connection whose default cursor returns dicts (RealDictCursor)."""
     if not DATABASE_URL:
         raise Exception("DATABASE_URL not configured")
-    return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    return psycopg2.connect(
+        DATABASE_URL,
+        cursor_factory=psycopg2.extras.RealDictCursor,
+        connect_timeout=5,
+    )
 
 # Global Pool
 pool = None
