@@ -342,6 +342,10 @@ function NewJobPageContent() {
   const [pageSubtitle, setPageSubtitle] = useState(STEP_DESCRIPTIONS[1]);
   const [rubricData, setRubricData] = useState<any>(null);
   const [isGeneratingRubric, setIsGeneratingRubric] = useState(false);
+  // Covers the entire Step-2 → Step-3 advance (draft save + rubric fetch) so
+  // the Next button stays in a loading state continuously. `isGeneratingRubric`
+  // alone misses the draft-save gap and makes the button look dead for ~1s.
+  const [isAdvancingStep, setIsAdvancingStep] = useState(false);
   const [workAuthorization, setWorkAuthorization] = useState("");
 
   // Step 4 - Set Filters state
@@ -438,6 +442,10 @@ function NewJobPageContent() {
   const QUALIFIED_SCORE_THRESHOLD = 70;
   const QUALIFIED_TARGET_COUNT = 50;
   const [candidates, setCandidates] = useState<any[]>([]);
+  // `true` when the current `candidates` list was restored from localStorage
+  // rather than a fresh stream. Used to surface a small "Restored from last
+  // run" caption so recruiters know results are stale until re-run.
+  const [restoredFromCache, setRestoredFromCache] = useState(false);
   const seenCandidateIdsRef = useRef<Set<string>>(new Set());
   const searchAbortRef = useRef<AbortController | null>(null);
   // Fires handleEnhanceJob() exactly once per session when the user first lands on
@@ -2820,13 +2828,22 @@ function NewJobPageContent() {
   // question. If so, the Step-4 sync effect stops overwriting the list — only
   // an explicit "Regenerate" button can rewrite it.
   const userHasEditedQuestionsRef = useRef(false);
+  // Records the screeningLevel the current question set was generated against.
+  // If the recruiter bumps the level on Step 1 (e.g. Light → Intensive), the
+  // sync effect is allowed to regenerate even if the list has been edited —
+  // raising depth should pull in additional role-specific questions, and the
+  // `customQuestions` pass-through below preserves hand-crafted entries.
+  const lastGeneratedLevelRef = useRef<string | null>(null);
 
   const initializeScreenQuestionsFromRubric = async (opts: { force?: boolean } = {}) => {
     if (!jobData) return;
-    // Respect recruiter edits. Sync-effect re-fires (from level / rubric
-    // changes) MUST NOT clobber handcrafted questions — an explicit
-    // `force: true` (from a user-initiated Regenerate) is the only escape.
-    if (userHasEditedQuestionsRef.current && !opts.force) return;
+    // Respect recruiter edits, UNLESS the screening level has changed since
+    // the last generation (recruiter dialed depth up/down on Step 1 — they
+    // expect the question set to track). `force: true` from the explicit
+    // Regenerate button is the other escape hatch.
+    const levelChanged = lastGeneratedLevelRef.current !== null
+      && lastGeneratedLevelRef.current !== screeningLevel;
+    if (userHasEditedQuestionsRef.current && !opts.force && !levelChanged) return;
 
     const addressParts = [jobData.address1, jobData.city, jobData.state].filter(Boolean);
     const addressStr = addressParts.join(", ");
@@ -2846,9 +2863,9 @@ function NewJobPageContent() {
     const intro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
     setBotIntroduction(prev => (prev && prev.trim().length > 0 ? prev : intro));
 
-    // 2. Default Questions — note the onsite/hybrid question is now
-    // arrangement-aware, address-aware, and marked as a hard filter so the
-    // downstream screening flow can disqualify automatically.
+    // 2. Default Questions — arrangement-aware, address-aware. The onsite/hybrid
+    // question is a preference check, not a hard filter; recruiters can flip
+    // it to a hard filter manually if disqualification should be automatic.
     const defaultQs: Array<{ text: string; criteria: string; is_hard_filter?: boolean }> = [
       { text: "Are you open to exploring new job opportunities?", criteria: "Must be open to new job opportunities" },
       { text: "What is your current or most recent role and key responsibilities?", criteria: "" },
@@ -2858,7 +2875,6 @@ function NewJobPageContent() {
       defaultQs.push({
         text: `This role follows ${arrangementLabel} work arrangement based in ${addressStr || location || "the job location"}. Are you open to working in this setup?`,
         criteria: `Must be open to ${arrangementLabel} work arrangement`,
-        is_hard_filter: true,
       });
     }
     defaultQs.push(
@@ -2958,6 +2974,7 @@ function NewJobPageContent() {
 
     setScreenQuestions(mergedQuestions);
     setQuestionIdCounter(mergedQuestions.length + 1);
+    lastGeneratedLevelRef.current = screeningLevel;
   };
 
   const initializeSourceFromRubric = () => {
@@ -3128,6 +3145,14 @@ function NewJobPageContent() {
     });
   }, [rubricData?.skills]);
 
+  // Fingerprint of the JD text the current rubric was generated against.
+  // When the recruiter edits the AI JD on Step 2 and re-clicks Next, we
+  // compare the new JD against this fingerprint — if it differs, the rubric
+  // (including Min Experience / `total_years`) is regenerated. If the JD is
+  // unchanged (Step 3 → back → Step 2 → Next without edits), the existing
+  // rubric + any recruiter edits to it are preserved.
+  const lastRubricJdRef = useRef<string>("");
+
   // Inject the Step 1 work-authorization value (e.g. "W2 only", "US Citizen /
   // GC") into Step 3's "Other Requirements" list so recruiters don't have to
   // re-enter it. We only inject once per rubric+workAuth pair — if the user
@@ -3162,6 +3187,38 @@ function NewJobPageContent() {
       };
     });
   }, [rubricData, workAuthorization, jobData?.work_authorization]);
+
+  // Inject Step 1 employment-type selections (e.g. "W2", "C2C") as individual
+  // Required rows in Step 3's "Other Requirements". Parallel to the workAuth
+  // injector above: uses its own signature ref so flipping selections on
+  // Step 1 re-injects (added types appear), but deleting a row on Step 3
+  // does NOT re-add it while the signature is unchanged.
+  const injectedEmpTypesRef = useRef<string>("");
+  useEffect(() => {
+    if (!rubricData) return;
+    if (!selectedEmpTypes || selectedEmpTypes.length === 0) return;
+    const signature = selectedEmpTypes.slice().sort().join("|");
+    if (injectedEmpTypesRef.current === signature) return;
+
+    setRubricData((prev: any) => {
+      if (!prev) return prev;
+      const existing: any[] = Array.isArray(prev.other_requirements) ? prev.other_requirements : [];
+      const existingLower = new Set(
+        existing
+          .map((item: any) => (typeof item?.value === "string" ? item.value.trim().toLowerCase() : ""))
+          .filter(Boolean)
+      );
+      const toAdd = selectedEmpTypes
+        .filter(t => !existingLower.has(String(t).trim().toLowerCase()))
+        .map(t => ({ value: String(t), required: "Required", source: "Step1" }));
+      injectedEmpTypesRef.current = signature;
+      if (toAdd.length === 0) return prev;
+      return {
+        ...prev,
+        other_requirements: [...toAdd, ...existing],
+      };
+    });
+  }, [rubricData, selectedEmpTypes]);
 
   useEffect(() => {
     if (currentStep !== 4) return;
@@ -3575,9 +3632,61 @@ function NewJobPageContent() {
     setSearchStatus("Search stopped");
   };
 
+  // Bucket key for persisted search results. Falls back to "draft" for jobs
+  // that haven't been assigned a numeric/JobDiva id yet so wizard work survives
+  // a reload before the first save.
+  const sourcingResultsKey = `sourcing:results:${numericJobId || jobdivaId || "draft"}`;
+
+  // Persist results once a search completes. Runs on the transition from
+  // `isSearching: true → false` (and also when `candidates` changes while idle).
+  // Skipped while streaming to avoid ~N writes per search.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (isSearching) return;
+    if (!hasSearched) return;
+    if (candidates.length === 0) return;
+    try {
+      const trimmed = candidates.slice(0, 100);
+      window.localStorage.setItem(
+        sourcingResultsKey,
+        JSON.stringify({ candidates: trimmed, savedAt: Date.now() })
+      );
+    } catch {
+      /* quota / unavailable — swallow, results remain in-memory */
+    }
+  }, [isSearching, hasSearched, candidates, sourcingResultsKey]);
+
+  // Restore last-run results when the recruiter lands on Step 5 with nothing
+  // in memory (e.g. after a reload). Gated to one-shot via the hasSearched
+  // check. Clears `restoredFromCache` as soon as a fresh search starts.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (currentStep !== 5) return;
+    if (hasSearched) return;
+    if (candidates.length > 0) return;
+    try {
+      const raw = window.localStorage.getItem(sourcingResultsKey);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      const cached = Array.isArray(parsed?.candidates) ? parsed.candidates : [];
+      if (cached.length === 0) return;
+      setCandidates(cached);
+      setHasSearched(true);
+      setRestoredFromCache(true);
+      const seen = seenCandidateIdsRef.current;
+      for (const c of cached) {
+        const id = String(c?.candidate_id || c?.id || "");
+        if (id) seen.add(id);
+      }
+    } catch {
+      /* corrupt or unparseable cache — ignore */
+    }
+  }, [currentStep, sourcingResultsKey]);
+
   const handleRunSearch = async () => {
     setIsSearching(true);
     setHasSearched(true);
+    setRestoredFromCache(false);
     try {
       const initial = resolvedGeneratedBoolean;
       setGeneratedBoolean(initial);
@@ -4630,31 +4739,6 @@ function NewJobPageContent() {
                                 })}
                               </div>
                             )}
-                            {/* 5.5: Run/Stop moved here so the recruiter reviews
-                                the Boolean before kicking off a search. */}
-                            <div className="flex items-center justify-end gap-2 mt-4">
-                              {isSearching && (
-                                <Button
-                                  className="bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
-                                  onClick={handleStopSearch}
-                                >
-                                  <Ban className="w-4 h-4" />
-                                  Stop Search
-                                </Button>
-                              )}
-                              <Button
-                                className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
-                                onClick={handleRunSearch}
-                                disabled={isSearching}
-                              >
-                                {isSearching ? (
-                                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                                ) : (
-                                  <Rocket className="w-4 h-4 fill-white" />
-                                )}
-                                Run Search
-                              </Button>
-                            </div>
                           </div>
                         ) : (
                           <div className="p-4 bg-white border border-[#ddd6fe] rounded-xl overflow-x-auto shadow-inner flex items-center justify-center py-6 gap-3">
@@ -4667,6 +4751,32 @@ function NewJobPageContent() {
                         )}
                       </div>
                     )}
+                    {/* Run/Stop live OUTSIDE the "View boolean string" collapsible
+                        so recruiters can always see the primary action. The
+                        collapsible above is for reviewing/editing the string. */}
+                    <div className="flex items-center justify-end gap-2 px-6 pb-6 pt-2">
+                      {isSearching && (
+                        <Button
+                          className="bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
+                          onClick={handleStopSearch}
+                        >
+                          <Ban className="w-4 h-4" />
+                          Stop Search
+                        </Button>
+                      )}
+                      <Button
+                        className="bg-[#6366f1] hover:bg-[#4f46e5] text-white font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
+                        onClick={handleRunSearch}
+                        disabled={isSearching}
+                      >
+                        {isSearching ? (
+                          <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        ) : (
+                          <Rocket className="w-4 h-4 fill-white" />
+                        )}
+                        Run Search
+                      </Button>
+                    </div>
                   </div>
                 </div>
               </section>
@@ -4690,6 +4800,11 @@ function NewJobPageContent() {
                         isSearching ? `Sourcing candidates... ${candidates.length} found so far` : `${candidates.length} candidates found${sourceFilter !== "all" ? ` · showing ${sortedCandidates.length}` : ""}`
                     ) : 'Run a search to find candidates.'}
                   </p>
+                  {restoredFromCache && !isSearching && (
+                    <p className="text-[11.5px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1 mt-2 inline-block">
+                      Restored from last run · Re-run to refresh
+                    </p>
+                  )}
                   {candidates.length > 0 && (
                     <div className="flex items-center gap-1.5 mt-3 flex-wrap">
                       {([
@@ -5096,17 +5211,8 @@ function NewJobPageContent() {
               </div>
             )}
 
-            {/* Bulk Resume Upload */}
-            <BulkUploadSection
-              jobRef={numericJobId || jobdivaId}
-              bulkFiles={bulkFiles}
-              onBulkFilesChange={setBulkFiles}
-              onClearProgress={() => setBulkProgress(null)}
-              isUploadingBulk={isUploadingBulk}
-              bulkProgress={bulkProgress}
-              bulkFileInputRef={bulkFileInputRef}
-              onUpload={handleBulkUpload}
-            />
+            {/* Bulk resume upload lives in the Tira chatbot now — removed from
+                Step 5 to keep sourcing focused on the boolean-string workflow. */}
             </div>
 
             {/* Launch Footer */}
@@ -5322,50 +5428,63 @@ function NewJobPageContent() {
                   }
                   setCurrentStep(2);
                 } else if (currentStep === 2) {
-                  const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
-                  if (!saved) {
-                    showToast("Failed to save Step 2 data. Please try again.", "info");
-                    return;
-                  }
-
-                  if (!rubricData || (rubricData.titles?.length === 0 && rubricData.skills?.length === 0)) {
-                    setIsGeneratingRubric(true);
-                    setCurrentStep(3);
-                    try {
-                      const apiUrl = API_BASE;
-                      const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({
-                          jobId: numericJobId || jobdivaId,
-                          jobdivaId: jobdivaId,
-                          jobTitle: jobData?.title || jobTitle,
-                          enhancedJobTitle: enhancedTitle || "",
-                          jobDescription: jobPosting,
-                          jobNotes: recruiterNotes,
-                          originalDescription: jobData?.description || "",
-                          customerName: jobData?.customer_name || jobData?.customer || "",
-                          requiredDegree: jobData?.required_degree || "",
-                          jobCity: jobData?.city || "",
-                          jobState: jobData?.state || "",
-                          locationType: jobData?.location_type || ""
-                        })
-                      });
-                      if (res.ok) {
-                        const data = await res.json();
-                        setRubricData(applyTitleRequiredSafetyNet(data));
-                        showToast("Step 2 saved and rubric generated!", "success");
-                      } else {
-                        throw new Error("API failed");
-                      }
-                    } catch (e) {
-                      console.error(e);
-                      showToast("Failed to generate rubric.", "info");
-                      setRubricData(null);
-                    } finally {
-                      setIsGeneratingRubric(false);
+                  setIsAdvancingStep(true);
+                  try {
+                    const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
+                    if (!saved) {
+                      showToast("Failed to save Step 2 data. Please try again.", "info");
+                      return;
                     }
+
+                    // Regenerate rubric when (a) none exists yet, or (b) the
+                    // JD text has been edited since the last rubric was
+                    // generated. Otherwise preserve the existing rubric +
+                    // recruiter edits on Step 3.
+                    const jdFingerprint = (jobPosting || "").trim();
+                    const rubricIsEmpty = !rubricData || (rubricData.titles?.length === 0 && rubricData.skills?.length === 0);
+                    const jdChanged = jdFingerprint !== "" && jdFingerprint !== lastRubricJdRef.current;
+                    if (rubricIsEmpty || jdChanged) {
+                      setIsGeneratingRubric(true);
+                      try {
+                        const apiUrl = API_BASE;
+                        const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            jobId: numericJobId || jobdivaId,
+                            jobdivaId: jobdivaId,
+                            jobTitle: jobData?.title || jobTitle,
+                            enhancedJobTitle: enhancedTitle || "",
+                            jobDescription: jobPosting,
+                            jobNotes: recruiterNotes,
+                            originalDescription: jobData?.description || "",
+                            customerName: jobData?.customer_name || jobData?.customer || "",
+                            requiredDegree: jobData?.required_degree || "",
+                            jobCity: jobData?.city || "",
+                            jobState: jobData?.state || "",
+                            locationType: jobData?.location_type || ""
+                          })
+                        });
+                        if (res.ok) {
+                          const data = await res.json();
+                          setRubricData(applyTitleRequiredSafetyNet(data));
+                          lastRubricJdRef.current = jdFingerprint;
+                          showToast("Step 2 saved and rubric generated!", "success");
+                        } else {
+                          throw new Error("API failed");
+                        }
+                      } catch (e) {
+                        console.error(e);
+                        showToast("Failed to generate rubric.", "info");
+                        setRubricData(null);
+                      } finally {
+                        setIsGeneratingRubric(false);
+                      }
+                    }
+                    setCurrentStep(3);
                     return;
+                  } finally {
+                    setIsAdvancingStep(false);
                   }
                 } else if (currentStep === 3) {
                   const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
@@ -5383,12 +5502,17 @@ function NewJobPageContent() {
 
                 if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
               }}
-              disabled={(currentStep === 1 && !jobData) || isGeneratingJD || isSearching}
+              disabled={(currentStep === 1 && !jobData) || isGeneratingJD || isSearching || isAdvancingStep || isGeneratingRubric}
             >
               {isGeneratingJD ? (
                 <>
                   <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
                   Enriching...
+                </>
+              ) : (isAdvancingStep || isGeneratingRubric) ? (
+                <>
+                  <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
+                  Preparing...
                 </>
               ) : (
                 <>
