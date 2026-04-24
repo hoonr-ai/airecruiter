@@ -21,6 +21,148 @@ from services.candidate_profiles_db import candidate_profiles_db
 logger = logging.getLogger(__name__)
 
 
+# v22: Module-level engine singleton. Pre-v22 every method/function created
+# its own `create_engine(db_url)` with default pool settings, leaking
+# connections until Postgres hit max_connections. Pool via a single engine
+# with `pool_pre_ping=True` (drops dead conns silently) and
+# `connect_timeout=5` (fails fast on a hung DB, doesn't block the worker
+# for the TCP default ~2 min).
+_ENGINE: Optional[sqlalchemy.engine.Engine] = None
+
+
+def _get_engine() -> sqlalchemy.engine.Engine:
+    global _ENGINE
+    if _ENGINE is None:
+        url = DATABASE_URL or SUPABASE_DB_URL
+        if not url:
+            raise RuntimeError("DATABASE_URL not configured for sourced_candidates_storage")
+        _ENGINE = sqlalchemy.create_engine(
+            url,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            connect_args={"connect_timeout": 5},
+        )
+    return _ENGINE
+
+
+def _ensure_sourced_candidates_schema() -> None:
+    """Sync DDL bootstrap for sourced_candidates + candidate_enhanced_info.
+
+    v22: pre-v22 this ran inside every save-path handler (see `_ensure_table`
+    and `save_candidate_enhanced_info`). CREATE TABLE IF NOT EXISTS is cheap
+    but ALTER TABLE grabs an ACCESS EXCLUSIVE lock — running it on every
+    request stalls concurrent readers and, under lock contention, raises
+    `psycopg2.errors.LockNotAvailable` → 500s. Lifespan calls this once at
+    startup; per-request paths skip DDL entirely.
+    """
+    url = DATABASE_URL or SUPABASE_DB_URL
+    if not url:
+        logger.warning("sourced_candidates_schema_init_skipped: no DATABASE_URL")
+        return
+    try:
+        engine = _get_engine()
+        with engine.connect() as conn:
+            # sourced_candidates (canonical schema).
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS sourced_candidates (
+                    id SERIAL PRIMARY KEY,
+                    jobdiva_id TEXT NOT NULL,
+                    candidate_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    name TEXT,
+                    email TEXT,
+                    phone TEXT,
+                    headline TEXT,
+                    location TEXT,
+                    resume_id TEXT,
+                    resume_text TEXT,
+                    profile_url TEXT,
+                    image_url TEXT,
+                    data JSONB,
+                    status TEXT DEFAULT 'sourced',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(jobdiva_id, candidate_id, source)
+                )
+            """))
+
+            # Legacy migrations (no-op if already applied). Wrapped so a
+            # failure on one doesn't poison the others.
+            for stmt in (
+                "ALTER TABLE sourced_candidates RENAME COLUMN job_id TO jobdiva_id",
+                "ALTER TABLE sourced_candidates RENAME COLUMN jobdiva_resume_id TO resume_id",
+                "ALTER TABLE sourced_candidates DROP COLUMN IF EXISTS jobdiva_candidate_id",
+                "ALTER TABLE sourced_candidates DROP COLUMN IF EXISTS candidate_type",
+            ):
+                try:
+                    conn.execute(text(stmt))
+                except Exception:
+                    pass
+
+            # Idempotent column adds.
+            for stmt in (
+                "ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS email TEXT",
+                "ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS phone TEXT",
+                "ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS resume_id TEXT",
+                "ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS resume_text TEXT",
+                "ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                "ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS resume_match_percentage NUMERIC",
+            ):
+                try:
+                    conn.execute(text(stmt))
+                except Exception as e:
+                    logger.warning(f"sourced_candidates ALTER skipped: {stmt!r}: {e}")
+
+            # candidate_enhanced_info (second DDL site, pre-v22 lived inside
+            # save_candidate_enhanced_info and ran per save).
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS candidate_enhanced_info (
+                    id SERIAL PRIMARY KEY,
+                    candidate_id TEXT NOT NULL UNIQUE,
+                    candidate_name TEXT,
+                    email TEXT,
+                    phone TEXT,
+                    job_title TEXT,
+                    years_of_experience INT,
+                    current_location TEXT,
+                    key_skills JSONB DEFAULT '[]'::jsonb,
+                    company_experience JSONB DEFAULT '[]'::jsonb,
+                    candidate_education JSONB DEFAULT '[]'::jsonb,
+                    candidate_certification JSONB DEFAULT '[]'::jsonb,
+                    urls JSONB DEFAULT '{}'::jsonb,
+                    resume_text TEXT,
+                    resume_hash TEXT,
+                    resume_extraction_status TEXT DEFAULT 'pending',
+                    source TEXT DEFAULT 'JobDiva',
+                    extracted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + '30 days'::interval)
+                )
+            """))
+            try:
+                conn.execute(text("ALTER TABLE candidate_enhanced_info ADD COLUMN IF NOT EXISTS resume_hash TEXT"))
+            except Exception as e:
+                logger.warning(f"candidate_enhanced_info ALTER resume_hash skipped: {e}")
+            try:
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS idx_candidate_enhanced_info_resume_hash "
+                    "ON candidate_enhanced_info (resume_hash)"
+                ))
+            except Exception as e:
+                logger.warning(f"candidate_enhanced_info CREATE INDEX skipped: {e}")
+
+            conn.commit()
+        logger.info("sourced_candidates schema ready")
+    except Exception as e:
+        logger.error(f"sourced_candidates schema init failed: {e}")
+
+
+async def init_sourced_candidates_schema() -> None:
+    """Async wrapper called from main.py lifespan."""
+    await asyncio.to_thread(_ensure_sourced_candidates_schema)
+
+
 def _truncate_log_value(value: Any, limit: int = 80) -> str:
     text_value = str(value or "").strip()
     if len(text_value) <= limit:
@@ -166,60 +308,11 @@ class SourcedCandidatesStorage:
         self.db_url = DATABASE_URL or SUPABASE_DB_URL
 
     def _ensure_table(self, conn):
-        """Ensure the sourced_candidates table exists with clean optimized schema."""
-        # Create table with clean schema (no redundant columns)
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS sourced_candidates (
-                id SERIAL PRIMARY KEY,
-                jobdiva_id TEXT NOT NULL,
-                candidate_id TEXT NOT NULL,
-                source TEXT NOT NULL,
-                name TEXT,
-                email TEXT,
-                phone TEXT,
-                headline TEXT,
-                location TEXT,
-                resume_id TEXT,
-                resume_text TEXT,
-                profile_url TEXT,
-                image_url TEXT,
-                data JSONB,
-                status TEXT DEFAULT 'sourced',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(jobdiva_id, candidate_id, source)
-            )
-        """))
-        
-        # Migration: rename columns if old schema exists
-        try:
-            conn.execute(text("ALTER TABLE sourced_candidates RENAME COLUMN job_id TO jobdiva_id"))
-        except Exception:
-            pass  # Already renamed or doesn't exist
-            
-        try:
-            conn.execute(text("ALTER TABLE sourced_candidates RENAME COLUMN jobdiva_resume_id TO resume_id"))
-        except Exception:
-            pass  # Already renamed or doesn't exist
-            
-        # Remove redundant columns
-        try:
-            conn.execute(text("ALTER TABLE sourced_candidates DROP COLUMN IF EXISTS jobdiva_candidate_id"))
-            conn.execute(text("ALTER TABLE sourced_candidates DROP COLUMN IF EXISTS candidate_type"))
-        except Exception:
-            pass  # Already dropped or doesn't exist
-            
-        # Add missing columns
-        try:
-            conn.execute(text("ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS email TEXT"))
-            conn.execute(text("ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS phone TEXT"))
-            conn.execute(text("ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS resume_id TEXT"))
-            conn.execute(text("ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS resume_text TEXT"))
-            conn.execute(text("ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"))
-            conn.execute(text("ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS resume_match_percentage NUMERIC"))
-            conn.commit()
-        except Exception as e:
-            pass  # Column might already exist
+        """No-op. v22: schema DDL moved to lifespan startup
+        (`init_sourced_candidates_schema`). Kept as a no-op so legacy callers
+        don't need to be rewritten, but the per-request ALTER TABLE lock
+        contention is gone."""
+        return
 
     def save_candidates(self, jobdiva_id: str, candidates: List[SourcedCandidate]) -> int:
         """Save search results to the database with enhanced JobDiva integration."""
@@ -228,7 +321,7 @@ class SourcedCandidatesStorage:
         
         saved_count = 0
         try:
-            engine = sqlalchemy.create_engine(self.db_url)
+            engine = _get_engine()
             with engine.connect() as conn:
                 self._ensure_table(conn)
                 
@@ -286,7 +379,7 @@ class SourcedCandidatesStorage:
             return False
             
         try:
-            engine = sqlalchemy.create_engine(self.db_url)
+            engine = _get_engine()
             with engine.connect() as conn:
                 self._ensure_table(conn)
                 
@@ -324,7 +417,7 @@ class SourcedCandidatesStorage:
             return 0
             
         try:
-            engine = sqlalchemy.create_engine(self.db_url)
+            engine = _get_engine()
             with engine.connect() as conn:
                 result = conn.execute(text("""
                     DELETE FROM sourced_candidates s1
@@ -355,7 +448,7 @@ class SourcedCandidatesStorage:
             import psycopg2.extras
             import json
             
-            conn = psycopg2.connect(self.db_url)
+            conn = psycopg2.connect(self.db_url, connect_timeout=5)
             conn.autocommit = True
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             
@@ -454,7 +547,7 @@ class SourcedCandidatesStorage:
             import psycopg2
             import psycopg2.extras
 
-            conn = psycopg2.connect(self.db_url)
+            conn = psycopg2.connect(self.db_url, connect_timeout=5)
             conn.autocommit = True
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -598,7 +691,7 @@ class SourcedCandidatesStorage:
             import psycopg2
             import psycopg2.extras
 
-            conn = psycopg2.connect(self.db_url)
+            conn = psycopg2.connect(self.db_url, connect_timeout=5)
             conn.autocommit = True
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -673,7 +766,7 @@ def _lookup_cached_enhanced_info_by_resume_hash(resume_hash: str) -> Optional[Di
     if not resume_hash:
         return None
     try:
-        engine = sqlalchemy.create_engine(DATABASE_URL)
+        engine = _get_engine()
         with engine.connect() as conn:
             row = conn.execute(text("""
                 SELECT candidate_name, email, phone, job_title, current_location,
@@ -1215,41 +1308,13 @@ async def process_dice_candidate(candidate: Dict[str, Any]):
 def save_candidate_enhanced_info(candidate_id: str, enhanced_info: Dict[str, Any], resume_text: str):
     """Save or update candidate_enhanced_info table with enriched data."""
     try:
-        engine = sqlalchemy.create_engine(DATABASE_URL)
+        engine = _get_engine()
         with engine.connect() as conn:
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS candidate_enhanced_info (
-                    id SERIAL PRIMARY KEY,
-                    candidate_id TEXT NOT NULL UNIQUE,
-                    candidate_name TEXT,
-                    email TEXT,
-                    phone TEXT,
-                    job_title TEXT,
-                    years_of_experience INT,
-                    current_location TEXT,
-                    key_skills JSONB DEFAULT '[]'::jsonb,
-                    company_experience JSONB DEFAULT '[]'::jsonb,
-                    candidate_education JSONB DEFAULT '[]'::jsonb,
-                    candidate_certification JSONB DEFAULT '[]'::jsonb,
-                    urls JSONB DEFAULT '{}'::jsonb,
-                    resume_text TEXT,
-                    resume_hash TEXT,
-                    resume_extraction_status TEXT DEFAULT 'pending',
-                    source TEXT DEFAULT 'JobDiva',
-                    extracted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + '30 days'::interval)
-                )
-            """))
-            # Idempotent migrations for existing deployments: add resume_hash
-            # column + index if the table already exists without them.
-            conn.execute(text(
-                "ALTER TABLE candidate_enhanced_info ADD COLUMN IF NOT EXISTS resume_hash TEXT"
-            ))
-            conn.execute(text(
-                "CREATE INDEX IF NOT EXISTS idx_candidate_enhanced_info_resume_hash "
-                "ON candidate_enhanced_info (resume_hash)"
-            ))
-            
+            # v22: DDL moved to lifespan (`init_sourced_candidates_schema`).
+            # Previously `CREATE TABLE IF NOT EXISTS` + two `ALTER TABLE` +
+            # `CREATE INDEX` ran per save → ACCESS EXCLUSIVE lock contention
+            # under concurrent writes. Save path is pure DML now.
+
             # Safe int parsing for years_experience
             raw_years = enhanced_info.get("years_of_experience")
             parsed_years = None
@@ -1331,7 +1396,7 @@ def save_candidate_enhanced_info(candidate_id: str, enhanced_info: Dict[str, Any
 def save_sourced_candidate(candidate: Dict[str, Any], enhanced_info: Dict[str, Any]):
     """Update sourced_candidates table with enriched LLM-only candidate info."""
     try:
-        engine = sqlalchemy.create_engine(DATABASE_URL)
+        engine = _get_engine()
         with engine.connect() as conn:
             sourced_payload = {
                 "candidate_name": enhanced_info.get("candidate_name") or candidate.get("name"),

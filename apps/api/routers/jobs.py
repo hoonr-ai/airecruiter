@@ -64,18 +64,34 @@ def save_monitored_jobs(jobs_data):
 # turn for a no-op migration. Run the DDL once at startup and drop it from
 # the request path.
 def _ensure_monitored_jobs_schema() -> None:
-    """Synchronous DDL bootstrap. Safe to re-run (all ADD COLUMN IF NOT EXISTS)."""
+    """Synchronous DDL bootstrap. Safe to re-run (all ADD COLUMN IF NOT EXISTS).
+
+    v22: absorbed the extraction-columns ALTER TABLE that previously ran
+    per-invocation inside `MonitoredJobsStorage.update_job_with_extracted_data`.
+    Keeps all monitored_jobs DDL in one startup path.
+    """
     try:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute(
-            "ALTER TABLE monitored_jobs "
-            "ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE"
-        )
-        cur.execute(
-            "ALTER TABLE monitored_jobs "
-            "ADD COLUMN IF NOT EXISTS job_requirements JSONB DEFAULT '[]'"
-        )
+        for stmt in (
+            # v21 columns
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS job_requirements JSONB DEFAULT '[]'",
+            # v22: extraction columns (previously ALTER'd per write in
+            # services/monitored_jobs_storage.py).
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS summary TEXT",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS hard_skills JSONB",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS soft_skills JSONB",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS experience_level TEXT",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS extraction_metadata JSONB",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS bot_introduction TEXT",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS sourcing_filters JSONB",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS resume_match_filters JSONB",
+        ):
+            try:
+                cur.execute(stmt)
+            except Exception as e:
+                logger.warning(f"monitored_jobs ALTER skipped: {stmt!r}: {e}")
         conn.commit()
         cur.close()
         conn.close()

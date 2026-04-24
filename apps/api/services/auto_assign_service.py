@@ -13,7 +13,7 @@ class AutoAssignService:
         self.db_url = db_url
 
     def _get_db_connection(self):
-        return psycopg2.connect(self.db_url)
+        return psycopg2.connect(self.db_url, connect_timeout=5)
 
     async def synchronize_job_applicants(self, job_id: str):
         """

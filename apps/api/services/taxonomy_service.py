@@ -56,7 +56,7 @@ def _get_conn():
         raise RuntimeError("DATABASE_URL is missing")
     
     # psycopg2 can connect directly via the DATABASE_URL string (DSN)
-    return psycopg2.connect(DATABASE_URL)
+    return psycopg2.connect(DATABASE_URL, connect_timeout=5)
 
 def _load_master_caches():
     """Initializes in-memory master taxonomies."""

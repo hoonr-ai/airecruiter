@@ -23,7 +23,15 @@ class VettedService:
         self.engine = None
         if self.db_url:
             try:
-                self.engine = sqlalchemy.create_engine(self.db_url)
+                # v22: add pool sizing + pre_ping + connect_timeout.
+                self.engine = sqlalchemy.create_engine(
+                    self.db_url,
+                    pool_size=5,
+                    max_overflow=10,
+                    pool_pre_ping=True,
+                    pool_recycle=1800,
+                    connect_args={"connect_timeout": 5},
+                )
             except Exception as e:
                 logger.error(f"Failed to create Vetted DB engine: {e}")
 

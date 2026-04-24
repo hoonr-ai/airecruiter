@@ -26,7 +26,7 @@ logger = logging.getLogger("JobDivaApplicantSync")
 def get_monitored_jobs():
     """Fetch all jobs that are not archived and have a jobdiva_id."""
     try:
-        with psycopg2.connect(DATABASE_URL) as conn:
+        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # We target all jobs that have been 'monitored'. 
                 # If there's an is_archived column, we should use it.
