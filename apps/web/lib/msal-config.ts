@@ -10,7 +10,7 @@ export const msalConfig: Configuration = {
         authority: process.env.NEXT_PUBLIC_AZURE_AUTHORITY || "https://login.microsoftonline.com/common",
         
         // Must be the same as the redirect URI configured in Azure portal
-        redirectUri: process.env.NEXT_PUBLIC_AZURE_REDIRECT_URI || (typeof window !== "undefined" ? window.location.origin : "/"),
+        redirectUri: process.env.NEXT_PUBLIC_AZURE_REDIRECT_URI || (typeof window !== "undefined" ? `${window.location.origin}/` : "/"),
     },
     cache: {
         cacheLocation: "sessionStorage", // This configures where your cache will be stored
