@@ -11,9 +11,34 @@ from sqlalchemy import text
 from core.config import DATABASE_URL, SUPABASE_DB_URL
 from models import ExtractedData, Skill
 
+
+# v22: Module-level engine singleton. Pre-v22 each method called
+# `sqlalchemy.create_engine(self.db_url)` with default pool settings, leaking
+# connections on every invocation. Pool once, reuse forever; fail fast on a
+# hung DB via `connect_timeout=5`.
+_ENGINE: Optional[sqlalchemy.engine.Engine] = None
+
+
+def _get_engine() -> sqlalchemy.engine.Engine:
+    global _ENGINE
+    if _ENGINE is None:
+        url = DATABASE_URL or SUPABASE_DB_URL
+        if not url:
+            raise RuntimeError("DATABASE_URL not configured for monitored_jobs_storage")
+        _ENGINE = sqlalchemy.create_engine(
+            url,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            connect_args={"connect_timeout": 5},
+        )
+    return _ENGINE
+
+
 class MonitoredJobsStorage:
     """Service to store all processed data in the updated monitored_jobs table."""
-    
+
     def __init__(self):
         self.db_url = DATABASE_URL or SUPABASE_DB_URL
     
@@ -37,7 +62,7 @@ class MonitoredJobsStorage:
             return False
             
         try:
-            engine = sqlalchemy.create_engine(self.db_url)
+            engine = _get_engine()
             conn = engine.connect()
             
             # Prepare hard_skills as JSON
@@ -61,20 +86,12 @@ class MonitoredJobsStorage:
             }
             
             bot_introduction = processing_metadata.get("bot_introduction") if processing_metadata else None
-            
-            # First, ensure columns exist
-            conn.execute(text("""
-                ALTER TABLE monitored_jobs 
-                ADD COLUMN IF NOT EXISTS summary TEXT,
-                ADD COLUMN IF NOT EXISTS hard_skills JSONB,
-                ADD COLUMN IF NOT EXISTS soft_skills JSONB,
-                ADD COLUMN IF NOT EXISTS experience_level TEXT,
-                ADD COLUMN IF NOT EXISTS extraction_metadata JSONB,
-                ADD COLUMN IF NOT EXISTS bot_introduction TEXT,
-                ADD COLUMN IF NOT EXISTS sourcing_filters JSONB,
-                ADD COLUMN IF NOT EXISTS resume_match_filters JSONB
-            """))
-            
+
+            # v22: DDL (ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS ...)
+            # moved to lifespan `_ensure_monitored_jobs_schema` in routers/jobs.py.
+            # Pre-v22 this ran on every extract, holding ACCESS EXCLUSIVE on
+            # monitored_jobs and stalling concurrent readers of /jobs/monitored.
+
             # Update the monitored_jobs record with all processed data
             result = conn.execute(text("""
                 UPDATE monitored_jobs SET
@@ -129,7 +146,7 @@ class MonitoredJobsStorage:
             return None
             
         try:
-            engine = sqlalchemy.create_engine(self.db_url)
+            engine = _get_engine()
             conn = engine.connect()
             
             result = conn.execute(text("SELECT * FROM monitored_jobs WHERE job_id = :job_id"), {"job_id": job_id})
@@ -175,7 +192,7 @@ class MonitoredJobsStorage:
             return {}
             
         try:
-            engine = sqlalchemy.create_engine(self.db_url)
+            engine = _get_engine()
             conn = engine.connect()
             
             # Count total jobs

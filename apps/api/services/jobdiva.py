@@ -443,7 +443,17 @@ class JobDivaService:
         self.engine = None
         if self.db_url:
             try:
-                self.engine = sqlalchemy.create_engine(self.db_url)
+                # v22: add pool sizing + pre_ping + connect_timeout. Pre-v22 a
+                # slow DB connect hung uvicorn workers for TCP default ~2 min;
+                # unpooled defaults also leaked connections under load.
+                self.engine = sqlalchemy.create_engine(
+                    self.db_url,
+                    pool_size=5,
+                    max_overflow=10,
+                    pool_pre_ping=True,
+                    pool_recycle=1800,
+                    connect_args={"connect_timeout": 5},
+                )
             except Exception as e:
                 logger.error(f"Failed to create JobDiva DB engine: {e}")
 
@@ -1850,11 +1860,11 @@ class JobDivaService:
                     import psycopg2
                     from core.config import DATABASE_URL
                     
-                    with psycopg2.connect(DATABASE_URL) as conn:
+                    with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
                         with conn.cursor() as cur:
                             cur.execute("""
-                                UPDATE sourced_candidates 
-                                SET resume_text = %s, resume_id = %s, updated_at = CURRENT_TIMESTAMP 
+                                UPDATE sourced_candidates
+                                SET resume_text = %s, resume_id = %s, updated_at = CURRENT_TIMESTAMP
                                 WHERE candidate_id = %s
                             """, (resume_text, resume_id, candidate_id))
                             

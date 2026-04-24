@@ -509,11 +509,13 @@ async def get_job_candidates(job_id_or_ref: str):
         # Resolve the alphanumeric jobdiva_id (e.g. '26-05172') from monitored_jobs.
         # sourced_candidates.jobdiva_id must always store the alphanumeric ref, NOT the numeric PK.
         resolved_jobdiva_id = job_id_or_ref  # fallback: use whatever was passed
-        with psycopg2.connect(DATABASE_URL) as conn:
+        # v22: connect_timeout=5 → slow/unreachable DB fails fast instead of
+        # hanging worker for TCP default (~2 min).
+        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT jobdiva_id, job_id FROM monitored_jobs 
-                    WHERE job_id = %s OR jobdiva_id = %s 
+                    SELECT jobdiva_id, job_id FROM monitored_jobs
+                    WHERE job_id = %s OR jobdiva_id = %s
                     LIMIT 1
                 """, (job_id_or_ref, job_id_or_ref))
                 result = cur.fetchone()
@@ -522,7 +524,7 @@ async def get_job_candidates(job_id_or_ref: str):
                     resolved_jobdiva_id = result[0] or result[1]
 
         # Query sourced_candidates using the resolved alphanumeric jobdiva_id
-        with psycopg2.connect(DATABASE_URL) as conn:
+        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
                     SELECT id, jobdiva_id, candidate_id, name, email, phone, headline, location,
@@ -561,7 +563,7 @@ async def save_candidates(request: CandidatesSaveRequest):
         from core.config import DATABASE_URL as _DB_URL
         resolved_jobdiva_id = request.jobdiva_id  # safe fallback
         try:
-            with _psycopg2.connect(_DB_URL) as _conn:
+            with _psycopg2.connect(_DB_URL, connect_timeout=5) as _conn:
                 with _conn.cursor() as _cur:
                     _cur.execute("""
                         SELECT jobdiva_id, job_id FROM monitored_jobs
@@ -591,7 +593,7 @@ async def save_candidates(request: CandidatesSaveRequest):
         saved_count = 0
         processing_payloads = []
 
-        with psycopg2.connect(DATABASE_URL) as conn:
+        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
             with conn.cursor() as cur:
                 for c in selected_candidates:
                     try:
