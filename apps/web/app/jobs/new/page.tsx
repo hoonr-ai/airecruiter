@@ -71,7 +71,6 @@ import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { PasteResumeModal } from "@/components/jobs/PasteResumeModal";
 import { BulkUploadSection } from "@/components/jobs/BulkUploadSection";
 import { PhoneIndicator } from "@/components/phone-indicator";
-import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
 import { API_BASE } from "@/lib/api";
 import { logger } from "@/lib/logger";
 
@@ -200,6 +199,18 @@ const getCandidateDisplayName = (candidate: {
   if (title) return title;
 
   return candidate.source === "LinkedIn" ? "LinkedIn profile" : "Unnamed candidate";
+};
+
+const extractLinkedInFromText = (text?: string | null): string => {
+  const raw = String(text || "");
+  if (!raw) return "";
+  const m = raw.match(/https?:\/\/(?:www\.)?linkedin\.com\/in\/[A-Za-z0-9\-_%]+/i);
+  return m ? m[0] : "";
+};
+
+const looksLikeLinkedInProfile = (url?: string | null): boolean => {
+  const u = String(url || "").trim().toLowerCase();
+  return u.includes("linkedin.com/in/");
 };
 
 export default function NewJobPage() {
@@ -434,6 +445,7 @@ function NewJobPageContent() {
   const [sourceCompanyInput, setSourceCompanyInput] = useState("");
   const [sourceKeywordInput, setSourceKeywordInput] = useState("");
   const [isSearching, setIsSearching] = useState(false);
+  const [isEnrichingContacts, setIsEnrichingContacts] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [booleanStringOpen, setBooleanStringOpen] = useState(false);
   const [generatedBoolean, setGeneratedBoolean] = useState("");
@@ -485,13 +497,6 @@ function NewJobPageContent() {
   };
   const [selectedCandidates, setSelectedCandidates] = useState<Set<string>>(new Set());
   const [searchStatus, setSearchStatus] = useState("Fetching applicants...");
-
-  // Missing-phones gate for Launch PAIR. Sourcing returns candidates without
-  // phone (Unipile/Exa don't expose phone; JobDiva sometimes does). PAIR
-  // rejects phone-less candidates, so we intercept Launch PAIR, collect the
-  // numbers inline, then proceed.
-  const [missingPhonesOpen, setMissingPhonesOpen] = useState(false);
-  const [missingPhoneCandidates, setMissingPhoneCandidates] = useState<MissingPhoneCandidate[]>([]);
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
@@ -2917,17 +2922,18 @@ function NewJobPageContent() {
     // which produces depth-probing, seniority-aware questions. Fall back to
     // the legacy per-skill template only if the endpoint fails, so we
     // never leave the recruiter empty-handed.
-    let roleSpecific: ScreenQuestion[] = [];
+    const roleSpecific: ScreenQuestion[] = [];
     try {
       const apiUrl = API_BASE;
       const jobRef = numericJobId || jobdivaId || "new";
+      const levelForApi = screeningLevel === "L1" ? "light" : screeningLevel === "L2" ? "intensive" : "medium";
       const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobRef}/screening-questions/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           jobTitle: (enhancedTitle || jobTitle || "").trim(),
           rubric: rubricData || {},
-          screeningLevel: screeningLevel,
+          screeningLevel: levelForApi,
           customerName: jobData?.customer_name || "",
           workArrangement: jobData?.location_type || "",
           address: addressStr,
@@ -2961,14 +2967,36 @@ function NewJobPageContent() {
       console.warn("screening-questions/generate failed, using template fallback", e);
     }
 
-    // Fallback path: legacy per-skill template so Step 4 is never empty.
+    // Fallback path: skill-aware technical prompts so Step 4 is never empty
+    // with generic questions even if the LLM endpoint fails.
     if (roleSpecific.length === 0 && rubricData?.skills) {
       rubricData.skills.forEach((skill: any) => {
         if (questions.length + roleSpecific.length >= 12) return;
+        const skillName = skill.value || "this technology";
+        const minYears = skill.minYears || 3;
+        const promptVariant = roleSpecific.length % 4;
+
+        let questionText = "";
+        let passCriteria = "";
+
+        if (promptVariant === 0) {
+          questionText = `Walk me through the most complex production implementation you built with ${skillName}. What design trade-off did you make and why?`;
+          passCriteria = `Candidate explains a real production use-case for ${skillName}, including one concrete trade-off and outcome.`;
+        } else if (promptVariant === 1) {
+          questionText = `Describe a difficult issue you debugged in ${skillName}. How did you isolate root cause, and what preventive guardrail did you add?`;
+          passCriteria = `Candidate describes root-cause analysis steps in ${skillName} and a specific prevention strategy beyond a one-time fix.`;
+        } else if (promptVariant === 2) {
+          questionText = `If you had to improve performance or scalability in a ${skillName}-based system, what metrics would you inspect first and what would you tune?`;
+          passCriteria = `Candidate names relevant performance metrics for ${skillName} and proposes a technically sound tuning approach.`;
+        } else {
+          questionText = `In your recent ${skillName} project, how did you ensure code quality and deployment safety (testing, CI/CD, rollback, monitoring)?`;
+          passCriteria = `Candidate links ${skillName} delivery to practical quality controls (tests, pipeline checks, rollback and monitoring).`;
+        }
+
         roleSpecific.push({
           id: idCounter++,
-          question_text: `Can you describe your experience with ${skill.value}? We're looking for ${skill.minYears || 3}+ years of experience.`,
-          pass_criteria: `Must have ${skill.minYears || 3}+ yrs of ${skill.value} experience`,
+          question_text: questionText,
+          pass_criteria: `${passCriteria} Must demonstrate at least ${minYears}+ years of hands-on ${skillName} experience.`,
           is_default: false,
           category: "role-specific",
           order_index: questions.length + roleSpecific.length,
@@ -3823,7 +3851,7 @@ function NewJobPageContent() {
           <div className="flex items-center gap-2 mb-4">
             <FileText className="w-4 h-4 text-slate-900 flex-shrink-0" />
             <h3 className="text-[14px] font-bold text-slate-800">Resume Match</h3>
-            <span className="text-[12px] font-normal text-slate-500">Hard filters applied during resume screening</span>
+            <span className="text-[12px] font-normal text-slate-500">Hard filters applied during resume matching</span>
             <span className="ml-auto bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
               <Sparkles className="w-3 h-3 inline mr-1" />
               Hoonr-Curate pre-filled
@@ -4128,21 +4156,26 @@ function NewJobPageContent() {
     </div>
   );
 
-  // Launch PAIR runs after missing-phone gating. `phoneOverrides` is a map of
-  // candidate_id → phone captured in the MissingPhonesModal; we merge those
-  // into the local `candidates` array before building the save payload so the
-  // saved rows carry the numbers we just collected.
-  const runLaunchPair = async (phoneOverrides?: Record<string, string>) => {
+  // Launch PAIR consumes selected candidates (with optional contact overrides
+  // from enrichment) and persists them to sourced_candidates.
+  const runLaunchPair = async (contactOverrides?: Record<string, { phone?: string; email?: string }>) => {
     if (selectedCandidates.size === 0) return;
     try {
-      const effective = phoneOverrides
+      const effective = contactOverrides
         ? candidates.map(c => {
             const id = c.candidate_id || c.id;
-            return phoneOverrides[id] ? { ...c, phone: phoneOverrides[id] } : c;
+            const override = contactOverrides[id];
+            return override
+              ? {
+                  ...c,
+                  phone: override.phone || c.phone,
+                  email: override.email || c.email,
+                }
+              : c;
           })
         : candidates;
 
-      if (phoneOverrides) {
+      if (contactOverrides) {
         setCandidates(effective);
       }
 
@@ -4202,7 +4235,14 @@ function NewJobPageContent() {
       if (response.ok && result.status === 'success') {
         const saved = result.saved_count || selectedCount;
         showToast(`${saved} candidates saved to Master Pool — redirecting...`, "success");
-        setTimeout(() => { router.push(`/candidates`); }, 1500);
+        const redirectJobRef = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
+        setTimeout(() => {
+          if (redirectJobRef) {
+            router.push(`/jobs/${encodeURIComponent(redirectJobRef)}/rankings`);
+          } else {
+            router.push(`/candidates`);
+          }
+        }, 1500);
       } else {
         console.error('Save failed details:', JSON.stringify(result, null, 2));
         const errorMsg = result.detail
@@ -4216,33 +4256,130 @@ function NewJobPageContent() {
     }
   };
 
-  // Entry point wired to the Launch PAIR button. Filters selected candidates
-  // with no valid phone into the modal; if everyone already has one, skips
-  // straight to runLaunchPair.
+  // Entry point wired to Launch PAIR. Before save, auto-enrich selected
+  // candidates missing phone via ZoomInfo using LinkedIn URL.
   const handleLaunchPairClick = async () => {
     if (selectedCandidates.size === 0) return;
-    const missing: MissingPhoneCandidate[] = [];
-    for (const c of candidates) {
-      const id = c.candidate_id || c.id;
-      if (!selectedCandidates.has(id)) continue;
-      const digits = String(c.phone || "").replace(/\D/g, "");
-      if (digits.length < 7) {
-        missing.push({
-          candidate_id: String(id),
-          name: getCandidateDisplayName(c) || "Unnamed",
-          headline: c.title || c.headline || "",
-          location: c.location || "",
-          source: c.source || "",
-          jobdiva_id: jobdivaId || jobData?.jobdiva_id || String(numericJobId || ""),
-        });
+    setIsEnrichingContacts(true);
+    try {
+      const candidatesMissingPhone = candidates.filter(c => {
+        const id = c.candidate_id || c.id;
+        if (!selectedCandidates.has(id)) return false;
+        const digits = String(c.phone || "").replace(/\D/g, "");
+        return digits.length < 7;
+      });
+
+      const contactOverrides: Record<string, { phone?: string; email?: string }> = {};
+      let enrichedCount = 0;
+      let enrichedMobileCount = 0;
+      let enrichedWorkPhoneCount = 0;
+      let missingLinkedInCount = 0;
+      let enrichFailedCount = 0;
+      let noContactFoundCount = 0;
+
+      for (const c of candidatesMissingPhone) {
+        const id = String(c.candidate_id || c.id || "").trim();
+        if (!id) continue;
+
+        const linkedinUrlCandidates = [
+          c.profile_url,
+          c.linkedin_url,
+          c.urls?.linkedin,
+          c.urls?.linkedin_url,
+          c.data?.urls?.linkedin,
+          c.data?.urls?.linkedin_url,
+          extractLinkedInFromText(c.resume_text || c.resumeText || c.data?.resume_text),
+        ].map((v: any) => String(v || "").trim()).filter(Boolean);
+
+        const linkedinUrl = linkedinUrlCandidates.find((u: string) => looksLikeLinkedInProfile(u)) || "";
+
+        if (!linkedinUrl) {
+          missingLinkedInCount += 1;
+          continue;
+        }
+
+        try {
+          const res = await fetch(`${API_BASE}/candidates/${encodeURIComponent(id)}/enrich-contact`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId || undefined,
+              source: c.source || undefined,
+              linkedin_url: linkedinUrl,
+            }),
+          });
+
+          if (!res.ok) {
+            enrichFailedCount += 1;
+            continue;
+          }
+          const enriched = await res.json();
+          const nextPhone = enriched?.phone || enriched?.mobilePhone || enriched?.workPhone || "";
+          const nextEmail = enriched?.email || "";
+          const phoneSource = String(enriched?.phone_source || "").trim();
+          if (nextPhone || nextEmail) {
+            contactOverrides[id] = {
+              phone: nextPhone || undefined,
+              email: nextEmail || undefined,
+            };
+            enrichedCount += 1;
+            if (phoneSource === "mobilePhone") {
+              enrichedMobileCount += 1;
+            } else if (phoneSource === "workPhone") {
+              enrichedWorkPhoneCount += 1;
+            }
+          } else {
+            noContactFoundCount += 1;
+          }
+        } catch {
+          // Best-effort enrichment; keep launch flow moving.
+          enrichFailedCount += 1;
+        }
       }
+
+      if (enrichedCount > 0) {
+        setCandidates(prev => prev.map(c => {
+          const cid = String(c.candidate_id || c.id || "").trim();
+          const override = contactOverrides[cid];
+          if (!override) return c;
+          return {
+            ...c,
+            phone: override.phone || c.phone,
+            email: override.email || c.email,
+          };
+        }));
+        const parts = [
+          `${enrichedCount} candidate${enrichedCount === 1 ? "" : "s"}`,
+          enrichedMobileCount > 0 ? `${enrichedMobileCount} mobile` : "",
+          enrichedWorkPhoneCount > 0 ? `${enrichedWorkPhoneCount} work phone` : "",
+        ].filter(Boolean);
+        showToast(`ZoomInfo enriched: ${parts.join(" · ")}.`, "success");
+      }
+
+      const unresolvedMissing = candidatesMissingPhone.filter(c => {
+        const cid = String(c.candidate_id || c.id || "").trim();
+        const overridePhone = contactOverrides[cid]?.phone || c.phone || "";
+        const digits = String(overridePhone).replace(/\D/g, "");
+        return digits.length < 7;
+      }).length;
+
+      if (unresolvedMissing > 0) {
+        showToast(`${unresolvedMissing} selected candidate${unresolvedMissing === 1 ? "" : "s"} still missing phone after enrichment.`, "info");
+      }
+
+      if (missingLinkedInCount > 0 || enrichFailedCount > 0 || noContactFoundCount > 0) {
+        const bits = [
+          missingLinkedInCount > 0 ? `${missingLinkedInCount} missing LinkedIn URL` : "",
+          noContactFoundCount > 0 ? `${noContactFoundCount} no ZoomInfo contact found` : "",
+          enrichFailedCount > 0 ? `${enrichFailedCount} enrichment call failed` : "",
+        ].filter(Boolean);
+        showToast(`Enrichment summary: ${bits.join(" · ")}`, "info");
+      }
+
+      await runLaunchPair(contactOverrides);
+    } finally {
+      setIsEnrichingContacts(false);
     }
-    if (missing.length > 0) {
-      setMissingPhoneCandidates(missing);
-      setMissingPhonesOpen(true);
-      return;
-    }
-    await runLaunchPair();
   };
 
   const sourceStep = (
@@ -5229,6 +5366,21 @@ function NewJobPageContent() {
                             </div>
                             );
                           })()}
+                          {(candidate.phone || candidate.email) && (
+                            <div className="mt-2 flex items-center gap-2 flex-wrap text-[11.5px]">
+                              {candidate.phone && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
+                                  Mobile: {candidate.phone}
+                                </span>
+                              )}
+                              {candidate.email && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200 font-semibold">
+                                  <Mail className="w-3 h-3" />
+                                  {candidate.email}
+                                </span>
+                              )}
+                            </div>
+                          )}
                           {/* 5.7: availability pill + abstract + location row.
                               Fields populated by jobdiva.py Talent Search
                               mapper. All three are optional — only render the
@@ -5387,28 +5539,19 @@ function NewJobPageContent() {
               <Button
                 className={`h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group ${candidates.length > 0 && selectedCandidates.size > 0 ? "bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98]" : "bg-slate-300 cursor-not-allowed"}`}
                 onClick={handleLaunchPairClick}
-                disabled={!hasSearched || isSearching || selectedCandidates.size === 0}
+                disabled={!hasSearched || isSearching || isEnrichingContacts || selectedCandidates.size === 0}
               >
-                <Rocket className="w-4 h-4 fill-white" />
-                Launch PAIR
+                {isEnrichingContacts ? (
+                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <Rocket className="w-4 h-4 fill-white" />
+                )}
+                {isEnrichingContacts ? "Enriching Contacts..." : "Launch PAIR"}
               </Button>
             </div>
           </div>
         </div>
       </div>
-
-      <MissingPhonesModal
-        open={missingPhonesOpen}
-        candidates={missingPhoneCandidates}
-        onClose={() => setMissingPhonesOpen(false)}
-        onAllProvided={async (phones) => {
-          setMissingPhonesOpen(false);
-          await runLaunchPair(phones);
-        }}
-        persist={false}
-        primaryLabel="Save & Launch PAIR"
-        description="These candidates don't have a phone number yet — PAIR calls require one. Add them below to include them in this launch."
-      />
     </div>
   );
 

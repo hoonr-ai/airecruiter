@@ -5,11 +5,15 @@ from typing import List, Dict, Any, Optional
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
+import httpx
+import re
 
 from services.ai_service import ai_service
 from services.jobdiva import jobdiva_service
 from services.unipile import unipile_service
 from services.sourced_candidates_storage import sourced_candidates_storage
+from services.unified_candidate_search import SearchCriteria, unified_search_service
 from models import (
     CandidateSearchRequest, CandidateMessageRequest, CandidatesSaveRequest,
     CandidateAnalysisRequest, CandidateAnalysisResponse,
@@ -18,6 +22,148 @@ from routers._helpers import get_db_connection
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _json_load_safe(value: Any, default: Any):
+    if value is None:
+        return default
+    if isinstance(value, type(default)):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, type(default)) else default
+        except Exception:
+            return default
+    return default
+
+
+def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
+    """Build SearchCriteria from monitored_jobs for detailed resume re-scoring."""
+    import psycopg2
+    from core.config import DATABASE_URL
+
+    try:
+        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT resume_match_filters, sourcing_filters, jobdiva_id
+                    FROM monitored_jobs
+                    WHERE job_id = %s OR jobdiva_id = %s
+                    LIMIT 1
+                    """,
+                    (job_ref, job_ref),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+
+        resume_match_filters = _json_load_safe(row[0], [])
+        sourcing_filters = _json_load_safe(row[1], {})
+        resolved_job_ref = row[2] or job_ref
+
+        title_criteria = [
+            {
+                "value": t.get("value", ""),
+                "match_type": t.get("matchType", "must"),
+                "years": t.get("years", 0),
+                "recent": t.get("recent", False),
+                "similar_terms": t.get("selectedSimilarTitles") or [],
+            }
+            for t in (sourcing_filters.get("titles") or [])
+        ]
+        skill_criteria = [
+            {
+                "value": s.get("value", ""),
+                "match_type": s.get("matchType", "must"),
+                "years": s.get("years", 0),
+                "recent": s.get("recent", False),
+                "similar_terms": s.get("selectedSimilarSkills") or [],
+            }
+            for s in (sourcing_filters.get("skills") or [])
+        ]
+        locations = sourcing_filters.get("locations") or []
+        primary_location = locations[0].get("value", "") if locations else ""
+
+        return SearchCriteria(
+            job_id=str(resolved_job_ref),
+            title_criteria=title_criteria,
+            skill_criteria=skill_criteria,
+            keywords=sourcing_filters.get("keywords") or [],
+            companies=sourcing_filters.get("companies") or [],
+            resume_match_filters=resume_match_filters,
+            location=primary_location,
+            page_size=100,
+            sources=["JobDiva"],
+            bypass_screening=False,
+        )
+    except Exception as e:
+        logger.warning(f"resume matching criteria load failed for {job_ref}: {e}")
+        return None
+
+
+def _build_candidate_for_resume_matching(payload: Dict[str, Any]) -> Dict[str, Any]:
+    data_blob = _json_load_safe(payload.get("data"), {})
+    enhanced = payload.get("enhanced_info") or data_blob.get("enhanced_info") or {}
+    return {
+        "candidate_id": str(payload.get("candidate_id") or ""),
+        "name": payload.get("name") or "",
+        "title": payload.get("headline") or "",
+        "headline": payload.get("headline") or "",
+        "location": payload.get("location") or "",
+        "resume_text": payload.get("resume_text") or "",
+        "skills": data_blob.get("skills") or payload.get("skills") or [],
+        "experience_years": data_blob.get("experience_years") or payload.get("experience_years") or 0,
+        "company_experience": data_blob.get("company_experience") or [],
+        "education": data_blob.get("education") or [],
+        "certifications": data_blob.get("certifications") or [],
+        "enhanced_info": enhanced if isinstance(enhanced, dict) else {},
+    }
+
+
+def _compute_resume_matching(payload: Dict[str, Any], criteria: Optional[SearchCriteria]) -> Dict[str, Any]:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fallback_score = payload.get("match_score")
+    try:
+        fallback_numeric = float(fallback_score) if fallback_score is not None else 0.0
+    except Exception:
+        fallback_numeric = 0.0
+
+    if not criteria:
+        return {
+            "score": max(0.0, fallback_numeric),
+            "status": "pending",
+            "missing_skills": [],
+            "matched_skills": [],
+            "explainability": ["Resume matching criteria unavailable"],
+            "score_details": {},
+            "scored_at": now_iso,
+        }
+
+    candidate = _build_candidate_for_resume_matching(payload)
+    try:
+        scored = unified_search_service._score_candidate(candidate, criteria)
+        return {
+            "score": float(scored.get("score") or 0),
+            "status": "done",
+            "missing_skills": scored.get("missing_skills") or [],
+            "matched_skills": scored.get("matched_skills") or [],
+            "explainability": scored.get("explainability") or [],
+            "score_details": scored.get("score_details") or {},
+            "scored_at": now_iso,
+        }
+    except Exception as e:
+        logger.warning(f"resume matching score failed for {payload.get('candidate_id')}: {e}")
+        return {
+            "score": max(0.0, fallback_numeric),
+            "status": "pending",
+            "missing_skills": [],
+            "matched_skills": [],
+            "explainability": [f"Detailed matching failed: {str(e)}"],
+            "score_details": {},
+            "scored_at": now_iso,
+        }
 
 
 def _candidate_to_persist_row(job_id: str, cand: Dict[str, Any]) -> Dict[str, Any]:
@@ -528,8 +674,9 @@ async def get_job_candidates(job_id_or_ref: str):
         with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT id, jobdiva_id, candidate_id, name, email, phone, headline, location,
-                           source, resume_match_percentage as match_score, created_at, data
+                      SELECT id, jobdiva_id, candidate_id, name, email, phone, headline, location,
+                          source, profile_url, image_url,
+                          resume_match_percentage as match_score, created_at, data
                     FROM sourced_candidates
                     WHERE jobdiva_id = %s
                     ORDER BY created_at DESC;
@@ -593,11 +740,52 @@ async def save_candidates(request: CandidatesSaveRequest):
 
         saved_count = 0
         processing_payloads = []
+        scoring_criteria = _build_resume_matching_criteria(str(resolved_jobdiva_id))
 
         with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
             with conn.cursor() as cur:
                 for c in selected_candidates:
                     try:
+                        raw_urls = getattr(c, 'urls', {})
+                        if not isinstance(raw_urls, dict):
+                            raw_urls = {}
+
+                        profile_url = (
+                            getattr(c, 'profile_url', None)
+                            or getattr(c, 'linkedin_url', None)
+                            or raw_urls.get('linkedin')
+                            or raw_urls.get('linkedin_url')
+                            or raw_urls.get('profile')
+                            or None
+                        )
+
+                        urls_payload = dict(raw_urls)
+                        if profile_url:
+                            urls_payload.setdefault('linkedin', profile_url)
+                            urls_payload.setdefault('linkedin_url', profile_url)
+
+                        pre_score_payload = {
+                            "candidate_id": c.candidate_id,
+                            "name": c.name,
+                            "headline": getattr(c, 'headline', None) or getattr(c, 'title', None),
+                            "location": getattr(c, 'location', None),
+                            "resume_text": getattr(c, 'resume_text', None),
+                            "skills": c.skills or [],
+                            "experience_years": c.experience_years or 0,
+                            "enhanced_info": getattr(c, 'enhanced_info', None),
+                            "data": {
+                                "skills": c.skills or [],
+                                "experience_years": c.experience_years or 0,
+                                "education": getattr(c, 'education', []) or getattr(c, 'candidate_education', []),
+                                "certifications": getattr(c, 'certifications', []) or getattr(c, 'candidate_certification', []),
+                                "company_experience": getattr(c, 'company_experience', []),
+                                "urls": urls_payload,
+                                "enhanced_info": getattr(c, 'enhanced_info', None),
+                            },
+                            "match_score": getattr(c, 'match_score', 0),
+                        }
+                        scoring = _compute_resume_matching(pre_score_payload, scoring_criteria)
+
                         # Prepare candidate data with clean schema
                         candidate_data = {
                             "jobdiva_id": resolved_jobdiva_id,
@@ -608,19 +796,27 @@ async def save_candidates(request: CandidatesSaveRequest):
                             "phone": getattr(c, 'phone', None),
                             "headline": getattr(c, 'headline', None) or getattr(c, 'title', None),
                             "location": getattr(c, 'location', None),
-                            "profile_url": getattr(c, 'profile_url', None),
+                            "profile_url": profile_url,
                             "image_url": getattr(c, 'image_url', None),
                             "resume_id": getattr(c, 'resume_id', None),
                             "resume_text": getattr(c, 'resume_text', None),
+                            "resume_match_percentage": scoring["score"],
                             "data": json.dumps({
                                 "skills": c.skills or [],
                                 "experience_years": c.experience_years or 0,
                                 "education": getattr(c, 'education', []) or getattr(c, 'candidate_education', []),
                                 "certifications": getattr(c, 'certifications', []) or getattr(c, 'candidate_certification', []),
                                 "company_experience": getattr(c, 'company_experience', []),
-                                "urls": getattr(c, 'urls', {}),
+                                "urls": urls_payload,
                                 "is_selected": True,
-                                "match_score": getattr(c, 'match_score', 0),
+                                "match_score": scoring["score"],
+                                "resume_matching_score": scoring["score"],
+                                "resume_matching_status": scoring["status"],
+                                "resume_matching_scored_at": scoring["scored_at"],
+                                "match_score_details": scoring["score_details"],
+                                "matched_skills": scoring["matched_skills"],
+                                "missing_skills": scoring["missing_skills"],
+                                "explainability": scoring["explainability"],
                                 "enhanced_info": getattr(c, 'enhanced_info', None)  # Full LLM extraction data
                             }),
                             "status": "sourced"
@@ -630,9 +826,11 @@ async def save_candidates(request: CandidatesSaveRequest):
                             INSERT INTO sourced_candidates (
                                 jobdiva_id, candidate_id, source, name, email, phone, headline, location,
                                 profile_url, image_url, resume_id, resume_text, data, status, updated_at
+                                , resume_match_percentage
                             ) VALUES (
                                 %(jobdiva_id)s, %(candidate_id)s, %(source)s, %(name)s, %(email)s, %(phone)s, %(headline)s, %(location)s,
-                                %(profile_url)s, %(image_url)s, %(resume_id)s, %(resume_text)s, %(data)s, %(status)s, CURRENT_TIMESTAMP
+                                %(profile_url)s, %(image_url)s, %(resume_id)s, %(resume_text)s, %(data)s, %(status)s, CURRENT_TIMESTAMP,
+                                %(resume_match_percentage)s
                             )
                             ON CONFLICT (jobdiva_id, candidate_id, source) DO UPDATE SET
                                 name = EXCLUDED.name,
@@ -644,6 +842,7 @@ async def save_candidates(request: CandidatesSaveRequest):
                                 image_url = EXCLUDED.image_url,
                                 resume_id = EXCLUDED.resume_id,
                                 resume_text = EXCLUDED.resume_text,
+                                resume_match_percentage = EXCLUDED.resume_match_percentage,
                                 data = EXCLUDED.data,
                                 status = EXCLUDED.status,
                                 updated_at = CURRENT_TIMESTAMP
@@ -686,12 +885,53 @@ async def save_candidates(request: CandidatesSaveRequest):
 
                     # Process JobDiva candidates with resume text
                     if payload.get("resume_text") and source.startswith("JobDiva"):
-                        await process_jobdiva_candidate(payload)
+                        extract_result = await process_jobdiva_candidate(payload)
+                        if isinstance(extract_result, dict):
+                            payload["enhanced_info"] = extract_result.get("raw")
                         enhanced_count += 1
                     # Process LinkedIn candidates
                     elif source == "LinkedIn":
-                        await process_linkedin_candidate(payload)
+                        extract_result = await process_linkedin_candidate(payload)
+                        if isinstance(extract_result, dict):
+                            payload["enhanced_info"] = extract_result.get("raw")
                         enhanced_count += 1
+
+                    # Re-score after enrichment pass so rank-list gets detailed
+                    # resume-matching status/score from the latest profile data.
+                    detailed_scoring = _compute_resume_matching(payload, scoring_criteria)
+                    data_blob = _json_load_safe(payload.get("data"), {})
+                    data_blob["match_score"] = detailed_scoring["score"]
+                    data_blob["resume_matching_score"] = detailed_scoring["score"]
+                    data_blob["resume_matching_status"] = detailed_scoring["status"]
+                    data_blob["resume_matching_scored_at"] = detailed_scoring["scored_at"]
+                    data_blob["match_score_details"] = detailed_scoring["score_details"]
+                    data_blob["matched_skills"] = detailed_scoring["matched_skills"]
+                    data_blob["missing_skills"] = detailed_scoring["missing_skills"]
+                    data_blob["explainability"] = detailed_scoring["explainability"]
+
+                    import psycopg2 as _psycopg2
+                    from core.config import DATABASE_URL as _DB_URL
+                    with _psycopg2.connect(_DB_URL, connect_timeout=5) as _conn:
+                        with _conn.cursor() as _cur:
+                            _cur.execute(
+                                """
+                                UPDATE sourced_candidates
+                                SET resume_match_percentage = %s,
+                                    data = %s,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE jobdiva_id = %s
+                                  AND candidate_id = %s
+                                  AND source = %s
+                                """,
+                                (
+                                    detailed_scoring["score"],
+                                    json.dumps(data_blob),
+                                    payload.get("jobdiva_id"),
+                                    payload.get("candidate_id"),
+                                    payload.get("source"),
+                                ),
+                            )
+                        _conn.commit()
                 except Exception as e:
                     print(f"⚠️ Enhanced processing failed for candidate {payload.get('candidate_id')}: {e}")
 
@@ -718,6 +958,16 @@ class UpdateCandidatePhoneRequest(BaseModel):
     jobdiva_id: Optional[str] = None
 
 
+class EnrichCandidateContactRequest(BaseModel):
+    jobdiva_id: Optional[str] = None
+    source: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    full_name: Optional[str] = None
+    company_name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+
+
 def _normalise_phone(raw: str) -> str:
     raw = (raw or "").strip()
     if not raw:
@@ -725,6 +975,421 @@ def _normalise_phone(raw: str) -> str:
     plus = "+" if raw.startswith("+") else ""
     digits = "".join(ch for ch in raw if ch.isdigit())
     return f"{plus}{digits}" if digits else ""
+
+
+def _mask_phone_for_log(raw: str) -> str:
+    normalised = _normalise_phone(raw)
+    digits = "".join(ch for ch in normalised if ch.isdigit())
+    if not digits:
+        return ""
+    if len(digits) <= 4:
+        return f"***{digits}"
+    return f"***{digits[-4:]}"
+
+
+def _mask_email_for_log(raw: str) -> str:
+    value = (raw or "").strip().lower()
+    if "@" not in value:
+        return ""
+    local, domain = value.split("@", 1)
+    if not local:
+        return f"***@{domain}"
+    return f"{local[:1]}***@{domain}"
+
+
+def _extract_enrichment_fields(payload: Any) -> Dict[str, str]:
+    targets = {"workPhone", "mobilePhone", "workEmail", "personalEmail"}
+    targets_lower = {t.lower(): t for t in targets}
+    found: Dict[str, str] = {}
+
+    def walk(node: Any):
+        if isinstance(node, dict):
+            # Shape A: {"fieldName":"mobilePhone","value":"+1..."}
+            field_name = node.get("fieldName")
+            field_value = node.get("value")
+            if isinstance(field_name, str) and isinstance(field_value, str) and field_value.strip():
+                canonical = targets_lower.get(field_name.strip().lower())
+                if canonical and canonical not in found:
+                    found[canonical] = field_value.strip()
+
+            for k, v in node.items():
+                # Shape B/C: direct key-value, possibly different case
+                canonical = targets_lower.get(str(k).strip().lower())
+                if canonical and isinstance(v, str) and v.strip() and canonical not in found:
+                    found[canonical] = v.strip()
+                walk(v)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return found
+
+
+def _split_name(raw: str) -> Dict[str, str]:
+    parts = [p for p in str(raw or "").strip().split() if p]
+    if not parts:
+        return {"first": "", "last": ""}
+    if len(parts) == 1:
+        return {"first": parts[0], "last": ""}
+    return {"first": parts[0], "last": " ".join(parts[1:])}
+
+
+def _name_from_linkedin_url(linkedin_url: str) -> str:
+    """Extract a best-effort human name from linkedin.com/in/<slug>."""
+    try:
+        url = str(linkedin_url or "").strip()
+        if not url:
+            return ""
+        m = re.search(r"linkedin\.com/in/([^/?#]+)", url, flags=re.IGNORECASE)
+        if not m:
+            return ""
+        slug = m.group(1)
+        slug = re.sub(r"[-_]*[0-9a-f]{6,}$", "", slug, flags=re.IGNORECASE)
+        parts = [p for p in re.split(r"[-_]", slug) if p and p.isalpha()]
+        if len(parts) < 2:
+            return ""
+        return " ".join(p.capitalize() for p in parts[:3])
+    except Exception:
+        return ""
+
+
+def _extract_new_zoominfo_contact_fields(payload: Dict[str, Any]) -> Dict[str, str]:
+    """Parse ZoomInfo new Data API contact enrich response into our canonical fields."""
+    data = payload.get("data") or []
+    first = data[0] if isinstance(data, list) and data else {}
+    attrs = first.get("attributes") if isinstance(first, dict) else {}
+    if not isinstance(attrs, dict):
+        attrs = {}
+
+    email_alt = attrs.get("emailAlt")
+    alt_email = ""
+    if isinstance(email_alt, list):
+        for item in email_alt:
+            if isinstance(item, dict):
+                candidate = str(item.get("value") or "").strip()
+                if candidate:
+                    alt_email = candidate
+                    break
+
+    return {
+        "mobilePhone": str(attrs.get("mobilePhone") or attrs.get("mobilePhoneAlt") or "").strip(),
+        "workPhone": str(attrs.get("phone") or attrs.get("directPhone") or attrs.get("directPhoneAlt") or "").strip(),
+        "workEmail": str(attrs.get("email") or "").strip(),
+        "personalEmail": alt_email,
+    }
+
+
+@router.post("/candidates/{candidate_id:path}/enrich-contact")
+async def enrich_candidate_contact(candidate_id: str, request: EnrichCandidateContactRequest):
+    """
+    Enrich candidate contact details from ZoomInfo using LinkedIn URL.
+    If sourced_candidates rows already exist, updates phone/email + data blob.
+    """
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    from core.config import (
+        DATABASE_URL,
+        ZOOMINFO_ENRICH_URL,
+        ZOOMINFO_BEARER_TOKEN,
+        ZOOMINFO_CLIENT_ID,
+    )
+    zoominfo_new_enrich_url = "https://api.zoominfo.com/gtm/data/v1/contacts/enrich"
+
+    if not ZOOMINFO_BEARER_TOKEN:
+        raise HTTPException(status_code=500, detail="ZOOMINFO_BEARER_TOKEN is not configured")
+
+    linkedin_url = (request.linkedin_url or "").strip()
+    existing_rows: List[Dict[str, Any]] = []
+
+    # If linkedin_url not passed, try to infer it from sourced_candidates.profile_url.
+    try:
+        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                query = """
+                    SELECT id, candidate_id, jobdiva_id, source, name, headline, profile_url, email, phone, data
+                    FROM sourced_candidates
+                    WHERE candidate_id = %s
+                """
+                params: List[Any] = [candidate_id]
+                if request.jobdiva_id:
+                    query += " AND jobdiva_id = %s"
+                    params.append(request.jobdiva_id)
+                if request.source:
+                    query += " AND source = %s"
+                    params.append(request.source)
+                query += " ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST"
+                cur.execute(query, tuple(params))
+                fetched = cur.fetchall() or []
+                existing_rows = [dict(r) for r in fetched]
+
+                if not linkedin_url:
+                    for r in existing_rows:
+                        candidate_profile = (r.get("profile_url") or "").strip()
+                        if candidate_profile:
+                            linkedin_url = candidate_profile
+                            break
+    except Exception as e:
+        logger.warning(f"enrich_contact prefetch failed for {candidate_id}: {e}")
+
+    if not linkedin_url:
+        return {
+            "status": "error",
+            "candidate_id": candidate_id,
+            "message": "LinkedIn URL not available for enrichment",
+            "updated_rows": 0,
+        }
+
+    headers = {
+        "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    if ZOOMINFO_CLIENT_ID:
+        headers["X-Client-Id"] = ZOOMINFO_CLIENT_ID
+
+    zoominfo_payload = {
+        "inputFields": [
+            {
+                "fieldName": "linkedinUrl",
+                "fieldType": "String",
+                "value": linkedin_url,
+            }
+        ],
+        "outputFields": ["workPhone", "mobilePhone", "workEmail", "personalEmail"],
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            zres = await client.post(ZOOMINFO_ENRICH_URL, headers=headers, json=zoominfo_payload)
+    except Exception as e:
+        logger.error(f"ZoomInfo enrich request failed for {candidate_id}: {e}")
+        raise HTTPException(status_code=502, detail=f"ZoomInfo request failed: {str(e)}")
+
+    response_text = zres.text
+    try:
+        zoominfo_data = zres.json()
+    except Exception:
+        zoominfo_data = {"raw": response_text}
+
+    if zres.status_code == 401:
+        # Legacy endpoint rejected this token. Fallback to the new OAuth Data API.
+        row0 = existing_rows[0] if existing_rows else {}
+        row_data = _json_load_safe(row0.get("data"), {}) if isinstance(row0, dict) else {}
+        row_enhanced = row_data.get("enhanced_info") if isinstance(row_data, dict) else {}
+        if not isinstance(row_enhanced, dict):
+            row_enhanced = {}
+
+        full_name = (request.full_name or row0.get("name") or "").strip()
+        company_name = (
+            request.company_name
+            or row_data.get("company_name")
+            or row_data.get("company")
+            or row_enhanced.get("current_company")
+            or row_enhanced.get("company")
+            or ""
+        )
+        company_name = str(company_name or "").strip()
+
+        fallback_email = (request.email or row0.get("email") or "").strip()
+        fallback_phone = _normalise_phone(request.phone or row0.get("phone") or "")
+
+        match_person_input: Dict[str, Any] = {}
+        if fallback_email:
+            match_person_input["emailAddress"] = fallback_email
+        elif fallback_phone and sum(1 for ch in fallback_phone if ch.isdigit()) >= 7:
+            match_person_input["phone"] = fallback_phone
+        elif full_name and company_name:
+            split = _split_name(full_name)
+            if split["first"] and split["last"]:
+                match_person_input["firstName"] = split["first"]
+                match_person_input["lastName"] = split["last"]
+                match_person_input["companyName"] = company_name
+            else:
+                match_person_input["fullName"] = full_name
+                match_person_input["companyName"] = company_name
+
+        if not match_person_input:
+            # Last-resort fallback: search by name and enrich by personId.
+            # Useful when we only have a LinkedIn URL and no persisted company/email/phone yet.
+            search_name = full_name or _name_from_linkedin_url(linkedin_url)
+            split = _split_name(search_name)
+            if split["first"] and split["last"]:
+                search_headers = {
+                    "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
+                    "accept": "application/vnd.api+json",
+                    "content-type": "application/vnd.api+json",
+                }
+                search_payload = {
+                    "data": {
+                        "type": "ContactSearch",
+                        "attributes": {
+                            "firstName": split["first"],
+                            "lastName": split["last"],
+                        },
+                    }
+                }
+                try:
+                    async with httpx.AsyncClient(timeout=20.0) as client:
+                        sres = await client.post(
+                            "https://api.zoominfo.com/gtm/data/v1/contacts/search",
+                            headers=search_headers,
+                            json=search_payload,
+                        )
+                    if sres.status_code < 400:
+                        sjson = sres.json()
+                        sdata = sjson.get("data") if isinstance(sjson, dict) else []
+                        if isinstance(sdata, list) and sdata:
+                            person_id = sdata[0].get("id")
+                            if person_id:
+                                match_person_input["personId"] = str(person_id)
+                                logger.info(
+                                    "ZoomInfo fallback search resolved personId for %s using name '%s'",
+                                    candidate_id,
+                                    search_name,
+                                )
+                except Exception as e:
+                    logger.warning(f"ZoomInfo fallback search failed for {candidate_id}: {e}")
+
+        if not match_person_input:
+            logger.warning(
+                "ZoomInfo new API fallback skipped for %s: insufficient match inputs after search (need email OR phone OR full name + company OR resolvable name)",
+                candidate_id,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="ZoomInfo API error (401). Fallback requires email OR phone OR full name + company name.",
+            )
+
+        new_headers = {
+            "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
+            "accept": "application/vnd.api+json",
+            "content-type": "application/vnd.api+json",
+        }
+        new_payload = {
+            "data": {
+                "type": "ContactEnrich",
+                "attributes": {
+                    "matchPersonInput": [match_person_input],
+                    "outputFields": ["mobilePhone", "phone", "email", "emailAlt"],
+                },
+            }
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                new_res = await client.post(zoominfo_new_enrich_url, headers=new_headers, json=new_payload)
+        except Exception as e:
+            logger.error(f"ZoomInfo new API fallback request failed for {candidate_id}: {e}")
+            raise HTTPException(status_code=502, detail=f"ZoomInfo fallback request failed: {str(e)}")
+
+        if new_res.status_code >= 400:
+            logger.warning(
+                "ZoomInfo fallback non-2xx for %s: %s %s",
+                candidate_id,
+                new_res.status_code,
+                new_res.text[:300],
+            )
+            raise HTTPException(status_code=502, detail=f"ZoomInfo API error ({new_res.status_code})")
+
+        try:
+            new_data = new_res.json()
+        except Exception:
+            new_data = {"raw": new_res.text}
+
+        extracted = _extract_new_zoominfo_contact_fields(new_data)
+    elif zres.status_code >= 400:
+        logger.warning(
+            f"ZoomInfo enrich non-2xx for {candidate_id}: {zres.status_code} {response_text[:300]}"
+        )
+        raise HTTPException(status_code=502, detail=f"ZoomInfo API error ({zres.status_code})")
+    else:
+        extracted = _extract_enrichment_fields(zoominfo_data)
+    raw_mobile_phone = extracted.get("mobilePhone") or ""
+    raw_work_phone = extracted.get("workPhone") or ""
+    raw_work_email = extracted.get("workEmail") or ""
+    raw_personal_email = extracted.get("personalEmail") or ""
+
+    phone_source = "none"
+    if raw_mobile_phone:
+        phone_source = "mobilePhone"
+    elif raw_work_phone:
+        phone_source = "workPhone"
+
+    enriched_phone = _normalise_phone(raw_mobile_phone or raw_work_phone or "")
+    if sum(1 for ch in enriched_phone if ch.isdigit()) < 7:
+        enriched_phone = ""
+
+    enriched_email = (
+        raw_work_email
+        or raw_personal_email
+        or ""
+    ).strip().lower()
+
+    logger.info(
+        "ZoomInfo enrich parsed for %s | phone_source=%s | has_mobile=%s | has_work=%s | has_email=%s | mobile=%s | work=%s | email=%s",
+        candidate_id,
+        phone_source,
+        bool(raw_mobile_phone),
+        bool(raw_work_phone),
+        bool(enriched_email),
+        _mask_phone_for_log(raw_mobile_phone),
+        _mask_phone_for_log(raw_work_phone),
+        _mask_email_for_log(enriched_email),
+    )
+
+    # Persist only when sourced candidate rows exist; Step 5 pre-save calls may
+    # return enriched contact with updated_rows=0 and the FE will persist during save.
+    updated_rows = 0
+    if existing_rows and (enriched_phone or enriched_email):
+        try:
+            with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+                with conn.cursor() as cur:
+                    for row in existing_rows:
+                        data_blob = _json_load_safe(row.get("data"), {})
+                        data_blob["zoominfo_contact_enrichment"] = {
+                            "linkedin_url": linkedin_url,
+                            "workPhone": extracted.get("workPhone"),
+                            "mobilePhone": extracted.get("mobilePhone"),
+                            "workEmail": extracted.get("workEmail"),
+                            "personalEmail": extracted.get("personalEmail"),
+                            "enriched_at": datetime.now(timezone.utc).isoformat(),
+                        }
+
+                        cur.execute(
+                            """
+                            UPDATE sourced_candidates
+                            SET phone = COALESCE(%s, phone),
+                                email = COALESCE(%s, email),
+                                data = %s,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = %s
+                            """,
+                            (
+                                enriched_phone or None,
+                                enriched_email or None,
+                                json.dumps(data_blob),
+                                row.get("id"),
+                            ),
+                        )
+                        updated_rows += cur.rowcount
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Failed persisting ZoomInfo enrichment for {candidate_id}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to persist enrichment: {str(e)}")
+
+    return {
+        "status": "success",
+        "candidate_id": candidate_id,
+        "linkedin_url": linkedin_url,
+        "phone_source": phone_source,
+        "phone": enriched_phone or None,
+        "email": enriched_email or None,
+        "workPhone": raw_work_phone or None,
+        "mobilePhone": raw_mobile_phone or None,
+        "workEmail": raw_work_email or None,
+        "personalEmail": raw_personal_email or None,
+        "updated_rows": updated_rows,
+    }
 
 
 @router.patch("/candidates/{candidate_id}/phone")
