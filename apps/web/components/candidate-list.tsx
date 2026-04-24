@@ -6,11 +6,11 @@ import { Badge } from "@/components/ui/badge";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { MessageSquare, ClipboardCheck, CheckCircle2, Loader2 } from "lucide-react";
+import { API_BASE } from "@/lib/api";
 
 interface Candidate {
     id: string;
     name: string;
-    matchScore: number;
     skills: string[];
     missing: string[];
 }
@@ -20,10 +20,10 @@ interface CandidateListProps {
 }
 
 export function CandidateList({ candidates }: CandidateListProps) {
-    // Mock logic to categorize candidates
-    const perfectFit = candidates.filter((c) => c.matchScore >= 90);
-    const stretch = candidates.filter((c) => c.matchScore >= 70 && c.matchScore < 90);
-    const pastApplicants = candidates.filter((c) => c.matchScore < 70); // Just for demo logic
+    // Categorize candidates by skills match
+    const perfectFit = candidates.filter((c) => c.missing.length === 0);
+    const stretch = candidates.filter((c) => c.missing.length > 0 && c.missing.length <= 2);
+    const pastApplicants = candidates.filter((c) => c.missing.length > 2);
 
     const CandidateCard = ({ candidate }: { candidate: Candidate }) => {
         const [engaging, setEngaging] = useState(false);
@@ -34,7 +34,7 @@ export function CandidateList({ candidates }: CandidateListProps) {
         const handleEngage = async () => {
             setEngaging(true);
             try {
-                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/candidates/${candidate.id}/engage`, {
+                const res = await fetch(`${API_BASE}/candidates/${candidate.id}/engage`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ candidate_id: candidate.id })
@@ -50,7 +50,7 @@ export function CandidateList({ candidates }: CandidateListProps) {
         const handleAssess = async () => {
             setAssessing(true);
             try {
-                const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/candidates/${candidate.id}/assess`, {
+                const res = await fetch(`${API_BASE}/candidates/${candidate.id}/assess`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ candidate_id: candidate.id })
@@ -69,10 +69,10 @@ export function CandidateList({ candidates }: CandidateListProps) {
                     <div className="flex justify-between items-start">
                         <div>
                             <CardTitle>{candidate.name}</CardTitle>
-                            <CardDescription>Match Score: {candidate.matchScore}%</CardDescription>
+                            <CardDescription>{candidate.missing.length === 0 ? 'Perfect Match' : `${candidate.missing.length} skills missing`}</CardDescription>
                         </div>
-                        <Badge variant={candidate.matchScore >= 90 ? "default" : "secondary"}>
-                            {candidate.matchScore}% Match
+                        <Badge variant={candidate.missing.length === 0 ? "default" : "secondary"}>
+                            {candidate.missing.length === 0 ? 'Perfect Fit' : candidate.missing.length <= 2 ? 'Good Match' : 'Stretch'}
                         </Badge>
                     </div>
                 </CardHeader>

@@ -1,0 +1,31 @@
+[Unit]
+Description=AI Recruiter FastAPI Application
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/home/ubuntu/codebase/airecruiter/apps/api
+
+[Service]
+Type=exec
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/codebase/airecruiter/apps/api
+Environment=PATH=/home/ubuntu/codebase/airecruiter/apps/api/venv/bin
+Environment=PYTHONPATH=/home/ubuntu/codebase/airecruiter/apps/api
+ExecStart=/home/ubuntu/codebase/airecruiter/apps/api/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 8
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=airecruiter-api
+
+# Security and resource limits
+NoNewPrivileges=true
+LimitNOFILE=65536
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

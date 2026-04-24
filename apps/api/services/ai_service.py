@@ -1,16 +1,17 @@
-import os
 import json
 import logging
 from typing import List, Dict, Any
 import httpx
 from openai import AsyncOpenAI
-from core.models import JobDescription, CandidateProfile
+from core.config import OPENAI_API_KEY
+from core.models import JobDescription, CandidateProfile, SkillProfileEntry
+from services.job_skills_extractor import _azure_agent, AZURE_AGENT_AVAILABLE
 
 logger = logging.getLogger(__name__)
 
 class AIService:
     def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.api_key = OPENAI_API_KEY
         self.client = AsyncOpenAI(api_key=self.api_key) if self.api_key else None
         
         # Initialize Ontology (Graph) if not loaded
@@ -19,8 +20,13 @@ class AIService:
         # In a real app, this should be done on startup event
         # But we'll do lazy load here for safety
         if len(ontology.graph.nodes) == 0:
-             # Try loading from DB
-             ontology.load_from_db()
+             # Try loading from DB (Ronak's skills database)
+             try:
+                 ontology.load_from_db()
+                 print("✅ Skills ontology loaded successfully")
+             except Exception as e:
+                 print(f"⚠️ Skills ontology unavailable (requires Ronak's credentials): {str(e)[:100]}")
+                 print("ℹ️ Core job functionality will work without advanced skills matching")
 
     async def _extract_jd(self, text: str) -> JobDescription:
         """
@@ -31,8 +37,9 @@ class AIService:
 
         system_prompt = "You are a Job Description Parser. Extract structured data."
         try:
+            model = "gpt-4o-mini"
             completion = await self.client.beta.chat.completions.parse(
-                model="gpt-4o",
+                model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": text[:20000]} # Increased Limit
@@ -40,6 +47,7 @@ class AIService:
                 response_format=JobDescription,
                 temperature=0.0
             )
+
             return completion.choices[0].message.parsed
         except Exception as e:
             logger.error(f"JD Extraction Failed: {e}")
@@ -60,22 +68,56 @@ class AIService:
         """
         Extracts structured Candidate from resume text.
         """
+        import asyncio
         if not self.client:
              raise Exception("OpenAI Client not initialized")
              
-        system_prompt = "You are a Resume Parser. Extract structured data including skills, timeline, and education."
+        system_prompt = (
+            "You are a professional Resume Parser and Taxonomy Expert. "
+            "Extract structured data from the resume text including Name, Location (City, State), "
+            "LinkedIn Profile URL (add to 'links' array), timeline (all jobs with dates and titles), and education. "
+            "You MUST also calculate the total years of professional experience (total_yoe) as a float. "
+            "Be precise with company names and job titles."
+        )
         try:
-            completion = await self.client.beta.chat.completions.parse(
-                model="gpt-4o",
+            model = "gpt-4o-mini"
+            # 1. Base Extraction (GPT)
+            gpt_task = self.client.beta.chat.completions.parse(
+                model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": text[:30000]} # Increased Limit
+                    {"role": "user", "content": text[:30000]}
                 ],
                 response_format=CandidateProfile,
                 temperature=0.0
             )
-            profile = completion.choices[0].message.parsed
-            profile.id = cid # Ensure ID matches
+            
+            # 2. Grounded Skill Extraction (Azure Agent) - Parallel
+            agent_task = None
+            if AZURE_AGENT_AVAILABLE and _azure_agent:
+                agent_task = _azure_agent.extract_roles_and_skills(text[:25000]) # Cap for speed/reliability
+                
+            # Wait for both
+            if agent_task:
+                gpt_resp, agent_resp = await asyncio.gather(gpt_task, agent_task)
+            else:
+                gpt_resp = await gpt_task
+                agent_resp = None
+
+            profile = gpt_resp.choices[0].message.parsed
+            profile.id = cid 
+            profile.resume_text = text # Store the original content
+            
+            # 3. Merge Grounded Skills
+            if agent_resp:
+                grounded_skills = _azure_agent.convert_to_profile_skills(agent_resp.get("job_skills", []) or agent_resp.get("skills", []))
+                
+                # Check for existing skills to avoid duplicates
+                existing_slugs = {s.skill_slug.lower().strip() for s in profile.skill_profile}
+                for gs in grounded_skills:
+                    if gs["skill_slug"].lower().strip() not in existing_slugs:
+                        profile.skill_profile.append(SkillProfileEntry(**gs))
+            
             return profile
             
         except Exception as e:
@@ -193,6 +235,11 @@ class AIService:
             res_dict['candidate_id'] = cid
             res_dict['candidate_name'] = c_dict.get('firstName', '') + ' ' + c_dict.get('lastName', '')
             
+            # Include extracted metadata for sync back to sourcing table
+            res_dict['extracted_location'] = cand_obj.candidate_metadata.location
+            res_dict['extracted_links'] = cand_obj.candidate_metadata.links
+            res_dict['resume_text'] = cand_obj.resume_text
+            
             # Map colors for UI if needed or handle in frontend
             # Frontend expects: "score", "candidate_id"
             # And we'll add the full object as 'details' or top level?
@@ -230,14 +277,16 @@ class AIService:
         user_prompt = f"Profile JSON:\n{json.dumps(profile_data, indent=2)}\n\nPlease format this as a text-based Resume."
         
         try:
+            model = "gpt-4o-mini"
             completion = await self.client.chat.completions.create(
-                model="gpt-4o",
+                model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
                 temperature=0.3
             )
+
             return completion.choices[0].message.content
         except Exception as e:
             logger.error(f"Resume Generation Failed: {e}")

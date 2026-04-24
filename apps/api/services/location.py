@@ -1,7 +1,7 @@
-import os
 import json
 from openai import AsyncOpenAI
 from pydantic import BaseModel
+from core.config import OPENAI_API_KEY
 
 class LocationVerdict(BaseModel):
     is_within_range: bool
@@ -10,7 +10,7 @@ class LocationVerdict(BaseModel):
 
 class LocationService:
     def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.api_key = OPENAI_API_KEY
         self.client = AsyncOpenAI(api_key=self.api_key) if self.api_key else None
         
     async def check_proximity(self, candidate_loc: str, job_loc: str, work_mode: str) -> LocationVerdict:
@@ -39,8 +39,9 @@ class LocationService:
         """
 
         try:
+            model = "gpt-4o-mini"
             completion = await self.client.beta.chat.completions.parse(
-                model="gpt-4o-mini", # Cheap model is fine for geography
+                model=model, # Cheap model is fine for geography
                 messages=[
                     {"role": "system", "content": "You are a Geography Distance Calculator. Be realistic about commuting."},
                     {"role": "user", "content": prompt}
@@ -48,6 +49,7 @@ class LocationService:
                 response_format=LocationVerdict,
                 temperature=0.0
             )
+
             return completion.choices[0].message.parsed
         except Exception as e:
             print(f"⚠️ Location Check Error: {e}")

@@ -1,7 +1,9 @@
 import networkx as nx
 import psycopg2
 from typing import List, Dict, Set, Optional
-import os
+from .config import (
+    SUPABASE_DB_URL, CLOUDSQL_CONNECTION_NAME, DB_USER, DB_PASSWORD, DB_NAME
+)
 
 class SkillsGraph:
     def __init__(self):
@@ -14,10 +16,11 @@ class SkillsGraph:
         Connects to Postgres and populates the graph/alias maps.
         """
         if not db_url:
-            db_url = os.getenv("SUPABASE_URL")
+            # Use SUPABASE_DB_URL for PostgreSQL connection, not SUPABASE_URL (HTTP API)
+            db_url = SUPABASE_DB_URL
             
-        if not db_url and not os.getenv("CLOUDSQL_CONNECTION_NAME"):
-            print("⚠️ Ontology: No DB configuration found (SUPABASE_URL or Cloud SQL), graph will be empty.")
+        if not db_url and not CLOUDSQL_CONNECTION_NAME:
+            print("⚠️ Ontology: No DB configuration found (SUPABASE_DB_URL or Cloud SQL), graph will be empty.")
             return
 
         print("🔗 Ontology: Connecting to Database...")
@@ -26,9 +29,8 @@ class SkillsGraph:
         
         try:
             # Check for Cloud SQL Configuration
-            cloud_sql_instance = os.getenv("CLOUDSQL_CONNECTION_NAME")
-            if cloud_sql_instance:
-                print(f"🔗 Ontology: Using Cloud SQL Connector for {cloud_sql_instance}...")
+            if CLOUDSQL_CONNECTION_NAME:
+                print(f"🔗 Ontology: Using Cloud SQL Connector for {CLOUDSQL_CONNECTION_NAME}...")
                 from google.cloud.sql.connector import Connector, IPTypes
                 import pg8000
 
@@ -37,11 +39,11 @@ class SkillsGraph:
 
                 def getconn():
                     return connector.connect(
-                        cloud_sql_instance,
+                        CLOUDSQL_CONNECTION_NAME,
                         "pg8000",
-                        user=os.getenv("DB_USER", "postgres"),
-                        password=os.getenv("DB_PASSWORD", ""),
-                        db=os.getenv("DB_NAME", "postgres"),
+                        user=DB_USER,
+                        password=DB_PASSWORD,
+                        db=DB_NAME,
                         ip_type=IPTypes.PUBLIC  # Use PUBLIC unless we are in VPC
                     )
 
@@ -56,7 +58,7 @@ class SkillsGraph:
                 
             else:
                 # Fallback to Standard URL (Supabase/Postgres)
-                conn = psycopg2.connect(db_url)
+                conn = psycopg2.connect(db_url, connect_timeout=5)
 
             cur = conn.cursor()
             
@@ -116,7 +118,7 @@ class SkillsGraph:
             conn.close()
             
         except psycopg2.errors.UndefinedTable:
-            print(f"❌ Ontology Load Failed: Table 'skill_nodes' not found in database '{os.getenv('DB_NAME')}'.")
+            print(f"❌ Ontology Load Failed: Table 'skill_nodes' not found in database '{DB_NAME}'.")
             try:
                 # Debug: List available databases
                 cur.execute("SELECT datname FROM pg_database WHERE datistemplate = false;")

@@ -5,6 +5,9 @@ import logging
 from typing import List, Tuple, Set
 from google.cloud.sql.connector import Connector, IPTypes
 import sqlalchemy
+from core.config import (
+    CLOUDSQL_CONNECTION_NAME, DB_USER, DB_PASSWORD, DB_NAME
+)
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO)
@@ -14,23 +17,18 @@ CSV_PATH = "ontology_data.csv"
 
 def get_db_connection():
     """Establishes a connection to the Cloud SQL database."""
-    instance_connection_name = os.getenv("CLOUDSQL_CONNECTION_NAME")
-    db_user = os.getenv("DB_USER", "postgres")
-    db_pass = os.getenv("DB_PASSWORD", "password")
-    db_name = os.getenv("DB_NAME", "postgres")
-
-    if not instance_connection_name:
+    if not CLOUDSQL_CONNECTION_NAME:
         raise ValueError("CLOUDSQL_CONNECTION_NAME environment variable not set")
 
     connector = Connector()
 
     def getconn():
         return connector.connect(
-            instance_connection_name,
+            CLOUDSQL_CONNECTION_NAME,
             "pg8000",
-            user=db_user,
-            password=db_pass,
-            db=db_name,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            db=DB_NAME,
             ip_type=IPTypes.PUBLIC
         )
 

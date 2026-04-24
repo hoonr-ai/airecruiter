@@ -1,26 +1,18 @@
-
-import os
 import sqlalchemy
-from google.cloud.sql.connector import Connector, IPTypes
-import pg8000
-
-# Configuration
-DATABASE_URL = os.getenv("DATABASE_URL")
+from core.config import DATABASE_URL
 
 print(f"🔍 Inspecting Database URL: {DATABASE_URL}")
 
 if not DATABASE_URL:
-    print("❌ DATABASE_URL is missing via env!")
+    print("❌ DATABASE_URL is missing via config!")
     exit(1)
 
 # Connect
-def getconn():
-    # SQLAlchemy requires 'postgresql://', but some legacy envs use 'postgres://'
-    url = DATABASE_URL.replace("postgres://", "postgresql://")
-    return sqlalchemy.create_engine(url)
+def get_engine():
+    return sqlalchemy.create_engine(DATABASE_URL)
 
 try:
-    engine = getconn()
+    engine = get_engine()
     conn = engine.connect()
     # conn.autocommit = True # SQLAlchemy handles text execution
     

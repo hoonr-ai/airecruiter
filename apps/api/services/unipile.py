@@ -1,21 +1,127 @@
-import os
 import httpx
+import json
 import logging
 import asyncio
+import re
+from urllib.parse import urlparse
 from typing import List, Dict, Any, Optional
+from core import (
+    UNIPILE_API_KEY, UNIPILE_DSN, UNIPILE_ACCOUNT_ID
+)
 
 logger = logging.getLogger(__name__)
 
 class UnipileService:
     def __init__(self):
-        # Defaults to api1.unipile.com if not set
-        dsn = os.getenv("UNIPILE_DSN", "api1.unipile.com")
+        # Use centralized config
+        dsn = UNIPILE_DSN
         if not dsn.startswith("http"):
             dsn = f"https://{dsn}"
         self.api_url = f"{dsn}/api/v1"
         
-        self.api_key = os.getenv("UNIPILE_API_KEY", "")
-        self.account_id = None # Cached Account ID
+        self.api_key = UNIPILE_API_KEY
+        self.account_id = UNIPILE_ACCOUNT_ID # Use from config if available
+        self._id_cache = {} # Simple in-memory cache for skill/location IDs
+
+    def _clean_candidate_name(self, value: Optional[str]) -> Optional[str]:
+        raw = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not raw:
+            return None
+
+        normalized = raw.casefold()
+        placeholders = {
+            "linkedin candidate",
+            "professional candidate",
+            "unknown candidate",
+            "candidate",
+            "unknown",
+        }
+        if normalized in placeholders:
+            return None
+            
+        # Alphanumeric ID detection: Reject long strings with no spaces that contain digits
+        # e.g. "Aemaaesrdj8Bputbeeugzft99J0Qcie7Kbhun5K"
+        if len(raw) > 15 and " " not in raw:
+            if any(c.isdigit() for c in raw):
+                return None
+            # Also reject if it has extremely suspicious character distribution (e.g. hashes)
+            if len(re.findall(r'[A-Z]', raw)) > 5 and len(re.findall(r'[a-z]', raw)) > 5:
+                return None
+
+        return raw
+
+    def _derive_name_from_profile_url(self, profile_url: Optional[str]) -> Optional[str]:
+        if not profile_url:
+            return None
+
+        try:
+            parsed = urlparse(profile_url)
+        except Exception:
+            return None
+
+        slug = ""
+        path_parts = [part for part in (parsed.path or "").split("/") if part]
+        if "in" in path_parts:
+            in_index = path_parts.index("in")
+            if in_index + 1 < len(path_parts):
+                slug = path_parts[in_index + 1]
+        elif path_parts:
+            slug = path_parts[-1]
+
+        slug = re.sub(r"[-_]+", " ", slug).strip()
+        slug = re.sub(r"\b\d+\b", " ", slug)
+        slug = re.sub(r"\s+", " ", slug).strip()
+        if not slug:
+            return None
+
+        if not re.search(r"[a-zA-Z]{2,}", slug):
+            return None
+
+        candidate_name = " ".join(part.capitalize() for part in slug.split()[:4])
+        return self._clean_candidate_name(candidate_name)
+
+    def _resolve_candidate_name(self, item: Dict[str, Any]) -> str:
+        # Try multiple fallbacks before using generic name
+        explicit_name = self._clean_candidate_name(item.get("name"))
+        if explicit_name:
+            return explicit_name
+
+        # Try first_name + last_name from profile
+        first_name = self._clean_candidate_name(item.get("first_name") or item.get("firstName"))
+        last_name = self._clean_candidate_name(item.get("last_name") or item.get("lastName"))
+        if first_name or last_name:
+            return f"{first_name} {last_name}".strip()
+
+        derived_name = self._derive_name_from_profile_url(
+            item.get("profile_url") or item.get("public_profile_url")
+        )
+        if derived_name:
+            return derived_name
+
+        # Try using headline as fallback
+        headline = self._clean_candidate_name(item.get("headline"))
+        if headline:
+            return headline
+        
+        # Try using current company or title
+        company = item.get("company") or item.get("current_company")
+        title = item.get("title") or item.get("current_title")
+        if company or title:
+            return f"{title or 'Professional'} at {company or 'Company'}".strip()
+
+        # Last resort - use provider ID to make it unique
+        provider_id = item.get("id") or item.get("provider_id")
+        if provider_id:
+            return f"LinkedIn Professional {str(provider_id)[:8]}"
+
+        return "LinkedIn Candidate"
+
+    def _split_candidate_name(self, full_name: str) -> tuple[str, str]:
+        cleaned = re.sub(r"\s+", " ", str(full_name or "")).strip()
+        if not cleaned:
+            return "", ""
+        parts = cleaned.split(" ", 1)
+        return parts[0], parts[1] if len(parts) > 1 else ""
 
     def _get_headers(self):
         return {
@@ -23,19 +129,50 @@ class UnipileService:
             "Accept": "application/json"
         }
 
+    async def _resolve_id(self, category: str, name: str) -> Optional[str]:
+        """Resolves a string name to a LinkedIn ID (Geurn) using Unipile endpoints."""
+        cache_key = f"{category}:{name.lower()}"
+        if cache_key in self._id_cache:
+            return self._id_cache[cache_key]
+
+        account_id = await self.get_account_id()
+        if not account_id: return None
+
+        # Fixed endpoint: /linkedin/search/parameters instead of /linkedin/search/skills 
+        # which was returning 404 in the logs.
+        url = f"{self.api_url}/linkedin/search/parameters"
+        p_type = "SKILL" if category == "skill" else "LOCATION"
+        params = {"account_id": account_id, "keywords": name, "type": p_type}
+        
+        try:
+             async with httpx.AsyncClient(timeout=10.0) as client:
+                 resp = await client.get(url, params=params, headers=self._get_headers())
+                 if resp.status_code == 200:
+                     items = resp.json().get("items", [])
+                     if items:
+                         # IMPROVEDish: Find the best match in the returned list
+                         # Unipile parameters list might return many matches
+                         best_match = items[0]
+                         for item in items:
+                             if item.get("title", "").lower() == name.lower():
+                                 best_match = item
+                                 break
+                         
+                         res_id = best_match.get("id")
+                         self._id_cache[cache_key] = res_id
+                         return res_id
+                 else:
+                     logger.warning(f"Unipile: Parameter resolution returned {resp.status_code} for {category} '{name}'")
+        except Exception as e:
+            logger.error(f"Unipile: ID resolution failed for {category} '{name}': {e}")
+        return None
+
     async def get_account_id(self) -> Optional[str]:
-        """Fetches the first connected LinkedIn account ID."""
         if self.account_id:
             return self.account_id
-
-        # Check environment variable first
-        env_id = os.getenv("UNIPILE_ACCOUNT_ID")
-        if env_id:
-            self.account_id = env_id
-            return env_id
             
-        if not self.api_key or "placeholder" in self.api_key:
-            logger.warning("Unipile API Key is missing or placeholder.")
+        if not self.api_key:
+            logger.warning("Unipile API Key is missing.")
             return None
 
         url = f"{self.api_url}/accounts"
@@ -69,110 +206,200 @@ class UnipileService:
             
         return None
 
-    async def search_candidates(self, skills: List[Any], location: str, open_to_work: bool = False, limit: int = 25) -> List[Dict[str, Any]]:
+    def _sanitize_linkedin_keywords(
+        self,
+        boolean_string: str,
+        resolved_skill_names: List[str],
+        has_location_id: bool,
+    ) -> str:
+        s = boolean_string or ""
+        # Drop years-of-experience phrases — LinkedIn profiles rarely contain the exact "10+ years" literal
+        s = re.sub(r'"\d+\+\s*years?"', "", s, flags=re.IGNORECASE)
+        s = re.sub(r'\s+AND\s+recent', "", s, flags=re.IGNORECASE)
+        # Drop location radius clauses when we've already resolved the location to an ID
+        if has_location_id:
+            s = re.sub(r'"[^"]+"\s+within\s+\d+\s+mi', "", s, flags=re.IGNORECASE)
+            s = re.sub(r'within\s+\d+\s+mi', "", s, flags=re.IGNORECASE)
+        # Drop quoted skill terms we've already resolved to IDs
+        for name in resolved_skill_names:
+            escaped = re.escape(name)
+            s = re.sub(rf'"{escaped}"', "", s, flags=re.IGNORECASE)
+        # Clean up leftover connectives / empty parens
+        for _ in range(6):
+            s = re.sub(r'\(\s*\)', "", s)
+            s = re.sub(r'\(\s*(AND|OR|NOT)\s+', "(", s, flags=re.IGNORECASE)
+            s = re.sub(r'\s+(AND|OR|NOT)\s*\)', ")", s, flags=re.IGNORECASE)
+            s = re.sub(r'\s+(AND|OR)\s+(AND|OR)\s+', r" \1 ", s, flags=re.IGNORECASE)
+            s = re.sub(r'^\s*(AND|OR|NOT)\s+', "", s, flags=re.IGNORECASE)
+            s = re.sub(r'\s+(AND|OR|NOT)\s*$', "", s, flags=re.IGNORECASE)
+        s = re.sub(r'\s+', " ", s).strip()
+        # Balance parentheses: drop any ')' without a matching '(', append missing closers
+        balanced = []
+        depth = 0
+        for ch in s:
+            if ch == ')':
+                if depth == 0:
+                    continue
+                depth -= 1
+            elif ch == '(':
+                depth += 1
+            balanced.append(ch)
+        s = "".join(balanced) + (")" * depth)
+        s = re.sub(r'\s+', " ", s).strip()
+        # Unwrap a single outer parenthesis only if the opening '(' truly matches the closing ')'
+        if s.startswith("(") and s.endswith(")"):
+            depth = 0
+            wraps_all = True
+            for i, ch in enumerate(s):
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                if depth == 0 and i < len(s) - 1:
+                    wraps_all = False
+                    break
+            if wraps_all:
+                s = s[1:-1].strip()
+        return s
+
+    async def search_candidates(self, skills: List[Any], location: str, open_to_work: bool = True, limit: int = 25, boolean_string: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Search LinkedIn via Unipile.
-        Filters by 'Open to Work' by appending keywords.
+        Search LinkedIn via Unipile using the Recruiter API mode.
         """
         account_id = await self.get_account_id()
         if not account_id:
             return []
 
-        # Construct Keywords
-        keywords = []
-        for s in skills:
-            # Handle string or object
-            if isinstance(s, dict):
-                name = s.get("name")
-            elif hasattr(s, "name"):
-                name = s.name
-            else:
-                name = str(s)
-            
+        # 1. Resolve Skill IDs
+        skill_ids = []
+        # Prioritize Must Have skills
+        must_haves = [s for s in skills if (isinstance(s, dict) and s.get("priority") == "Must Have") or (hasattr(s, "priority") and s.priority == "Must Have")]
+        other_skills = [s for s in skills if s not in must_haves]
+        
+        # Resolve top 5 terms only to keep payload reasonable
+        search_terms = (must_haves + other_skills)[:5]
+        
+        for s in search_terms:
+            name = s.get("value") or s.get("name") if isinstance(s, dict) else getattr(s, "value", getattr(s, "name", str(s)))
             if name:
-                 # Quote simplistic terms to be safe? Or simple string?
-                 # Unipile/LinkedIn supports boolean.
-                 keywords.append(f'"{name}"')
+                 s_id = await self._resolve_id("skill", name)
+                 if s_id:
+                     priority = "MUST_HAVE" if s in must_haves else "CAN_HAVE"
+                     skill_ids.append({"id": s_id, "priority": priority, "name_ref": name})
         
-        query_str = " AND ".join(keywords)
-        
-        # Open To Work Filter (Keyword Approximation)
-        if open_to_work:
-             query_str += ' AND ("Open to Work" OR "Looking for opportunities" OR "Seeking new roles")'
-             
-        # Location
-        # Unipile accepts 'location' parameter which takes LinkedIn Geurns/IDs usually.
-        # But documentation says "Search for location IDs... Use this ID".
-        # This is complex. 
-        # HOWEVER, 'keywords' param can include location? "Java AND San Francisco"?
-        # Or we use 'location' param if valid ID?
-        # User prompt said "limit to 25".
-        # Docs say param "location" takes IDs.
-        # If I pass string "San Francisco", it might fail.
-        # SAFE BET: Append location to keywords if I don't have ID.
+        # 2. Resolve Location ID
+        location_ids = []
         if location and location.strip():
-             # Heuristic: Split "City, State" and use "City"
-             # "New York, NY" -> "New York"
-             # "Austin, TX" -> "Austin"
              loc_term = location.split(",")[0].strip()
-             query_str += f' AND {loc_term}'
-             print(f"🔥 DEBUG: LinkedIn Location Query: Added '{loc_term}' (Unquoted) from '{location}'")
+             l_id = await self._resolve_id("location", loc_term)
+             if l_id:
+                 location_ids.append(l_id)
 
-        # Account ID must be a query parameter
+        # 3. Build Payload using Recruiter API structure
         url = f"{self.api_url}/linkedin/search"
-        params = {"account_id": account_id}
+        params = {"account_id": account_id, "limit": limit}
         
-        # Payload must be flat (no 'params' wrapper)
+        # Determine keywords
+        final_keywords = ""
+        if boolean_string:
+            final_keywords = self._sanitize_linkedin_keywords(
+                boolean_string,
+                resolved_skill_names=[s["name_ref"].lower() for s in skill_ids if s.get("name_ref")],
+                has_location_id=bool(location_ids),
+            )
+            logger.info(f"Unipile keywords sanitized: '{boolean_string[:120]}...' -> '{final_keywords[:120]}...'")
+        else:
+            # Prepare keywords for anything we couldn't resolve to an ID
+            unresolved_terms = []
+            for s in search_terms:
+                name = s.get("value") or s.get("name") if isinstance(s, dict) else getattr(s, "value", getattr(s, "name", str(s)))
+                # If not in skill_ids (which contains resolved IDs), add to keywords
+                if not any(sid.get("name_ref") == name for sid in skill_ids):
+                    unresolved_terms.append(f'"{name}"')
+            
+            # If location didn't resolve, add to keywords
+            if location and not location_ids:
+                 loc_term = location.split(",")[0].strip()
+                 unresolved_terms.append(f'"{loc_term}"')
+
+            # Keywords fallback for remaining skills
+            if len(search_terms) < len(skills):
+                extra_skills = skills[len(search_terms):8] # Limit to avoid query too large
+                for s in extra_skills:
+                    name = s.get("value") or s.get("name") if isinstance(s, dict) else getattr(s, "value", getattr(s, "name", str(s)))
+                    if name: unresolved_terms.append(f'"{name}"')
+
+            if unresolved_terms:
+                final_keywords = " AND ".join(unresolved_terms)
+
+        # Handle Open to Work separately or append it
+        if open_to_work:
+            otw = '("Open to Work" OR "Looking for opportunities")'
+            if final_keywords:
+                final_keywords = f"({final_keywords}) AND {otw}"
+            else:
+                final_keywords = otw
+
         payload = {
-            "api": "classic",
-            "keywords": query_str,
-            "category": "people",
-            "limit": limit
+            "api": "recruiter",
+            "category": "people"
         }
+        
+        logger.info(f"Resolved {len(skill_ids)} skill IDs and {len(location_ids)} location IDs for LinkedIn search")
+
+        if skill_ids:
+            payload["skills"] = [{"id": s["id"], "priority": s["priority"]} for s in skill_ids]
+            
+        if location_ids:
+            payload["location"] = [{"id": lid, "priority": "MUST_HAVE"} for lid in location_ids]
+        
+        if final_keywords:
+            payload["keywords"] = final_keywords
 
         results = []
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                logger.info(f"Unipile Search: {query_str}")
-                # Pass account_id as query param, payload as json body
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                logger.info(f"Unipile Recruiter Search Payload: {json.dumps(payload)}")
                 resp = await client.post(url, params=params, json=payload, headers=self._get_headers())
                 
-                if resp.status_code == 200: # Unipile often returns 201 for Async? 
-                    # Docs say "Perform search...". Sync/Async?
-                    # Getting Started said "export result".
-                    # Real-time search might be synchronous.
+                if resp.status_code in [200, 201]: 
                     data = resp.json()
                     items = data.get("items", [])
                     
                     for item in items:
-                        # Map to Candidate
-                        c_id = item.get("id") # Provider ID
-                        # Construct internal ID? "unipile_{id}"
+                        c_id = item.get("id")
+                        full_name = self._resolve_candidate_name(item)
+                        first_name, last_name = self._split_candidate_name(full_name)
                         
-                        # Extract basic info
-                        match_score = 0 # logic later
+                        # Handle potential nulls and field variations from docs
+                        img_url = item.get("img") or item.get("profile_picture_url")
+                        p_url = item.get("profile_url") or item.get("public_profile_url")
                         
                         cand = {
                             "id": f"unipile_{c_id}",
                             "provider_id": c_id,
-                            "firstName": item.get("name", "").split(" ")[0],
-                            "lastName": " ".join(item.get("name", "").split(" ")[1:]),
-                            "email": "", # Not provided usually
+                            "name": full_name,
+                            "firstName": first_name,
+                            "lastName": last_name,
+                            "email": "",
                             "city": item.get("location", ""),
                             "state": "",
                             "title": item.get("headline", ""),
-                            "source": "LinkedIn",
+                            "source": "LinkedIn-Unipile",
                             "match_score": 0,
-                            "profile_url": item.get("profile_url"),
-                            "image_url": item.get("img"),
-                            "open_to_work": open_to_work # We filtered for it
+                            "profile_url": p_url,
+                            "image_url": img_url,
+                            "open_to_work": open_to_work,
+                            "recruiter_candidate_id": item.get("recruiter_candidate_id")
                         }
                         results.append(cand)
                 else:
                     logger.error(f"Unipile Search Failed: {resp.status_code} - {resp.text}")
+                    return []
 
         except Exception as e:
             logger.error(f"Unipile Search Exception: {e}")
+            return []
 
         logger.info(f"Unipile returned {len(results)} candidates")
         return results
