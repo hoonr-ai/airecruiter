@@ -1998,26 +1998,34 @@ function NewJobPageContent() {
     return normalizeTitle(titleObj?.value) === primaryJobTitle;
   };
 
+  // Preserve user-selected matchType (Exact/Similar). Previously this was
+  // hardcoded to "Similar" on every normalization pass, which silently reverted
+  // clicks on the Exact toggle — the state update landed, the normalizer
+  // overwrote it, and the UI snapped back. Default to "Similar" only when no
+  // prior value exists.
+  const normalizeMatchType = (value: any): "Exact" | "Similar" =>
+    value === "Exact" ? "Exact" : "Similar";
+
   const getNormalizedTitleItem = (titleItem: any) => {
     if (isDirectResumeTitle(titleItem)) {
       return {
         ...titleItem,
         required: "Required",
-        matchType: "Similar",
+        matchType: normalizeMatchType(titleItem.matchType),
       };
     }
 
     return {
       ...titleItem,
       required: isRubricItemRequired(titleItem) ? "Required" : "Preferred",
-      matchType: "Similar",
+      matchType: normalizeMatchType(titleItem.matchType),
     };
   };
 
   const getNormalizedSkillItem = (skillItem: any) => ({
     ...skillItem,
     required: isRubricItemRequired(skillItem) ? "Required" : "Preferred",
-    matchType: "Similar",
+    matchType: normalizeMatchType(skillItem.matchType),
   });
 
   const getNormalizedRubricPayload = () => {
@@ -3320,7 +3328,19 @@ function NewJobPageContent() {
   };
 
   const buildGeneratedBooleanString = () => {
-    const quote = (value: string) => `"${value.replace(/"/g, '\\"')}"`;
+    // JobDiva's Talent Search parser speaks a different dialect than the
+    // generic "X" AND "N+ years" form used for LinkedIn/Dice/Exa: it wants
+    // uppercase quoted terms and `"TERM" OVER N YRS` for experience clauses
+    // (see apps/api/services/jobdiva_boolean_translator.py). When JobDiva is
+    // the active source we render the string in its native syntax so the
+    // recruiter sees what JobDiva will actually run — no more "Databricks
+    // AND 5+ years" looking correct in the UI but silently getting rewritten
+    // by the backend translator.
+    const isJobDiva = !!searchSources.jobdiva;
+    const quote = (value: string) => {
+      const body = (isJobDiva ? value.toUpperCase() : value).replace(/"/g, '\\"');
+      return `"${body}"`;
+    };
     const normalizeTerm = (value: string) =>
       value
         .toLowerCase()
@@ -3350,7 +3370,9 @@ function NewJobPageContent() {
       const terms = [value, ...similar].map(term => term.trim()).filter(Boolean).map(quote);
       const base = terms.length > 1 ? `(${terms.join(" OR ")})` : terms[0];
       if (!base) return "";
-      const experienceClause = years > 0 ? ` AND "${years}+ years"` : "";
+      const experienceClause = years > 0
+        ? (isJobDiva ? ` OVER ${years} YRS` : ` AND "${years}+ years"`)
+        : "";
       const recentClause = recent ? " AND recent" : "";
       return `${base}${recentClause}${experienceClause}`;
     };
@@ -5480,6 +5502,12 @@ function NewJobPageContent() {
             <Button
               className="h-[44px] px-8 bg-[#6366f1] hover:bg-[#4f46e5] flex items-center gap-2 shadow-lg shadow-indigo-100 text-[15px] font-bold text-white transition-all rounded-xl active:scale-95"
               onClick={async () => {
+                // Per-step loading: every Next click flips isAdvancingStep on
+                // for the duration of its own save (+ rubric fetch on step 2),
+                // so the button shows "Preparing..." while something is
+                // actually in flight. Passing currentStep+1 to saveJobDraft
+                // records the step the user is navigating TO, so Resume Setup
+                // lands them back where they were — not one step behind.
                 if (currentStep === 1) {
                   if (!jobData) {
                     showToast("Fetch a job first before saving.", "info");
@@ -5495,16 +5523,22 @@ function NewJobPageContent() {
                     return;
                   }
 
-                  const saved = await saveJobDraft({ currentStep: 1, skipToast: true });
-                  if (!saved) {
-                    showToast("Failed to save Step 1 data. Please try again.", "info");
-                    return;
-                  }
-                  setCurrentStep(2);
-                } else if (currentStep === 2) {
                   setIsAdvancingStep(true);
                   try {
                     const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
+                    if (!saved) {
+                      showToast("Failed to save Step 1 data. Please try again.", "info");
+                      return;
+                    }
+                    setCurrentStep(2);
+                  } finally {
+                    setIsAdvancingStep(false);
+                  }
+                  return;
+                } else if (currentStep === 2) {
+                  setIsAdvancingStep(true);
+                  try {
+                    const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
                     if (!saved) {
                       showToast("Failed to save Step 2 data. Please try again.", "info");
                       return;
@@ -5561,16 +5595,26 @@ function NewJobPageContent() {
                     setIsAdvancingStep(false);
                   }
                 } else if (currentStep === 3) {
-                  const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
-                  if (!saved) return;
+                  setIsAdvancingStep(true);
+                  try {
+                    const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
+                    if (!saved) return;
+                  } finally {
+                    setIsAdvancingStep(false);
+                  }
                 } else if (currentStep === 4) {
-                  const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
-                  if (!saved) return;
-                  // Only derive sourcing criteria on first entry (5.3). The
-                  // sync effect below won't override it on subsequent visits.
-                  if (!sourcingCriteriaInitializedRef.current) {
-                    initializeSourceFromRubric();
-                    sourcingCriteriaInitializedRef.current = true;
+                  setIsAdvancingStep(true);
+                  try {
+                    const saved = await saveJobDraft({ currentStep: 5, skipToast: true });
+                    if (!saved) return;
+                    // Only derive sourcing criteria on first entry (5.3). The
+                    // sync effect below won't override it on subsequent visits.
+                    if (!sourcingCriteriaInitializedRef.current) {
+                      initializeSourceFromRubric();
+                      sourcingCriteriaInitializedRef.current = true;
+                    }
+                  } finally {
+                    setIsAdvancingStep(false);
                   }
                 }
 
