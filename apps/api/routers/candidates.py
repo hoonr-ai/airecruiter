@@ -5,11 +5,13 @@ from typing import List, Dict, Any, Optional
 import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 
 from services.ai_service import ai_service
 from services.jobdiva import jobdiva_service
 from services.unipile import unipile_service
 from services.sourced_candidates_storage import sourced_candidates_storage
+from services.unified_candidate_search import SearchCriteria, unified_search_service
 from models import (
     CandidateSearchRequest, CandidateMessageRequest, CandidatesSaveRequest,
     CandidateAnalysisRequest, CandidateAnalysisResponse,
@@ -18,6 +20,148 @@ from routers._helpers import get_db_connection
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _json_load_safe(value: Any, default: Any):
+    if value is None:
+        return default
+    if isinstance(value, type(default)):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, type(default)) else default
+        except Exception:
+            return default
+    return default
+
+
+def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
+    """Build SearchCriteria from monitored_jobs for detailed resume re-scoring."""
+    import psycopg2
+    from core.config import DATABASE_URL
+
+    try:
+        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT resume_match_filters, sourcing_filters, jobdiva_id
+                    FROM monitored_jobs
+                    WHERE job_id = %s OR jobdiva_id = %s
+                    LIMIT 1
+                    """,
+                    (job_ref, job_ref),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+
+        resume_match_filters = _json_load_safe(row[0], [])
+        sourcing_filters = _json_load_safe(row[1], {})
+        resolved_job_ref = row[2] or job_ref
+
+        title_criteria = [
+            {
+                "value": t.get("value", ""),
+                "match_type": t.get("matchType", "must"),
+                "years": t.get("years", 0),
+                "recent": t.get("recent", False),
+                "similar_terms": t.get("selectedSimilarTitles") or [],
+            }
+            for t in (sourcing_filters.get("titles") or [])
+        ]
+        skill_criteria = [
+            {
+                "value": s.get("value", ""),
+                "match_type": s.get("matchType", "must"),
+                "years": s.get("years", 0),
+                "recent": s.get("recent", False),
+                "similar_terms": s.get("selectedSimilarSkills") or [],
+            }
+            for s in (sourcing_filters.get("skills") or [])
+        ]
+        locations = sourcing_filters.get("locations") or []
+        primary_location = locations[0].get("value", "") if locations else ""
+
+        return SearchCriteria(
+            job_id=str(resolved_job_ref),
+            title_criteria=title_criteria,
+            skill_criteria=skill_criteria,
+            keywords=sourcing_filters.get("keywords") or [],
+            companies=sourcing_filters.get("companies") or [],
+            resume_match_filters=resume_match_filters,
+            location=primary_location,
+            page_size=100,
+            sources=["JobDiva"],
+            bypass_screening=False,
+        )
+    except Exception as e:
+        logger.warning(f"resume matching criteria load failed for {job_ref}: {e}")
+        return None
+
+
+def _build_candidate_for_resume_matching(payload: Dict[str, Any]) -> Dict[str, Any]:
+    data_blob = _json_load_safe(payload.get("data"), {})
+    enhanced = payload.get("enhanced_info") or data_blob.get("enhanced_info") or {}
+    return {
+        "candidate_id": str(payload.get("candidate_id") or ""),
+        "name": payload.get("name") or "",
+        "title": payload.get("headline") or "",
+        "headline": payload.get("headline") or "",
+        "location": payload.get("location") or "",
+        "resume_text": payload.get("resume_text") or "",
+        "skills": data_blob.get("skills") or payload.get("skills") or [],
+        "experience_years": data_blob.get("experience_years") or payload.get("experience_years") or 0,
+        "company_experience": data_blob.get("company_experience") or [],
+        "education": data_blob.get("education") or [],
+        "certifications": data_blob.get("certifications") or [],
+        "enhanced_info": enhanced if isinstance(enhanced, dict) else {},
+    }
+
+
+def _compute_resume_matching(payload: Dict[str, Any], criteria: Optional[SearchCriteria]) -> Dict[str, Any]:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    fallback_score = payload.get("match_score")
+    try:
+        fallback_numeric = float(fallback_score) if fallback_score is not None else 0.0
+    except Exception:
+        fallback_numeric = 0.0
+
+    if not criteria:
+        return {
+            "score": max(0.0, fallback_numeric),
+            "status": "pending",
+            "missing_skills": [],
+            "matched_skills": [],
+            "explainability": ["Resume matching criteria unavailable"],
+            "score_details": {},
+            "scored_at": now_iso,
+        }
+
+    candidate = _build_candidate_for_resume_matching(payload)
+    try:
+        scored = unified_search_service._score_candidate(candidate, criteria)
+        return {
+            "score": float(scored.get("score") or 0),
+            "status": "done",
+            "missing_skills": scored.get("missing_skills") or [],
+            "matched_skills": scored.get("matched_skills") or [],
+            "explainability": scored.get("explainability") or [],
+            "score_details": scored.get("score_details") or {},
+            "scored_at": now_iso,
+        }
+    except Exception as e:
+        logger.warning(f"resume matching score failed for {payload.get('candidate_id')}: {e}")
+        return {
+            "score": max(0.0, fallback_numeric),
+            "status": "pending",
+            "missing_skills": [],
+            "matched_skills": [],
+            "explainability": [f"Detailed matching failed: {str(e)}"],
+            "score_details": {},
+            "scored_at": now_iso,
+        }
 
 
 def _candidate_to_persist_row(job_id: str, cand: Dict[str, Any]) -> Dict[str, Any]:
@@ -593,11 +737,34 @@ async def save_candidates(request: CandidatesSaveRequest):
 
         saved_count = 0
         processing_payloads = []
+        scoring_criteria = _build_resume_matching_criteria(str(resolved_jobdiva_id))
 
         with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
             with conn.cursor() as cur:
                 for c in selected_candidates:
                     try:
+                        pre_score_payload = {
+                            "candidate_id": c.candidate_id,
+                            "name": c.name,
+                            "headline": getattr(c, 'headline', None) or getattr(c, 'title', None),
+                            "location": getattr(c, 'location', None),
+                            "resume_text": getattr(c, 'resume_text', None),
+                            "skills": c.skills or [],
+                            "experience_years": c.experience_years or 0,
+                            "enhanced_info": getattr(c, 'enhanced_info', None),
+                            "data": {
+                                "skills": c.skills or [],
+                                "experience_years": c.experience_years or 0,
+                                "education": getattr(c, 'education', []) or getattr(c, 'candidate_education', []),
+                                "certifications": getattr(c, 'certifications', []) or getattr(c, 'candidate_certification', []),
+                                "company_experience": getattr(c, 'company_experience', []),
+                                "urls": getattr(c, 'urls', {}),
+                                "enhanced_info": getattr(c, 'enhanced_info', None),
+                            },
+                            "match_score": getattr(c, 'match_score', 0),
+                        }
+                        scoring = _compute_resume_matching(pre_score_payload, scoring_criteria)
+
                         # Prepare candidate data with clean schema
                         candidate_data = {
                             "jobdiva_id": resolved_jobdiva_id,
@@ -612,6 +779,7 @@ async def save_candidates(request: CandidatesSaveRequest):
                             "image_url": getattr(c, 'image_url', None),
                             "resume_id": getattr(c, 'resume_id', None),
                             "resume_text": getattr(c, 'resume_text', None),
+                            "resume_match_percentage": scoring["score"],
                             "data": json.dumps({
                                 "skills": c.skills or [],
                                 "experience_years": c.experience_years or 0,
@@ -620,7 +788,14 @@ async def save_candidates(request: CandidatesSaveRequest):
                                 "company_experience": getattr(c, 'company_experience', []),
                                 "urls": getattr(c, 'urls', {}),
                                 "is_selected": True,
-                                "match_score": getattr(c, 'match_score', 0),
+                                "match_score": scoring["score"],
+                                "resume_matching_score": scoring["score"],
+                                "resume_matching_status": scoring["status"],
+                                "resume_matching_scored_at": scoring["scored_at"],
+                                "match_score_details": scoring["score_details"],
+                                "matched_skills": scoring["matched_skills"],
+                                "missing_skills": scoring["missing_skills"],
+                                "explainability": scoring["explainability"],
                                 "enhanced_info": getattr(c, 'enhanced_info', None)  # Full LLM extraction data
                             }),
                             "status": "sourced"
@@ -630,9 +805,11 @@ async def save_candidates(request: CandidatesSaveRequest):
                             INSERT INTO sourced_candidates (
                                 jobdiva_id, candidate_id, source, name, email, phone, headline, location,
                                 profile_url, image_url, resume_id, resume_text, data, status, updated_at
+                                , resume_match_percentage
                             ) VALUES (
                                 %(jobdiva_id)s, %(candidate_id)s, %(source)s, %(name)s, %(email)s, %(phone)s, %(headline)s, %(location)s,
-                                %(profile_url)s, %(image_url)s, %(resume_id)s, %(resume_text)s, %(data)s, %(status)s, CURRENT_TIMESTAMP
+                                %(profile_url)s, %(image_url)s, %(resume_id)s, %(resume_text)s, %(data)s, %(status)s, CURRENT_TIMESTAMP,
+                                %(resume_match_percentage)s
                             )
                             ON CONFLICT (jobdiva_id, candidate_id, source) DO UPDATE SET
                                 name = EXCLUDED.name,
@@ -644,6 +821,7 @@ async def save_candidates(request: CandidatesSaveRequest):
                                 image_url = EXCLUDED.image_url,
                                 resume_id = EXCLUDED.resume_id,
                                 resume_text = EXCLUDED.resume_text,
+                                resume_match_percentage = EXCLUDED.resume_match_percentage,
                                 data = EXCLUDED.data,
                                 status = EXCLUDED.status,
                                 updated_at = CURRENT_TIMESTAMP
@@ -686,12 +864,53 @@ async def save_candidates(request: CandidatesSaveRequest):
 
                     # Process JobDiva candidates with resume text
                     if payload.get("resume_text") and source.startswith("JobDiva"):
-                        await process_jobdiva_candidate(payload)
+                        extract_result = await process_jobdiva_candidate(payload)
+                        if isinstance(extract_result, dict):
+                            payload["enhanced_info"] = extract_result.get("raw")
                         enhanced_count += 1
                     # Process LinkedIn candidates
                     elif source == "LinkedIn":
-                        await process_linkedin_candidate(payload)
+                        extract_result = await process_linkedin_candidate(payload)
+                        if isinstance(extract_result, dict):
+                            payload["enhanced_info"] = extract_result.get("raw")
                         enhanced_count += 1
+
+                    # Re-score after enrichment pass so rank-list gets detailed
+                    # resume-matching status/score from the latest profile data.
+                    detailed_scoring = _compute_resume_matching(payload, scoring_criteria)
+                    data_blob = _json_load_safe(payload.get("data"), {})
+                    data_blob["match_score"] = detailed_scoring["score"]
+                    data_blob["resume_matching_score"] = detailed_scoring["score"]
+                    data_blob["resume_matching_status"] = detailed_scoring["status"]
+                    data_blob["resume_matching_scored_at"] = detailed_scoring["scored_at"]
+                    data_blob["match_score_details"] = detailed_scoring["score_details"]
+                    data_blob["matched_skills"] = detailed_scoring["matched_skills"]
+                    data_blob["missing_skills"] = detailed_scoring["missing_skills"]
+                    data_blob["explainability"] = detailed_scoring["explainability"]
+
+                    import psycopg2 as _psycopg2
+                    from core.config import DATABASE_URL as _DB_URL
+                    with _psycopg2.connect(_DB_URL, connect_timeout=5) as _conn:
+                        with _conn.cursor() as _cur:
+                            _cur.execute(
+                                """
+                                UPDATE sourced_candidates
+                                SET resume_match_percentage = %s,
+                                    data = %s,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE jobdiva_id = %s
+                                  AND candidate_id = %s
+                                  AND source = %s
+                                """,
+                                (
+                                    detailed_scoring["score"],
+                                    json.dumps(data_blob),
+                                    payload.get("jobdiva_id"),
+                                    payload.get("candidate_id"),
+                                    payload.get("source"),
+                                ),
+                            )
+                        _conn.commit()
                 except Exception as e:
                     print(f"⚠️ Enhanced processing failed for candidate {payload.get('candidate_id')}: {e}")
 
