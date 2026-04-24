@@ -89,6 +89,8 @@ def _ensure_monitored_jobs_schema() -> None:
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS bot_introduction TEXT",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS sourcing_filters JSONB",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS resume_match_filters JSONB",
+            # v30: keep job rubric screen-question schema changes out of request path.
+            "ALTER TABLE IF EXISTS job_screen_questions ADD COLUMN IF NOT EXISTS is_hard_filter BOOLEAN NOT NULL DEFAULT FALSE",
             # v28: hot-path read optimizations for GET /jobs/monitored
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_active_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS NOT TRUE",
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_archived_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS TRUE",

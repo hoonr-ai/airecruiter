@@ -270,22 +270,13 @@ class JobRubricDB:
             print(f"❌ Failed to fetch rubric for {jobdiva_id}: {e}")
             return None
     def _ensure_hard_filter_column(self, cur) -> None:
-        """Idempotent DDL: add `is_hard_filter` if missing.
+        """No-op placeholder.
 
-        We don't run formal migrations in this codebase, so we guarantee the
-        column exists on first write/read after the feature lands. DEFAULT
-        FALSE keeps historical rows honest — only the recruiter-marked
-        arrangement question becomes a hard filter going forward.
+        v30: moved `job_screen_questions.is_hard_filter` schema provisioning to
+        startup bootstrap in `routers/jobs._ensure_monitored_jobs_schema` so
+        request paths remain DDL-free.
         """
-        try:
-            cur.execute(
-                "ALTER TABLE job_screen_questions "
-                "ADD COLUMN IF NOT EXISTS is_hard_filter BOOLEAN NOT NULL DEFAULT FALSE"
-            )
-        except Exception as e:
-            # Non-fatal: older Postgres without IF NOT EXISTS, or permission issue.
-            # Reads still work because the SELECT below COALESCEs a missing column.
-            self.logger.debug(f"ensure_hard_filter_column skipped: {e}")
+        return
 
     def _save_screen_questions_internal(self, cur, jobdiva_id: str, questions: List[Dict]):
         """Internal helper to save screen questions using an existing cursor."""
