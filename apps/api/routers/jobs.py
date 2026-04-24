@@ -76,6 +76,8 @@ def _ensure_monitored_jobs_schema() -> None:
         for stmt in (
             # v21 columns
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS archive_reason TEXT",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS job_requirements JSONB DEFAULT '[]'",
             # v22: extraction columns (previously ALTER'd per write in
             # services/monitored_jobs_storage.py).
@@ -87,6 +89,9 @@ def _ensure_monitored_jobs_schema() -> None:
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS bot_introduction TEXT",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS sourcing_filters JSONB",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS resume_match_filters JSONB",
+            # v28: hot-path read optimizations for GET /jobs/monitored
+            "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_active_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS NOT TRUE",
+            "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_archived_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS TRUE",
         ):
             try:
                 cur.execute(stmt)
@@ -1272,7 +1277,8 @@ async def get_monitored_job_data(job_id: str):
             SELECT job_id, title, enhanced_title, ai_description, selected_job_boards,
                    recruiter_notes, recruiter_emails, selected_employment_types,
                    work_authorization, screening_level, current_step, processing_status,
-                   job_requirements, ai_enhanced, created_at, updated_at, jobdiva_id
+                   job_requirements, ai_enhanced, created_at, updated_at, jobdiva_id,
+                   is_archived, archive_reason, archived_at
             FROM monitored_jobs 
             WHERE job_id = %s OR jobdiva_id = %s
         """, (job_id, job_id))
@@ -1288,7 +1294,8 @@ async def get_monitored_job_data(job_id: str):
         columns = ["job_id", "title", "enhanced_title", "ai_description", "selected_job_boards",
                    "recruiter_notes", "recruiter_emails", "selected_employment_types", 
                    "work_authorization", "screening_level", "current_step", "processing_status",
-                   "job_requirements", "ai_enhanced", "created_at", "updated_at", "jobdiva_id"]
+                   "job_requirements", "ai_enhanced", "created_at", "updated_at", "jobdiva_id",
+                   "is_archived", "archive_reason", "archived_at"]
         
         data = dict(zip(columns, row))
         
@@ -1301,7 +1308,7 @@ async def get_monitored_job_data(job_id: str):
                     pass
         
         # Convert datetime objects to strings if they aren't already strings
-        for date_field in ["created_at", "updated_at"]:
+        for date_field in ["created_at", "updated_at", "archived_at"]:
             if data.get(date_field) and not isinstance(data[date_field], str):
                 try:
                     data[date_field] = data[date_field].isoformat()
@@ -1592,7 +1599,7 @@ async def remove_job_from_monitoring(job_id: str):
     else:
         raise HTTPException(status_code=404, detail="Job not in monitoring list")
 
-def _get_monitored_jobs_sync(include_archived: bool):
+def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
     """
     Sync body for the /jobs/monitored endpoint. Runs off the event loop via
     asyncio.to_thread so the psycopg2 round-trip does not stall concurrent
@@ -1602,15 +1609,29 @@ def _get_monitored_jobs_sync(include_archived: bool):
     conn = get_db_connection()
     cursor = conn.cursor()
 
+    if view == "full":
+        select_sql = "SELECT * FROM monitored_jobs"
+    else:
+        # Summary view for dashboard/read-heavy lists. Avoid shipping heavy text/json
+        # blobs (jobdiva_description, ai_description, notes, filters, etc.) when
+        # only list-level metadata is needed.
+        select_sql = (
+            "SELECT job_id, jobdiva_id, title, customer_name, status, "
+            "city, state, zip_code, priority, program_duration, max_allowed_submittals, "
+            "processing_status, is_archived, "
+            "candidates_sourced, resumes_shortlisted, complete_submissions, "
+            "pass_submissions, pair_external_subs, feedback_completed, "
+            "time_to_first_pass, created_at, updated_at "
+            "FROM monitored_jobs"
+        )
+
     if include_archived:
         cursor.execute(
-            "SELECT * FROM monitored_jobs WHERE is_archived = TRUE ORDER BY created_at DESC"
+            f"{select_sql} WHERE is_archived IS TRUE ORDER BY created_at DESC"
         )
     else:
         cursor.execute(
-            "SELECT * FROM monitored_jobs "
-            "WHERE is_archived = FALSE OR is_archived IS NULL "
-            "ORDER BY created_at DESC"
+            f"{select_sql} WHERE is_archived IS NOT TRUE ORDER BY created_at DESC"
         )
 
     columns = [desc[0] for desc in cursor.description]
@@ -1639,13 +1660,16 @@ def _get_monitored_jobs_sync(include_archived: bool):
 
 
 @router.get("/jobs/monitored")
-async def get_monitored_jobs(include_archived: bool = False):
+async def get_monitored_jobs(
+    include_archived: bool = False,
+    view: str = Query("summary", pattern="^(summary|full)$")
+):
     """
     Get all jobs currently being monitored from the database.
     By default, excludes archived jobs unless include_archived=true is passed.
     """
     try:
-        return await asyncio.to_thread(_get_monitored_jobs_sync, include_archived)
+        return await asyncio.to_thread(_get_monitored_jobs_sync, include_archived, view)
     except Exception as e:
         logger.error(f"Error fetching monitored jobs from DB: {e}")
         # Fallback to legacy file only on catastrophic DB failure
