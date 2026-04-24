@@ -9,6 +9,10 @@ export function MsalProviderWrapper({ children }: { children: ReactNode }) {
 
     useEffect(() => {
         msalInstance.initialize().then(() => {
+            const accounts = msalInstance.getAllAccounts();
+            if (accounts.length > 0) {
+                msalInstance.setActiveAccount(accounts[0]);
+            }
             setIsInitialized(true);
         }).catch(e => {
             console.error("MSAL init error", e);
