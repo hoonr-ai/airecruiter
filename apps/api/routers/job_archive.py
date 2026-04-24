@@ -48,18 +48,6 @@ async def archive_job(job_id: str, request: JobArchiveRequest = None):
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Ensure archive columns exist
-        try:
-            cursor.execute("""
-                ALTER TABLE monitored_jobs 
-                ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE,
-                ADD COLUMN IF NOT EXISTS archive_reason TEXT,
-                ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP
-            """)
-            conn.commit()
-        except Exception as e:
-            logger.warning(f"Could not add archive columns (may already exist): {e}")
-        
         # First check if job exists (by job_id or jobdiva_id)
         logger.info(f"Looking for job: {job_id}")
         cursor.execute("""
