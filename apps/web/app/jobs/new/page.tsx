@@ -71,7 +71,6 @@ import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { PasteResumeModal } from "@/components/jobs/PasteResumeModal";
 import { BulkUploadSection } from "@/components/jobs/BulkUploadSection";
 import { PhoneIndicator } from "@/components/phone-indicator";
-import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
 import { API_BASE } from "@/lib/api";
 import { logger } from "@/lib/logger";
 
@@ -434,6 +433,7 @@ function NewJobPageContent() {
   const [sourceCompanyInput, setSourceCompanyInput] = useState("");
   const [sourceKeywordInput, setSourceKeywordInput] = useState("");
   const [isSearching, setIsSearching] = useState(false);
+  const [isEnrichingContacts, setIsEnrichingContacts] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [booleanStringOpen, setBooleanStringOpen] = useState(false);
   const [generatedBoolean, setGeneratedBoolean] = useState("");
@@ -485,13 +485,6 @@ function NewJobPageContent() {
   };
   const [selectedCandidates, setSelectedCandidates] = useState<Set<string>>(new Set());
   const [searchStatus, setSearchStatus] = useState("Fetching applicants...");
-
-  // Missing-phones gate for Launch PAIR. Sourcing returns candidates without
-  // phone (Unipile/Exa don't expose phone; JobDiva sometimes does). PAIR
-  // rejects phone-less candidates, so we intercept Launch PAIR, collect the
-  // numbers inline, then proceed.
-  const [missingPhonesOpen, setMissingPhonesOpen] = useState(false);
-  const [missingPhoneCandidates, setMissingPhoneCandidates] = useState<MissingPhoneCandidate[]>([]);
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
@@ -4151,21 +4144,26 @@ function NewJobPageContent() {
     </div>
   );
 
-  // Launch PAIR runs after missing-phone gating. `phoneOverrides` is a map of
-  // candidate_id → phone captured in the MissingPhonesModal; we merge those
-  // into the local `candidates` array before building the save payload so the
-  // saved rows carry the numbers we just collected.
-  const runLaunchPair = async (phoneOverrides?: Record<string, string>) => {
+  // Launch PAIR consumes selected candidates (with optional contact overrides
+  // from enrichment) and persists them to sourced_candidates.
+  const runLaunchPair = async (contactOverrides?: Record<string, { phone?: string; email?: string }>) => {
     if (selectedCandidates.size === 0) return;
     try {
-      const effective = phoneOverrides
+      const effective = contactOverrides
         ? candidates.map(c => {
             const id = c.candidate_id || c.id;
-            return phoneOverrides[id] ? { ...c, phone: phoneOverrides[id] } : c;
+            const override = contactOverrides[id];
+            return override
+              ? {
+                  ...c,
+                  phone: override.phone || c.phone,
+                  email: override.email || c.email,
+                }
+              : c;
           })
         : candidates;
 
-      if (phoneOverrides) {
+      if (contactOverrides) {
         setCandidates(effective);
       }
 
@@ -4246,33 +4244,91 @@ function NewJobPageContent() {
     }
   };
 
-  // Entry point wired to the Launch PAIR button. Filters selected candidates
-  // with no valid phone into the modal; if everyone already has one, skips
-  // straight to runLaunchPair.
+  // Entry point wired to Launch PAIR. Before save, auto-enrich selected
+  // candidates missing phone via ZoomInfo using LinkedIn URL.
   const handleLaunchPairClick = async () => {
     if (selectedCandidates.size === 0) return;
-    const missing: MissingPhoneCandidate[] = [];
-    for (const c of candidates) {
-      const id = c.candidate_id || c.id;
-      if (!selectedCandidates.has(id)) continue;
-      const digits = String(c.phone || "").replace(/\D/g, "");
-      if (digits.length < 7) {
-        missing.push({
-          candidate_id: String(id),
-          name: getCandidateDisplayName(c) || "Unnamed",
-          headline: c.title || c.headline || "",
-          location: c.location || "",
-          source: c.source || "",
-          jobdiva_id: jobdivaId || jobData?.jobdiva_id || String(numericJobId || ""),
-        });
+    setIsEnrichingContacts(true);
+    try {
+      const candidatesMissingPhone = candidates.filter(c => {
+        const id = c.candidate_id || c.id;
+        if (!selectedCandidates.has(id)) return false;
+        const digits = String(c.phone || "").replace(/\D/g, "");
+        return digits.length < 7;
+      });
+
+      const contactOverrides: Record<string, { phone?: string; email?: string }> = {};
+      let enrichedCount = 0;
+
+      for (const c of candidatesMissingPhone) {
+        const id = String(c.candidate_id || c.id || "").trim();
+        if (!id) continue;
+
+        const linkedinUrl =
+          c.profile_url ||
+          c.linkedin_url ||
+          c.urls?.linkedin ||
+          c.urls?.linkedin_url ||
+          "";
+
+        if (!linkedinUrl) continue;
+
+        try {
+          const res = await fetch(`${API_BASE}/candidates/${encodeURIComponent(id)}/enrich-contact`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId || undefined,
+              source: c.source || undefined,
+              linkedin_url: linkedinUrl,
+            }),
+          });
+
+          if (!res.ok) continue;
+          const enriched = await res.json();
+          const nextPhone = enriched?.phone || "";
+          const nextEmail = enriched?.email || "";
+          if (nextPhone || nextEmail) {
+            contactOverrides[id] = {
+              phone: nextPhone || undefined,
+              email: nextEmail || undefined,
+            };
+            enrichedCount += 1;
+          }
+        } catch {
+          // Best-effort enrichment; keep launch flow moving.
+        }
       }
+
+      if (enrichedCount > 0) {
+        setCandidates(prev => prev.map(c => {
+          const cid = String(c.candidate_id || c.id || "").trim();
+          const override = contactOverrides[cid];
+          if (!override) return c;
+          return {
+            ...c,
+            phone: override.phone || c.phone,
+            email: override.email || c.email,
+          };
+        }));
+        showToast(`ZoomInfo enriched ${enrichedCount} candidate${enrichedCount === 1 ? "" : "s"}.`, "success");
+      }
+
+      const unresolvedMissing = candidatesMissingPhone.filter(c => {
+        const cid = String(c.candidate_id || c.id || "").trim();
+        const overridePhone = contactOverrides[cid]?.phone || c.phone || "";
+        const digits = String(overridePhone).replace(/\D/g, "");
+        return digits.length < 7;
+      }).length;
+
+      if (unresolvedMissing > 0) {
+        showToast(`${unresolvedMissing} selected candidate${unresolvedMissing === 1 ? "" : "s"} still missing phone after enrichment.`, "info");
+      }
+
+      await runLaunchPair(contactOverrides);
+    } finally {
+      setIsEnrichingContacts(false);
     }
-    if (missing.length > 0) {
-      setMissingPhoneCandidates(missing);
-      setMissingPhonesOpen(true);
-      return;
-    }
-    await runLaunchPair();
   };
 
   const sourceStep = (
@@ -5417,28 +5473,19 @@ function NewJobPageContent() {
               <Button
                 className={`h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group ${candidates.length > 0 && selectedCandidates.size > 0 ? "bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98]" : "bg-slate-300 cursor-not-allowed"}`}
                 onClick={handleLaunchPairClick}
-                disabled={!hasSearched || isSearching || selectedCandidates.size === 0}
+                disabled={!hasSearched || isSearching || isEnrichingContacts || selectedCandidates.size === 0}
               >
-                <Rocket className="w-4 h-4 fill-white" />
-                Launch PAIR
+                {isEnrichingContacts ? (
+                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                ) : (
+                  <Rocket className="w-4 h-4 fill-white" />
+                )}
+                {isEnrichingContacts ? "Enriching Contacts..." : "Launch PAIR"}
               </Button>
             </div>
           </div>
         </div>
       </div>
-
-      <MissingPhonesModal
-        open={missingPhonesOpen}
-        candidates={missingPhoneCandidates}
-        onClose={() => setMissingPhonesOpen(false)}
-        onAllProvided={async (phones) => {
-          setMissingPhonesOpen(false);
-          await runLaunchPair(phones);
-        }}
-        persist={false}
-        primaryLabel="Save & Launch PAIR"
-        description="These candidates don't have a phone number yet — PAIR calls require one. Add them below to include them in this launch."
-      />
     </div>
   );
 

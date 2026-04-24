@@ -81,6 +81,11 @@ AZURE_AI_AGENT_NAME       = os.getenv("AZURE_AI_AGENT_NAME", "skill-role-extract
 # ---- Exa API ----
 EXA_API_KEY = get_env_with_default("EXA_API_KEY", "")
 
+# ---- ZoomInfo Contact Enrichment ----
+ZOOMINFO_ENRICH_URL = get_env_with_default("ZOOMINFO_ENRICH_URL", "https://api.zoominfo.com/enrich/contact")
+ZOOMINFO_BEARER_TOKEN = get_env_with_default("ZOOMINFO_BEARER_TOKEN", "")
+ZOOMINFO_CLIENT_ID = get_env_with_default("ZOOMINFO_CLIENT_ID", "")
+
 # ---- Candidate Scoring Calibration ----
 # These knobs tune how harsh the match_score curve is. Defaults were calibrated
 # after observing that no candidate scored above ~60% in real searches. Lower
