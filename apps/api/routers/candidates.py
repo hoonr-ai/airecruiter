@@ -706,7 +706,7 @@ async def save_candidates(request: CandidatesSaveRequest):
         logging.getLogger(__name__).error(f"Error saving candidates: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/candidates")
+@router.get("/candidates/list")
 async def get_all_candidates(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
