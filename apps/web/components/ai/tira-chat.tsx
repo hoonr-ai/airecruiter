@@ -19,7 +19,7 @@ import {
     Copy,
 } from "lucide-react";
 import { useAI } from "@/context/ai-context";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { API_BASE } from "@/lib/api";
 
@@ -142,6 +142,13 @@ function ChatMode({
     isLoading: boolean;
 }) {
     const [input, setInput] = useState("");
+    // Anchor at the bottom of the message list — scrollIntoView on new messages
+    // keeps the conversation pinned to the latest reply without needing a ref
+    // into Radix's internal viewport.
+    const endRef = useRef<HTMLDivElement | null>(null);
+    useEffect(() => {
+        endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    }, [messages, isLoading]);
     const handleSubmit = (e: React.FormEvent) => {
         e.preventDefault();
         if (!input.trim() || isLoading) return;
@@ -150,7 +157,7 @@ function ChatMode({
     };
     return (
         <>
-            <ScrollArea className="flex-1 p-4">
+            <ScrollArea className="flex-1 min-h-0 p-4">
                 <div className="space-y-4">
                     {messages.map((m, i) => (
                         <div key={i} className={cn("flex gap-3", m.role === "user" ? "flex-row-reverse" : "flex-row")}>
@@ -185,6 +192,7 @@ function ChatMode({
                             </div>
                         </div>
                     )}
+                    <div ref={endRef} />
                 </div>
             </ScrollArea>
             <div className="p-4 border-t bg-background">
