@@ -51,9 +51,13 @@ async def archive_job(job_id: str, request: JobArchiveRequest = None):
         # First check if job exists (by job_id or jobdiva_id)
         logger.info(f"Looking for job: {job_id}")
         cursor.execute("""
-            SELECT job_id, jobdiva_id FROM monitored_jobs 
-            WHERE job_id = %s OR jobdiva_id = %s
-        """, (job_id, job_id))
+            SELECT job_id, jobdiva_id FROM monitored_jobs
+            WHERE job_id = %s
+            UNION ALL
+            SELECT job_id, jobdiva_id FROM monitored_jobs
+            WHERE jobdiva_id = %s AND job_id <> %s
+            LIMIT 1
+        """, (job_id, job_id, job_id))
         row = cursor.fetchone()
         logger.info(f"Query result: {row}")
         if not row:
@@ -110,9 +114,13 @@ async def unarchive_job(job_id: str):
         
         # First check if job exists (by job_id or jobdiva_id)
         cursor.execute("""
-            SELECT job_id FROM monitored_jobs 
-            WHERE job_id = %s OR jobdiva_id = %s
-        """, (job_id, job_id))
+            SELECT job_id FROM monitored_jobs
+            WHERE job_id = %s
+            UNION ALL
+            SELECT job_id FROM monitored_jobs
+            WHERE jobdiva_id = %s AND job_id <> %s
+            LIMIT 1
+        """, (job_id, job_id, job_id))
         row = cursor.fetchone()
         if not row:
             cursor.close()
