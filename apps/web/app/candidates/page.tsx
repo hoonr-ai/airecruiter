@@ -11,6 +11,8 @@ import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { ResumeModal } from "@/components/ResumeModal";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { AssessModal } from "@/components/AssessModal";
+import { PhoneIndicator } from "@/components/phone-indicator";
+import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
 
 import {
   Table,
@@ -80,6 +82,8 @@ interface Candidate {
   status: string;
   created_at: string;
   resume_text?: string;
+  email?: string | null;
+  phone?: string | null;
   data?: any;
 }
 
@@ -149,6 +153,14 @@ export default function CandidatesPage() {
   const [isAssessModalOpen, setIsAssessModalOpen] = useState(false);
   const [selectedAssessCandidate, setSelectedAssessCandidate] = useState<any>(null);
   const [selectedAssessInterviewId, setSelectedAssessInterviewId] = useState<string | null>(null);
+
+  // Missing-phone gate before firing PAIR. When Engage runs on a candidate
+  // whose sourced_candidates.phone is empty/short, we open this modal so the
+  // recruiter can supply the number inline; on save the PATCH updates the DB
+  // and we re-enter the Engage flow with the fresh phone.
+  const [missingPhonesOpen, setMissingPhonesOpen] = useState(false);
+  const [missingPhoneCandidates, setMissingPhoneCandidates] = useState<MissingPhoneCandidate[]>([]);
+  const [pendingEngageCandidate, setPendingEngageCandidate] = useState<Candidate | null>(null);
 
   // Debounce searchQuery -> searchDebounced. Filter/sort/page changes fire
   // immediately (below); only free-text search pays the 250ms penalty.
@@ -378,7 +390,12 @@ export default function CandidatesPage() {
   };
 
   // ---- Engage Handlers ----
-  const handleEngageClick = async (candidate: Candidate) => {
+  const hasUsablePhone = (p?: string | null) => {
+    const digits = String(p || "").replace(/\D/g, "");
+    return digits.length >= 7;
+  };
+
+  const runEngage = async (candidate: Candidate) => {
     setEngageLoading(true);
     setEngageError(null);
     try {
@@ -394,6 +411,23 @@ export default function CandidatesPage() {
     } finally {
       setEngageLoading(false);
     }
+  };
+
+  const handleEngageClick = async (candidate: Candidate) => {
+    if (!hasUsablePhone(candidate.phone)) {
+      setPendingEngageCandidate(candidate);
+      setMissingPhoneCandidates([{
+        candidate_id: candidate.candidate_id,
+        name: candidate.name || "Unnamed",
+        headline: candidate.headline || "",
+        location: candidate.location || "",
+        source: candidate.source || "",
+        jobdiva_id: candidate.jobdiva_id,
+      }]);
+      setMissingPhonesOpen(true);
+      return;
+    }
+    await runEngage(candidate);
   };
 
   const handleScheduleCall = async (payloadOverride?: string) => {
@@ -676,12 +710,12 @@ export default function CandidatesPage() {
                              }`}>
                                {candidate.name}
                              </span>
-                             <span 
+                             <span
                                className={`shrink-0 h-6 w-6 flex items-center justify-center border border-slate-200 bg-white text-slate-400 rounded-lg shadow-sm transition-all ${
-                                 candidate.source?.startsWith('LinkedIn') 
-                                   ? 'group-hover/name:border-[#bfdbfe] group-hover/name:bg-[#eff6ff] group-hover/name:text-[#1d4ed8]' : 
-                                 candidate.source === 'JobDiva-TalentSearch' 
-                                   ? 'group-hover/name:border-[#D2B48C] group-hover/name:bg-[#FDF8F5] group-hover/name:text-[#8B5A2B]' : 
+                                 candidate.source?.startsWith('LinkedIn')
+                                   ? 'group-hover/name:border-[#bfdbfe] group-hover/name:bg-[#eff6ff] group-hover/name:text-[#1d4ed8]' :
+                                 candidate.source === 'JobDiva-TalentSearch'
+                                   ? 'group-hover/name:border-[#D2B48C] group-hover/name:bg-[#FDF8F5] group-hover/name:text-[#8B5A2B]' :
                                  'group-hover/name:border-[#c7d2fe] group-hover/name:bg-[#f5f3ff] group-hover/name:text-[#6366f1]'
                                }`}
                                title={candidate.source?.startsWith('LinkedIn') ? "View LinkedIn Profile" : "Click to view resume"}
@@ -690,6 +724,23 @@ export default function CandidatesPage() {
                              </span>
                            </span>
                         </a>
+                        <div onClick={(e) => e.stopPropagation()} className="inline-flex">
+                          <PhoneIndicator
+                            candidateId={candidate.candidate_id}
+                            jobdivaId={candidate.jobdiva_id}
+                            phone={candidate.phone}
+                            persist
+                            onSaved={(normalised) => {
+                              setCandidates(prev =>
+                                prev.map(c =>
+                                  c.candidate_id === candidate.candidate_id
+                                    ? { ...c, phone: normalised }
+                                    : c
+                                )
+                              );
+                            }}
+                          />
+                        </div>
                         <div className="flex items-center gap-1.5 opacity-70 mt-1" title={candidate.headline || ""}>
                           <Briefcase className="w-3.5 h-3.5 text-slate-500 shrink-0" />
                           <p className="text-[13px] text-slate-600 font-medium truncate">{candidate.headline}</p>
@@ -941,6 +992,31 @@ export default function CandidatesPage() {
         }}
         interviewId={selectedAssessInterviewId}
         candidateName={selectedAssessCandidate?.name || ''}
+      />
+
+      <MissingPhonesModal
+        open={missingPhonesOpen}
+        candidates={missingPhoneCandidates}
+        onClose={() => {
+          setMissingPhonesOpen(false);
+          setPendingEngageCandidate(null);
+        }}
+        onAllProvided={async (phones) => {
+          setMissingPhonesOpen(false);
+          const cand = pendingEngageCandidate;
+          setPendingEngageCandidate(null);
+          if (!cand) return;
+          const picked = phones[cand.candidate_id] || cand.phone || "";
+          setCandidates(prev =>
+            prev.map(c =>
+              c.candidate_id === cand.candidate_id ? { ...c, phone: picked } : c
+            )
+          );
+          await runEngage({ ...cand, phone: picked });
+        }}
+        title="Phone number required"
+        description="PAIR can only call candidates with a phone number on file. Add it below to continue."
+        primaryLabel="Save & Engage"
       />
     </div>
   );
