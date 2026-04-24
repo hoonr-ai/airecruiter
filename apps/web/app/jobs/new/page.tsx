@@ -201,6 +201,18 @@ const getCandidateDisplayName = (candidate: {
   return candidate.source === "LinkedIn" ? "LinkedIn profile" : "Unnamed candidate";
 };
 
+const extractLinkedInFromText = (text?: string | null): string => {
+  const raw = String(text || "");
+  if (!raw) return "";
+  const m = raw.match(/https?:\/\/(?:www\.)?linkedin\.com\/in\/[A-Za-z0-9\-_%]+/i);
+  return m ? m[0] : "";
+};
+
+const looksLikeLinkedInProfile = (url?: string | null): boolean => {
+  const u = String(url || "").trim().toLowerCase();
+  return u.includes("linkedin.com/in/");
+};
+
 export default function NewJobPage() {
   return (
     <Suspense fallback={<div>Loading...</div>}>
@@ -4259,19 +4271,30 @@ function NewJobPageContent() {
 
       const contactOverrides: Record<string, { phone?: string; email?: string }> = {};
       let enrichedCount = 0;
+      let missingLinkedInCount = 0;
+      let enrichFailedCount = 0;
+      let noContactFoundCount = 0;
 
       for (const c of candidatesMissingPhone) {
         const id = String(c.candidate_id || c.id || "").trim();
         if (!id) continue;
 
-        const linkedinUrl =
-          c.profile_url ||
-          c.linkedin_url ||
-          c.urls?.linkedin ||
-          c.urls?.linkedin_url ||
-          "";
+        const linkedinUrlCandidates = [
+          c.profile_url,
+          c.linkedin_url,
+          c.urls?.linkedin,
+          c.urls?.linkedin_url,
+          c.data?.urls?.linkedin,
+          c.data?.urls?.linkedin_url,
+          extractLinkedInFromText(c.resume_text || c.resumeText || c.data?.resume_text),
+        ].map((v: any) => String(v || "").trim()).filter(Boolean);
 
-        if (!linkedinUrl) continue;
+        const linkedinUrl = linkedinUrlCandidates.find((u: string) => looksLikeLinkedInProfile(u)) || "";
+
+        if (!linkedinUrl) {
+          missingLinkedInCount += 1;
+          continue;
+        }
 
         try {
           const res = await fetch(`${API_BASE}/candidates/${encodeURIComponent(id)}/enrich-contact`, {
@@ -4284,7 +4307,10 @@ function NewJobPageContent() {
             }),
           });
 
-          if (!res.ok) continue;
+          if (!res.ok) {
+            enrichFailedCount += 1;
+            continue;
+          }
           const enriched = await res.json();
           const nextPhone = enriched?.phone || "";
           const nextEmail = enriched?.email || "";
@@ -4294,9 +4320,12 @@ function NewJobPageContent() {
               email: nextEmail || undefined,
             };
             enrichedCount += 1;
+          } else {
+            noContactFoundCount += 1;
           }
         } catch {
           // Best-effort enrichment; keep launch flow moving.
+          enrichFailedCount += 1;
         }
       }
 
@@ -4323,6 +4352,15 @@ function NewJobPageContent() {
 
       if (unresolvedMissing > 0) {
         showToast(`${unresolvedMissing} selected candidate${unresolvedMissing === 1 ? "" : "s"} still missing phone after enrichment.`, "info");
+      }
+
+      if (missingLinkedInCount > 0 || enrichFailedCount > 0 || noContactFoundCount > 0) {
+        const bits = [
+          missingLinkedInCount > 0 ? `${missingLinkedInCount} missing LinkedIn URL` : "",
+          noContactFoundCount > 0 ? `${noContactFoundCount} no ZoomInfo contact found` : "",
+          enrichFailedCount > 0 ? `${enrichFailedCount} enrichment call failed` : "",
+        ].filter(Boolean);
+        showToast(`Enrichment summary: ${bits.join(" · ")}`, "info");
       }
 
       await runLaunchPair(contactOverrides);

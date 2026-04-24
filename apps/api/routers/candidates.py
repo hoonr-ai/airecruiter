@@ -955,13 +955,24 @@ def _normalise_phone(raw: str) -> str:
 
 def _extract_enrichment_fields(payload: Any) -> Dict[str, str]:
     targets = {"workPhone", "mobilePhone", "workEmail", "personalEmail"}
+    targets_lower = {t.lower(): t for t in targets}
     found: Dict[str, str] = {}
 
     def walk(node: Any):
         if isinstance(node, dict):
+            # Shape A: {"fieldName":"mobilePhone","value":"+1..."}
+            field_name = node.get("fieldName")
+            field_value = node.get("value")
+            if isinstance(field_name, str) and isinstance(field_value, str) and field_value.strip():
+                canonical = targets_lower.get(field_name.strip().lower())
+                if canonical and canonical not in found:
+                    found[canonical] = field_value.strip()
+
             for k, v in node.items():
-                if k in targets and isinstance(v, str) and v.strip() and k not in found:
-                    found[k] = v.strip()
+                # Shape B/C: direct key-value, possibly different case
+                canonical = targets_lower.get(str(k).strip().lower())
+                if canonical and isinstance(v, str) and v.strip() and canonical not in found:
+                    found[canonical] = v.strip()
                 walk(v)
         elif isinstance(node, list):
             for item in node:
@@ -971,7 +982,7 @@ def _extract_enrichment_fields(payload: Any) -> Dict[str, str]:
     return found
 
 
-@router.post("/candidates/{candidate_id}/enrich-contact")
+@router.post("/candidates/{candidate_id:path}/enrich-contact")
 async def enrich_candidate_contact(candidate_id: str, request: EnrichCandidateContactRequest):
     """
     Enrich candidate contact details from ZoomInfo using LinkedIn URL.
