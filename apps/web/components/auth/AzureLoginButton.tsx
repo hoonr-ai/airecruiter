@@ -6,37 +6,41 @@ import { LogOut, LogIn } from "lucide-react";
 
 export function AzureLoginButton() {
     const { instance, accounts } = useMsal();
+    const activeAccount = instance.getActiveAccount() || accounts[0];
 
     const handleLogin = () => {
-        instance.loginPopup(loginRequest).catch((e) => {
+        instance.loginRedirect(loginRequest).catch((e) => {
             console.error(e);
         });
     };
 
     const handleLogout = () => {
-        instance.logoutPopup({
+        instance.logoutRedirect({
             postLogoutRedirectUri: window.location.origin,
-            mainWindowRedirectUri: window.location.origin,
         }).catch((e) => {
             console.error(e);
         });
     };
 
-    if (accounts.length > 0) {
+    if (activeAccount) {
         return (
             <div className="flex flex-col gap-3 p-4 bg-slate-50 rounded-xl border border-slate-200 mt-auto">
                 <div className="flex items-center gap-3">
                     <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center text-primary font-bold">
-                        {(accounts[0].name || accounts[0].username || "A").charAt(0).toUpperCase()}
+                        {(activeAccount.name || activeAccount.username || "A").charAt(0).toUpperCase()}
                     </div>
                     <div className="flex flex-col overflow-hidden">
-                        <span className="text-sm font-semibold truncate">{accounts[0].name}</span>
-                        <span className="text-xs text-slate-500 truncate">{accounts[0].username}</span>
+                        <span className="text-sm font-semibold truncate text-slate-900">
+                            {activeAccount.name || "User"}
+                        </span>
+                        <span className="text-xs text-slate-500 truncate">
+                            {activeAccount.username}
+                        </span>
                     </div>
                 </div>
-                <button 
+                <button
                     onClick={handleLogout}
-                    className="flex w-full justify-center items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-md transition-colors border border-transparent hover:border-red-100"
+                    className="flex w-full justify-center items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-md transition-colors border border-transparent hover:border-red-100 font-medium"
                 >
                     <LogOut className="w-4 h-4" />
                     Sign Out
@@ -47,7 +51,7 @@ export function AzureLoginButton() {
 
     return (
         <div className="mt-auto p-4">
-            <button 
+            <button
                 onClick={handleLogin}
                 className="flex w-full justify-center items-center gap-2 px-4 py-2.5 bg-[#0078D4] text-white rounded-lg hover:bg-[#006cbd] transition-colors font-medium shadow-sm"
             >
