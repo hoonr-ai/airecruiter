@@ -57,6 +57,7 @@ export DOMAIN_NAME=curate.hoonr.ai
   - Template-based nginx configuration
   - Automatic service management
   - Environment validation
+  - Smart SSL handling (HTTPS if certificates exist, HTTP-only if not)
 
 **Usage:**
 ```bash
@@ -70,12 +71,18 @@ export DOMAIN_NAME=curate.hoonr.ai
 DOMAIN_NAME=curate.hoonr.ai ./deploy-azure.sh
 ```
 
+**SSL Handling:**
+- If SSL certificates exist: Uses full HTTPS nginx configuration
+- If no SSL certificates: Uses HTTP-only configuration with Let's Encrypt validation ready
+- Automatically provides guidance to run `./setup-ssl.sh` when needed
+
 ### `setup-ssl.sh` - SSL Certificate Management
-- **Purpose**: Setup SSL certificates with Let's Encrypt
+- **Purpose**: Setup SSL certificates with Let's Encrypt (focused only on SSL)
 - **Features**:
-  - Two-stage SSL setup (avoids chicken-and-egg problem)
-  - Automatic certificate renewal
+  - Clean SSL certificate generation using webroot validation
+  - Automatic certificate renewal setup
   - Domain detection (same logic as deploy script)
+  - Switches nginx from HTTP-only to HTTPS configuration after getting certificates
 
 **Usage:**
 ```bash
@@ -85,6 +92,14 @@ DOMAIN_NAME=curate.hoonr.ai ./deploy-azure.sh
 # Specific domain
 ./setup-ssl.sh curate.hoonr.ai
 ```
+
+**Process:**
+1. Detects domain (same logic as deploy-azure.sh)
+2. Installs certbot if needed
+3. Obtains SSL certificate using webroot validation
+4. Sets up automatic renewal
+5. Switches nginx to HTTPS configuration
+6. Verifies SSL certificate is working
 
 ### `manage.sh` - Application Management
 - **Purpose**: Monitor and manage the application
@@ -148,10 +163,10 @@ detect_domain() {
 # Switch to develop branch
 git checkout develop
 
-# Deploy (automatically detects QA environment)
+# Deploy (automatically detects QA environment and sets up HTTP)
 ./deploy-azure.sh
 
-# Setup SSL if needed
+# Setup SSL to enable HTTPS (optional but recommended)
 ./setup-ssl.sh
 
 # Check status
@@ -166,12 +181,26 @@ git checkout main
 # Deploy (automatically detects PRODUCTION environment)
 ./deploy-azure.sh
 
-# Setup SSL if needed
+# Setup SSL for production (recommended)
 ./setup-ssl.sh
 
 # Verify deployment
 ./manage.sh env
 curl -I https://curate.hoonr.ai
+```
+
+### First-time Deployment (No SSL)
+```bash
+# Deploy application (will use HTTP-only configuration)
+./deploy-azure.sh
+
+# Application is now available at http://domain.com
+# API available at http://domain.com/api/docs
+
+# Setup SSL when ready
+./setup-ssl.sh
+
+# Application now available at https://domain.com
 ```
 
 ### Manual Run with Specific Domain

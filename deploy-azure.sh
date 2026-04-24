@@ -209,15 +209,95 @@ print_status "Next.js application built"
 # Configure Nginx reverse proxy
 echo -e "${BLUE}🌐 Configuring Nginx reverse proxy...${NC}"
 
-# Update nginx config with the correct domain (replace template placeholder)
-sed -i "s/{{DOMAIN_NAME}}/$DOMAIN_NAME/g" "$PROJECT_DIR/nginx.conf"
+# Check if SSL certificates exist for this domain
+if sudo test -f "/etc/letsencrypt/live/$DOMAIN_NAME/fullchain.pem" && sudo test -f "/etc/letsencrypt/live/$DOMAIN_NAME/privkey.pem"; then
+    echo -e "${BLUE}🔒 SSL certificates found, using HTTPS configuration${NC}"
+    # Update nginx config with the correct domain (replace template placeholder)
+    sed -i "s/{{DOMAIN_NAME}}/$DOMAIN_NAME/g" "$PROJECT_DIR/nginx.conf"
+    sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
+    # Restore template for next deployment
+    sed -i "s/$DOMAIN_NAME/{{DOMAIN_NAME}}/g" "$PROJECT_DIR/nginx.conf"
+    print_status "HTTPS Nginx configuration applied"
+else
+    echo -e "${BLUE}📄 SSL certificates not found, using HTTP-only configuration${NC}"
+    # Create temporary HTTP-only configuration for initial deployment
+    cat > /tmp/nginx-http-only.conf << EOF
+# Temporary HTTP-only configuration - use setup-ssl.sh to enable HTTPS
+upstream airecruiter_api {
+    server 127.0.0.1:8000;
+    keepalive 32;
+}
 
-# Always copy and update nginx config
-sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
-print_status "Nginx configuration updated"
+upstream airecruiter_web {
+    server 127.0.0.1:3000;
+    keepalive 32;
+}
 
-# Restore template for next deployment
-sed -i "s/$DOMAIN_NAME/{{DOMAIN_NAME}}/g" "$PROJECT_DIR/nginx.conf"
+limit_req_zone \\\$binary_remote_addr zone=api_limit:10m rate=30r/m;
+limit_req_zone \\\$binary_remote_addr zone=web_limit:10m rate=600r/m;
+
+# HTTP server
+server {
+    listen 80;
+    server_name $DOMAIN_NAME;
+    
+    # Allow Let's Encrypt validation (for future SSL setup)
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+    
+    # API routes
+    location /api/ {
+        limit_req zone=api_limit burst=10 nodelay;
+        proxy_pass http://airecruiter_api;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \\\$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \\\$host;
+        proxy_set_header X-Real-IP \\\$remote_addr;
+        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\\$scheme;
+        proxy_cache_bypass \\\$http_upgrade;
+        proxy_read_timeout 86400;
+    }
+    
+    # Backend API endpoints (non-/api/ prefix)
+    location ~ ^/(jobs|chat|candidates)/ {
+        limit_req zone=api_limit burst=10 nodelay;
+        proxy_pass http://airecruiter_api\\\$uri\\\$is_args\\\$args;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \\\$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \\\$host;
+        proxy_set_header X-Real-IP \\\$remote_addr;
+        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\\$scheme;
+        proxy_cache_bypass \\\$http_upgrade;
+        proxy_read_timeout 86400;
+    }
+    
+    # All other requests go to Next.js frontend
+    location / {
+        limit_req zone=web_limit burst=100 nodelay;
+        proxy_pass http://airecruiter_web;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \\\$http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host \\\$host;
+        proxy_set_header X-Real-IP \\\$remote_addr;
+        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \\\$scheme;
+        proxy_cache_bypass \\\$http_upgrade;
+        proxy_read_timeout 86400;
+    }
+}
+EOF
+    sudo cp /tmp/nginx-http-only.conf /etc/nginx/sites-available/airecruiter
+    sudo mkdir -p /var/www/html  # Ensure webroot exists for Let's Encrypt
+    rm -f /tmp/nginx-http-only.conf
+    print_status "HTTP-only Nginx configuration applied"
+    echo -e "${YELLOW}💡${NC} Run './setup-ssl.sh' after deployment to enable HTTPS"
+fi
 
 # Enable airecruiter site and disable default
 sudo ln -sf /etc/nginx/sites-available/airecruiter /etc/nginx/sites-enabled/
