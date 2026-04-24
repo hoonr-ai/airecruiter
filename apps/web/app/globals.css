@@ -32,6 +32,9 @@
   --radius-lg: var(--radius);
   --radius-md: calc(var(--radius) - 2px);
   --radius-sm: calc(var(--radius) - 4px);
+
+  --font-inter: var(--font-inter);
+  --font-outfit: var(--font-outfit);
 }
 
 @utility container {
@@ -114,6 +117,11 @@
 
   body {
     @apply bg-background text-foreground;
+    font-family: var(--font-inter), ui-sans-serif, system-ui;
+  }
+
+  h1, h2, h3, h4, h5, h6, .font-outfit {
+    font-family: var(--font-outfit), ui-sans-serif, system-ui;
   }
 }
 

@@ -1,13 +1,13 @@
 import json
-import os
 from openai import AsyncOpenAI
 from core.intelligence import TribunalVerdict
 from core.models import CandidateProfile, JobDescription
 from core.toon import encode
+from core.config import OPENAI_API_KEY
 
 class TribunalService:
     def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.api_key = OPENAI_API_KEY
         self.client = AsyncOpenAI(api_key=self.api_key) if self.api_key else None
         
     async def evaluate_narrative(
@@ -75,15 +75,17 @@ class TribunalService:
         """
 
         try:
+            model = "gpt-4o-mini"
             completion = await self.client.beta.chat.completions.parse(
-                model="gpt-4o", # Use smart model for reasoning
+                model=model, # Optimized model
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
+                    {"role": "user",   "content": user_prompt}
                 ],
                 response_format=TribunalVerdict,
                 temperature=0.2 # low temp for consistent tagging
             )
+            
             return completion.choices[0].message.parsed
             
         except Exception as e:

@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { decryptField } from "@/lib/crypto";
 import { useState, useEffect } from "react";
-import { MessageCircle, Mail } from "lucide-react";
+import { MessageCircle, Mail, ChevronRight, User, MapPin } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
     Dialog,
@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
+import { API_BASE } from "@/lib/api";
 
 interface Candidate {
     id: string;
@@ -35,7 +36,6 @@ interface Candidate {
     city: string;
     state: string;
     source?: string;
-    match_score?: number;
     open_to_work?: boolean;
     profile_url?: string;
 }
@@ -103,7 +103,7 @@ export function CandidateTable({ candidates, onView, onSelectionChange, selected
         if (!currentCandidate) return;
         setSending(true);
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/candidates/message`, {
+            const res = await fetch(`${API_BASE}/candidates/message`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -146,8 +146,8 @@ export function CandidateTable({ candidates, onView, onSelectionChange, selected
             <Table>
                 <TableHeader>
                     <TableRow>
-                        <TableHead className="w-[40px]"></TableHead>
-                        <TableHead className="w-[200px]">Name</TableHead>
+                        <TableHead className="w-10"></TableHead>
+                        <TableHead className="w-50">Name</TableHead>
                         <TableHead>Email</TableHead>
                         <TableHead>Match</TableHead>
                         <TableHead>Location</TableHead>
@@ -170,7 +170,7 @@ export function CandidateTable({ candidates, onView, onSelectionChange, selected
             </Table>
 
             <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-                <DialogContent className="sm:max-w-[500px]">
+                <DialogContent className="sm:max-w-125">
                     <DialogHeader>
                         <DialogTitle>Message {currentCandidate?.firstName} {currentCandidate?.lastName}</DialogTitle>
                         <DialogDescription>
@@ -184,7 +184,7 @@ export function CandidateTable({ candidates, onView, onSelectionChange, selected
                                 id="message"
                                 value={messageText}
                                 onChange={(e) => setMessageText(e.target.value)}
-                                className="h-[150px]"
+                                className="h-37.5"
                             />
                         </div>
                     </div>
@@ -226,7 +226,7 @@ function CandidateRow({
         e.stopPropagation();
         setEngaging(true);
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/candidates/${candidate.id}/engage`, {
+            const res = await fetch(`${API_BASE}/candidates/${candidate.id}/engage`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ candidate_id: candidate.id })
@@ -243,7 +243,7 @@ function CandidateRow({
         e.stopPropagation();
         setAssessing(true);
         try {
-            const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/candidates/${candidate.id}/assess`, {
+            const res = await fetch(`${API_BASE}/candidates/${candidate.id}/assess`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ candidate_id: candidate.id })
@@ -256,6 +256,8 @@ function CandidateRow({
         }
     };
 
+    // Fallback logic for candidate name
+    const displayName = `${candidate.firstName || ''} ${candidate.lastName || ''}`.trim() || 'Unknown';
     return (
         <TableRow>
             <TableCell>
@@ -267,16 +269,16 @@ function CandidateRow({
             <TableCell className="font-medium">
                 <div className="flex items-center gap-3">
                     <Avatar className="h-8 w-8">
-                        <AvatarFallback>{candidate.firstName[0]}{candidate.lastName?.[0] || ''}</AvatarFallback>
+                        <AvatarFallback>{displayName[0] || '?'}</AvatarFallback>
                     </Avatar>
                     <div>
                         <div className="flex items-center gap-2">
                             {candidate.profile_url ? (
                                 <a href={candidate.profile_url} target="_blank" rel="noopener noreferrer" className="hover:underline font-semibold text-primary">
-                                    {candidate.firstName} {candidate.lastName}
+                                    {displayName}
                                 </a>
                             ) : (
-                                <span>{candidate.firstName} {candidate.lastName}</span>
+                                <span>{displayName}</span>
                             )}
                             {candidate.open_to_work && (
                                 <span className="flex h-2 w-2 rounded-full bg-green-500" title="Open to Work" />
@@ -292,8 +294,8 @@ function CandidateRow({
                         <a href={candidate.profile_url} target="_blank" rel="noopener noreferrer">
                             <Badge variant={candidate.source === "VettedDB" ? "default" : "outline"}
                                 className={
-                                    candidate.source === "VettedDB" ? "bg-purple-100 text-purple-700 hover:bg-purple-100 border-purple-200" :
-                                        candidate.source === "LinkedIn" ? "bg-blue-100 text-blue-700 hover:bg-blue-100 border-blue-200 cursor-pointer" : ""
+                                    candidate.source === "VettedDB" ? "bg-primary/10 text-primary hover:bg-primary/20 border-primary/20" :
+                                        candidate.source === "LinkedIn" ? "bg-sky-100 text-sky-700 hover:bg-sky-200 border-sky-200 cursor-pointer" : "bg-slate-100 text-slate-700 border-slate-200"
                                 }>
                                 {candidate.source || "JobDiva"}
                             </Badge>
@@ -301,8 +303,8 @@ function CandidateRow({
                     ) : (
                         <Badge variant={candidate.source === "VettedDB" ? "default" : "outline"}
                             className={
-                                candidate.source === "VettedDB" ? "bg-purple-100 text-purple-700 hover:bg-purple-100 border-purple-200" :
-                                    candidate.source === "LinkedIn" ? "bg-blue-100 text-blue-700 hover:bg-blue-100 border-blue-200" : ""
+                                candidate.source === "VettedDB" ? "bg-primary/10 text-primary hover:bg-primary/20 border-primary/20" :
+                                    candidate.source === "LinkedIn" ? "bg-sky-100 text-sky-700 hover:bg-sky-200 border-sky-200" : "bg-slate-100 text-slate-700 border-slate-200"
                             }>
                             {candidate.source || "JobDiva"}
                         </Badge>
@@ -312,22 +314,15 @@ function CandidateRow({
                     )}
                 </div>
             </TableCell>
-            <TableCell>
-                {candidate.match_score ? (
-                    <span className={`font-bold ${candidate.match_score > 90 ? 'text-green-600' : 'text-blue-600'}`}>
-                        {candidate.match_score}%
-                    </span>
-                ) : "-"}
-            </TableCell>
             <TableCell>{candidate.city}, {candidate.state}</TableCell>
             <TableCell className="text-right">
                 <div className="flex justify-end gap-2">
                     <Button
                         size="sm"
                         variant="outline"
-                        className={isMessaged ? "bg-green-50 text-green-600 border-green-200" :
-                            candidate.source === "LinkedIn" ? "hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200" :
-                                "hover:bg-orange-50 hover:text-orange-600 hover:border-orange-200"}
+                        className={isMessaged ? "bg-emerald-50 text-emerald-600 border-emerald-200" :
+                            candidate.source === "LinkedIn" ? "hover:bg-sky-50 hover:text-sky-600 hover:border-sky-200 shadow-sm" :
+                                "hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-200 shadow-sm"}
                         onClick={(e) => { e.stopPropagation(); onMessageClick(); }}
                         disabled={isMessaged}
                     >
@@ -338,29 +333,32 @@ function CandidateRow({
                         )}
                         {isMessaged ? "Sent" : (candidate.source === "LinkedIn" ? "Message" : "Email")}
                     </Button>
-                    {candidate.source !== "LinkedIn" && (
-                        <>
-                            <Button
-                                size="sm"
-                                variant="outline"
-                                className={engaged ? "bg-green-50 text-green-600 border-green-200" : ""}
-                                onClick={handleEngage}
-                                disabled={engaging || engaged}
-                            >
-                                {engaging ? "..." : engaged ? "Sent" : "Engage"}
-                            </Button>
-                            <Button
-                                size="sm"
-                                variant="outline"
-                                className={assessed ? "bg-purple-50 text-purple-600 border-purple-200" : ""}
-                                onClick={handleAssess}
-                                disabled={assessing || assessed}
-                            >
-                                {assessing ? "..." : assessed ? "Sent" : "Assess"}
-                            </Button>
-                        </>
-                    )}
-                    <Button variant="ghost" size="sm" onClick={() => onView && onView(candidate)}>View</Button>
+                    <Button
+                        size="sm"
+                        variant="outline"
+                        className={engaged ? "bg-amber-50 text-amber-600 border-amber-200" : "hover:bg-amber-50 hover:text-amber-600 hover:border-amber-200 transition-colors"}
+                        onClick={handleEngage}
+                        disabled={engaging || engaged}
+                    >
+                        {engaging ? "..." : engaged ? "Engaged" : "Engage"}
+                    </Button>
+                    <Button
+                        size="sm"
+                        variant="outline"
+                        className={assessed ? "bg-violet-50 text-violet-600 border-violet-200" : "hover:bg-violet-50 hover:text-violet-600 hover:border-violet-200 transition-colors"}
+                        onClick={handleAssess}
+                        disabled={assessing || assessed}
+                    >
+                        {assessing ? "..." : assessed ? "Assessed" : "Assess"}
+                    </Button>
+                    <Button 
+                        variant="ghost" 
+                        size="icon" 
+                        className="h-8 w-8 hover:bg-slate-100 text-slate-400 hover:text-slate-900 transition-all"
+                        onClick={() => onView && onView(candidate)}
+                    >
+                        <ChevronRight className="h-5 w-5" />
+                    </Button>
                 </div>
             </TableCell>
         </TableRow>

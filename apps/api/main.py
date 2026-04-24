@@ -1,254 +1,400 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, Query, UploadFile, File
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import asyncio
+import json
+import logging
+import os
+import psycopg2
+import psycopg2.extras
+from psycopg2.extras import RealDictCursor
+import httpx
+import time
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from dotenv import load_dotenv
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from sqlalchemy import text
+from contextlib import asynccontextmanager
 
-# Load environment variables
+from core import (
+    OPENAI_API_KEY, DATABASE_URL, 
+    JOBDIVA_JOB_NOTES_UDF_ID, ALLOWED_ORIGINS
+)
+
+# Load environment variables (core handles .env, but keeping load_dotenv for compatibility)
 load_dotenv()
+
+# Helper function for readable IST timestamps
+def readable_ist_now() -> str:
+    """Returns current IST time in readable format: 2026-02-24 16:25:59 IST"""
+    ist = timezone(timedelta(hours=5, minutes=30))
+    return datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
+
+# Setup structured logging. JSON by default (override LOG_FORMAT=text for
+# local dev readability) and picks up LOG_LEVEL from env. New Relic /
+# Datadog / OpenTelemetry can layer on later with zero code change.
+from core.logging import configure_logging, RequestIDMiddleware
+configure_logging()
+logger = logging.getLogger(__name__)
 
 from services.ai_service import ai_service
 from models import (
     JobDescription, MatchResult, ParsedJobRequest, ParsedJobResponse,
-    ChatRequest, ChatResponse, CandidateSearchRequest, CandidateMessageRequest, JobFetchRequest,
-    CandidateAnalysisRequest, CandidateAnalysisResponse
+    ChatRequest, ChatResponse, CandidateSearchRequest, CandidateMessageRequest, CandidatesSaveRequest, JobFetchRequest,
+    CandidateAnalysisRequest, CandidateAnalysisResponse, JobCriterion, JobCriteriaResponse,
+    JobCriteriaUpdate, JobDraftData, JobDraftRequirement, JobDraftRequirements, 
+    JobDraftResponse, JobPublishRequest, JobBasicInfoUpdate, SkillsExtractionRequest, SkillsExtractionResponse,
+    JobSkillsSummaryResponse, ExternalJobCreateRequest, ManualCandidateRequest
 )
 from matcher import mock_match_candidates
 from services.extractor import llm_extractor
 from services.jobdiva import jobdiva_service
 from services.unipile import unipile_service
 from services.chat_service import chat_service
-from routers import engagement
+from services.monitored_jobs_storage import MonitoredJobsStorage
+from services.job_rubric_db import JobRubricDB
 
-app = FastAPI(title="Hoonr.ai API")
+# Legacy file-based tracking replaced by monitored_jobs SQL table
+
+# Global scheduler
+scheduler = AsyncIOScheduler()
+
+def schedule_next_poll():
+    """Schedule next poll 5 minutes from now, canceling any existing poll"""
+    try:
+        # Remove existing scheduled poll if any
+        if scheduler.get_job("job_status_poll"):
+            scheduler.remove_job("job_status_poll")
+        
+        # Schedule new poll 5 minutes from now
+        scheduler.add_job(
+            poll_all_jobs,
+            "date",
+            run_date=datetime.now(timezone(timedelta(hours=5, minutes=30))) + timedelta(minutes=5),
+            id="job_status_poll",
+            replace_existing=True
+        )
+        
+        next_run = datetime.now(timezone(timedelta(hours=5, minutes=30))) + timedelta(minutes=5)
+        logger.info(f"🔄 Next auto-poll scheduled for: {next_run.strftime('%Y-%m-%d %H:%M:%S IST')}")
+    except Exception as e:
+        logger.error(f"Failed to schedule next poll: {e}")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application lifecycle - start/stop scheduler"""
+    # Startup
+    logger.info("🚀 Starting dynamic job status monitoring scheduler...")
+    
+    scheduler.start()
+    
+    # 1. Schedule job status polling (existing)
+    schedule_next_poll()
+
+    # 2. Schedule "Always-On" JobDiva Sync (Zero-Setup / Production-Safe)
+    from services.auto_assign_service import auto_assign_service
+    
+    async def auto_sync_all_jobs():
+        """
+        Global sync agent that runs inside the app process.
+        Uses a simple 'skip loop' if a sync is already in progress.
+        """
+        if getattr(app, "sync_in_progress", False):
+            logger.info("🤖 [AutoSync] Cycle skipped: A sync is already running.")
+            return
+            
+        app.sync_in_progress = True
+        logger.info("🤖 [AutoSync] Starting built-in 15-minute synchronization cycle...")
+        
+        try:
+            from psycopg2.extras import RealDictCursor
+            conn = get_db_connection()
+            cur = conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute("SELECT job_id, title FROM monitored_jobs")
+            jobs = cur.fetchall()
+            cur.close()
+            conn.close()
+            
+            if not jobs:
+                logger.info("🤖 [AutoSync] No jobs to sync.")
+                return
+
+            for job in jobs:
+                jid = job['job_id']
+                logger.info(f"🤖 [AutoSync] Syncing: {job.get('title', jid)}")
+                await auto_assign_service.synchronize_job_applicants(jid)
+                await asyncio.sleep(2) # Prevent hammering the API
+                
+            logger.info(f"✅ [AutoSync] Cycle complete for {len(jobs)} jobs.")
+        except Exception as e:
+            logger.error(f"❌ [AutoSync] Cycle failed: {e}")
+        finally:
+            app.sync_in_progress = False
+
+    # Interval: Every 15 minutes
+    scheduler.add_job(auto_sync_all_jobs, "interval", minutes=15, id="always_on_sync")
+
+    # 3. Initialize engagement audit table (moved out of module import in
+    # engagement.py so a slow/locked DB can no longer crash-loop the app).
+    # Wrapped in wait_for so even a hung DB does not block readiness.
+    if engagement is not None and hasattr(engagement, "init_engagement_tables"):
+        try:
+            await asyncio.wait_for(engagement.init_engagement_tables(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error("engagement_audit_init_timeout (10s); continuing without init")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"engagement_audit_init_failed: {e}; continuing")
+
+    # 4. Provision monitored_jobs columns once at startup. Previously two
+    # handlers in routers/jobs.py ran `ALTER TABLE monitored_jobs ADD COLUMN
+    # IF NOT EXISTS ...` on every request — ACCESS EXCLUSIVE lock queued
+    # behind the auto-sync's shared lock, so `GET /jobs/monitored` could
+    # stall for 60-90+ seconds. Run it once here; skip it in the hot path.
+    if jobs_router is not None and hasattr(jobs_router, "init_monitored_jobs_schema"):
+        try:
+            await asyncio.wait_for(jobs_router.init_monitored_jobs_schema(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error("monitored_jobs_schema_init_timeout (10s); continuing")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"monitored_jobs_schema_init_failed: {e}; continuing")
+
+    # 5. Provision sourced_candidates + candidate_enhanced_info schema.
+    # Pre-v22: `_ensure_table` ran CREATE TABLE + 6x ALTER on every save, and
+    # `save_candidate_enhanced_info` ran its own CREATE TABLE + ALTER + CREATE
+    # INDEX per call. ALTER TABLE grabs ACCESS EXCLUSIVE and serialized every
+    # concurrent reader/writer. Budget 15s because candidate_enhanced_info is
+    # larger than monitored_jobs and the initial CREATE INDEX can take longer.
+    try:
+        from services import sourced_candidates_storage as _scs
+        await asyncio.wait_for(_scs.init_sourced_candidates_schema(), timeout=15)
+    except asyncio.TimeoutError:
+        logger.error("sourced_candidates_schema_init_timeout (15s); continuing")
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"sourced_candidates_schema_init_failed: {e}; continuing")
+
+    # Delay first auto-sync 60s. Previously the sync ran immediately and held
+    # the DB pool for minutes, while fresh user requests queued behind it —
+    # manifesting as site-wide slowness right after every deploy. The 15-min
+    # interval schedule above still catches everything; the delay just keeps
+    # the cold-start window uncontested.
+    async def _delayed_first_sync():
+        await asyncio.sleep(60)
+        await auto_sync_all_jobs()
+
+    asyncio.create_task(_delayed_first_sync())
+
+    yield
+    
+    # Shutdown
+    logger.info("📋 Stopping scheduler...")
+    scheduler.shutdown()
+    
+# Defensive router import. Previously a single `from routers import engagement,
+# ai_generation, voice_agent, boolean_agent, candidate_processing, job_archive`
+# meant one broken module (e.g. engagement's `_ensure_audit_table()` raising at
+# import time on a slow/locked DB) blew up the whole import — so all six
+# routers failed to register and FastAPI answered 404 for every `/api/v1/*`
+# route beneath them. Load each module in isolation; log and continue on
+# failure so an isolated outage in one router does not black-hole unrelated
+# traffic (e.g. the AI-JD generator on `/api/v1/ai-generation`).
+def _safe_import(module_name: str):
+    try:
+        return __import__(f"routers.{module_name}", fromlist=["router"])
+    except Exception as e:  # noqa: BLE001 — broad by design; we never want import errors to crash boot
+        logger.error(
+            "router_import_failed",
+            extra={"router": module_name, "error": str(e)},
+            exc_info=True,
+        )
+        return None
+
+engagement = _safe_import("engagement")
+ai_generation = _safe_import("ai_generation")
+voice_agent = _safe_import("voice_agent")
+boolean_agent = _safe_import("boolean_agent")
+candidate_processing = _safe_import("candidate_processing")
+job_archive = _safe_import("job_archive")
+chat_router = _safe_import("chat")
+tira_router = _safe_import("tira")
+job_criteria_router = _safe_import("job_criteria")
+manual_candidates_router = _safe_import("manual_candidates")
+candidates_router = _safe_import("candidates")
+jobs_router = _safe_import("jobs")
+
+app = FastAPI(title="Hoonr.ai API", lifespan=lifespan)
+# Request-correlation middleware. Must wrap every route so downstream
+# handlers and services see the same request_id via contextvars.
+app.add_middleware(RequestIDMiddleware)
+
+def _mount(module, label: str, **kwargs) -> None:
+    """Mount a router defensively. Same rationale as _safe_import."""
+    if module is None or not hasattr(module, "router"):
+        logger.warning("router_skip_not_loaded", extra={"router": label})
+        return
+    try:
+        app.include_router(module.router, **kwargs)
+    except Exception as e:  # noqa: BLE001
+        logger.error(
+            "router_mount_failed",
+            extra={"router": label, "error": str(e)},
+            exc_info=True,
+        )
+
+_mount(ai_generation, "ai_generation", prefix="/api/v1/ai-generation")
+_mount(ai_generation, "ai_generation(gemini)", prefix="/api/v1/gemini")
+_mount(voice_agent, "voice_agent", prefix="/api/v1/voice")
+_mount(boolean_agent, "boolean_agent", prefix="/api/v1/boolean")
+_mount(candidate_processing, "candidate_processing", prefix="/api/v1/candidates")
+_mount(job_archive, "job_archive")
+_mount(chat_router, "chat")
+_mount(tira_router, "tira")
+_mount(job_criteria_router, "job_criteria")
+_mount(manual_candidates_router, "manual_candidates")
+_mount(candidates_router, "candidates")
+_mount(jobs_router, "jobs")
+_mount(engagement, "engagement", prefix="/api/v1/engagement")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allow all origins for local dev
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-@app.post("/jobs/parse", response_model=ParsedJobResponse)
-async def parse_job_description(request: ParsedJobRequest):
-    """
-    Parses raw text JD into structured format (skills, location, etc).
-    """
-    try:
-        data = await llm_extractor.extract_from_jd(request.text)
-        return ParsedJobResponse(
-            title=data.title,
-            summary=data.summary,
-            hard_skills=data.hard_skills,
-            soft_skills=data.soft_skills,
-            experience_level=data.experience_level,
-            location_type=data.location_type
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/candidates/search")
-async def search_jobdiva_candidates(request: CandidateSearchRequest):
-    """
-    Searches JobDiva, Vetted Database, AND LinkedIn (via Unipile) for candidates.
-    """
-    # Determine effective location based on location_type
-    effective_location = None if request.location_type.lower() == "remote" else request.location
-    
-    print(f"🔥 DEBUG: SEARCH REQUEST: {request.model_dump_json()}")
-    print(f"🔥 DEBUG: SEARCH: location_type={request.location_type}, effective_location={effective_location}, sources={request.sources}, open_to_work={request.open_to_work}")
-    
-    # 1. Define Helper Wrapper
-    async def safe_search(coro, name):
-        try:
-            print(f"🔍 Starting {name} search...")
-            result = await asyncio.wait_for(coro, timeout=30.0)
-            print(f"✅ {name} returned {len(result)} results")
-            return result
-        except asyncio.TimeoutError:
-            print(f"⚠️ {name} Search Timed Out (>30s). Skipping.")
-            return []
-        except Exception as e:
-            print(f"❌ {name} Search Failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
 
-    # 2. Prepare Tasks
-    tasks = []
-    
-    # Task A: JobDiva
-    if "JobDiva" in request.sources:
-        tasks.append(safe_search(
-            jobdiva_service.search_candidates(request.skills, effective_location, request.page, request.limit), 
-            "JobDiva"
-        ))
-    else:
-        tasks.append(asyncio.sleep(0, result=[]))
 
-    # Task B: Vetted DB
-    if "VettedDB" in request.sources:
-        skill_names = []
-        for s in request.skills:
-             if isinstance(s, dict): skill_names.append(s.get("name"))
-             elif hasattr(s, "name"): skill_names.append(s.name)
-             else: skill_names.append(str(s))
+
+
+
+
+
+
+
+
+# Job monitoring utility functions
+def load_monitored_jobs() -> Dict[str, Any]:
+    """Load the list of jobs being monitored from PostgreSQL via JobDivaService"""
+    return jobdiva_service.get_all_monitored_jobs()
+
+def save_monitored_jobs(jobs_data: Dict[str, Any]):
+    """Save/Update monitored jobs in PostgreSQL via JobDivaService"""
+    for jid, details in jobs_data.get("jobs", {}).items():
+        jobdiva_service.monitor_job_locally(jid, details)
+
+async def poll_all_jobs():
+    """Background task to poll all monitored jobs for status changes"""
+    logger.info("🔄 Starting job status polling...")
+    
+    jobs_data = load_monitored_jobs()
+    job_ids = list(jobs_data.get("jobs", {}).keys())
+    
+    if not job_ids:
+        logger.info("No jobs to monitor")
+        return
+    
+    logger.info(f"Polling {len(job_ids)} jobs: {job_ids}")
+    
+    # Batch fetch statuses
+    statuses = await jobdiva_service.get_multiple_jobs_status(job_ids)
+    
+    # Update local tracking in-place to avoid deleting jobs that failed to poll
+    import time
+    changes_detected = []
+    
+    # We use the existing jobs_data dict and update it
+    current_jobs = jobs_data.get("jobs", {})
+    
+    for status in statuses:
+        job_id = status["job_id"]
+        current_status = status["status"]
         
-        from services.vetted import vetted_service
-        tasks.append(safe_search(
-            vetted_service.search_candidates(skill_names, effective_location, request.page, request.limit),
-            "VettedDB"
-        ))
-    else:
-        tasks.append(asyncio.sleep(0, result=[]))
-
-    # Task C: LinkedIn (Unipile)
-    if "LinkedIn" in request.sources:
-        tasks.append(safe_search(
-            unipile_service.search_candidates(
-                request.skills, 
-                effective_location, 
-                request.open_to_work, 
-                25 if request.limit > 25 else request.limit # Cap at 25 as requested
-            ),
-            "LinkedIn"
-        ))
-    else:
-        tasks.append(asyncio.sleep(0, result=[]))
-
-    # 3. Execute in Parallel
-    results = await asyncio.gather(*tasks)
-    
-    jd_results = results[0] if isinstance(results[0], list) else []
-    vet_results = results[1] if isinstance(results[1], list) else []
-    li_results = results[2] if isinstance(results[2], list) else []
-    
-    print(f"✅ SEARCH COMPLETE: JobDiva={len(jd_results)}, Vetted={len(vet_results)}, LinkedIn={len(li_results)}")
-    
-    # 4. Combine
-    if request.page == 1:
-        # Prioritize Vetted, then LinkedIn, then JobDiva? Or Mix?
-        # User implies LinkedIn is "extra".
-        combined = vet_results + li_results + jd_results
-    else:
-        combined = jd_results # Pagination logic weak, assume others fit in page 1
-        
-    return combined
-
-@app.post("/candidates/message")
-async def message_candidate(request: CandidateMessageRequest):
-    """
-    Sends a message to a candidate via the specified source provider.
-    Currently supports: LinkedIn (via Unipile).
-    """
-    if request.source == "LinkedIn":
-        success = await unipile_service.send_message(request.candidate_provider_id, request.message)
-        if success:
-            return {"status": "success", "detail": "Message queued/sent via LinkedIn"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to send LinkedIn message")
+        if job_id not in current_jobs:
+            continue
             
-    elif request.source in ["JobDiva", "VettedDB", "Email"]:
-        # Mock Email Send (Log it)
-        print(f"📧 EMAIL OUTREACH: Sending email to candidate {request.candidate_provider_id}")
-        print(f"📧 Subject: (Auto-generated)")
-        print(f"📧 Body: {request.message}")
-        return {"status": "success", "detail": f"Email simulation successful for {request.source}"}
+        old_data = current_jobs[job_id]
+        old_status = old_data.get("status", "UNKNOWN")
         
-    else:
-        raise HTTPException(status_code=400, detail=f"Messaging not supported for source: {request.source}")
+        # Track changes
+        if old_status != current_status:
+            changes_detected.append({
+                "job_id": job_id,
+                "old_status": old_status,
+                "new_status": current_status,
+                "title": status.get("title", "")
+            })
+        
+        # Safety Check: Do not overwrite with NOT_FOUND if we already have data
+        if current_status == "NOT_FOUND":
+            logger.warning(f"⚠️ Polling returned NOT_FOUND for {job_id}. Preserving status '{old_status}'.")
+            continue
 
-@app.post("/candidates/analyze", response_model=CandidateAnalysisResponse)
-async def analyze_candidates(request: CandidateAnalysisRequest):
-    """
-    Batch analyzes candidates against JD using AI.
-    """
-    candidates_to_process = []
+        # UPDATE in-place for legacy file compatibility
+        old_data.update({
+            "status":       current_status,
+            "customer_name": status.get("customer_name", "Unknown"),
+            "title":        status.get("title", ""),
+        })
+        
+        # NEW: Update the Database (PostgreSQL) as well
+        db_data = {
+            "status": current_status,
+            "customer_name": status.get("customer_name"),
+            "title": status.get("title")
+        }
+        jobdiva_service.monitor_job_locally(job_id, db_data)
     
-    # We need to ensure we have resume text for analysis.
-    # If the client sent it, great. If not, we fetch it given the ID.
-    for c in request.candidates: 
-        c_text = c.get("resume_text")
-        if not c_text:
-             # Try fetch if missing
-             try:
-                # Determine Source to Route Correctly
-                source = c.get("source", "JobDiva")
-                if source == "VettedDB":
-                    from services.vetted import vetted_service
-                    c_text = await vetted_service.get_candidate_resume(c.get("id"))
-                else:
-                    # Default to JobDiva
-                    c_text = await jobdiva_service.get_candidate_resume(c.get("id"))
-                
-                c["resume_text"] = c_text
-             except Exception as e:
-                # Log but continue, AI will just have less context
-                print(f"Error fetching resume for {c.get('id')}: {e}")
-                pass
-        candidates_to_process.append(c)
+    # Save updated data
+    jobs_data["last_sync"] = readable_ist_now()
+    save_monitored_jobs(jobs_data)
+    
+    if changes_detected:
+        logger.info(f"📢 Status changes detected: {changes_detected}")
+    else:
+        logger.info("✅ No status changes detected")
+    
+    # Schedule next poll 5 minutes from now
+    schedule_next_poll()
+    
+    return {"polled": len(job_ids), "changes": changes_detected}
 
-    results = await ai_service.analyze_candidates_batch(
-        candidates_to_process, 
-        request.job_description,
-        structured_jd=request.structured_jd
-    )
-    return {"results": results, "name": "", "email": "", "skills": [], "experience_years": 0} # Dummy fields to satisfy model if strict
 
-@app.post("/jobs/fetch")
-async def fetch_job_from_jobdiva(request: JobFetchRequest):
-    """
-    Fetches Full Job Details from JobDiva by ID.
-    """
-    job = await jobdiva_service.get_job_by_id(request.job_id)
-    if not job:
-         raise HTTPException(status_code=404, detail="Job not found in JobDiva")
-    return job
 
-@app.get("/candidates/{candidate_id}/resume")
-async def get_candidate_resume(candidate_id: str):
-    """
-    Fetches the resume text for a candidate.
-    Waterfall: LinkedIn (via Unipile + AI), JobDiva, then Vetted API.
-    """
-    # 1. LinkedIn (Unipile)
-    if candidate_id.startswith("unipile_"):
-        real_id = candidate_id.replace("unipile_", "")
-        print(f"🔍 Fetching LinkedIn Profile for {real_id}...")
-        profile = await unipile_service.get_candidate_profile(real_id)
-        
-        if profile:
-            print(f"✅ Profile found. Generating Resume with AI...")
-            resume_text = await ai_service.generate_resume_from_profile(profile)
-            return {"resume_text": resume_text}
-        else:
-            raise HTTPException(status_code=404, detail="LinkedIn Profile not found or accessible")
+# =====================================================
+# JOB DRAFTS API ENDPOINTS
+# =====================================================
 
-    try:
-        resume_text = await jobdiva_service.get_candidate_resume(candidate_id)
-        
-        # Check if JobDiva returned error string (it doesn't raise Exception)
-        if not resume_text or "Resume content unavailable" in resume_text:
-             raise Exception("JobDiva Resume Not Found")
-             
-        return {"resume_text": resume_text}
-    except Exception:
-        # If JobDiva fails (404), try Vetted DB
-        try:
-            from services.vetted import vetted_service
-            resume_text = await vetted_service.get_candidate_resume(candidate_id)
-            if resume_text:
-                return {"resume_text": resume_text}
-            raise HTTPException(status_code=404, detail="Resume not found in any source")
-        except Exception:
-            raise HTTPException(status_code=404, detail="Resume not found")
+from core.db import get_db_connection  # re-exported for callers that import from main
 
-@app.post("/chat", response_model=ChatResponse)
-async def chat_with_aria(request: ChatRequest):
-    response = await chat_service.get_response(request.message, request.history)
-    return {"response": response}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

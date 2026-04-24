@@ -1,0 +1,33 @@
+[Unit]
+Description=AI Recruiter Next.js Application
+After=network-online.target airecruiter-api.service
+Wants=network-online.target
+Requires=airecruiter-api.service
+RequiresMountsFor=/home/ubuntu/codebase/airecruiter/apps/web
+
+[Service]
+Type=exec
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/codebase/airecruiter/apps/web
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=NEXT_TELEMETRY_DISABLED=1
+ExecStart=/usr/bin/npm start
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=airecruiter-web
+
+# Security and resource limits
+NoNewPrivileges=true
+LimitNOFILE=65536
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

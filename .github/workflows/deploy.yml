@@ -1,0 +1,96 @@
+name: Deploy Pair Application
+
+on:
+  push:
+    branches:
+      - develop
+      - main
+
+jobs:
+
+  # ----------------------
+  # QA DEPLOYMENT
+  # ----------------------
+  deploy-qa:
+    if: github.ref_name == 'develop'
+    runs-on: ubuntu-latest
+
+    environment:
+      name: qa
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AZURE_JOB_DIVA_KEY_QA }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ secrets.AZURE_JOB_DIVA_HOST_QA }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to QA VM
+        env:
+          DOMAIN_NAME: qacurate.hoonr.ai
+        run: |
+          ssh -i ~/.ssh/id_ed25519 ubuntu@${{ secrets.AZURE_JOB_DIVA_HOST_QA }} << EOF
+            set -e
+            cd ~/codebase/airecruiter
+            git fetch --all
+            git reset --hard origin/${{ github.ref_name }}
+            export DOMAIN_NAME="$DOMAIN_NAME"
+            bash deploy-azure.sh && export DOMAIN_NAME="$DOMAIN_NAME" && bash setup-ssl.sh
+          EOF
+
+      - name: Deployment Info
+        run: |
+          echo "🚀 QA Deployment Complete"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "👤 Author: ${{ github.event.head_commit.author.name }}"
+          echo "💬 Message: ${{ github.event.head_commit.message }}"
+
+
+
+  # ----------------------
+  # PRODUCTION DEPLOYMENT
+  # ----------------------
+  deploy-prod:
+    if: github.ref_name == 'main'
+    #if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    environment:
+      name: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.AZURE_JOB_DIVA_KEY_PROD }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H ${{ secrets.AZURE_JOB_DIVA_HOST_PROD }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to PROD VM
+        env:
+          DOMAIN_NAME: curate.hoonr.ai
+        run: |
+          ssh -i ~/.ssh/id_ed25519 ubuntu@${{ secrets.AZURE_JOB_DIVA_HOST_PROD }} << EOF
+            set -e
+            cd ~/codebase/airecruiter
+            git fetch --all
+            git reset --hard origin/${{ github.ref_name }}
+            export DOMAIN_NAME="$DOMAIN_NAME"
+            bash deploy-azure.sh && export DOMAIN_NAME="$DOMAIN_NAME" && bash setup-ssl.sh
+          EOF
+
+      - name: Deployment Info
+        run: |
+          echo "🚀 PRODUCTION Deployment Complete"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "👤 Author: ${{ github.event.head_commit.author.name }}"
+          echo "💬 Message: ${{ github.event.head_commit.message }}"

@@ -81,6 +81,8 @@ class CandidateProfile(BaseModel):
     # Validation Flags
     is_valid: bool = Field(..., description="Is this a valid Resume/CV? Set False if it looks like a recipe, code block, or random text.")
     parsing_error: Optional[str] = None
+    resume_text: str = "" # Full raw content for persistence
+
 
 # -----------------------------------------------------------------------------
 # Advanced JD Contract

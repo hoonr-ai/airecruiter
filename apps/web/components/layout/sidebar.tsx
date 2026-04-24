@@ -1,61 +1,67 @@
 "use client";
 
 import Link from "next/link";
-import Image from "next/image";
-import { LayoutDashboard, Briefcase, Users, Settings, PlusCircle } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { usePathname } from "next/navigation";
+import { LayoutDashboard, Briefcase, Users, Settings } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { AzureLoginButton } from "@/components/auth/AzureLoginButton";
 
 export function Sidebar() {
+    const pathname = usePathname();
+
+    const navItems = [
+        { label: "Jobs", href: "/", icon: Briefcase },
+        { label: "Candidates", href: "/candidates", icon: Users },
+        { label: "Settings", href: "/settings", icon: Settings },
+    ];
+
     return (
-        <div className="w-64 border-r border-border bg-card/50 backdrop-blur-xl h-screen flex flex-col fixed left-0 top-0">
-            <div className="p-6">
-                <Link href="/" className="flex items-center gap-2 mb-8 cursor-pointer hover:opacity-80 transition-opacity">
-                    <div className="relative w-32 h-10">
-                        <Image
-                            src="/hoonr-logo.png"
-                            alt="Hoonr.ai"
-                            fill
-                            className="object-contain object-left"
-                            priority
-                        />
-                    </div>
-                </Link>
-
-                <Link href="/jobs/new">
-                    <Button className="w-full bg-hoonr-gradient hover:opacity-90 transition-opacity mb-6">
-                        <PlusCircle className="mr-2 h-4 w-4" /> New Job
-                    </Button>
-                </Link>
-
-                <nav className="space-y-2">
-                    <Link href="/" className="flex items-center px-4 py-2.5 text-sm font-medium rounded-lg bg-primary/10 text-primary">
-                        <LayoutDashboard className="mr-3 h-4 w-4" />
-                        Dashboard
-                    </Link>
-                    <Link href="#" className="flex items-center px-4 py-2.5 text-sm font-medium rounded-lg text-muted-foreground hover:bg-accent hover:text-white transition-colors">
-                        <Briefcase className="mr-3 h-4 w-4" />
-                        Jobs
-                    </Link>
-                    <Link href="#" className="flex items-center px-4 py-2.5 text-sm font-medium rounded-lg text-muted-foreground hover:bg-accent hover:text-white transition-colors">
-                        <Users className="mr-3 h-4 w-4" />
-                        Candidates
-                    </Link>
-                    <Link href="#" className="flex items-center px-4 py-2.5 text-sm font-medium rounded-lg text-muted-foreground hover:bg-accent hover:text-white transition-colors">
-                        <Settings className="mr-3 h-4 w-4" />
-                        Settings
-                    </Link>
-                </nav>
+        <div className="w-[260px] border-r border-slate-200 bg-white h-screen flex flex-col fixed left-0 top-0 p-6">
+            {/* Brand wordmark — stacked "Hoonr./Curate" with the arrow
+                flourishes baked into the PNG. Source: apps/web/public/hoonr-curate-logo.png.
+                `unoptimized` skips Next's image pipeline since the source PNG is oversized
+                (2730×1536, 4MB) and we just want the raw asset rendered by the browser. */}
+            <div className="brand flex items-center justify-center mb-10">
+                <img
+                    src="/hoonr-curate-logo.png"
+                    alt="Hoonr.Curate"
+                    width={200}
+                    height={112}
+                    className="object-contain"
+                    style={{ width: 200, height: "auto" }}
+                />
             </div>
 
-            <div className="mt-auto p-6 border-t border-border">
-                <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-blue-500 to-cyan-500" />
-                    <div className="flex-1 overflow-hidden">
-                        <p className="text-sm font-medium truncate">John Smith</p>
-                        <p className="text-xs text-muted-foreground truncate">Recruiter Admin</p>
-                    </div>
-                </div>
-            </div>
+            <nav>
+                <ul className="space-y-2 list-none">
+                    {navItems.map((item) => {
+                        const isActive = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+                        const Icon = item.icon;
+
+                        return (
+                            <li key={item.label}>
+                                <Link 
+                                    href={item.href} 
+                                    className={cn(
+                                        "flex items-center px-4 py-3 text-[14px] font-medium rounded-lg transition-all duration-200 group",
+                                        isActive 
+                                            ? "bg-primary text-white shadow-md shadow-primary/20" 
+                                            : "text-slate-500 hover:bg-slate-50 hover:text-slate-900"
+                                    )}
+                                >
+                                    <Icon className={cn(
+                                        "mr-3 h-[20px] w-[20px] transition-colors duration-200",
+                                        isActive ? "text-white" : "text-slate-400 group-hover:text-slate-600"
+                                    )} />
+                                    {item.label}
+                                </Link>
+                            </li>
+                        );
+                    })}
+                </ul>
+            </nav>
+
+            <AzureLoginButton />
         </div>
     );
 }

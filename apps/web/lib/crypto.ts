@@ -1,4 +1,4 @@
-const ENCRYPTION_KEY = '014f5c76a37102e57a9426964b16a22e358741266b4a7c67dabcd1ed2eedf72e';
+const ENCRYPTION_KEY = process.env.NEXT_PUBLIC_ENCRYPTION_KEY || '';
 
 // Helper to convert hex string to Uint8Array
 function hexToBytes(hex: string): Uint8Array {
