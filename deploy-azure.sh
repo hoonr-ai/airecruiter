@@ -3,9 +3,17 @@
 # Azure-Specific Deployment Script for AI Recruiter
 # This script assumes you have Azure Database for PostgreSQL setup
 #
-# 🔄 REDEPLOYMENT USAGE:
-# Normal redeploy:    ./deploy-azure.sh
-# Force env update:   FORCE_ENV_UPDATE=true ./deploy-azure.sh
+# 🔄 USAGE:
+# Auto-detect (based on git branch):   ./deploy-azure.sh
+# Explicit domain:                     ./deploy-azure.sh curate.hoonr.ai
+# CI/CD (environment variable):        DOMAIN_NAME=domain.com ./deploy-azure.sh
+# Force env update:                    FORCE_ENV_UPDATE=true ./deploy-azure.sh
+#
+# 🌍 DOMAIN DETECTION PRIORITY:
+# 1. Command line argument (highest)
+# 2. DOMAIN_NAME environment variable (CI/CD)  
+# 3. Git branch detection (main→PROD, develop→QA)
+# 4. Default to QA domain
 
 set -e
 
@@ -22,12 +30,61 @@ API_DIR="$PROJECT_DIR/apps/api"
 WEB_DIR="$PROJECT_DIR/apps/web"
 DEPLOY_USER="ubuntu"
 
-# Set default domain for QA if not provided
-if [ -z "$DOMAIN_NAME" ]; then
-    DOMAIN_NAME="qacurate.hoonr.ai"
-fi
+# Function to detect environment domain
+detect_domain() {
+    # Priority order:
+    # 1. Command line argument (highest priority)
+    # 2. Environment variable (CI/CD sets this)
+    # 3. Auto-detect from git branch (for manual runs)
+    # 4. Default fallback
+    
+    if [ -n "$1" ]; then
+        # Command line argument provided
+        echo "$1"
+        return
+    fi
+    
+    if [ -n "$DOMAIN_NAME" ]; then
+        # Environment variable set (CI/CD pipeline)
+        echo "$DOMAIN_NAME"
+        return
+    fi
+    
+    # Auto-detect from git branch (for manual runs)
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    case "$current_branch" in
+        "main"|"master")
+            echo "curate.hoonr.ai"
+            ;;
+        "develop"|"development")
+            echo "qacurate.hoonr.ai"
+            ;;
+        *)
+            # Default to QA for feature branches or unknown
+            echo "qacurate.hoonr.ai"
+            ;;
+    esac
+}
+
+# Store original env var for detection logging
+DOMAIN_NAME_FROM_ENV="$DOMAIN_NAME"
+
+# Detect and set domain
+DOMAIN_NAME=$(detect_domain "$1")
 
 echo -e "${BLUE}🚀 Starting AI Recruiter deployment for Azure...${NC}"
+echo -e "${BLUE}🌍 Deployment Domain: ${YELLOW}$DOMAIN_NAME${NC}"
+
+# Display domain detection method
+if [ -n "$1" ]; then
+    echo -e "${BLUE}🎯 Domain set via: ${GREEN}Command line argument${NC}"
+elif [ -n "${DOMAIN_NAME_FROM_ENV:-$DOMAIN_NAME}" ] && [ -z "$1" ]; then
+    echo -e "${BLUE}🎯 Domain set via: ${GREEN}Environment variable (CI/CD)${NC}"
+else
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    echo -e "${BLUE}🎯 Domain set via: ${GREEN}Git branch auto-detection${NC} (branch: $current_branch)"
+fi
+echo ""
 
 print_status() {
     echo -e "${GREEN}✓${NC} $1"
@@ -152,12 +209,15 @@ print_status "Next.js application built"
 # Configure Nginx reverse proxy
 echo -e "${BLUE}🌐 Configuring Nginx reverse proxy...${NC}"
 
-# Update nginx config with the correct domain
-sed -i "s/qacurate.hoonr.ai/$DOMAIN_NAME/g" "$PROJECT_DIR/nginx.conf"
+# Update nginx config with the correct domain (replace template placeholder)
+sed -i "s/{{DOMAIN_NAME}}/$DOMAIN_NAME/g" "$PROJECT_DIR/nginx.conf"
 
 # Always copy and update nginx config
 sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
 print_status "Nginx configuration updated"
+
+# Restore template for next deployment
+sed -i "s/$DOMAIN_NAME/{{DOMAIN_NAME}}/g" "$PROJECT_DIR/nginx.conf"
 
 # Enable airecruiter site and disable default
 sudo ln -sf /etc/nginx/sites-available/airecruiter /etc/nginx/sites-enabled/
