@@ -2876,6 +2876,8 @@ function NewJobPageContent() {
 
     let idCounter = 1;
     const questions: ScreenQuestion[] = [];
+    const targetRoleSpecificCount =
+      screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5;
     const customQuestions = screenQuestions.filter(
       question => question.category !== "default" && question.category !== "role-specific"
     );
@@ -2951,6 +2953,7 @@ function NewJobPageContent() {
             const cat = String(q?.category || "").toLowerCase();
             return cat !== "default" && cat !== "work-arrangement" && cat !== "intro";
           })
+          .slice(0, targetRoleSpecificCount)
           .forEach((q: any) => {
             roleSpecific.push({
               id: idCounter++,
@@ -2971,9 +2974,8 @@ function NewJobPageContent() {
     // with generic questions even if the LLM endpoint fails.
     if (roleSpecific.length === 0 && rubricData?.skills) {
       rubricData.skills.forEach((skill: any) => {
-        if (questions.length + roleSpecific.length >= 12) return;
+        if (roleSpecific.length >= targetRoleSpecificCount) return;
         const skillName = skill.value || "this technology";
-        const minYears = skill.minYears || 3;
         const promptVariant = roleSpecific.length % 4;
 
         let questionText = "";
@@ -2996,12 +2998,43 @@ function NewJobPageContent() {
         roleSpecific.push({
           id: idCounter++,
           question_text: questionText,
-          pass_criteria: `${passCriteria} Must demonstrate at least ${minYears}+ years of hands-on ${skillName} experience.`,
+          pass_criteria: passCriteria,
           is_default: false,
           category: "role-specific",
           order_index: questions.length + roleSpecific.length,
           is_hard_filter: false,
         });
+      });
+
+      // If we still don't have enough questions (few rubric skills), top up
+      // to the exact level target with generic but concrete prompts.
+      while (roleSpecific.length < targetRoleSpecificCount) {
+        const idx = roleSpecific.length + 1;
+        roleSpecific.push({
+          id: idCounter++,
+          question_text: `Share a recent project example where you solved a non-trivial technical problem. What constraints mattered most?`,
+          pass_criteria: `Candidate gives a concrete project example with constraints, decision rationale, and outcome.`,
+          is_default: false,
+          category: "role-specific",
+          order_index: questions.length + roleSpecific.length,
+          is_hard_filter: false,
+        });
+      }
+    }
+
+    // Belt-and-suspenders: keep role-specific count deterministic by level.
+    if (roleSpecific.length > targetRoleSpecificCount) {
+      roleSpecific.splice(targetRoleSpecificCount);
+    }
+    while (roleSpecific.length < targetRoleSpecificCount) {
+      roleSpecific.push({
+        id: idCounter++,
+        question_text: "Share a recent project example where you solved a non-trivial technical problem. What constraints mattered most?",
+        pass_criteria: "Candidate gives a concrete project example with constraints, decision rationale, and outcome.",
+        is_default: false,
+        category: "role-specific",
+        order_index: questions.length + roleSpecific.length,
+        is_hard_filter: false,
       });
     }
 
