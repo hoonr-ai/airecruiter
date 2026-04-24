@@ -209,7 +209,7 @@ print_status "Next.js application built"
 # Configure Nginx reverse proxy
 echo -e "${BLUE}🌐 Configuring Nginx reverse proxy...${NC}"
 
-# Update nginx config with the correct domain (simple replacement like the old version)
+# Update nginx config with the correct domain
 sed -i "s/qacurate.hoonr.ai/$DOMAIN_NAME/g" "$PROJECT_DIR/nginx.conf"
 
 # Always copy and update nginx config
@@ -228,97 +228,6 @@ if sudo nginx -t; then
 else
     print_error "Nginx configuration test failed"
 fi
-fi
-
-# Create systemd services
-echo -e "${BLUE}🔧 Setting up systemd services...${NC}"
-
-# Copy systemd service files
-    server 127.0.0.1:3000;
-    keepalive 32;
-}
-
-limit_req_zone \\\$binary_remote_addr zone=api_limit:10m rate=30r/m;
-limit_req_zone \\\$binary_remote_addr zone=web_limit:10m rate=600r/m;
-
-# HTTP server
-server {
-    listen 80;
-    server_name $DOMAIN_NAME;
-    
-    # Allow Let's Encrypt validation (for future SSL setup)
-    location /.well-known/acme-challenge/ {
-        root /var/www/html;
-    }
-    
-    # API routes
-    location /api/ {
-        limit_req zone=api_limit burst=10 nodelay;
-        proxy_pass http://airecruiter_api;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \\\$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host \\\$host;
-        proxy_set_header X-Real-IP \\\$remote_addr;
-        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \\\$scheme;
-        proxy_cache_bypass \\\$http_upgrade;
-        proxy_read_timeout 86400;
-    }
-    
-    # Backend API endpoints (non-/api/ prefix)
-    location ~ ^/(jobs|chat|candidates)/ {
-        limit_req zone=api_limit burst=10 nodelay;
-        proxy_pass http://airecruiter_api\\\$uri\\\$is_args\\\$args;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \\\$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host \\\$host;
-        proxy_set_header X-Real-IP \\\$remote_addr;
-        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \\\$scheme;
-        proxy_cache_bypass \\\$http_upgrade;
-        proxy_read_timeout 86400;
-    }
-    
-    # All other requests go to Next.js frontend
-    location / {
-        limit_req zone=web_limit burst=100 nodelay;
-        proxy_pass http://airecruiter_web;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade \\\$http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host \\\$host;
-        proxy_set_header X-Real-IP \\\$remote_addr;
-        proxy_set_header X-Forwarded-For \\\$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \\\$scheme;
-        proxy_cache_bypass \\\$http_upgrade;
-        proxy_read_timeout 86400;
-    }
-}
-EOF
-    sudo cp /tmp/nginx-http-only.conf /etc/nginx/sites-available/airecruiter
-    sudo mkdir -p /var/www/html  # Ensure webroot exists for Let's Encrypt
-    rm -f /tmp/nginx-http-only.conf
-    print_status "HTTP-only Nginx configuration applied"
-    echo -e "${YELLOW}💡${NC} Run './setup-ssl.sh' after deployment to enable HTTPS"
-fi
-
-# Enable airecruiter site and disable default
-sudo ln -sf /etc/nginx/sites-available/airecruiter /etc/nginx/sites-enabled/
-sudo rm -f /etc/nginx/sites-enabled/default
-print_status "Nginx airecruiter site enabled"
-
-# Test and reload nginx configuration
-if sudo nginx -t; then
-    sudo systemctl reload nginx
-    print_status "Nginx configuration reloaded"
-else
-    print_error "Nginx configuration test failed"
-fi
-
-# Create systemd services
-echo -e "${BLUE}🔧 Setting up systemd services...${NC}"
 
 # Copy systemd service files
 if [ -f "$PROJECT_DIR/systemd/airecruiter-api.service" ]; then
