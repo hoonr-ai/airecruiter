@@ -8,15 +8,14 @@ export function AzureLoginButton() {
     const { instance, accounts } = useMsal();
 
     const handleLogin = () => {
-        instance.loginPopup(loginRequest).catch((e) => {
+        instance.loginRedirect(loginRequest).catch((e) => {
             console.error(e);
         });
     };
 
     const handleLogout = () => {
-        instance.logoutPopup({
+        instance.logoutRedirect({
             postLogoutRedirectUri: window.location.origin,
-            mainWindowRedirectUri: window.location.origin,
         }).catch((e) => {
             console.error(e);
         });
@@ -34,7 +33,7 @@ export function AzureLoginButton() {
                         <span className="text-xs text-slate-500 truncate">{accounts[0].username}</span>
                     </div>
                 </div>
-                <button 
+                <button
                     onClick={handleLogout}
                     className="flex w-full justify-center items-center gap-2 px-3 py-2 text-sm text-red-600 hover:bg-red-50 rounded-md transition-colors border border-transparent hover:border-red-100"
                 >
@@ -47,7 +46,7 @@ export function AzureLoginButton() {
 
     return (
         <div className="mt-auto p-4">
-            <button 
+            <button
                 onClick={handleLogin}
                 className="flex w-full justify-center items-center gap-2 px-4 py-2.5 bg-[#0078D4] text-white rounded-lg hover:bg-[#006cbd] transition-colors font-medium shadow-sm"
             >
