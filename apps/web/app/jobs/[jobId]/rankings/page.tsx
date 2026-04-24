@@ -736,8 +736,24 @@ export default function CandidateRankingsPage() {
 
                         <TableCell className="text-center align-top py-2 font-medium text-[#0f172a] text-[13px]">
                           <div className="flex items-center justify-center gap-1.5 w-full text-center">
-                            {screeningScore > 0 ? screeningScore : <span className="font-normal opacity-50">—</span>}
-                            <Lightbulb className="w-3.5 h-3.5 text-amber-500 opacity-80 cursor-help" />
+                            {screeningScore > 0 ? (
+                              <button
+                                onClick={() => openDetails(candidate)}
+                                className="font-semibold text-indigo-600 hover:underline"
+                                title="View detailed resume matching breakdown"
+                              >
+                                {screeningScore}
+                              </button>
+                            ) : (
+                              <span className="font-normal opacity-50">—</span>
+                            )}
+                            <button
+                              onClick={() => openDetails(candidate)}
+                              className="inline-flex"
+                              title="View detailed resume matching breakdown"
+                            >
+                              <Lightbulb className="w-3.5 h-3.5 text-amber-500 opacity-80 cursor-pointer" />
+                            </button>
                           </div>
                         </TableCell>
 
