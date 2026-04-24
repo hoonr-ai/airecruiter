@@ -92,6 +92,9 @@ def _ensure_monitored_jobs_schema() -> None:
             # v28: hot-path read optimizations for GET /jobs/monitored
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_active_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS NOT TRUE",
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_archived_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS TRUE",
+            # v29: direct job-scoped lookup indexes for /jobs/{id}/... APIs
+            "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_job_id_lookup ON monitored_jobs (job_id)",
+            "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_jobdiva_id_lookup ON monitored_jobs (jobdiva_id)",
         ):
             try:
                 cur.execute(stmt)
@@ -884,21 +887,29 @@ def _get_job_draft_sync(job_id: str) -> dict:
         try: return json.loads(val)
         except: return []
 
+    def _fetch_one_monitored_job(cursor, requested_job_id: str):
+        # Avoid `OR` predicates on job_id/jobdiva_id so planner can use single-column
+        # indexes more reliably under load.
+        cursor.execute(
+            """
+            SELECT * FROM monitored_jobs
+            WHERE job_id = %s
+            UNION ALL
+            SELECT * FROM monitored_jobs
+            WHERE jobdiva_id = %s AND job_id <> %s
+            LIMIT 1
+            """,
+            (requested_job_id, requested_job_id, requested_job_id),
+        )
+        return cursor.fetchone()
+
     conn = get_dict_cursor_connection()
     cursor = conn.cursor()
     try:
-        # jobdiva_id format contains '-' (e.g. '26-08807'); pure numeric → job_id PK
-        if '-' in job_id:
-            cursor.execute(
-                "SELECT * FROM monitored_jobs WHERE jobdiva_id = %s",
-                (job_id,)
-            )
-        else:
-            cursor.execute(
-                "SELECT * FROM monitored_jobs WHERE job_id = %s OR job_id = %s",
-                (job_id, job_id.lstrip('0'))
-            )
-        job_row = cursor.fetchone()
+        normalized_job_id = job_id.lstrip('0') if job_id and '-' not in job_id else job_id
+        job_row = _fetch_one_monitored_job(cursor, job_id)
+        if not job_row and normalized_job_id != job_id:
+            job_row = _fetch_one_monitored_job(cursor, normalized_job_id)
     finally:
         cursor.close()
         conn.close()
@@ -1272,16 +1283,25 @@ async def get_monitored_job_data(job_id: str):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
+
         cursor.execute("""
             SELECT job_id, title, enhanced_title, ai_description, selected_job_boards,
-                   recruiter_notes, recruiter_emails, selected_employment_types,
-                   work_authorization, screening_level, current_step, processing_status,
-                   job_requirements, ai_enhanced, created_at, updated_at, jobdiva_id,
-                   is_archived, archive_reason, archived_at
-            FROM monitored_jobs 
-            WHERE job_id = %s OR jobdiva_id = %s
-        """, (job_id, job_id))
+                recruiter_notes, recruiter_emails, selected_employment_types,
+                work_authorization, screening_level, current_step, processing_status,
+                job_requirements, ai_enhanced, created_at, updated_at, jobdiva_id,
+                is_archived, archive_reason, archived_at
+            FROM monitored_jobs
+            WHERE job_id = %s
+            UNION ALL
+            SELECT job_id, title, enhanced_title, ai_description, selected_job_boards,
+                recruiter_notes, recruiter_emails, selected_employment_types,
+                work_authorization, screening_level, current_step, processing_status,
+                job_requirements, ai_enhanced, created_at, updated_at, jobdiva_id,
+                is_archived, archive_reason, archived_at
+            FROM monitored_jobs
+            WHERE jobdiva_id = %s AND job_id <> %s
+            LIMIT 1
+        """, (job_id, job_id, job_id))
         
         row = cursor.fetchone()
         cursor.close()
