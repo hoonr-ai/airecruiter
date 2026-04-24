@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+import httpx
 
 from services.ai_service import ai_service
 from services.jobdiva import jobdiva_service
@@ -937,6 +938,12 @@ class UpdateCandidatePhoneRequest(BaseModel):
     jobdiva_id: Optional[str] = None
 
 
+class EnrichCandidateContactRequest(BaseModel):
+    jobdiva_id: Optional[str] = None
+    source: Optional[str] = None
+    linkedin_url: Optional[str] = None
+
+
 def _normalise_phone(raw: str) -> str:
     raw = (raw or "").strip()
     if not raw:
@@ -944,6 +951,185 @@ def _normalise_phone(raw: str) -> str:
     plus = "+" if raw.startswith("+") else ""
     digits = "".join(ch for ch in raw if ch.isdigit())
     return f"{plus}{digits}" if digits else ""
+
+
+def _extract_enrichment_fields(payload: Any) -> Dict[str, str]:
+    targets = {"workPhone", "mobilePhone", "workEmail", "personalEmail"}
+    found: Dict[str, str] = {}
+
+    def walk(node: Any):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k in targets and isinstance(v, str) and v.strip() and k not in found:
+                    found[k] = v.strip()
+                walk(v)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return found
+
+
+@router.post("/candidates/{candidate_id}/enrich-contact")
+async def enrich_candidate_contact(candidate_id: str, request: EnrichCandidateContactRequest):
+    """
+    Enrich candidate contact details from ZoomInfo using LinkedIn URL.
+    If sourced_candidates rows already exist, updates phone/email + data blob.
+    """
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+    from core.config import (
+        DATABASE_URL,
+        ZOOMINFO_ENRICH_URL,
+        ZOOMINFO_BEARER_TOKEN,
+        ZOOMINFO_CLIENT_ID,
+    )
+
+    if not ZOOMINFO_BEARER_TOKEN:
+        raise HTTPException(status_code=500, detail="ZOOMINFO_BEARER_TOKEN is not configured")
+
+    linkedin_url = (request.linkedin_url or "").strip()
+    existing_rows: List[Dict[str, Any]] = []
+
+    # If linkedin_url not passed, try to infer it from sourced_candidates.profile_url.
+    try:
+        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                query = """
+                    SELECT id, candidate_id, jobdiva_id, source, profile_url, email, phone, data
+                    FROM sourced_candidates
+                    WHERE candidate_id = %s
+                """
+                params: List[Any] = [candidate_id]
+                if request.jobdiva_id:
+                    query += " AND jobdiva_id = %s"
+                    params.append(request.jobdiva_id)
+                if request.source:
+                    query += " AND source = %s"
+                    params.append(request.source)
+                query += " ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST"
+                cur.execute(query, tuple(params))
+                fetched = cur.fetchall() or []
+                existing_rows = [dict(r) for r in fetched]
+
+                if not linkedin_url:
+                    for r in existing_rows:
+                        candidate_profile = (r.get("profile_url") or "").strip()
+                        if candidate_profile:
+                            linkedin_url = candidate_profile
+                            break
+    except Exception as e:
+        logger.warning(f"enrich_contact prefetch failed for {candidate_id}: {e}")
+
+    if not linkedin_url:
+        return {
+            "status": "error",
+            "candidate_id": candidate_id,
+            "message": "LinkedIn URL not available for enrichment",
+            "updated_rows": 0,
+        }
+
+    headers = {
+        "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
+        "Content-Type": "application/json",
+    }
+    if ZOOMINFO_CLIENT_ID:
+        headers["X-Client-Id"] = ZOOMINFO_CLIENT_ID
+
+    zoominfo_payload = {
+        "inputFields": [
+            {
+                "fieldName": "linkedinUrl",
+                "fieldType": "String",
+                "value": linkedin_url,
+            }
+        ],
+        "outputFields": ["workPhone", "mobilePhone", "workEmail", "personalEmail"],
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            zres = await client.post(ZOOMINFO_ENRICH_URL, headers=headers, json=zoominfo_payload)
+    except Exception as e:
+        logger.error(f"ZoomInfo enrich request failed for {candidate_id}: {e}")
+        raise HTTPException(status_code=502, detail=f"ZoomInfo request failed: {str(e)}")
+
+    response_text = zres.text
+    try:
+        zoominfo_data = zres.json()
+    except Exception:
+        zoominfo_data = {"raw": response_text}
+
+    if zres.status_code >= 400:
+        logger.warning(
+            f"ZoomInfo enrich non-2xx for {candidate_id}: {zres.status_code} {response_text[:300]}"
+        )
+        raise HTTPException(status_code=502, detail=f"ZoomInfo API error ({zres.status_code})")
+
+    extracted = _extract_enrichment_fields(zoominfo_data)
+    enriched_phone = _normalise_phone(extracted.get("mobilePhone") or extracted.get("workPhone") or "")
+    if sum(1 for ch in enriched_phone if ch.isdigit()) < 7:
+        enriched_phone = ""
+
+    enriched_email = (
+        extracted.get("workEmail")
+        or extracted.get("personalEmail")
+        or ""
+    ).strip().lower()
+
+    # Persist only when sourced candidate rows exist; Step 5 pre-save calls may
+    # return enriched contact with updated_rows=0 and the FE will persist during save.
+    updated_rows = 0
+    if existing_rows and (enriched_phone or enriched_email):
+        try:
+            with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+                with conn.cursor() as cur:
+                    for row in existing_rows:
+                        data_blob = _json_load_safe(row.get("data"), {})
+                        data_blob["zoominfo_contact_enrichment"] = {
+                            "linkedin_url": linkedin_url,
+                            "workPhone": extracted.get("workPhone"),
+                            "mobilePhone": extracted.get("mobilePhone"),
+                            "workEmail": extracted.get("workEmail"),
+                            "personalEmail": extracted.get("personalEmail"),
+                            "enriched_at": datetime.now(timezone.utc).isoformat(),
+                        }
+
+                        cur.execute(
+                            """
+                            UPDATE sourced_candidates
+                            SET phone = COALESCE(%s, phone),
+                                email = COALESCE(%s, email),
+                                data = %s,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE id = %s
+                            """,
+                            (
+                                enriched_phone or None,
+                                enriched_email or None,
+                                json.dumps(data_blob),
+                                row.get("id"),
+                            ),
+                        )
+                        updated_rows += cur.rowcount
+                conn.commit()
+        except Exception as e:
+            logger.error(f"Failed persisting ZoomInfo enrichment for {candidate_id}: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to persist enrichment: {str(e)}")
+
+    return {
+        "status": "success",
+        "candidate_id": candidate_id,
+        "linkedin_url": linkedin_url,
+        "phone": enriched_phone or None,
+        "email": enriched_email or None,
+        "workPhone": extracted.get("workPhone"),
+        "mobilePhone": extracted.get("mobilePhone"),
+        "workEmail": extracted.get("workEmail"),
+        "personalEmail": extracted.get("personalEmail"),
+        "updated_rows": updated_rows,
+    }
 
 
 @router.patch("/candidates/{candidate_id}/phone")
