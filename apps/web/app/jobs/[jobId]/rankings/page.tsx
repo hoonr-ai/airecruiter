@@ -1,34 +1,27 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
   ArrowLeft,
   Search,
   RefreshCw,
-  Linkedin,
+  Loader2,
   Mail,
   Phone,
-  MapPin,
-  Clock,
-  ExternalLink,
   Medal,
   ChevronDown,
   ChevronUp,
   ChevronsUpDown,
   Filter,
   Calendar,
-  Check,
   X,
   Lightbulb,
-  LinkIcon,
-  Loader2
+  MessageSquare,
+  Send,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   Table,
   TableBody,
@@ -39,7 +32,11 @@ import {
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
+import { CandidateMessageModal } from "@/components/candidate-message-modal";
+import { EngageWizardModal } from "@/components/EngageWizardModal";
+import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
 import { API_BASE } from "@/lib/api";
+import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 
 // Utility function to format dates
 const formatDate = (dateStr: string) => {
@@ -55,7 +52,7 @@ const formatDate = (dateStr: string) => {
       minute: '2-digit',
       hour12: true
     }).toUpperCase();
-  } catch (e) {
+  } catch {
     return dateStr;
   }
 };
@@ -71,6 +68,7 @@ interface JobDetails {
 
 interface Candidate {
   id: number;
+  jobdiva_id?: string;
   candidate_id?: string;
   name: string;
   email: string;
@@ -94,6 +92,7 @@ interface Candidate {
 export default function CandidateRankingsPage() {
   const { jobId } = useParams();
   const router = useRouter();
+  const engagement = useEngagementFlow();
 
   const [job, setJob] = useState<JobDetails | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
@@ -102,7 +101,7 @@ export default function CandidateRankingsPage() {
 
   // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
   // filter updates the table synchronously (no stale state via setFilteredCandidates).
-  type StatusFilter = "all" | "pass" | "fail" | "pending";
+  type StatusFilter = "all" | "done" | "pending";
   type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score";
   type SortDir = "asc" | "desc";
 
@@ -112,13 +111,12 @@ export default function CandidateRankingsPage() {
   const [sortField, setSortField] = useState<SortField>("index");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
 
-  // Derive screening status. Treat unscored candidates (score === 0 or null/undefined)
-  // as "Pending" rather than "Fail" — they haven't been evaluated yet. Only real
-  // evaluations that came in below the 70 bar are "Fail".
-  const deriveStatus = (c: Candidate): "pass" | "fail" | "pending" => {
+  // Resume-matching completion status for filter + table labels.
+  const deriveStatus = (c: Candidate): "done" | "pending" => {
+    const fromData = String(c.data?.resume_matching_status || "").toLowerCase();
+    if (fromData === "done") return "done";
     const s = c.match_score ?? c.resume_match_percentage ?? 0;
-    if (!s) return "pending";
-    return s >= 70 ? "pass" : "fail";
+    return s > 0 ? "done" : "pending";
   };
 
   // Pull availability off the JSONB `data` blob. Different producers put it in
@@ -216,26 +214,260 @@ export default function CandidateRankingsPage() {
   const [detailsModalOpen, setDetailsModalOpen] = useState(false);
   const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
 
-  // Integration Action states
-  const [feedbacks, setFeedbacks] = useState<Record<number, string>>({});
-  const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
-  const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
-  const [rejectReason, setRejectReason] = useState("");
+  // Rank-list actions (Email / Screen / SMS)
+  const [messageModalOpen, setMessageModalOpen] = useState(false);
+  const [selectedCandidateForEmail, setSelectedCandidateForEmail] = useState<Candidate | null>(null);
 
-  const handleConfirmSubmit = () => {
-    if (actionCandidateId) {
-      setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
-      setIntegrationModalOpen(null);
-      setActionCandidateId(null);
+  const [isScreenModalOpen, setIsScreenModalOpen] = useState(false);
+  const [screenPayload, setScreenPayload] = useState<string>("");
+  const [screenLoading, setScreenLoading] = useState(false);
+  const [screenError, setScreenError] = useState<string | null>(null);
+  const [selectedScreenCandidateIds, setSelectedScreenCandidateIds] = useState<string[]>([]);
+  const [screenApiResponse, setScreenApiResponse] = useState<any>(null);
+
+  const [missingPhonesOpen, setMissingPhonesOpen] = useState(false);
+  const [missingPhoneCandidates, setMissingPhoneCandidates] = useState<MissingPhoneCandidate[]>([]);
+  const [pendingScreenCandidate, setPendingScreenCandidate] = useState<Candidate | null>(null);
+  const [enrichingCandidateIds, setEnrichingCandidateIds] = useState<Set<string>>(new Set());
+  const [enrichStatusByCandidateId, setEnrichStatusByCandidateId] = useState<Record<string, { type: "info" | "error" | "success"; message: string }>>({});
+
+  const hasUsablePhone = (p?: string | null) => {
+    const digits = String(p || "").replace(/\D/g, "");
+    return digits.length >= 7;
+  };
+
+  const needsContactEnrichment = (c: Candidate) => {
+    const missingPhone = !hasUsablePhone(c.phone);
+    const missingEmail = !String(c.email || "").trim();
+    return missingPhone || missingEmail;
+  };
+
+  const extractLinkedInFromText = (text?: string | null): string => {
+    const raw = String(text || "");
+    if (!raw) return "";
+    const m = raw.match(/https?:\/\/(?:www\.)?linkedin\.com\/in\/[A-Za-z0-9\-_%]+/i);
+    return m ? m[0] : "";
+  };
+
+  const looksLikeLinkedInProfile = (url?: string | null): boolean => {
+    const u = String(url || "").trim().toLowerCase();
+    return u.includes("linkedin.com/in/");
+  };
+
+  const resolveCandidateLinkedInUrl = (c: Candidate): string => {
+    const dataBlob = c.data || {};
+    const candidates = [
+      c.profile_url,
+      (dataBlob?.profile_url as string | undefined),
+      (dataBlob?.linkedin_url as string | undefined),
+      (dataBlob?.urls?.linkedin as string | undefined),
+      (dataBlob?.urls?.linkedin_url as string | undefined),
+      extractLinkedInFromText(dataBlob?.resume_text as string | undefined),
+    ]
+      .map(v => String(v || "").trim())
+      .filter(Boolean);
+
+    return candidates.find(u => looksLikeLinkedInProfile(u)) || "";
+  };
+
+  const handleEnrichContact = async (candidate: Candidate) => {
+    const candidateKey = String(candidate.candidate_id || candidate.id || "").trim();
+    if (!candidateKey) return;
+
+    const linkedinUrl = resolveCandidateLinkedInUrl(candidate);
+    if (!linkedinUrl) {
+      setEnrichStatusByCandidateId(prev => ({
+        ...prev,
+        [candidateKey]: {
+          type: "error",
+          message: "LinkedIn URL missing — cannot query ZoomInfo.",
+        },
+      }));
+      return;
+    }
+
+    setEnrichStatusByCandidateId(prev => {
+      const next = { ...prev };
+      delete next[candidateKey];
+      return next;
+    });
+
+    setEnrichingCandidateIds(prev => {
+      const next = new Set(prev);
+      next.add(candidateKey);
+      return next;
+    });
+
+    try {
+      const res = await fetch(`${API_BASE}/candidates/${encodeURIComponent(candidateKey)}/enrich-contact`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jobdiva_id: candidate.jobdiva_id || job?.jobdiva_id || String(jobId || "") || undefined,
+          source: candidate.source || undefined,
+          linkedin_url: linkedinUrl,
+          full_name: candidate.name || undefined,
+          company_name:
+            candidate.data?.company_name ||
+            candidate.data?.company?.name ||
+            candidate.data?.enhanced_info?.current_company ||
+            undefined,
+          email: candidate.email || undefined,
+          phone: candidate.phone || undefined,
+        }),
+      });
+
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setEnrichStatusByCandidateId(prev => ({
+          ...prev,
+          [candidateKey]: {
+            type: "error",
+            message: payload?.detail || `ZoomInfo call failed (${res.status})`,
+          },
+        }));
+        return;
+      }
+
+      const nextPhone = payload?.phone || candidate.phone || "";
+      const nextEmail = payload?.email || candidate.email || "";
+
+      if (!nextPhone && !nextEmail) {
+        setEnrichStatusByCandidateId(prev => ({
+          ...prev,
+          [candidateKey]: {
+            type: "info",
+            message: "No contact info found from ZoomInfo for this LinkedIn URL.",
+          },
+        }));
+        return;
+      }
+
+      setEnrichStatusByCandidateId(prev => ({
+        ...prev,
+        [candidateKey]: {
+          type: "success",
+          message: "ZoomInfo contact info applied.",
+        },
+      }));
+
+      setCandidates(prev =>
+        prev.map(c => {
+          const cid = String(c.candidate_id || c.id || "").trim();
+          if (cid !== candidateKey) return c;
+          return {
+            ...c,
+            phone: nextPhone,
+            email: nextEmail,
+            data: {
+              ...(c.data || {}),
+              zoominfo_contact_enrichment: {
+                ...(c.data?.zoominfo_contact_enrichment || {}),
+                linkedin_url: payload?.linkedin_url || linkedinUrl,
+                workPhone: payload?.workPhone || null,
+                mobilePhone: payload?.mobilePhone || null,
+                workEmail: payload?.workEmail || null,
+                personalEmail: payload?.personalEmail || null,
+                phone_source: payload?.phone_source || null,
+              },
+            },
+          };
+        })
+      );
+    } catch (err: any) {
+      setEnrichStatusByCandidateId(prev => ({
+        ...prev,
+        [candidateKey]: {
+          type: "error",
+          message: err?.message || "Enrichment request failed",
+        },
+      }));
+    } finally {
+      setEnrichingCandidateIds(prev => {
+        const next = new Set(prev);
+        next.delete(candidateKey);
+        return next;
+      });
     }
   };
 
-  const handleConfirmReject = () => {
-    if (actionCandidateId && rejectReason) {
-      setFeedbacks(prev => ({ ...prev, [actionCandidateId]: `Reject: ${rejectReason}` }));
-      setIntegrationModalOpen(null);
-      setActionCandidateId(null);
+  const runScreen = async (candidate: Candidate) => {
+    setScreenLoading(true);
+    setScreenError(null);
+    try {
+      const data = await engagement.generatePayload({
+        candidateIds: [candidate.candidate_id || String(candidate.id)],
+        jobId: candidate.jobdiva_id || String(jobId || ""),
+      });
+      setScreenPayload(data.payload);
+      setSelectedScreenCandidateIds([candidate.candidate_id || String(candidate.id)]);
+      setIsScreenModalOpen(true);
+    } catch (err: any) {
+      setScreenError(err?.message || "Failed to generate screening payload");
+    } finally {
+      setScreenLoading(false);
     }
+  };
+
+  const handleScreenClick = async (candidate: Candidate) => {
+    if (!hasUsablePhone(candidate.phone)) {
+      setPendingScreenCandidate(candidate);
+      setMissingPhoneCandidates([
+        {
+          candidate_id: String(candidate.candidate_id || candidate.id),
+          name: candidate.name || "Unnamed",
+          headline: candidate.headline || "",
+          location: candidate.location || "",
+          source: candidate.source || "",
+          jobdiva_id: candidate.jobdiva_id || String(jobId || ""),
+        },
+      ]);
+      setMissingPhonesOpen(true);
+      return;
+    }
+    await runScreen(candidate);
+  };
+
+  const handleSendScreen = async (payloadOverride?: string) => {
+    setScreenLoading(true);
+    setScreenError(null);
+    setScreenApiResponse(null);
+    const payloadToSend = payloadOverride ?? screenPayload;
+    try {
+      const data = await engagement.sendBulkInterview({
+        payload: payloadToSend,
+        realCandidateIds: selectedScreenCandidateIds,
+      });
+      setScreenApiResponse(data);
+      if (data.success) {
+        setTimeout(() => {
+          setIsScreenModalOpen(false);
+          fetchData();
+        }, 1200);
+      } else {
+        setScreenError(data.message || "Screen API returned an error");
+      }
+    } catch (err: any) {
+      setScreenError(err?.message || "Screen call failed");
+    } finally {
+      setScreenLoading(false);
+    }
+  };
+
+  const handleEmailCandidate = (candidate: Candidate) => {
+    setSelectedCandidateForEmail(candidate);
+    setMessageModalOpen(true);
+  };
+
+  const handleSmsCandidate = (candidate: Candidate) => {
+    const raw = String(candidate.phone || "").trim();
+    const digits = raw.replace(/\D/g, "");
+    if (!digits) {
+      alert("No phone number available for this candidate.");
+      return;
+    }
+    const smsTarget = raw.startsWith("+") ? `+${digits}` : digits;
+    window.open(`sms:${smsTarget}`, "_blank");
   };
 
   useEffect(() => {
@@ -275,10 +507,20 @@ export default function CandidateRankingsPage() {
         // We keep the first occurrence since they are sorted by created_at DESC from the backend.
         const seen = new Set();
         const uniqueCandidates = candData.candidates.filter((c: any) => {
-          const id = c.candidate_id || c.id;
-          if (!id) return true;
-          if (seen.has(id)) return false;
-          seen.add(id);
+          const candidateIdKey = String(c.candidate_id || "").trim();
+          const emailKey = String(c.email || "").trim().toLowerCase();
+          const nameKey = String(c.name || "").trim().toLowerCase();
+          const dedupKey =
+            candidateIdKey
+              ? `cid:${candidateIdKey}`
+              : emailKey
+                ? `email:${emailKey}`
+                : nameKey
+                  ? `name:${nameKey}`
+                  : `row:${String(c.id || "").trim()}`;
+          if (!dedupKey) return true;
+          if (seen.has(dedupKey)) return false;
+          seen.add(dedupKey);
           return true;
         });
 
@@ -329,34 +571,11 @@ export default function CandidateRankingsPage() {
     setDetailsModalOpen(true);
   };
 
-  const getStatusBadge = (statusOrScore?: string | number) => {
-    if (statusOrScore === undefined || statusOrScore === null || statusOrScore === "") {
-      return <Badge variant="outline" className="bg-slate-50 text-slate-500 border border-slate-200 shadow-sm px-3 py-0.5 font-semibold italic">Pending</Badge>;
-    }
-    
-    // If it's a score (number), use 70 as threshold
-    if (typeof statusOrScore === 'number') {
-      if (statusOrScore >= 70) {
-        return <Badge className="bg-emerald-50 text-emerald-600 hover:bg-emerald-100 border border-emerald-200 shadow-sm px-3 py-0.5 font-bold tracking-wide">Pass</Badge>;
-      }
-      return <Badge variant="destructive" className="bg-rose-50 text-rose-600 hover:bg-rose-100 border border-rose-200 shadow-sm px-3 py-0.5 font-bold tracking-wide">Fail</Badge>;
-    }
-
-    const s = statusOrScore.toLowerCase();
-    if (s.includes("pass") || s.includes("completed") || s.includes("sourced")) {
-      return <Badge className="bg-emerald-50 text-emerald-600 hover:bg-emerald-100 border border-emerald-200 shadow-sm px-3 py-0.5 font-bold tracking-wide">Pass</Badge>;
-    }
-    if (s.includes("fail") || s.includes("reject")) {
-      return <Badge variant="destructive" className="bg-rose-50 text-rose-600 hover:bg-rose-100 border border-rose-200 shadow-sm px-3 py-0.5 font-bold tracking-wide">Fail</Badge>;
-    }
-    return <Badge variant="outline" className="bg-slate-50 text-slate-600 border border-slate-200 shadow-sm px-3 py-0.5 font-semibold">Pending</Badge>;
-  };
-
   const isInitialLoading = isLoading && !job && candidates.length === 0;
   const isRefreshing = isLoading && !isInitialLoading;
 
   return (
-    <div className="max-w-[1400px] mx-auto space-y-6 pb-20">
+    <div className="max-w-[1600px] mx-auto px-2 space-y-4 pb-10">
       {/* Top Navigation */}
       <div className="pt-2 mb-4">
         <Button
@@ -370,7 +589,7 @@ export default function CandidateRankingsPage() {
       </div>
 
       {/* Rankings Page Header matching the exact HTML vibe */}
-      <div className="bg-white rounded-[16px] border border-slate-200 p-6 flex flex-row items-center justify-between shadow-[0_2px_10px_rgba(0,0,0,0.02)]">
+      <div className="bg-white rounded-[14px] border border-slate-200 p-4 flex flex-row items-center justify-between shadow-[0_2px_10px_rgba(0,0,0,0.02)]">
         <div className="flex flex-col gap-1">
           <div className="flex items-center gap-3">
             {isInitialLoading ? (
@@ -389,7 +608,7 @@ export default function CandidateRankingsPage() {
           </div>
           <div className="text-[14px] text-slate-500 font-medium mt-0.5">Candidate Rank List</div>
         </div>
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-4">
           <div className="flex items-center gap-8 py-1 px-4 border-r border-slate-100">
             <div className="space-y-1.5 text-[14px] text-slate-600">
               {isInitialLoading ? (
@@ -426,7 +645,7 @@ export default function CandidateRankingsPage() {
               )}
             </div>
           </div>
-          <Button variant="outline" className="w-[40px] h-[40px] p-0 flex items-center justify-center text-slate-500 hover:text-slate-800" onClick={fetchData} disabled={isLoading}>
+          <Button variant="outline" className="w-[36px] h-[36px] p-0 flex items-center justify-center text-slate-500 hover:text-slate-800" onClick={fetchData} disabled={isLoading}>
             <RefreshCw className={`w-[16px] h-[16px] ${isRefreshing ? "animate-spin" : ""}`} />
           </Button>
         </div>
@@ -458,8 +677,7 @@ export default function CandidateRankingsPage() {
               className="text-[13px] font-medium text-slate-700 bg-transparent focus:outline-none cursor-pointer"
             >
               <option value="all">All</option>
-              <option value="pass">Pass</option>
-              <option value="fail">Fail</option>
+              <option value="done">Done</option>
               <option value="pending">Pending</option>
             </select>
           </div>
@@ -512,9 +730,9 @@ export default function CandidateRankingsPage() {
         {/* HTML Exact Replica Table */}
         <div className="bg-white rounded-[12px] border border-slate-200 shadow-sm overflow-hidden relative">
           <div className="overflow-x-auto">
-            <Table>
+            <Table className="table-fixed w-full">
               <TableHeader>
-                <TableRow className="bg-white border-b border-slate-200 hover:bg-white h-[50px]">
+                <TableRow className="bg-white border-b border-slate-200 hover:bg-white h-[42px]">
                   <TableHead className="w-[60px] text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider border-r border-[#e2e8f0]">#</TableHead>
                   {(() => {
                     // Helper that turns a column header into a sortable button.
@@ -529,7 +747,7 @@ export default function CandidateRankingsPage() {
                     };
                     return null; // just a hoist trick; the component is used inline below
                   })()}
-                  <TableHead className="w-[300px] font-bold text-slate-900 text-[12px] uppercase tracking-wider border-r border-slate-200 py-0">
+                  <TableHead className="w-[220px] font-bold text-slate-900 text-[11px] uppercase tracking-wide border-r border-slate-200 py-0">
                     <button
                       onClick={() => toggleSort("name")}
                       className="flex items-center justify-between w-full h-full px-3 cursor-pointer hover:bg-slate-50 transition-colors"
@@ -543,20 +761,20 @@ export default function CandidateRankingsPage() {
                       </div>
                     </button>
                   </TableHead>
-                  <TableHead className="text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider min-w-[240px] py-0">
+                  <TableHead className="w-[145px] text-center font-bold text-slate-900 text-[10px] uppercase tracking-wide py-0">
                     <div className="flex items-center justify-between w-full h-full px-3">
                       <div className="w-[40px]" />
-                      <span className="whitespace-nowrap flex-1 text-center">RESUME SCREENING STATUS</span>
+                      <span className="flex-1 text-center leading-tight">RESUME MATCHING STATUS</span>
                       <div className="w-[40px]" />
                     </div>
                   </TableHead>
-                  <TableHead className="text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider min-w-[220px] py-0">
+                  <TableHead className="w-[140px] text-center font-bold text-slate-900 text-[10px] uppercase tracking-wide py-0">
                     <button
                       onClick={() => toggleSort("screening_score")}
                       className="flex items-center justify-between w-full h-full px-3 cursor-pointer hover:bg-slate-50 transition-colors"
                     >
                       <div className="w-[40px]" />
-                      <span className="whitespace-nowrap flex-1 text-center">RESUME SCREENING SCORE</span>
+                      <span className="flex-1 text-center leading-tight">RESUME MATCHING SCORE</span>
                       <div className="w-[40px] flex items-center justify-end gap-1 px-2">
                         {sortField === "screening_score"
                           ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
@@ -564,20 +782,20 @@ export default function CandidateRankingsPage() {
                       </div>
                     </button>
                   </TableHead>
-                  <TableHead className="text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider min-w-[180px] py-0">
+                  <TableHead className="w-[120px] text-center font-bold text-slate-900 text-[10px] uppercase tracking-wide py-0">
                     <div className="flex items-center justify-between w-full h-full px-3">
                       <div className="w-[40px]" />
-                      <span className="whitespace-nowrap flex-1 text-center">ENGAGE STATUS</span>
+                      <span className="flex-1 text-center leading-tight">SCREEN STATUS</span>
                       <div className="w-[40px]" />
                     </div>
                   </TableHead>
-                  <TableHead className="text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider min-w-[170px] py-0">
+                  <TableHead className="w-[120px] text-center font-bold text-slate-900 text-[10px] uppercase tracking-wide py-0">
                     <button
                       onClick={() => toggleSort("engage_score")}
                       className="flex items-center justify-between w-full h-full px-3 cursor-pointer hover:bg-slate-50 transition-colors"
                     >
                       <div className="w-[40px]" />
-                      <span className="whitespace-nowrap flex-1 text-center">ENGAGE SCORE</span>
+                      <span className="flex-1 text-center leading-tight">SCREEN SCORE</span>
                       <div className="w-[40px] flex items-center justify-end gap-1 px-2">
                         {sortField === "engage_score"
                           ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
@@ -585,20 +803,20 @@ export default function CandidateRankingsPage() {
                       </div>
                     </button>
                   </TableHead>
-                  <TableHead className="text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider min-w-[240px] py-0">
+                  <TableHead className="w-[160px] text-center font-bold text-slate-900 text-[10px] uppercase tracking-wide py-0">
                     <div className="flex items-center justify-between w-full h-full px-3">
                       <div className="w-[40px]" />
-                      <span className="whitespace-nowrap flex-1 text-center">ENGAGE COMPLETED AT</span>
+                      <span className="flex-1 text-center leading-tight">SCREEN COMPLETED AT</span>
                       <div className="w-[40px]" />
                     </div>
                   </TableHead>
-                  <TableHead className="text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider min-w-[160px] py-0">
+                  <TableHead className="w-[115px] text-center font-bold text-slate-900 text-[10px] uppercase tracking-wide py-0">
                     <button
                       onClick={() => toggleSort("total_score")}
                       className="flex items-center justify-between w-full h-full px-3 cursor-pointer hover:bg-slate-50 transition-colors"
                     >
                       <div className="w-[40px]" />
-                      <span className="whitespace-nowrap flex-1 text-center">TOTAL FIT SCORE</span>
+                      <span className="flex-1 text-center leading-tight">TOTAL FIT SCORE</span>
                       <div className="w-[40px] flex items-center justify-end gap-1 px-2">
                         {sortField === "total_score"
                           ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
@@ -606,19 +824,19 @@ export default function CandidateRankingsPage() {
                       </div>
                     </button>
                   </TableHead>
-                  <TableHead className="text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider min-w-[140px] py-0">
+                  <TableHead className="w-[105px] text-center font-bold text-slate-900 text-[10px] uppercase tracking-wide py-0">
                     <div className="flex items-center justify-between w-full h-full px-3">
                       <div className="w-[40px]" />
-                      <span className="whitespace-nowrap flex-1 text-center">JOB CONFIG</span>
+                      <span className="flex-1 text-center leading-tight">JOB CONFIG</span>
                       <div className="w-[40px] flex items-center justify-end gap-1 px-2">
                         <Lightbulb className="w-3.5 h-3.5 text-slate-500" />
                       </div>
                     </div>
                   </TableHead>
-                  <TableHead className="sticky right-0 bg-white z-50 text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider border-l border-slate-200 py-0 min-w-[160px]">
+                  <TableHead className="sticky right-0 bg-white z-50 w-[195px] text-center font-bold text-slate-900 text-[10px] uppercase tracking-wide border-l border-slate-200 py-0">
                     <div className="flex items-center justify-between w-full h-full px-3">
                       <div className="w-[40px]" />
-                      <span className="whitespace-nowrap flex-1 text-center">FEEDBACK</span>
+                      <span className="flex-1 text-center leading-tight">ACTIONS</span>
                       <div className="w-[40px]" />
                     </div>
                   </TableHead>
@@ -645,62 +863,114 @@ export default function CandidateRankingsPage() {
                     const screeningScore = candidate.match_score || 0;
                     const engageScore = candidate.engage_score || 0;
                     const totalScore = screeningScore + engageScore;
-                    const initials = candidate.name.split(' ').map(n => n[0]).join('');
 
                     return (
                       <TableRow key={`${candidate.id || candidate.candidate_id}-${idx}`} className="border-b border-[#e2e8f0] hover:bg-slate-50/80 transition-colors h-auto group text-center">
-                        <TableCell className="text-center font-semibold text-slate-500 text-[13px] border-r border-[#e2e8f0] w-[60px] py-4 align-top">
+                        <TableCell className="text-center font-semibold text-slate-500 text-[12px] border-r border-[#e2e8f0] w-[60px] py-2 align-top">
                           {idx + 1}
                         </TableCell>
-                        <TableCell className="border-r border-[#e2e8f0] min-w-[300px] py-4 px-5 align-middle text-center">
+                        <TableCell className="border-r border-[#e2e8f0] w-[220px] py-2 px-1.5 align-middle text-center">
                           <button
                             onClick={() => openDetails(candidate)}
                             className="text-[15px] font-bold text-indigo-600 hover:underline text-center w-full block mb-1.5"
                           >
                             {candidate.name}
                           </button>
-                          <span className="text-[13px] text-[#64748b] block mb-1 text-center">
+                          <span className="text-[12px] text-[#64748b] block mb-0.5 text-center">
                             <Mail className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {candidate.email || <span className="font-normal opacity-50">—</span>}
                           </span>
-                          <span className="text-[13px] text-[#64748b] block mb-1 text-center">
+                          <span className="text-[12px] text-[#64748b] block mb-0.5 text-center">
                             <Phone className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {candidate.phone || <span className="font-normal opacity-50">—</span>}
                           </span>
-                          <span className={`text-[13px] block text-center ${availabilityPillClasses(deriveAvailability(candidate))}`}>
+                          {needsContactEnrichment(candidate) && (
+                            <div className="text-center mt-1.5">
+                              <Button
+                                size="sm"
+                                className="h-6 px-2 bg-white border border-[#6366f1]/30 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[10px] rounded-md shadow-sm"
+                                onClick={() => handleEnrichContact(candidate)}
+                                disabled={enrichingCandidateIds.has(String(candidate.candidate_id || candidate.id || ""))}
+                                title="Fetch missing phone/email from ZoomInfo"
+                              >
+                                {enrichingCandidateIds.has(String(candidate.candidate_id || candidate.id || "")) ? (
+                                  <>
+                                    <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                                    Checking...
+                                  </>
+                                ) : (
+                                  <>
+                                    <RefreshCw className="w-3 h-3 mr-1" />
+                                    Get Contact
+                                  </>
+                                )}
+                              </Button>
+                              {(() => {
+                                const cid = String(candidate.candidate_id || candidate.id || "").trim();
+                                const status = enrichStatusByCandidateId[cid];
+                                if (!status) return null;
+                                const tone = status.type === "error"
+                                  ? "text-rose-600"
+                                  : status.type === "success"
+                                    ? "text-emerald-600"
+                                    : "text-slate-500";
+                                return (
+                                  <div className={`mt-1 text-[10px] font-medium ${tone}`}>
+                                    {status.message}
+                                  </div>
+                                );
+                              })()}
+                            </div>
+                          )}
+                          <span className={`text-[12px] block text-center ${availabilityPillClasses(deriveAvailability(candidate))}`}>
                             <Calendar className="w-3.5 h-3.5 inline mr-1 opacity-70" /> Available: {deriveAvailability(candidate) || <span className="font-normal opacity-50">—</span>}
                           </span>
                         </TableCell>
 
-                        <TableCell className="text-center align-middle py-4">
+                        <TableCell className="text-center align-middle py-2">
                           <div className="flex items-center justify-center gap-1.5">
                             {(() => {
-                              const status = deriveStatus(candidate);
-                              if (status === "pending") {
-                                return <span className="font-medium text-[13px] italic text-slate-400">Pending</span>;
+                              const statusFromData = String(candidate.data?.resume_matching_status || "").toLowerCase();
+                              if (statusFromData === "done") {
+                                return <span className="font-medium text-[12px] text-emerald-600">Done</span>;
                               }
-                              return (
-                                <span className="font-medium text-[13px]" style={{ color: status === "pass" ? '#059669' : '#e11d48' }}>
-                                  {status === "pass" ? "Pass" : "Fail"}
-                                </span>
-                              );
+                              if (screeningScore > 0) {
+                                return <span className="font-medium text-[12px] text-emerald-600">Done</span>;
+                              }
+                              return <span className="font-medium text-[12px] italic text-slate-400">Pending</span>;
                             })()}
                             <Lightbulb className="w-3.5 h-3.5 text-amber-500 opacity-80 cursor-help" />
                           </div>
                         </TableCell>
 
-                        <TableCell className="text-center align-top py-4 font-medium text-[#0f172a] text-[14px]">
+                        <TableCell className="text-center align-top py-2 font-medium text-[#0f172a] text-[13px]">
                           <div className="flex items-center justify-center gap-1.5 w-full text-center">
-                            {screeningScore > 0 ? screeningScore : <span className="font-normal opacity-50">—</span>}
-                            <Lightbulb className="w-3.5 h-3.5 text-amber-500 opacity-80 cursor-help" />
+                            {screeningScore > 0 ? (
+                              <button
+                                onClick={() => openDetails(candidate)}
+                                className="font-semibold text-indigo-600 hover:underline"
+                                title="View detailed resume matching breakdown"
+                              >
+                                {screeningScore}
+                              </button>
+                            ) : (
+                              <span className="font-normal opacity-50">—</span>
+                            )}
+                            <button
+                              onClick={() => openDetails(candidate)}
+                              className="inline-flex"
+                              title="View detailed resume matching breakdown"
+                            >
+                              <Lightbulb className="w-3.5 h-3.5 text-amber-500 opacity-80 cursor-pointer" />
+                            </button>
                           </div>
                         </TableCell>
 
-                        <TableCell className="text-center align-middle py-4">
+                        <TableCell className="text-center align-middle py-2">
                           <span className="font-medium text-[13px]" style={{ color: candidate.engage_status?.toLowerCase().includes("pass") ? '#059669' : '#64748b' }}>
                             {candidate.engage_status || "Pending"}
                           </span>
                         </TableCell>
 
-                        <TableCell className="text-center align-middle py-4 font-medium text-slate-700 text-[14px]">
+                        <TableCell className="text-center align-middle py-2 font-medium text-slate-700 text-[13px]">
                           {engageScore > 0 ? (
                             <div className="flex items-center justify-center gap-1.5 w-full text-center">
                               {engageScore}
@@ -711,47 +981,48 @@ export default function CandidateRankingsPage() {
                           )}
                         </TableCell>
 
-                        <TableCell className="text-center font-medium text-slate-700 text-[14px] align-middle py-4">
+                        <TableCell className="text-center font-medium text-slate-700 text-[12px] align-middle py-2">
                           {candidate.data?.engage_completed_at ? formatDate(candidate.data.engage_completed_at) : <span className="font-normal opacity-50">—</span>}
                         </TableCell>
 
-                        <TableCell className="text-center font-medium text-slate-700 text-[14px] align-middle py-4">
+                        <TableCell className="text-center font-medium text-slate-700 text-[13px] align-middle py-2">
                           {totalScore || <span className="font-normal opacity-50">—</span>}
                         </TableCell>
 
-                        <TableCell className="text-center align-middle py-4 font-medium text-slate-700 text-[13px]">
+                        <TableCell className="text-center align-middle py-2 font-medium text-slate-700 text-[12px]">
                           <div className="flex items-center justify-center gap-1.5 w-full text-center">
                             {candidate.data?.config_version || <span className="font-normal opacity-50">—</span>}
                             <Lightbulb className="w-3.5 h-3.5 text-amber-500 opacity-80 cursor-help" />
                           </div>
                         </TableCell>
 
-                        <TableCell className="sticky right-0 bg-white z-40 text-center pr-5 pl-5 border-l border-[#e2e8f0] py-4 align-middle transition-colors group-hover:bg-slate-50/80">
-                          <div className="flex flex-col items-center">
-                            <select 
-                              className="w-full text-[13px] font-medium text-[#334155] bg-white border border-[#cbd5e1] rounded h-9 px-2 focus:outline-none focus:ring-1 focus:ring-indigo-500 mb-2"
-                              value={feedbacks[candidate.id]?.startsWith("Reject") ? "Reject" : feedbacks[candidate.id] || ""}
-                              onChange={(e) => {
-                                const val = e.target.value;
-                                if (val === "Reject") {
-                                  setActionCandidateId(candidate.id);
-                                  setRejectReason("");
-                                  setIntegrationModalOpen('reject');
-                                } else if (val === "Submit") {
-                                  setActionCandidateId(candidate.id);
-                                  setIntegrationModalOpen('submit');
-                                }
-                              }}
+                        <TableCell className="sticky right-0 bg-white z-40 text-center pr-1.5 pl-1.5 border-l border-[#e2e8f0] py-2 align-middle transition-colors group-hover:bg-slate-50/80">
+                          <div className="flex items-center justify-center gap-1">
+                            <Button
+                              size="sm"
+                              className="h-7 px-2 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[10px] rounded-md shadow-sm"
+                              onClick={() => handleEmailCandidate(candidate)}
                             >
-                              <option value="" disabled>Select Action...</option>
-                              <option value="Submit">Submit</option>
-                              <option value="Reject">Reject</option>
-                            </select>
-                            {feedbacks[candidate.id] && (
-                              <div className={`text-[11px] font-bold flex items-center justify-center gap-1.5 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : 'text-rose-600'}`}>
-                                {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3.5 h-3.5" /> Submitted</> : <><X className="w-3.5 h-3.5" /> Rejected</>}
-                              </div>
-                            )}
+                              <Mail className="w-3 h-3 mr-0.5" />
+                              Email
+                            </Button>
+                            <Button
+                              size="sm"
+                              className="h-7 px-2 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[10px] rounded-md shadow-sm"
+                              onClick={() => handleScreenClick(candidate)}
+                              disabled={screenLoading}
+                            >
+                              <MessageSquare className="w-3 h-3 mr-0.5" />
+                              Screen
+                            </Button>
+                            <Button
+                              size="sm"
+                              className="h-7 px-2 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[10px] rounded-md shadow-sm"
+                              onClick={() => handleSmsCandidate(candidate)}
+                            >
+                              <Send className="w-3 h-3 mr-0.5" />
+                              SMS
+                            </Button>
                           </div>
                         </TableCell>
                       </TableRow>
@@ -783,72 +1054,54 @@ export default function CandidateRankingsPage() {
         />
       )}
 
-      {/* Integration Modals */}
-      {integrationModalOpen && actionCandidateId && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
-            {integrationModalOpen === 'submit' ? (
-              <>
-                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                    <ExternalLink className="w-5 h-5 text-indigo-600" /> 
-                    Submit to JobDiva
-                  </h3>
-                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600"><Search className="w-4 h-4 hidden" />×</button>
-                </div>
-                <div className="p-6 space-y-4">
-                  <p className="text-sm text-slate-500">
-                    This action will initiate an <strong className="text-slate-900 font-semibold">external submission in JobDiva</strong> for:
-                  </p>
-                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 space-y-2 text-sm text-slate-700">
-                    <p><strong>Candidate:</strong> {candidates.find(c => c.id === actionCandidateId)?.name}</p>
-                    <p><strong>Job:</strong> {job?.title} ({job?.jobdiva_id || job?.job_id || jobId})</p>
-                    <p><strong>Client:</strong> {job?.customer_name || "—"}</p>
-                  </div>
-                </div>
-                <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
-                  <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
-                  <Button className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold" onClick={handleConfirmSubmit}>Confirm & Submit</Button>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                    <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
-                    Reject Candidate
-                  </h3>
-                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
-                </div>
-                <div className="p-6 space-y-4">
-                  <p className="text-sm text-slate-500">
-                    Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidates.find(c => c.id === actionCandidateId)?.name}</strong>.
-                  </p>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
-                    <select 
-                      className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50"
-                      value={rejectReason}
-                      onChange={e => setRejectReason(e.target.value)}
-                    >
-                      <option value="" disabled>Select a reason...</option>
-                      <option value="Skills do not meet requirements">Skills do not meet requirements</option>
-                      <option value="Communication skills">Communication skills</option>
-                      <option value="Compensation expectations exceed budget">Compensation expectations exceed budget</option>
-                      <option value="Candidate withdrew interest">Candidate withdrew interest</option>
-                      <option value="Other">Other</option>
-                    </select>
-                  </div>
-                </div>
-                <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
-                  <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
-                  <Button className="bg-rose-600 hover:bg-rose-700 text-white font-bold" onClick={handleConfirmReject} disabled={!rejectReason}>Confirm Reject</Button>
-                </div>
-              </>
-            )}
-          </div>
-        </div>
+      {selectedCandidateForEmail && (
+        <CandidateMessageModal
+          candidateName={selectedCandidateForEmail.name}
+          candidateEmail={selectedCandidateForEmail.email || "Email not available"}
+          isOpen={messageModalOpen}
+          onClose={() => {
+            setMessageModalOpen(false);
+            setSelectedCandidateForEmail(null);
+          }}
+        />
       )}
+
+      <EngageWizardModal
+        open={isScreenModalOpen}
+        onClose={() => setIsScreenModalOpen(false)}
+        initialPayload={screenPayload}
+        candidateIds={selectedScreenCandidateIds}
+        onSend={async (payload) => {
+          setScreenPayload(payload);
+          await handleSendScreen(payload);
+        }}
+        loading={screenLoading}
+        error={screenError}
+        successData={screenApiResponse}
+      />
+
+      <MissingPhonesModal
+        open={missingPhonesOpen}
+        candidates={missingPhoneCandidates}
+        onClose={() => {
+          setMissingPhonesOpen(false);
+          setPendingScreenCandidate(null);
+        }}
+        onAllProvided={async (phones) => {
+          setMissingPhonesOpen(false);
+          const cand = pendingScreenCandidate;
+          setPendingScreenCandidate(null);
+          if (!cand) return;
+          const cid = String(cand.candidate_id || cand.id);
+          const picked = phones[cid] || cand.phone || "";
+          const next = { ...cand, phone: picked };
+          setCandidates(prev => prev.map(c => String(c.candidate_id || c.id) === cid ? next : c));
+          await runScreen(next);
+        }}
+        title="Phone number required"
+        description="PAIR can only call candidates with a phone number on file. Add it below to continue."
+        primaryLabel="Save & Screen"
+      />
     </div>
   );
 }
