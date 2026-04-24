@@ -4271,6 +4271,8 @@ function NewJobPageContent() {
 
       const contactOverrides: Record<string, { phone?: string; email?: string }> = {};
       let enrichedCount = 0;
+      let enrichedMobileCount = 0;
+      let enrichedWorkPhoneCount = 0;
       let missingLinkedInCount = 0;
       let enrichFailedCount = 0;
       let noContactFoundCount = 0;
@@ -4312,14 +4314,20 @@ function NewJobPageContent() {
             continue;
           }
           const enriched = await res.json();
-          const nextPhone = enriched?.phone || "";
+          const nextPhone = enriched?.phone || enriched?.mobilePhone || enriched?.workPhone || "";
           const nextEmail = enriched?.email || "";
+          const phoneSource = String(enriched?.phone_source || "").trim();
           if (nextPhone || nextEmail) {
             contactOverrides[id] = {
               phone: nextPhone || undefined,
               email: nextEmail || undefined,
             };
             enrichedCount += 1;
+            if (phoneSource === "mobilePhone") {
+              enrichedMobileCount += 1;
+            } else if (phoneSource === "workPhone") {
+              enrichedWorkPhoneCount += 1;
+            }
           } else {
             noContactFoundCount += 1;
           }
@@ -4340,7 +4348,12 @@ function NewJobPageContent() {
             email: override.email || c.email,
           };
         }));
-        showToast(`ZoomInfo enriched ${enrichedCount} candidate${enrichedCount === 1 ? "" : "s"}.`, "success");
+        const parts = [
+          `${enrichedCount} candidate${enrichedCount === 1 ? "" : "s"}`,
+          enrichedMobileCount > 0 ? `${enrichedMobileCount} mobile` : "",
+          enrichedWorkPhoneCount > 0 ? `${enrichedWorkPhoneCount} work phone` : "",
+        ].filter(Boolean);
+        showToast(`ZoomInfo enriched: ${parts.join(" · ")}.`, "success");
       }
 
       const unresolvedMissing = candidatesMissingPhone.filter(c => {
@@ -5353,6 +5366,21 @@ function NewJobPageContent() {
                             </div>
                             );
                           })()}
+                          {(candidate.phone || candidate.email) && (
+                            <div className="mt-2 flex items-center gap-2 flex-wrap text-[11.5px]">
+                              {candidate.phone && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
+                                  Mobile: {candidate.phone}
+                                </span>
+                              )}
+                              {candidate.email && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200 font-semibold">
+                                  <Mail className="w-3 h-3" />
+                                  {candidate.email}
+                                </span>
+                              )}
+                            </div>
+                          )}
                           {/* 5.7: availability pill + abstract + location row.
                               Fields populated by jobdiva.py Talent Search
                               mapper. All three are optional — only render the

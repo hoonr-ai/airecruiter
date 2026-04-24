@@ -6,6 +6,7 @@ import {
   ArrowLeft,
   Search,
   RefreshCw,
+  Loader2,
   Mail,
   Phone,
   Medal,
@@ -67,6 +68,7 @@ interface JobDetails {
 
 interface Candidate {
   id: number;
+  jobdiva_id?: string;
   candidate_id?: string;
   name: string;
   email: string;
@@ -226,10 +228,167 @@ export default function CandidateRankingsPage() {
   const [missingPhonesOpen, setMissingPhonesOpen] = useState(false);
   const [missingPhoneCandidates, setMissingPhoneCandidates] = useState<MissingPhoneCandidate[]>([]);
   const [pendingScreenCandidate, setPendingScreenCandidate] = useState<Candidate | null>(null);
+  const [enrichingCandidateIds, setEnrichingCandidateIds] = useState<Set<string>>(new Set());
+  const [enrichStatusByCandidateId, setEnrichStatusByCandidateId] = useState<Record<string, { type: "info" | "error" | "success"; message: string }>>({});
 
   const hasUsablePhone = (p?: string | null) => {
     const digits = String(p || "").replace(/\D/g, "");
     return digits.length >= 7;
+  };
+
+  const needsContactEnrichment = (c: Candidate) => {
+    const missingPhone = !hasUsablePhone(c.phone);
+    const missingEmail = !String(c.email || "").trim();
+    return missingPhone || missingEmail;
+  };
+
+  const extractLinkedInFromText = (text?: string | null): string => {
+    const raw = String(text || "");
+    if (!raw) return "";
+    const m = raw.match(/https?:\/\/(?:www\.)?linkedin\.com\/in\/[A-Za-z0-9\-_%]+/i);
+    return m ? m[0] : "";
+  };
+
+  const looksLikeLinkedInProfile = (url?: string | null): boolean => {
+    const u = String(url || "").trim().toLowerCase();
+    return u.includes("linkedin.com/in/");
+  };
+
+  const resolveCandidateLinkedInUrl = (c: Candidate): string => {
+    const dataBlob = c.data || {};
+    const candidates = [
+      c.profile_url,
+      (dataBlob?.profile_url as string | undefined),
+      (dataBlob?.linkedin_url as string | undefined),
+      (dataBlob?.urls?.linkedin as string | undefined),
+      (dataBlob?.urls?.linkedin_url as string | undefined),
+      extractLinkedInFromText(dataBlob?.resume_text as string | undefined),
+    ]
+      .map(v => String(v || "").trim())
+      .filter(Boolean);
+
+    return candidates.find(u => looksLikeLinkedInProfile(u)) || "";
+  };
+
+  const handleEnrichContact = async (candidate: Candidate) => {
+    const candidateKey = String(candidate.candidate_id || candidate.id || "").trim();
+    if (!candidateKey) return;
+
+    const linkedinUrl = resolveCandidateLinkedInUrl(candidate);
+    if (!linkedinUrl) {
+      setEnrichStatusByCandidateId(prev => ({
+        ...prev,
+        [candidateKey]: {
+          type: "error",
+          message: "LinkedIn URL missing — cannot query ZoomInfo.",
+        },
+      }));
+      return;
+    }
+
+    setEnrichStatusByCandidateId(prev => {
+      const next = { ...prev };
+      delete next[candidateKey];
+      return next;
+    });
+
+    setEnrichingCandidateIds(prev => {
+      const next = new Set(prev);
+      next.add(candidateKey);
+      return next;
+    });
+
+    try {
+      const res = await fetch(`${API_BASE}/candidates/${encodeURIComponent(candidateKey)}/enrich-contact`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jobdiva_id: candidate.jobdiva_id || job?.jobdiva_id || String(jobId || "") || undefined,
+          source: candidate.source || undefined,
+          linkedin_url: linkedinUrl,
+          full_name: candidate.name || undefined,
+          company_name:
+            candidate.data?.company_name ||
+            candidate.data?.company?.name ||
+            candidate.data?.enhanced_info?.current_company ||
+            undefined,
+          email: candidate.email || undefined,
+          phone: candidate.phone || undefined,
+        }),
+      });
+
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setEnrichStatusByCandidateId(prev => ({
+          ...prev,
+          [candidateKey]: {
+            type: "error",
+            message: payload?.detail || `ZoomInfo call failed (${res.status})`,
+          },
+        }));
+        return;
+      }
+
+      const nextPhone = payload?.phone || candidate.phone || "";
+      const nextEmail = payload?.email || candidate.email || "";
+
+      if (!nextPhone && !nextEmail) {
+        setEnrichStatusByCandidateId(prev => ({
+          ...prev,
+          [candidateKey]: {
+            type: "info",
+            message: "No contact info found from ZoomInfo for this LinkedIn URL.",
+          },
+        }));
+        return;
+      }
+
+      setEnrichStatusByCandidateId(prev => ({
+        ...prev,
+        [candidateKey]: {
+          type: "success",
+          message: "ZoomInfo contact info applied.",
+        },
+      }));
+
+      setCandidates(prev =>
+        prev.map(c => {
+          const cid = String(c.candidate_id || c.id || "").trim();
+          if (cid !== candidateKey) return c;
+          return {
+            ...c,
+            phone: nextPhone,
+            email: nextEmail,
+            data: {
+              ...(c.data || {}),
+              zoominfo_contact_enrichment: {
+                ...(c.data?.zoominfo_contact_enrichment || {}),
+                linkedin_url: payload?.linkedin_url || linkedinUrl,
+                workPhone: payload?.workPhone || null,
+                mobilePhone: payload?.mobilePhone || null,
+                workEmail: payload?.workEmail || null,
+                personalEmail: payload?.personalEmail || null,
+                phone_source: payload?.phone_source || null,
+              },
+            },
+          };
+        })
+      );
+    } catch (err: any) {
+      setEnrichStatusByCandidateId(prev => ({
+        ...prev,
+        [candidateKey]: {
+          type: "error",
+          message: err?.message || "Enrichment request failed",
+        },
+      }));
+    } finally {
+      setEnrichingCandidateIds(prev => {
+        const next = new Set(prev);
+        next.delete(candidateKey);
+        return next;
+      });
+    }
   };
 
   const runScreen = async (candidate: Candidate) => {
@@ -348,10 +507,20 @@ export default function CandidateRankingsPage() {
         // We keep the first occurrence since they are sorted by created_at DESC from the backend.
         const seen = new Set();
         const uniqueCandidates = candData.candidates.filter((c: any) => {
-          const id = c.candidate_id || c.id;
-          if (!id) return true;
-          if (seen.has(id)) return false;
-          seen.add(id);
+          const candidateIdKey = String(c.candidate_id || "").trim();
+          const emailKey = String(c.email || "").trim().toLowerCase();
+          const nameKey = String(c.name || "").trim().toLowerCase();
+          const dedupKey =
+            candidateIdKey
+              ? `cid:${candidateIdKey}`
+              : emailKey
+                ? `email:${emailKey}`
+                : nameKey
+                  ? `name:${nameKey}`
+                  : `row:${String(c.id || "").trim()}`;
+          if (!dedupKey) return true;
+          if (seen.has(dedupKey)) return false;
+          seen.add(dedupKey);
           return true;
         });
 
@@ -713,6 +882,44 @@ export default function CandidateRankingsPage() {
                           <span className="text-[12px] text-[#64748b] block mb-0.5 text-center">
                             <Phone className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {candidate.phone || <span className="font-normal opacity-50">—</span>}
                           </span>
+                          {needsContactEnrichment(candidate) && (
+                            <div className="text-center mt-1.5">
+                              <Button
+                                size="sm"
+                                className="h-6 px-2 bg-white border border-[#6366f1]/30 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[10px] rounded-md shadow-sm"
+                                onClick={() => handleEnrichContact(candidate)}
+                                disabled={enrichingCandidateIds.has(String(candidate.candidate_id || candidate.id || ""))}
+                                title="Fetch missing phone/email from ZoomInfo"
+                              >
+                                {enrichingCandidateIds.has(String(candidate.candidate_id || candidate.id || "")) ? (
+                                  <>
+                                    <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                                    Checking...
+                                  </>
+                                ) : (
+                                  <>
+                                    <RefreshCw className="w-3 h-3 mr-1" />
+                                    Get Contact
+                                  </>
+                                )}
+                              </Button>
+                              {(() => {
+                                const cid = String(candidate.candidate_id || candidate.id || "").trim();
+                                const status = enrichStatusByCandidateId[cid];
+                                if (!status) return null;
+                                const tone = status.type === "error"
+                                  ? "text-rose-600"
+                                  : status.type === "success"
+                                    ? "text-emerald-600"
+                                    : "text-slate-500";
+                                return (
+                                  <div className={`mt-1 text-[10px] font-medium ${tone}`}>
+                                    {status.message}
+                                  </div>
+                                );
+                              })()}
+                            </div>
+                          )}
                           <span className={`text-[12px] block text-center ${availabilityPillClasses(deriveAvailability(candidate))}`}>
                             <Calendar className="w-3.5 h-3.5 inline mr-1 opacity-70" /> Available: {deriveAvailability(candidate) || <span className="font-normal opacity-50">—</span>}
                           </span>
