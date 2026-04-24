@@ -9,6 +9,30 @@ from core.config import DATABASE_URL, SUPABASE_DB_URL
 
 logger = logging.getLogger(__name__)
 
+
+# v22: Module-level engine singleton. Pre-v22 `bulk_upsert_candidates`
+# instantiated a fresh unpooled engine on every call, leaking connections
+# under load.
+_ENGINE: Optional[sqlalchemy.engine.Engine] = None
+
+
+def _get_engine() -> sqlalchemy.engine.Engine:
+    global _ENGINE
+    if _ENGINE is None:
+        url = DATABASE_URL or SUPABASE_DB_URL
+        if not url:
+            raise RuntimeError("DATABASE_URL not configured for candidate_profiles_db")
+        _ENGINE = sqlalchemy.create_engine(
+            url,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            connect_args={"connect_timeout": 5},
+        )
+    return _ENGINE
+
+
 class CandidateProfilesDB:
     def __init__(self):
         self.db_url = DATABASE_URL or SUPABASE_DB_URL
@@ -32,7 +56,7 @@ class CandidateProfilesDB:
             return 0
             
         saved = 0
-        engine = sqlalchemy.create_engine(self.db_url)
+        engine = _get_engine()
         with engine.begin() as conn:
             for c in candidates:
                 try:

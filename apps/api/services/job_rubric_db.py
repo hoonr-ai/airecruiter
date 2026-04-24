@@ -53,7 +53,7 @@ class JobRubricDB:
             rubric = rubric_obj
 
         try:
-            with psycopg2.connect(self.db_url) as conn:
+            with psycopg2.connect(self.db_url, connect_timeout=5) as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         "SELECT title FROM monitored_jobs WHERE jobdiva_id = %s OR job_id = %s LIMIT 1",
@@ -195,7 +195,7 @@ class JobRubricDB:
             return None
 
         try:
-            with psycopg2.connect(self.db_url) as conn:
+            with psycopg2.connect(self.db_url, connect_timeout=5) as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     # Fetch domains and bot_introduction from monitored_jobs
                     cur.execute("SELECT domains, bot_introduction FROM monitored_jobs WHERE jobdiva_id = %s OR job_id = %s", (jobdiva_id, jobdiva_id))
