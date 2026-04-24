@@ -22,7 +22,7 @@ from models import (
     SkillsExtractionRequest, SkillsExtractionResponse, JobSkillsSummaryResponse,
     ExternalJobCreateRequest,
 )
-from routers._helpers import get_db_connection
+from routers._helpers import get_db_connection, get_dict_cursor_connection
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
