@@ -121,7 +121,7 @@ export default function SetCriteriaPage() {
       if (response.ok) {
         console.log("Criteria saved successfully");
         // Navigate to next step - assuming Create Filters or Candidates
-        router.push(`/jobs/${jobId}/candidates`);
+        router.push(`/jobs/${jobId}/rankings`);
       } else {
         console.error("Failed to save criteria");
       }
