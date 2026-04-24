@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Body, Query, UploadFile, File
 from typing import List, Dict, Any, Optional
 import json
@@ -50,6 +51,43 @@ def load_monitored_jobs():
 def save_monitored_jobs(jobs_data):
     import main
     return main.save_monitored_jobs(jobs_data)
+
+
+# ---------------------------------------------------------------------------
+# One-time schema bootstrap (v21)
+# ---------------------------------------------------------------------------
+# Previously two handlers ran `ALTER TABLE monitored_jobs ADD COLUMN IF NOT
+# EXISTS ...` on every request to their hot paths. ALTER TABLE needs an
+# ACCESS EXCLUSIVE lock, which queues behind any concurrent reader — so when
+# the background auto-sync loop held a shared lock on monitored_jobs, a
+# simple `GET /jobs/monitored` could block for 60-90+ seconds waiting its
+# turn for a no-op migration. Run the DDL once at startup and drop it from
+# the request path.
+def _ensure_monitored_jobs_schema() -> None:
+    """Synchronous DDL bootstrap. Safe to re-run (all ADD COLUMN IF NOT EXISTS)."""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "ALTER TABLE monitored_jobs "
+            "ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE"
+        )
+        cur.execute(
+            "ALTER TABLE monitored_jobs "
+            "ADD COLUMN IF NOT EXISTS job_requirements JSONB DEFAULT '[]'"
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("monitored_jobs schema ready")
+    except Exception as e:
+        # Non-fatal: handlers still work if columns already exist. Log and move on.
+        logger.error(f"monitored_jobs schema init failed: {e}")
+
+
+async def init_monitored_jobs_schema() -> None:
+    """Async wrapper — main.py lifespan awaits this with a timeout."""
+    await asyncio.to_thread(_ensure_monitored_jobs_schema)
 
 
 @router.post("/jobs/parse", response_model=ParsedJobResponse)
@@ -1174,12 +1212,11 @@ async def save_draft_requirements(job_id: str, requirements_data: JobDraftRequir
             for req in requirements_data.requirements
         ]
         
-        # Ensure the requirements column exists in monitored_jobs
-        cursor.execute("""
-            ALTER TABLE monitored_jobs 
-            ADD COLUMN IF NOT EXISTS job_requirements JSONB DEFAULT '[]'
-        """)
-        
+        # NOTE: `job_requirements` column is now provisioned once at startup
+        # via `init_monitored_jobs_schema` (see top of this module). Keeping
+        # ALTER TABLE on the hot path serialized requests behind Postgres'
+        # ACCESS EXCLUSIVE lock — see v21 QA slowness fix.
+
         # Update monitored_jobs with requirements data directly
         cursor.execute("""
             UPDATE monitored_jobs 
@@ -1549,6 +1586,52 @@ async def remove_job_from_monitoring(job_id: str):
     else:
         raise HTTPException(status_code=404, detail="Job not in monitoring list")
 
+def _get_monitored_jobs_sync(include_archived: bool):
+    """
+    Sync body for the /jobs/monitored endpoint. Runs off the event loop via
+    asyncio.to_thread so the psycopg2 round-trip does not stall concurrent
+    requests on the same worker. The DDL that used to live here moved to
+    `_ensure_monitored_jobs_schema` (called once at startup from lifespan).
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    if include_archived:
+        cursor.execute(
+            "SELECT * FROM monitored_jobs WHERE is_archived = TRUE ORDER BY created_at DESC"
+        )
+    else:
+        cursor.execute(
+            "SELECT * FROM monitored_jobs "
+            "WHERE is_archived = FALSE OR is_archived IS NULL "
+            "ORDER BY created_at DESC"
+        )
+
+    columns = [desc[0] for desc in cursor.description]
+    rows = cursor.fetchall()
+
+    jobs = {}
+    for row in rows:
+        job_data = dict(zip(columns, row))
+        jid = str(job_data.get("jobdiva_id") or job_data.get("job_id"))
+
+        if job_data.get("created_at") and hasattr(job_data["created_at"], "isoformat"):
+            job_data["created_at"] = job_data["created_at"].isoformat()
+        if job_data.get("updated_at") and hasattr(job_data["updated_at"], "isoformat"):
+            job_data["updated_at"] = job_data["updated_at"].isoformat()
+
+        jobs[jid] = job_data
+
+    cursor.close()
+    conn.close()
+
+    return {
+        "jobs": jobs,
+        "total_count": len(jobs),
+        "source": "database",
+    }
+
+
 @router.get("/jobs/monitored")
 async def get_monitored_jobs(include_archived: bool = False):
     """
@@ -1556,50 +1639,7 @@ async def get_monitored_jobs(include_archived: bool = False):
     By default, excludes archived jobs unless include_archived=true is passed.
     """
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Ensure is_archived column exists
-        try:
-            cursor.execute("""
-                ALTER TABLE monitored_jobs 
-                ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE
-            """)
-            conn.commit()
-        except Exception as e:
-            logger.warning(f"Could not add is_archived column: {e}")
-        
-        # Fetch all columns from monitored_jobs, optionally filtering out archived
-        if include_archived:
-            cursor.execute("SELECT * FROM monitored_jobs WHERE is_archived = TRUE ORDER BY created_at DESC")
-        else:
-            cursor.execute("SELECT * FROM monitored_jobs WHERE is_archived = FALSE OR is_archived IS NULL ORDER BY created_at DESC")
-        
-        columns = [desc[0] for desc in cursor.description]
-        rows = cursor.fetchall()
-        
-        jobs = {}
-        for row in rows:
-            job_data = dict(zip(columns, row))
-            # Format Job ID for JSON compatibility if needed
-            jid = str(job_data.get("jobdiva_id") or job_data.get("job_id"))
-            
-            # Convert Timestamps to ISO strings if they are datetime objects
-            if job_data.get("created_at") and hasattr(job_data["created_at"], "isoformat"): 
-                job_data["created_at"] = job_data["created_at"].isoformat()
-            if job_data.get("updated_at") and hasattr(job_data["updated_at"], "isoformat"): 
-                job_data["updated_at"] = job_data["updated_at"].isoformat()
-            
-            jobs[jid] = job_data
-            
-        cursor.close()
-        conn.close()
-        
-        return {
-            "jobs": jobs,
-            "total_count": len(jobs),
-            "source": "database"
-        }
+        return await asyncio.to_thread(_get_monitored_jobs_sync, include_archived)
     except Exception as e:
         logger.error(f"Error fetching monitored jobs from DB: {e}")
         # Fallback to legacy file only on catastrophic DB failure
