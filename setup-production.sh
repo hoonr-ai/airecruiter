@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# SSL Setup and Production Configuration Script
-# Run this after deploy.sh and updating your API keys
+# Production Configuration Script
+# ⚠️ NOTE: This script is legacy. Use setup-ssl.sh instead for SSL configuration.
+# This script is kept for reference and custom production setups.
 
 set -e
 
@@ -12,16 +13,36 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-DOMAIN_NAME="${1:-}"
-EMAIL="${2:-admin@example.com}"
+# Function to detect environment domain (same logic as other scripts)
+detect_domain() {
+    if [ -n "$1" ]; then
+        echo "$1"
+        return
+    fi
+    
+    if [ -n "$DOMAIN_NAME" ]; then
+        echo "$DOMAIN_NAME"
+        return
+    fi
+    
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    case "$current_branch" in
+        "main"|"master")
+            echo "curate.hoonr.ai"
+            ;;
+        "develop"|"development")
+            echo "qacurate.hoonr.ai"
+            ;;
+        *)
+            echo "qacurate.hoonr.ai"
+            ;;
+    esac
+}
 
-if [ -z "$DOMAIN_NAME" ]; then
-    echo -e "${RED}❌ Please provide your domain name:${NC}"
-    echo "Usage: ./setup-production.sh yourdomain.com [admin@yourdomain.com]"
-    echo "Example: ./setup-production.sh myapp.example.com admin@example.com"
-    exit 1
-fi
+DOMAIN_NAME=$(detect_domain "$1")
+EMAIL="${2:-Pragati.Raj@celsiortech.com}"
 
+echo -e "${YELLOW}⚠️ This script is legacy. For SSL setup, use: ./setup-ssl.sh${NC}"
 echo -e "${BLUE}🔐 Setting up production configuration for $DOMAIN_NAME${NC}"
 
 # Install certbot for Let's Encrypt
@@ -31,11 +52,12 @@ sudo apt install -y certbot python3-certbot-nginx
 
 # Setup Nginx configuration
 echo -e "${BLUE}⚙️ Configuring Nginx...${NC}"
-sudo cp nginx.conf /etc/nginx/sites-available/airecruiter
 
-# Update domain name in nginx config
-sudo sed -i "s/your-domain.com/$DOMAIN_NAME/g" /etc/nginx/sites-available/airecruiter
-sudo sed -i "s/www.your-domain.com/www.$DOMAIN_NAME/g" /etc/nginx/sites-available/airecruiter
+# Copy nginx config and replace template placeholder
+cp nginx.conf /tmp/nginx-temp.conf
+sed -i "s/{{DOMAIN_NAME}}/$DOMAIN_NAME/g" /tmp/nginx-temp.conf
+sudo cp /tmp/nginx-temp.conf /etc/nginx/sites-available/airecruiter
+rm /tmp/nginx-temp.conf
 
 # Enable site
 sudo ln -sf /etc/nginx/sites-available/airecruiter /etc/nginx/sites-enabled/
@@ -52,7 +74,7 @@ fi
 
 # Obtain SSL certificate
 echo -e "${BLUE}🔒 Obtaining SSL certificate from Let's Encrypt...${NC}"
-sudo certbot --nginx -d "$DOMAIN_NAME" -d "www.$DOMAIN_NAME" --non-interactive --agree-tos --email "$EMAIL"
+sudo certbot --nginx -d "$DOMAIN_NAME" --non-interactive --agree-tos --email "$EMAIL"
 
 if [ $? -eq 0 ]; then
     echo -e "${GREEN}✓${NC} SSL certificate obtained successfully"
@@ -60,8 +82,12 @@ else
     echo -e "${YELLOW}⚠${NC} SSL certificate setup failed, continuing with HTTP"
 fi
 
-# Update API environment with correct domain
-sed -i "s/ALLOWED_ORIGINS=.*/ALLOWED_ORIGINS=*,https:\/\/$DOMAIN_NAME,https:\/\/www.$DOMAIN_NAME,http:\/\/20.57.137.251,http:\/\/20.57.137.251:3000/" /home/ubuntu/codebase/airecruiter/apps/api/.env
+# Update API environment with correct domain (if ALLOWED_ORIGINS exists in .env)
+API_ENV_FILE="/home/ubuntu/codebase/airecruiter/apps/api/.env"
+if [ -f "$API_ENV_FILE" ] && grep -q "ALLOWED_ORIGINS" "$API_ENV_FILE"; then
+    sed -i "s|ALLOWED_ORIGINS=.*|ALLOWED_ORIGINS=https://$DOMAIN_NAME,http://$DOMAIN_NAME|" "$API_ENV_FILE"
+    echo -e "${GREEN}✓${NC} Updated API CORS origins for $DOMAIN_NAME"
+fi
 
 # Restart services
 sudo systemctl restart airecruiter-api
@@ -95,8 +121,7 @@ check_service() {
 check_service "airecruiter-api"
 check_service "airecruiter-web" 
 check_service "nginx"
-check_service "postgresql"
-# Redis not used in current application
+# Note: Using Azure Database for PostgreSQL (managed service)
 EOF
 
 sudo chmod +x /usr/local/bin/airecruiter-monitor.sh
@@ -107,11 +132,11 @@ sudo chmod +x /usr/local/bin/airecruiter-monitor.sh
 echo -e "${GREEN}🎉 Production setup completed!${NC}"
 echo -e "${BLUE}Your application is now available at:${NC}"
 echo -e "Web: https://$DOMAIN_NAME"
-echo -e "API: https://$DOMAIN_NAME/api"
-echo -e "API Docs: https://$DOMAIN_NAME/docs"
+echo -e "API Docs: https://$DOMAIN_NAME/api/docs"
 echo ""
-echo -e "${YELLOW}📋 Final steps:${NC}"
-echo -e "1. Update API keys in /home/ubuntu/codebase/airecruiter/apps/api/.env"
-echo -e "2. Test all endpoints at https://$DOMAIN_NAME/docs" 
-echo -e "3. Monitor logs with: sudo journalctl -u airecruiter-api -f"
-echo -e "4. Check monitoring logs: tail -f /var/log/airecruiter/monitor.log"
+echo -e "${YELLOW}📋 Recommended workflow:${NC}"
+echo -e "1. Use ./deploy-azure.sh for future deployments"
+echo -e "2. Use ./setup-ssl.sh for SSL configuration"
+echo -e "3. Use ./manage.sh status to check system health"
+echo -e "4. Update API keys in /home/ubuntu/codebase/airecruiter/apps/api/.env"
+echo -e "5. Monitor logs with: ./manage.sh logs"
