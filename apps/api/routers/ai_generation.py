@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+import logging
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
 from pydantic import BaseModel, Field
@@ -21,6 +22,7 @@ from core import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Initialize OpenAI client
 client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
@@ -521,6 +523,17 @@ async def generate_screening_questions_endpoint(job_id: str, req: ScreeningQuest
             work_arrangement=req.workArrangement,
             address=req.address,
             total_years=req.totalYears or 0,
+        )
+        role_specific_count = len([
+            q for q in (questions or [])
+            if str((q or {}).get("category", "")).lower() not in ("default", "work-arrangement", "intro", "logistics")
+        ])
+        logger.info(
+            "screening_questions_generated job_id=%s requested_level=%s total_count=%s role_specific_count=%s",
+            job_id,
+            req.screeningLevel,
+            len(questions or []),
+            role_specific_count,
         )
         return {"questions": questions}
     except Exception as exc:

@@ -14,8 +14,8 @@ to write depth-probing questions. Questions always include:
   - default/intro question (always first, non-role-specific)
   - work-arrangement question (onsite / hybrid; hard-filter if not remote)
   - default-experience overview (total years)
-  - N role-specific questions, scaled by screening_level:
-      Light=3-5, Medium=6-9, Intensive=10-14
+    - N role-specific questions, scaled by screening_level:
+            Light=3, Medium=5, Intensive=7
 The frontend still owns the "merge user-edits" flow — we return a fresh
 set and the UI decides how to reconcile.
 """
@@ -73,15 +73,15 @@ def detect_seniority(job_title: str) -> str:
     return "mid"
 
 
-def _question_count_for_level(level: str) -> tuple[int, int]:
-    """(min, max) number of role-specific questions for a screening level."""
+def _question_count_for_level(level: str) -> int:
+    """Exact number of role-specific questions for a screening level."""
     normalized = (level or "").strip().lower()
     if normalized in ("light", "low", "basic", "quick"):
-        return (3, 5)
+        return 3
     if normalized in ("intensive", "deep", "extensive", "high"):
-        return (10, 14)
+        return 7
     # Default: Medium
-    return (6, 9)
+    return 5
 
 
 def _build_prompt(
@@ -93,8 +93,7 @@ def _build_prompt(
     required_skills: List[Dict[str, Any]],
     preferred_skills: List[Dict[str, Any]],
     total_years: int,
-    min_count: int,
-    max_count: int,
+    target_count: int,
 ) -> str:
     def _fmt_skills(skills: List[Dict[str, Any]]) -> str:
         if not skills:
@@ -122,7 +121,7 @@ RUBRIC — Nice-to-have skills:
 {_fmt_skills(preferred_skills)}
 
 TASK
-Produce between {min_count} and {max_count} role-specific screening questions that would
+Produce exactly {target_count} role-specific screening questions that would
 genuinely differentiate a candidate who has DONE this work from one who has only read about
 it or glanced at a tutorial.
 
@@ -145,8 +144,9 @@ STRICT RULES — FOLLOW EVERY ONE:
    architecture, Unity Catalog, Autoloader, Delta Live Tables, Z-order, workspace
    governance). Do not be generic.
 5. Each question must include a `pass_criteria` — a one-sentence CONCRETE signal the
-   recruiter should listen for in the answer (e.g. "mentions bronze/silver/gold layering
-   AND can explain a real consistency trade-off"). Do NOT write "Must have N+ yrs of X".
+    recruiter should listen for in the answer (e.g. "mentions bronze/silver/gold layering
+    AND can explain a real consistency trade-off"). Never ask for years or use wording like
+    "N+ years", "X years of experience", "minimum years", or similar duration thresholds.
 6. Questions must be answerable in under 90 seconds each during a phone screen.
 7. Do not repeat or paraphrase the same question.
 8. Return nothing except the JSON array below.
@@ -170,16 +170,30 @@ No markdown, no preamble, no trailing commentary. JSON only.
 
 def _sanitize_questions(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Normalize LLM output onto the shape the frontend expects."""
+    years_phrase = re.compile(
+        r"(\b\d+\s*\+?\s*years?\b|\byears?\s+of\s+experience\b|\bminimum\s+years?\b)",
+        flags=re.IGNORECASE,
+    )
+
+    def _strip_years_language(text: str) -> str:
+        t = re.sub(years_phrase, "", text or "")
+        t = re.sub(r"\s{2,}", " ", t)
+        t = re.sub(r"\s+([,.;:!?])", r"\1", t)
+        return t.strip(" ,.;:")
+
     cleaned: List[Dict[str, Any]] = []
     for idx, q in enumerate(raw or []):
         if not isinstance(q, dict):
             continue
-        qt = (q.get("question_text") or q.get("question") or "").strip()
+        qt = _strip_years_language((q.get("question_text") or q.get("question") or "").strip())
         if not qt:
             continue
+        pc = _strip_years_language((q.get("pass_criteria") or q.get("criteria") or "").strip())
+        if not pc:
+            pc = "Candidate gives concrete, project-level details with specific decisions and outcomes."
         cleaned.append({
             "question_text": qt,
-            "pass_criteria": (q.get("pass_criteria") or q.get("criteria") or "").strip(),
+            "pass_criteria": pc,
             "category": (q.get("category") or "role-specific").strip().lower(),
             "related_skill": (q.get("related_skill") or q.get("skill") or "").strip(),
             "is_default": False,
@@ -215,7 +229,7 @@ async def generate_screening_questions(
     followed by N role-specific questions from the LLM.
     """
     seniority = detect_seniority(job_title)
-    min_count, max_count = _question_count_for_level(screening_level)
+    target_count = _question_count_for_level(screening_level)
 
     # Split rubric skills by required/preferred.
     all_skills: List[Dict[str, Any]] = []
@@ -254,13 +268,20 @@ async def generate_screening_questions(
     # 2. Total-experience
     if total_years and total_years > 0:
         exp_text = (
-            f"How many years of hands-on experience do you have in roles similar to {job_title}? "
-            f"We're looking for at least {total_years} years."
+            f"Can you summarize the most relevant parts of your background for a {job_title} role, "
+            f"including the kinds of projects and scope you've handled?"
         )
-        exp_criteria = f"Candidate has at least {total_years} years of relevant hands-on experience."
+        exp_criteria = (
+            "Candidate ties their background to comparable project scope, role expectations, and concrete outcomes."
+        )
     else:
-        exp_text = f"How many years of hands-on experience do you have in roles similar to {job_title}?"
-        exp_criteria = "Candidate can state a concrete number of years in directly relevant roles."
+        exp_text = (
+            f"Can you summarize the most relevant parts of your background for a {job_title} role, "
+            "including the kinds of projects and scope you've handled?"
+        )
+        exp_criteria = (
+            "Candidate explains directly relevant projects and responsibilities with concrete examples."
+        )
     questions.append({
         "question_text": exp_text,
         "pass_criteria": exp_criteria,
@@ -301,8 +322,7 @@ async def generate_screening_questions(
         required_skills=required_skills,
         preferred_skills=preferred_skills,
         total_years=total_years,
-        min_count=min_count,
-        max_count=max_count,
+        target_count=target_count,
     )
 
     role_specific: List[Dict[str, Any]] = []
@@ -329,30 +349,79 @@ async def generate_screening_questions(
         role_specific = _sanitize_questions(raw.get("questions", []))
     except Exception as exc:
         logger.error(f"❌ screening_question_generator LLM failed: {exc}")
-        # Fall back to a minimal per-skill template — better than nothing but
-        # still flagged so the frontend can tell it wasn't the good path.
+        # Fall back to deterministic per-skill templates — level-aware and
+        # explicitly free of years-of-experience phrasing.
         fallback: List[Dict[str, Any]] = []
-        for idx, skill in enumerate(required_skills[: max(min_count, 3)]):
+        focus_skills = required_skills or preferred_skills
+        if not focus_skills:
+            focus_skills = [{"value": "core role responsibilities"}]
+
+        level = (screening_level or "").strip().lower()
+        for idx in range(target_count):
+            skill = focus_skills[idx % len(focus_skills)]
             name = skill.get("value") or skill.get("name") or "this technology"
-            yrs = skill.get("minYears") or skill.get("min_years") or 0
-            fallback.append({
-                "question_text": (
-                    f"Walk me through the most complex project where you used {name}. "
-                    f"What was your specific contribution, and what was the hardest "
-                    f"technical decision you had to make?"
-                ),
-                "pass_criteria": (
-                    f"Candidate describes a concrete project using {name} with a specific "
-                    f"technical decision — not a vague 'I used {name} for X years'."
+            if level in ("intensive", "deep", "extensive", "high"):
+                q_text = (
+                    f"In a production system using {name}, describe a failure mode you encountered, "
+                    "how you diagnosed root cause, and what design change prevented recurrence."
                 )
-                + (f" Must have {yrs}+ years." if yrs else ""),
-                "category": "technical-depth",
+                criteria = (
+                    f"Candidate details a real {name} incident with diagnosis steps, trade-offs, "
+                    "and a concrete prevention mechanism."
+                )
+                category = "architecture"
+            elif level in ("light", "low", "basic", "quick"):
+                q_text = (
+                    f"What's one concrete task you handled with {name} recently, and what result did it drive?"
+                )
+                criteria = (
+                    f"Candidate gives a specific {name} example with clear ownership and measurable impact."
+                )
+                category = "technical-depth"
+            else:
+                q_text = (
+                    f"Walk me through a meaningful implementation using {name}: what constraints did you face, "
+                    "what decision did you make, and why?"
+                )
+                criteria = (
+                    f"Candidate explains a concrete {name} implementation with constraints, rationale, and outcomes."
+                )
+                category = "scenario"
+
+            fallback.append({
+                "question_text": q_text,
+                "pass_criteria": criteria,
+                "category": category,
                 "related_skill": name,
                 "is_default": False,
                 "is_hard_filter": False,
                 "order_index": idx,
             })
         role_specific = fallback
+
+    # Enforce exact role-specific count regardless of model output variance.
+    if len(role_specific) > target_count:
+        role_specific = role_specific[:target_count]
+    elif len(role_specific) < target_count:
+        focus_skills = required_skills or preferred_skills
+        if not focus_skills:
+            focus_skills = [{"value": "core role responsibilities"}]
+        for idx in range(len(role_specific), target_count):
+            skill = focus_skills[idx % len(focus_skills)]
+            name = skill.get("value") or skill.get("name") or "this area"
+            role_specific.append({
+                "question_text": (
+                    f"Describe a real example where you used {name} to solve a non-trivial problem under constraints."
+                ),
+                "pass_criteria": (
+                    "Candidate provides a specific situation, concrete decisions, and clear outcomes."
+                ),
+                "category": "scenario",
+                "related_skill": name,
+                "is_default": False,
+                "is_hard_filter": False,
+                "order_index": idx,
+            })
 
     # Re-index role-specific entries to sit after the front-matter.
     base_index = len(questions)
