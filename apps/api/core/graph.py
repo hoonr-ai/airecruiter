@@ -58,7 +58,7 @@ class SkillsGraph:
                 
             else:
                 # Fallback to Standard URL (Supabase/Postgres)
-                conn = psycopg2.connect(db_url)
+                conn = psycopg2.connect(db_url, connect_timeout=5)
 
             cur = conn.cursor()
             

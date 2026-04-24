@@ -160,6 +160,20 @@ async def lifespan(app: FastAPI):
         except Exception as e:  # noqa: BLE001
             logger.error(f"monitored_jobs_schema_init_failed: {e}; continuing")
 
+    # 5. Provision sourced_candidates + candidate_enhanced_info schema.
+    # Pre-v22: `_ensure_table` ran CREATE TABLE + 6x ALTER on every save, and
+    # `save_candidate_enhanced_info` ran its own CREATE TABLE + ALTER + CREATE
+    # INDEX per call. ALTER TABLE grabs ACCESS EXCLUSIVE and serialized every
+    # concurrent reader/writer. Budget 15s because candidate_enhanced_info is
+    # larger than monitored_jobs and the initial CREATE INDEX can take longer.
+    try:
+        from services import sourced_candidates_storage as _scs
+        await asyncio.wait_for(_scs.init_sourced_candidates_schema(), timeout=15)
+    except asyncio.TimeoutError:
+        logger.error("sourced_candidates_schema_init_timeout (15s); continuing")
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"sourced_candidates_schema_init_failed: {e}; continuing")
+
     # Delay first auto-sync 60s. Previously the sync ran immediately and held
     # the DB pool for minutes, while fresh user requests queued behind it —
     # manifesting as site-wide slowness right after every deploy. The 15-min

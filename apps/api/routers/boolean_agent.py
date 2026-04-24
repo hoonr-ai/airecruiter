@@ -24,7 +24,7 @@ async def get_boolean_agent_context(job_id: str):
                 ref_id = job_context.get('jobdiva_id', job_id)
         else:
              # If it's a ref code, try to find the numeric ID
-             with psycopg2.connect(DATABASE_URL) as conn:
+             with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT job_id FROM monitored_jobs WHERE jobdiva_id = %s", (job_id,))
                     row = cur.fetchone()

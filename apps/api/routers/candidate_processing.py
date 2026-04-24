@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends, Query
 from typing import List, Dict, Any, Optional
 import logging
+import sqlalchemy
 
 from models import (
     CandidateSearchRequest,
@@ -11,9 +12,33 @@ from models import (
     Skill
 )
 from services.jobdiva import JobDivaService
+from core.config import DATABASE_URL, SUPABASE_DB_URL
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Module-level engine singleton. v21/v22: unpooled per-request create_engine()
+# leaks DB connections until Postgres hits max_connections. Pool these instead
+# and bound connect_timeout so a slow DB fails fast rather than hanging workers
+# for the TCP default (~2 min).
+_engine: Optional[sqlalchemy.engine.Engine] = None
+
+
+def _get_engine() -> sqlalchemy.engine.Engine:
+    global _engine
+    if _engine is None:
+        db_url = DATABASE_URL or SUPABASE_DB_URL
+        if not db_url:
+            raise HTTPException(status_code=500, detail="Database not configured")
+        _engine = sqlalchemy.create_engine(
+            db_url,
+            pool_size=5,
+            max_overflow=10,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            connect_args={"connect_timeout": 5},
+        )
+    return _engine
 
 @router.get("/job-applicants/{jobdiva_id}")
 async def get_job_applicants(
@@ -495,16 +520,10 @@ async def get_candidate_enhanced_info(candidate_id: str) -> Dict[str, Any]:
     """
     try:
         logger.info(f"Fetching enhanced info for candidate: {candidate_id}")
-        
-        import sqlalchemy
+
         from sqlalchemy import text
-        from core.config import DATABASE_URL, SUPABASE_DB_URL
-        
-        db_url = DATABASE_URL or SUPABASE_DB_URL
-        if not db_url:
-            raise HTTPException(status_code=500, detail="Database not configured")
-        
-        engine = sqlalchemy.create_engine(db_url)
+
+        engine = _get_engine()
         with engine.connect() as conn:
             result = conn.execute(text("""
                 SELECT candidate_id, candidate_name, email, phone, job_title,
