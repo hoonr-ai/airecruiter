@@ -730,7 +730,7 @@ class SourcedCandidatesStorage:
             conn.autocommit = True
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-            # Jobs: jobdiva_id + best-effort title via monitored_jobs.
+                        # Jobs: jobdiva_id + best-effort title via monitored_jobs.
                         cur.execute("""
                                 WITH distinct_jobs AS (
                                         SELECT DISTINCT sc.jobdiva_id AS id
