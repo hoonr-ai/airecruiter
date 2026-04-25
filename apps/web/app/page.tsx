@@ -304,11 +304,15 @@ export default function DashboardPage() {
             <FileText className="h-4 w-4" />
             Export to Excel
           </Button>
-          <Button asChild variant="outline" className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-700 font-semibold text-[13px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all">
-            <Link href="/candidates">
-              <Users className="h-4 w-4" />
-              All Candidates
-            </Link>
+          <Button
+            variant="outline"
+            disabled
+            aria-disabled="true"
+            title="Temporarily disabled"
+            className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-400 font-semibold text-[13px] rounded-lg bg-slate-50 shadow-sm cursor-not-allowed"
+          >
+            <Users className="h-4 w-4" />
+            All Candidates (Disabled)
           </Button>
           <Button asChild className="flex items-center gap-2 h-10 px-5 bg-[#4f46e5] hover:bg-[#4338ca] text-white font-semibold text-[13px] rounded-lg shadow-sm transition-all active:scale-95 border-none">
             <Link href="/jobs/new">

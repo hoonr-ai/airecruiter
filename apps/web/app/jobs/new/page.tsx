@@ -4273,7 +4273,7 @@ function NewJobPageContent() {
           if (redirectJobRef) {
             router.push(`/jobs/${encodeURIComponent(redirectJobRef)}/rankings`);
           } else {
-            router.push(`/candidates`);
+            router.push(`/`);
           }
         }, 1500);
       } else {
