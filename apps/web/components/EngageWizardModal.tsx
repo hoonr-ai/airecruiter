@@ -111,12 +111,14 @@ function parsePayload(raw: string): WizardState | null {
       job: {
         job_id: jd.job_id || "",
         jobdiva_id: jd.jobdiva_id || "",
-        title: ctx.title || "",
-        customer_name: ctx.customer_name || "",
-        city: ctx.city || "",
-        state: ctx.state || "",
-        location_type: ctx.location_type || "",
-        description: ctx.jobdiva_description || "",
+        // Prefer backend's canonical top-level jd fields, with legacy
+        // fallback to jd.context for compatibility with older payloads.
+        title: jd.title || ctx.title || "",
+        customer_name: jd.customer_name || ctx.customer_name || "",
+        city: jd.city || ctx.city || "",
+        state: jd.state || ctx.state || "",
+        location_type: jd.location_type || ctx.location_type || "",
+        description: jd.jobdiva_description || ctx.jobdiva_description || "",
         interview_duration: p.interview_duration || "",
       },
       questions: (jd.pre_screen_questions || []).map((q: any) => ({
@@ -135,6 +137,8 @@ function buildPayload(raw: string, state: WizardState): string {
   try {
     const p = JSON.parse(raw);
     const resume = (p.resumes || [])[0] || {};
+    const existingJd = p.jd || {};
+    const existingCtx = existingJd.context || {};
 
     const updatedResume = {
       ...resume,
@@ -149,17 +153,25 @@ function buildPayload(raw: string, state: WizardState): string {
     };
 
     const updatedJd = {
-      ...p.jd,
+      ...existingJd,
       job_id: state.job.job_id,
       jobdiva_id: state.job.jobdiva_id,
+      // Keep top-level jd fields aligned with backend engagement router.
+      title: state.job.title,
+      customer_name: state.job.customer_name,
+      city: state.job.city,
+      state: state.job.state,
+      location_type: state.job.location_type,
+      jobdiva_description: state.job.description,
       pre_screen_questions: state.questions.map((q) => ({
         question_text: q.question_text,
         pass_criteria: q.pass_criteria,
         is_default: q.is_default,
         category: q.category,
       })),
+      // Also keep legacy nested context in sync for compatibility.
       context: {
-        ...(p.jd?.context || {}),
+        ...existingCtx,
         title: state.job.title,
         customer_name: state.job.customer_name,
         city: state.job.city,
