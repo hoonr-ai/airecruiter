@@ -223,7 +223,12 @@ manual_candidates_router = _safe_import("manual_candidates")
 candidates_router = _safe_import("candidates")
 jobs_router = _safe_import("jobs")
 
-app = FastAPI(title="Hoonr.ai API", lifespan=lifespan)
+# redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
+# prod reverse proxy a 307 with the wrong scheme (when uvicorn isn't running
+# with --proxy-headers, or if a future deploy drops that flag) becomes an
+# http↔https loop via nginx. Failing loudly with 404 on slash mismatch is a
+# cheap fence around that whole class of misconfig.
+app = FastAPI(title="Hoonr.ai API", lifespan=lifespan, redirect_slashes=False)
 # Request-correlation middleware. Must wrap every route so downstream
 # handlers and services see the same request_id via contextvars.
 app.add_middleware(RequestIDMiddleware)

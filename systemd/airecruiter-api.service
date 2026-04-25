@@ -11,7 +11,14 @@ Group=ubuntu
 WorkingDirectory=/home/ubuntu/codebase/airecruiter/apps/api
 Environment=PATH=/home/ubuntu/codebase/airecruiter/apps/api/venv/bin
 Environment=PYTHONPATH=/home/ubuntu/codebase/airecruiter/apps/api
-ExecStart=/home/ubuntu/codebase/airecruiter/apps/api/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 8
+# --proxy-headers + --forwarded-allow-ips: trust nginx's X-Forwarded-Proto so
+# Starlette's request scope sees scheme=https in prod. Without these flags,
+# uvicorn sees scheme=http (nginx terminates TLS), and FastAPI's default
+# `redirect_slashes=True` emits 307s with `Location: http://qacurate.hoonr.ai/...`
+# on any trailing-slash mismatch. Browser → http → nginx port 80 → 301 https →
+# bounces, hitting ERR_TOO_MANY_REDIRECTS once HSTS rewrites the http hop in
+# the browser. Localhost is unaffected because there's no http→https proxy.
+ExecStart=/home/ubuntu/codebase/airecruiter/apps/api/venv/bin/uvicorn main:app --host 0.0.0.0 --port 8000 --workers 8 --proxy-headers --forwarded-allow-ips='127.0.0.1'
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=always
 RestartSec=10
