@@ -89,6 +89,8 @@ interface Candidate {
   data?: any;
 }
 
+type EnrichStatus = { type: "info" | "error" | "success"; message: string };
+
 export default function CandidateRankingsPage() {
   const { jobId } = useParams();
   const router = useRouter();
@@ -145,6 +147,25 @@ export default function CandidateRankingsPage() {
       return "text-rose-600";
     }
     return "text-slate-600";
+  };
+
+  const compactEnrichStatusMessage = (status: EnrichStatus): string => {
+    const raw = String(status.message || "").trim();
+    const lower = raw.toLowerCase();
+    if (!raw) return "";
+    if (lower.includes("no contact info found") || lower.includes("no contact match")) {
+      return "No ZoomInfo contact found";
+    }
+    if (lower.includes("linkedin url missing")) {
+      return "LinkedIn URL missing";
+    }
+    if (lower.includes("applied")) {
+      return "Contact info applied";
+    }
+    if (lower.includes("failed")) {
+      return "ZoomInfo request failed";
+    }
+    return raw;
   };
 
   // Distinct sources present in the current candidate set, for the source dropdown.
@@ -229,7 +250,7 @@ export default function CandidateRankingsPage() {
   const [missingPhoneCandidates, setMissingPhoneCandidates] = useState<MissingPhoneCandidate[]>([]);
   const [pendingScreenCandidate, setPendingScreenCandidate] = useState<Candidate | null>(null);
   const [enrichingCandidateIds, setEnrichingCandidateIds] = useState<Set<string>>(new Set());
-  const [enrichStatusByCandidateId, setEnrichStatusByCandidateId] = useState<Record<string, { type: "info" | "error" | "success"; message: string }>>({});
+  const [enrichStatusByCandidateId, setEnrichStatusByCandidateId] = useState<Record<string, EnrichStatus>>({});
 
   const hasUsablePhone = (p?: string | null) => {
     const digits = String(p || "").replace(/\D/g, "");
@@ -729,9 +750,9 @@ export default function CandidateRankingsPage() {
         </div>
 
         {/* HTML Exact Replica Table */}
-        <div className="bg-white rounded-[12px] border border-slate-200 shadow-sm overflow-hidden relative">
-          <div className="overflow-x-auto">
-            <Table className="table-fixed w-full">
+        <div className="bg-white rounded-[12px] border border-slate-200 shadow-sm overflow-hidden relative max-w-full">
+          <div className="overflow-x-auto pb-1">
+            <Table className="table-auto min-w-[1480px] w-full">
               <TableHeader>
                 <TableRow className="bg-white border-b border-slate-200 hover:bg-white h-[42px]">
                   <TableHead className="w-[60px] text-center font-bold text-slate-900 text-[12px] uppercase tracking-wider border-r border-[#e2e8f0]">#</TableHead>
@@ -834,7 +855,7 @@ export default function CandidateRankingsPage() {
                       </div>
                     </div>
                   </TableHead>
-                  <TableHead className="sticky right-0 bg-white z-50 w-[195px] text-center font-bold text-slate-900 text-[10px] uppercase tracking-wide border-l border-slate-200 py-0">
+                  <TableHead className="w-[195px] text-center font-bold text-slate-900 text-[10px] uppercase tracking-wide border-l border-slate-200 py-0">
                     <div className="flex items-center justify-between w-full h-full px-3">
                       <div className="w-[40px]" />
                       <span className="flex-1 text-center leading-tight">ACTIONS</span>
@@ -866,8 +887,8 @@ export default function CandidateRankingsPage() {
                     const totalScore = screeningScore + engageScore;
 
                     return (
-                      <TableRow key={`${candidate.id || candidate.candidate_id}-${idx}`} className="border-b border-[#e2e8f0] hover:bg-slate-50/80 transition-colors h-auto group text-center">
-                        <TableCell className="text-center font-semibold text-slate-500 text-[12px] border-r border-[#e2e8f0] w-[60px] py-2 align-top">
+                      <TableRow key={`${candidate.id || candidate.candidate_id}-${idx}`} className="border-b border-[#e2e8f0] hover:bg-slate-50/80 transition-colors h-auto group">
+                        <TableCell className="text-center font-semibold text-slate-500 text-[12px] border-r border-[#e2e8f0] w-[60px] py-2 align-middle">
                           {idx + 1}
                         </TableCell>
                         <TableCell className="border-r border-[#e2e8f0] w-[220px] py-2 px-1.5 align-middle text-center">
@@ -909,13 +930,16 @@ export default function CandidateRankingsPage() {
                                 const status = enrichStatusByCandidateId[cid];
                                 if (!status) return null;
                                 const tone = status.type === "error"
-                                  ? "text-rose-600"
+                                  ? "text-rose-700 bg-rose-50 border-rose-200"
                                   : status.type === "success"
-                                    ? "text-emerald-600"
-                                    : "text-slate-500";
+                                    ? "text-emerald-700 bg-emerald-50 border-emerald-200"
+                                    : "text-slate-600 bg-slate-100 border-slate-200";
                                 return (
-                                  <div className={`mt-1 text-[10px] font-medium ${tone}`}>
-                                    {status.message}
+                                  <div
+                                    className={`mt-1 inline-flex max-w-[175px] items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold ${tone} truncate`}
+                                    title={status.message}
+                                  >
+                                    {compactEnrichStatusMessage(status)}
                                   </div>
                                 );
                               })()}
@@ -997,7 +1021,7 @@ export default function CandidateRankingsPage() {
                           </div>
                         </TableCell>
 
-                        <TableCell className="sticky right-0 bg-white z-40 text-center pr-1.5 pl-1.5 border-l border-[#e2e8f0] py-2 align-middle transition-colors group-hover:bg-slate-50/80">
+                        <TableCell className="text-center pr-1.5 pl-1.5 border-l border-[#e2e8f0] py-2 align-middle transition-colors group-hover:bg-slate-50/80">
                           <div className="flex items-center justify-center gap-1">
                             <Button
                               size="sm"
