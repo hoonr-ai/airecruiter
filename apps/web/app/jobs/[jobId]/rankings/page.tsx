@@ -299,10 +299,11 @@ export default function CandidateRankingsPage() {
     });
 
     try {
-      const res = await fetch(`${API_BASE}/candidates/${encodeURIComponent(candidateKey)}/enrich-contact`, {
+      const res = await fetch(`${API_BASE}/candidates/enrich-contact`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          candidate_id: candidateKey,
           jobdiva_id: candidate.jobdiva_id || job?.jobdiva_id || String(jobId || "") || undefined,
           source: candidate.source || undefined,
           linkedin_url: linkedinUrl,
