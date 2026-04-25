@@ -730,22 +730,22 @@ class SourcedCandidatesStorage:
             conn.autocommit = True
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-                        # Jobs: jobdiva_id + best-effort title via monitored_jobs.
-                        cur.execute("""
-                                WITH distinct_jobs AS (
-                                        SELECT DISTINCT sc.jobdiva_id AS id
-                                        FROM sourced_candidates sc
-                                        WHERE sc.jobdiva_id IS NOT NULL AND sc.jobdiva_id <> ''
-                                )
-                                SELECT dj.id,
-                                             COALESCE(mj_div.title, mj_num.title) AS title
-                                FROM distinct_jobs dj
-                                LEFT JOIN monitored_jobs mj_div
-                                    ON mj_div.jobdiva_id = dj.id
-                                LEFT JOIN monitored_jobs mj_num
-                                    ON mj_num.job_id::text = dj.id
-                                ORDER BY title NULLS LAST, dj.id
-                        """)
+            # Jobs: jobdiva_id + best-effort title via monitored_jobs.
+            cur.execute("""
+                WITH distinct_jobs AS (
+                    SELECT DISTINCT sc.jobdiva_id AS id
+                    FROM sourced_candidates sc
+                    WHERE sc.jobdiva_id IS NOT NULL AND sc.jobdiva_id <> ''
+                )
+                SELECT dj.id,
+                       COALESCE(mj_div.title, mj_num.title) AS title
+                FROM distinct_jobs dj
+                LEFT JOIN monitored_jobs mj_div
+                  ON mj_div.jobdiva_id = dj.id
+                LEFT JOIN monitored_jobs mj_num
+                  ON mj_num.job_id::text = dj.id
+                ORDER BY title NULLS LAST, dj.id
+            """)
             jobs = [
                 {"id": r["id"], "label": f"{r['title']} — #{r['id']}" if r["title"] else f"#{r['id']}"}
                 for r in cur.fetchall()
