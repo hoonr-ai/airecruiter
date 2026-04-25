@@ -4,6 +4,8 @@ from typing import List, Dict, Any, Optional
 import json
 import logging
 import time
+import copy
+import threading
 
 import psycopg2
 import psycopg2.extras
@@ -26,6 +28,42 @@ from routers._helpers import get_db_connection, get_dict_cursor_connection
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+# Short-lived cache + DB timeout guards for the monitored jobs list endpoint.
+# Rationale: when concurrent write traffic/locks briefly delay monitored_jobs,
+# recruiters should still get a near-instant dashboard response from fresh
+# in-memory data instead of waiting 60-90s for lock release.
+_monitored_jobs_cache: Dict[str, Dict[str, Any]] = {}
+_monitored_jobs_cache_lock = threading.Lock()
+_MONITORED_JOBS_CACHE_TTL_SECONDS = 30
+_MONITORED_JOBS_LOCK_TIMEOUT_MS = 2000
+_MONITORED_JOBS_STATEMENT_TIMEOUT_MS = 8000
+
+
+def _monitored_jobs_cache_key(include_archived: bool, view: str) -> str:
+    return f"{int(include_archived)}:{view}"
+
+
+def _get_cached_monitored_jobs(include_archived: bool, view: str) -> Optional[Dict[str, Any]]:
+    key = _monitored_jobs_cache_key(include_archived, view)
+    now = time.time()
+    with _monitored_jobs_cache_lock:
+        cached = _monitored_jobs_cache.get(key)
+        if not cached:
+            return None
+        if now - cached.get("ts", 0) > _MONITORED_JOBS_CACHE_TTL_SECONDS:
+            return None
+        return copy.deepcopy(cached.get("data"))
+
+
+def _set_cached_monitored_jobs(include_archived: bool, view: str, payload: Dict[str, Any]) -> None:
+    key = _monitored_jobs_cache_key(include_archived, view)
+    with _monitored_jobs_cache_lock:
+        _monitored_jobs_cache[key] = {
+            "ts": time.time(),
+            "data": copy.deepcopy(payload),
+        }
 
 
 # Proxies to scheduler-tangled helpers that remain in main.py.
@@ -1631,54 +1669,60 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    if view == "full":
-        select_sql = "SELECT * FROM monitored_jobs"
-    else:
-        # Summary view for dashboard/read-heavy lists. Avoid shipping heavy text/json
-        # blobs (jobdiva_description, ai_description, notes, filters, etc.) when
-        # only list-level metadata is needed.
-        select_sql = (
-            "SELECT job_id, jobdiva_id, title, customer_name, status, "
-            "city, state, zip_code, priority, program_duration, max_allowed_submittals, "
-            "processing_status, is_archived, "
-            "candidates_sourced, resumes_shortlisted, complete_submissions, "
-            "pass_submissions, pair_external_subs, feedback_completed, "
-            "time_to_first_pass, created_at, updated_at "
-            "FROM monitored_jobs"
-        )
+    try:
+        # Fail fast on lock/statement contention rather than hanging dashboard
+        # requests for tens of seconds.
+        cursor.execute("SET LOCAL lock_timeout = %s", (f"{_MONITORED_JOBS_LOCK_TIMEOUT_MS}ms",))
+        cursor.execute("SET LOCAL statement_timeout = %s", (f"{_MONITORED_JOBS_STATEMENT_TIMEOUT_MS}ms",))
 
-    if include_archived:
-        cursor.execute(
-            f"{select_sql} WHERE is_archived IS TRUE ORDER BY created_at DESC"
-        )
-    else:
-        cursor.execute(
-            f"{select_sql} WHERE is_archived IS NOT TRUE ORDER BY created_at DESC"
-        )
+        if view == "full":
+            select_sql = "SELECT * FROM monitored_jobs"
+        else:
+            # Summary view for dashboard/read-heavy lists. Avoid shipping heavy text/json
+            # blobs (jobdiva_description, ai_description, notes, filters, etc.) when
+            # only list-level metadata is needed.
+            select_sql = (
+                "SELECT job_id, jobdiva_id, title, customer_name, status, "
+                "city, state, zip_code, priority, program_duration, max_allowed_submittals, "
+                "processing_status, is_archived, "
+                "candidates_sourced, resumes_shortlisted, complete_submissions, "
+                "pass_submissions, pair_external_subs, feedback_completed, "
+                "time_to_first_pass, created_at, updated_at "
+                "FROM monitored_jobs"
+            )
 
-    columns = [desc[0] for desc in cursor.description]
-    rows = cursor.fetchall()
+        if include_archived:
+            cursor.execute(
+                f"{select_sql} WHERE is_archived IS TRUE ORDER BY created_at DESC"
+            )
+        else:
+            cursor.execute(
+                f"{select_sql} WHERE is_archived IS NOT TRUE ORDER BY created_at DESC"
+            )
 
-    jobs = {}
-    for row in rows:
-        job_data = dict(zip(columns, row))
-        jid = str(job_data.get("jobdiva_id") or job_data.get("job_id"))
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
 
-        if job_data.get("created_at") and hasattr(job_data["created_at"], "isoformat"):
-            job_data["created_at"] = job_data["created_at"].isoformat()
-        if job_data.get("updated_at") and hasattr(job_data["updated_at"], "isoformat"):
-            job_data["updated_at"] = job_data["updated_at"].isoformat()
+        jobs = {}
+        for row in rows:
+            job_data = dict(zip(columns, row))
+            jid = str(job_data.get("jobdiva_id") or job_data.get("job_id"))
 
-        jobs[jid] = job_data
+            if job_data.get("created_at") and hasattr(job_data["created_at"], "isoformat"):
+                job_data["created_at"] = job_data["created_at"].isoformat()
+            if job_data.get("updated_at") and hasattr(job_data["updated_at"], "isoformat"):
+                job_data["updated_at"] = job_data["updated_at"].isoformat()
 
-    cursor.close()
-    conn.close()
+            jobs[jid] = job_data
 
-    return {
-        "jobs": jobs,
-        "total_count": len(jobs),
-        "source": "database",
-    }
+        return {
+            "jobs": jobs,
+            "total_count": len(jobs),
+            "source": "database",
+        }
+    finally:
+        cursor.close()
+        conn.close()
 
 
 @router.get("/jobs/monitored")
@@ -1690,11 +1734,26 @@ async def get_monitored_jobs(
     Get all jobs currently being monitored from the database.
     By default, excludes archived jobs unless include_archived=true is passed.
     """
+    cached = _get_cached_monitored_jobs(include_archived, view)
+    if cached is not None:
+        cached["source"] = "cache"
+        return cached
+
     try:
-        return await asyncio.to_thread(_get_monitored_jobs_sync, include_archived, view)
+        payload = await asyncio.to_thread(_get_monitored_jobs_sync, include_archived, view)
+        _set_cached_monitored_jobs(include_archived, view, payload)
+        return payload
     except Exception as e:
         logger.error(f"Error fetching monitored jobs from DB: {e}")
-        # Fallback to legacy file only on catastrophic DB failure
+        # Serve stale cache if available to avoid long blank-loads during
+        # transient lock contention/timeouts.
+        stale_cached = _get_cached_monitored_jobs(include_archived, view)
+        if stale_cached is not None:
+            stale_cached["source"] = "cache_stale"
+            stale_cached["warning"] = "Returned stale cache due DB contention"
+            return stale_cached
+
+        # Final fallback to legacy source only on catastrophic DB failure.
         jobs_data = load_monitored_jobs()
         return jobs_data
 
