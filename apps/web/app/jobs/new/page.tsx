@@ -4332,10 +4332,11 @@ function NewJobPageContent() {
         }
 
         try {
-          const res = await fetch(`${API_BASE}/candidates/${encodeURIComponent(id)}/enrich-contact`, {
+          const res = await fetch(`${API_BASE}/candidates/enrich-contact`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
+              candidate_id: id,
               jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId || undefined,
               source: c.source || undefined,
               linkedin_url: linkedinUrl,
