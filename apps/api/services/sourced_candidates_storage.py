@@ -152,6 +152,27 @@ def _ensure_sourced_candidates_schema() -> None:
             except Exception as e:
                 logger.warning(f"candidate_enhanced_info CREATE INDEX skipped: {e}")
 
+            # Hot read-path indexes for /candidates/list and /candidates/filter-options.
+            # These are idempotent and run once at startup.
+            for stmt in (
+                "CREATE INDEX IF NOT EXISTS idx_sourced_candidates_candidate_created_at "
+                "ON sourced_candidates (candidate_id, created_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_sourced_candidates_jobdiva_id "
+                "ON sourced_candidates (jobdiva_id)",
+                "CREATE INDEX IF NOT EXISTS idx_sourced_candidates_source "
+                "ON sourced_candidates (source)",
+                "CREATE INDEX IF NOT EXISTS idx_sourced_candidates_location "
+                "ON sourced_candidates (location)",
+                "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_jobdiva_id "
+                "ON monitored_jobs (jobdiva_id)",
+                "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_job_id "
+                "ON monitored_jobs (job_id)",
+            ):
+                try:
+                    conn.execute(text(stmt))
+                except Exception as e:
+                    logger.warning(f"schema index create skipped: {stmt!r}: {e}")
+
             conn.commit()
         logger.info("sourced_candidates schema ready")
     except Exception as e:
@@ -601,17 +622,31 @@ class SourcedCandidatesStorage:
             # CTE dedupes by candidate_id (keep most-recent row), then outer
             # SELECT filters, counts, orders, paginates.
             query = f"""
-                WITH deduped AS (
+                WITH monitored_jobs_lookup AS (
+                    SELECT DISTINCT ON (lookup_id) lookup_id, title
+                    FROM (
+                        SELECT mj.jobdiva_id::text AS lookup_id, mj.title
+                        FROM monitored_jobs mj
+                        WHERE mj.jobdiva_id IS NOT NULL AND mj.jobdiva_id <> ''
+                        UNION ALL
+                        SELECT mj.job_id::text AS lookup_id, mj.title
+                        FROM monitored_jobs mj
+                        WHERE mj.job_id IS NOT NULL AND mj.job_id <> ''
+                    ) x
+                    WHERE lookup_id IS NOT NULL AND lookup_id <> ''
+                    ORDER BY lookup_id
+                ),
+                deduped AS (
                     SELECT DISTINCT ON (sc.candidate_id)
                         sc.*,
                         COALESCE(
                             sc.resume_match_percentage,
                             NULLIF(sc.data->>'match_score','')::numeric
                         ) AS match_score,
-                        mj.title AS job_title
+                        mjl.title AS job_title
                     FROM sourced_candidates sc
-                    LEFT JOIN monitored_jobs mj
-                      ON (sc.jobdiva_id = mj.job_id OR sc.jobdiva_id = mj.jobdiva_id)
+                    LEFT JOIN monitored_jobs_lookup mjl
+                      ON sc.jobdiva_id = mjl.lookup_id
                     ORDER BY sc.candidate_id, sc.created_at DESC
                 )
                 SELECT d.*, COUNT(*) OVER() AS total_count
@@ -696,15 +731,21 @@ class SourcedCandidatesStorage:
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
             # Jobs: jobdiva_id + best-effort title via monitored_jobs.
-            cur.execute("""
-                SELECT sc.jobdiva_id AS id, MIN(mj.title) AS title
-                FROM sourced_candidates sc
-                LEFT JOIN monitored_jobs mj
-                  ON (sc.jobdiva_id = mj.job_id OR sc.jobdiva_id = mj.jobdiva_id)
-                WHERE sc.jobdiva_id IS NOT NULL AND sc.jobdiva_id <> ''
-                GROUP BY sc.jobdiva_id
-                ORDER BY title NULLS LAST, sc.jobdiva_id
-            """)
+                        cur.execute("""
+                                WITH distinct_jobs AS (
+                                        SELECT DISTINCT sc.jobdiva_id AS id
+                                        FROM sourced_candidates sc
+                                        WHERE sc.jobdiva_id IS NOT NULL AND sc.jobdiva_id <> ''
+                                )
+                                SELECT dj.id,
+                                             COALESCE(mj_div.title, mj_num.title) AS title
+                                FROM distinct_jobs dj
+                                LEFT JOIN monitored_jobs mj_div
+                                    ON mj_div.jobdiva_id = dj.id
+                                LEFT JOIN monitored_jobs mj_num
+                                    ON mj_num.job_id::text = dj.id
+                                ORDER BY title NULLS LAST, dj.id
+                        """)
             jobs = [
                 {"id": r["id"], "label": f"{r['title']} — #{r['id']}" if r["title"] else f"#{r['id']}"}
                 for r in cur.fetchall()
