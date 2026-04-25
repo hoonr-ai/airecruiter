@@ -959,6 +959,7 @@ class UpdateCandidatePhoneRequest(BaseModel):
 
 
 class EnrichCandidateContactRequest(BaseModel):
+    candidate_id: Optional[str] = None
     jobdiva_id: Optional[str] = None
     source: Optional[str] = None
     linkedin_url: Optional[str] = None
@@ -1080,8 +1081,7 @@ def _extract_new_zoominfo_contact_fields(payload: Dict[str, Any]) -> Dict[str, s
     }
 
 
-@router.post("/candidates/{candidate_id:path}/enrich-contact")
-async def enrich_candidate_contact(candidate_id: str, request: EnrichCandidateContactRequest):
+async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandidateContactRequest):
     """
     Enrich candidate contact details from ZoomInfo using LinkedIn URL.
     If sourced_candidates rows already exist, updates phone/email + data blob.
@@ -1255,10 +1255,24 @@ async def enrich_candidate_contact(candidate_id: str, request: EnrichCandidateCo
                 "ZoomInfo new API fallback skipped for %s: insufficient match inputs after search (need email OR phone OR full name + company OR resolvable name)",
                 candidate_id,
             )
-            raise HTTPException(
-                status_code=502,
-                detail="ZoomInfo API error (401). Fallback requires email OR phone OR full name + company name.",
+            logger.info(
+                "ZoomInfo fallback insufficient inputs for %s; returning no-contact result",
+                candidate_id,
             )
+            return {
+                "status": "success",
+                "candidate_id": candidate_id,
+                "linkedin_url": linkedin_url,
+                "phone_source": "none",
+                "phone": None,
+                "email": None,
+                "workPhone": None,
+                "mobilePhone": None,
+                "workEmail": None,
+                "personalEmail": None,
+                "updated_rows": 0,
+                "message": "ZoomInfo fallback skipped: insufficient match inputs (no reliable person match).",
+            }
 
         new_headers = {
             "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
@@ -1289,6 +1303,21 @@ async def enrich_candidate_contact(candidate_id: str, request: EnrichCandidateCo
                 new_res.status_code,
                 new_res.text[:300],
             )
+            if 400 <= new_res.status_code < 500:
+                return {
+                    "status": "success",
+                    "candidate_id": candidate_id,
+                    "linkedin_url": linkedin_url,
+                    "phone_source": "none",
+                    "phone": None,
+                    "email": None,
+                    "workPhone": None,
+                    "mobilePhone": None,
+                    "workEmail": None,
+                    "personalEmail": None,
+                    "updated_rows": 0,
+                    "message": f"ZoomInfo returned no contact match ({new_res.status_code}).",
+                }
             raise HTTPException(status_code=502, detail=f"ZoomInfo API error ({new_res.status_code})")
 
         try:
@@ -1301,6 +1330,21 @@ async def enrich_candidate_contact(candidate_id: str, request: EnrichCandidateCo
         logger.warning(
             f"ZoomInfo enrich non-2xx for {candidate_id}: {zres.status_code} {response_text[:300]}"
         )
+        if 400 <= zres.status_code < 500:
+            return {
+                "status": "success",
+                "candidate_id": candidate_id,
+                "linkedin_url": linkedin_url,
+                "phone_source": "none",
+                "phone": None,
+                "email": None,
+                "workPhone": None,
+                "mobilePhone": None,
+                "workEmail": None,
+                "personalEmail": None,
+                "updated_rows": 0,
+                "message": f"ZoomInfo returned no contact match ({zres.status_code}).",
+            }
         raise HTTPException(status_code=502, detail=f"ZoomInfo API error ({zres.status_code})")
     else:
         extracted = _extract_enrichment_fields(zoominfo_data)
@@ -1390,6 +1434,23 @@ async def enrich_candidate_contact(candidate_id: str, request: EnrichCandidateCo
         "personalEmail": raw_personal_email or None,
         "updated_rows": updated_rows,
     }
+
+
+@router.post("/candidates/enrich-contact")
+async def enrich_candidate_contact_body(request: EnrichCandidateContactRequest):
+    """
+    Body-based enrich endpoint to avoid URL/path encoding edge cases for
+    candidate IDs containing reserved/non-ASCII characters.
+    """
+    candidate_id = str(request.candidate_id or "").strip()
+    if not candidate_id:
+        raise HTTPException(status_code=400, detail="candidate_id is required")
+    return await _enrich_candidate_contact_impl(candidate_id, request)
+
+
+@router.post("/candidates/{candidate_id:path}/enrich-contact")
+async def enrich_candidate_contact(candidate_id: str, request: EnrichCandidateContactRequest):
+    return await _enrich_candidate_contact_impl(candidate_id, request)
 
 
 @router.patch("/candidates/{candidate_id}/phone")
