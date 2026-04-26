@@ -30,7 +30,7 @@ router = APIRouter(tags=["Engagement"])
 # Configuration
 # ---------------------------------------------------------------------------
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:root@localhost:5432/airecruiter")
-EXTERNAL_INTERVIEW_API_URL = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairqa.hoonr.ai")
+EXTERNAL_INTERVIEW_API_URL = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai")
 
 # ---------------------------------------------------------------------------
 # Auto-Migration: Ensure audit table exists
@@ -301,6 +301,82 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
         conn = _get_db_connection()
         cur = conn.cursor()
 
+        def _write_candidate_engage_status(
+            candidate_id: str,
+            status_value: str,
+            job_id_value: str,
+            interview_id_value: str = "",
+            response_fragment: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            """Write-through status sync for rank-list source of truth.
+
+            Rank-list reads engage_status from sourced_candidates.data, so we
+            must update that blob whenever engage send state changes.
+            """
+            now_iso = datetime.now(timezone.utc).isoformat()
+            cur.execute(
+                """
+                UPDATE sourced_candidates
+                SET data =
+                    jsonb_set(
+                        jsonb_set(
+                            jsonb_set(
+                                COALESCE(data, '{}'::jsonb),
+                                '{engage_status}',
+                                to_jsonb(%s::text),
+                                true
+                            ),
+                            '{engage_updated_at}',
+                            to_jsonb(%s::text),
+                            true
+                        ),
+                        '{engage_interview_id}',
+                        to_jsonb(%s::text),
+                        true
+                    ),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE candidate_id = %s
+                  AND (
+                    jobdiva_id = %s
+                    OR jobdiva_id = %s
+                  )
+                """,
+                (
+                    status_value,
+                    now_iso,
+                    interview_id_value,
+                    candidate_id,
+                    str(job_id_value or ""),
+                    str(payload_obj.get("jd", {}).get("jobdiva_id", "") or ""),
+                ),
+            )
+
+            # Preserve last external response snippet for support/debugging.
+            if response_fragment is not None:
+                cur.execute(
+                    """
+                    UPDATE sourced_candidates
+                    SET data = jsonb_set(
+                            COALESCE(data, '{}'::jsonb),
+                            '{engage_last_response}',
+                            %s::jsonb,
+                            true
+                        ),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE candidate_id = %s
+                      AND (
+                        jobdiva_id = %s
+                        OR jobdiva_id = %s
+                      )
+                    """,
+                    (
+                        json.dumps(response_fragment),
+                        candidate_id,
+                        str(job_id_value or ""),
+                        str(payload_obj.get("jd", {}).get("jobdiva_id", "") or ""),
+                    ),
+                )
+
         interview_results = []
 
         if is_success and isinstance(response_data, dict):
@@ -334,6 +410,14 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                     "sent"
                 ))
 
+                _write_candidate_engage_status(
+                    candidate_id=candidate_id,
+                    status_value="sent",
+                    job_id_value=job_id,
+                    interview_id_value=interview_id,
+                    response_fragment=interview_info,
+                )
+
                 interview_results.append({
                     "candidate_id": candidate_id,
                     "interview_id": interview_id,
@@ -358,6 +442,14 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                     json.dumps(response_data),
                     "failed"
                 ))
+
+                _write_candidate_engage_status(
+                    candidate_id=candidate_id,
+                    status_value="failed",
+                    job_id_value=job_id,
+                    interview_id_value="",
+                    response_fragment=response_data if isinstance(response_data, dict) else {"response": response_data},
+                )
 
         conn.commit()
         cur.close()
