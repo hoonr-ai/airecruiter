@@ -63,7 +63,10 @@ def _ensure_sourced_candidates_schema() -> None:
         return
     try:
         engine = _get_engine()
-        with engine.connect() as conn:
+        # v22: use AUTOCOMMIT for schema init so one failing migration (e.g.
+        # RENAME of a column that's already been renamed) doesn't abort the
+        # transaction and skip all subsequent DDL.
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
             # sourced_candidates (canonical schema).
             conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS sourced_candidates (
@@ -175,10 +178,10 @@ def _ensure_sourced_candidates_schema() -> None:
                 except Exception as e:
                     logger.warning(f"schema index create skipped: {stmt!r}: {e}")
 
-            conn.commit()
         logger.info("sourced_candidates schema ready")
     except Exception as e:
         logger.error(f"sourced_candidates schema init failed: {e}")
+
 
 
 async def init_sourced_candidates_schema() -> None:
