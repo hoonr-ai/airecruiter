@@ -712,6 +712,7 @@ async def get_job_candidates(job_id_or_ref: str):
                     FROM sourced_candidates sc
                     LEFT JOIN latest_audit la
                         ON la.candidate_id = sc.candidate_id
+
                     WHERE sc.jobdiva_id = %s
                     ORDER BY sc.created_at DESC;
                 """, (str(resolved_jobdiva_id), str(resolved_numeric_job_id), resolved_jobdiva_id,))
@@ -752,6 +753,9 @@ async def get_job_candidates(job_id_or_ref: str):
                 cand["engage_interview_id"] = cand.get("audit_interview_id")
                 if isinstance(data_blob, dict):
                     data_blob["engage_interview_id"] = cand.get("audit_interview_id")
+
+            if not cand.get("engage_created_at") and cand.get("audit_created_at"):
+                cand["engage_created_at"] = cand.get("audit_created_at")
 
             if isinstance(data_blob, dict):
                 cand["data"] = data_blob

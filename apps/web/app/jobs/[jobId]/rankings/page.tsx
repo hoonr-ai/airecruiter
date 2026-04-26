@@ -85,6 +85,7 @@ interface Candidate {
   engage_score?: number;
   engage_status?: string;
   engage_completed_at?: string;
+  engage_created_at?: string;
   availability?: string;
   created_at: string;
   data?: any;
@@ -1265,9 +1266,31 @@ export default function CandidateRankingsPage() {
                               const rawStatus = String(candidate.engage_status || candidate.data?.engage_status || "").trim().toLowerCase();
                               if (rawStatus === "initiated" || rawStatus === "sent" || rawStatus === "sms sent") {
                                 return (
-                                  <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 font-bold text-[11px] border border-amber-200 shadow-sm leading-none">
-                                    SMS Sent
-                                  </span>
+                                  <div className="flex flex-col items-center gap-1.5 py-1">
+                                    <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 font-bold text-[11px] border border-amber-200 shadow-sm leading-none">
+                                      SMS Sent
+                                    </span>
+                                    {(candidate.engage_created_at || candidate.data?.engage_created_at) && (
+                                      <div className="flex flex-col items-center gap-0.5">
+                                        <div className="text-[10px] text-emerald-600 flex items-center gap-1 font-bold" title="Time when automated outreach was first initiated">
+                                          <Mail className="w-2.5 h-2.5" /> {formatDate(candidate.engage_created_at || candidate.data?.engage_created_at)}
+                                        </div>
+                                        {(() => {
+                                          const baseTime = candidate.engage_created_at || candidate.data?.engage_created_at;
+                                          const phoneTime = new Date(new Date(baseTime).getTime() + 30 * 60000);
+                                          const isActive = new Date() > phoneTime;
+                                          return (
+                                            <div 
+                                              className={}
+                                              title={isActive ? "Automated follow-up call has been triggered" : "Scheduled time for automated follow-up call if no response"}
+                                            >
+                                              <Phone className="w-2.5 h-2.5" /> {formatDate(phoneTime.toISOString())}
+                                            </div>
+                                          );
+                                        })()}
+                                      </div>
+                                    )}
+                                  </div>
                                 );
                               }
                               const screenStatus = normalizeScreenStatus(candidate);
@@ -1330,7 +1353,7 @@ export default function CandidateRankingsPage() {
 
                               onClick={() => handleSmsCandidate(candidate)}
                               disabled={candidate.engage_status === "Initiated" || candidate.engage_status === "sent" || candidate.engage_status === "SMS Sent"}
-                              title={(candidate.engage_status === "Initiated" || candidate.engage_status === "sent" || candidate.engage_status === "SMS Sent") ? "SMS outreach already initiated" : ""}
+                              title={(candidate.engage_status === "Initiated" || candidate.engage_status === "sent" || candidate.engage_status === "SMS Sent") ? "Outreach already initiated" : ""}
                             >
                               <Send className="w-3 h-3 mr-0.5" />
                               SMS

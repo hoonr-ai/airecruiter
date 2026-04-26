@@ -413,7 +413,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                     candidate_email,
                     json.dumps(payload_obj),
                     json.dumps(interview_info),
-                    "SMS Sent"
+                    "Initiated"
                 ))
 
                 _write_candidate_engage_status(
