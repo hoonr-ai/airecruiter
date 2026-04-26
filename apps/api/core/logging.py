@@ -83,6 +83,30 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(out, default=str)
 
 
+class AmplitudeLogHandler(logging.Handler):
+    """Best-effort log forwarding for warning/error records to Amplitude."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if record.levelno < logging.WARNING:
+            return
+        try:
+            from core.amplitude import track_event_async
+
+            event_type = "backend_error" if record.levelno >= logging.ERROR else "backend_log"
+            track_event_async(
+                event_type,
+                {
+                    "level": record.levelname,
+                    "logger": record.name,
+                    "message": record.getMessage(),
+                    "request_id": getattr(record, "request_id", None),
+                },
+                device_id="airecruiter-api-logs",
+            )
+        except Exception:
+            return
+
+
 def configure_logging(
     level: str | None = None,
     fmt: str | None = None,
@@ -110,6 +134,10 @@ def configure_logging(
             )
         )
     root.addHandler(handler)
+
+    if os.getenv("AMPLITUDE_API_KEY") and os.getenv("AMPLITUDE_TRACK_LOGS", "true").lower() in {"1", "true", "yes", "on"}:
+        root.addHandler(AmplitudeLogHandler())
+
     root.setLevel(level)
 
     # Quiet a couple of noisy third-party loggers at INFO — they stay
