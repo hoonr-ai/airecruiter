@@ -721,15 +721,26 @@ async def get_job_candidates(job_id_or_ref: str):
                     pass
 
             data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else {}
+            # Promote engage values from JSONB blob to top-level response fields.
+            # These are persisted by engagement sync endpoints in sourced_candidates.data.
+            if isinstance(data_blob, dict):
+                if data_blob.get("engage_status"):
+                    cand["engage_status"] = data_blob.get("engage_status")
+                if data_blob.get("engage_interview_id"):
+                    cand["engage_interview_id"] = data_blob.get("engage_interview_id")
+                if data_blob.get("engage_score") is not None:
+                    cand["engage_score"] = data_blob.get("engage_score")
+                if data_blob.get("engage_completed_at"):
+                    cand["engage_completed_at"] = data_blob.get("engage_completed_at")
+
             # Read-side fallback: audit table is authoritative when candidate
-            # blob doesn't yet have engage status.
-            existing_status = cand.get("engage_status") or data_blob.get("engage_status")
-            if not existing_status and cand.get("audit_status"):
+            # blob doesn't yet have engage status/interview id.
+            if not cand.get("engage_status") and cand.get("audit_status"):
                 cand["engage_status"] = cand.get("audit_status")
                 if isinstance(data_blob, dict):
                     data_blob["engage_status"] = cand.get("audit_status")
 
-            if not (cand.get("engage_interview_id") or data_blob.get("engage_interview_id")) and cand.get("audit_interview_id"):
+            if not cand.get("engage_interview_id") and cand.get("audit_interview_id"):
                 cand["engage_interview_id"] = cand.get("audit_interview_id")
                 if isinstance(data_blob, dict):
                     data_blob["engage_interview_id"] = cand.get("audit_interview_id")
