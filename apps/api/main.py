@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, Query, UploadFile, File
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, Query, UploadFile, File, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
@@ -36,6 +36,7 @@ def readable_ist_now() -> str:
 # local dev readability) and picks up LOG_LEVEL from env. New Relic /
 # Datadog / OpenTelemetry can layer on later with zero code change.
 from core.logging import configure_logging, RequestIDMiddleware
+from core.amplitude import track_event_async
 configure_logging()
 logger = logging.getLogger(__name__)
 
@@ -268,6 +269,60 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def amplitude_request_tracking(request: Request, call_next):
+    """Best-effort API telemetry: request journey + failures."""
+    started = time.perf_counter()
+    method = request.method
+    path = request.url.path
+    query = request.url.query
+    user_id = request.headers.get("x-user-id") or request.headers.get("x-user-email")
+
+    try:
+        response = await call_next(request)
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        track_event_async(
+            "api_request",
+            {
+                "method": method,
+                "path": path,
+                "query": query,
+                "status_code": response.status_code,
+                "duration_ms": duration_ms,
+            },
+            user_id=user_id,
+            device_id="airecruiter-api",
+        )
+        if response.status_code >= 500:
+            track_event_async(
+                "api_server_error",
+                {
+                    "method": method,
+                    "path": path,
+                    "status_code": response.status_code,
+                    "duration_ms": duration_ms,
+                },
+                user_id=user_id,
+                device_id="airecruiter-api",
+            )
+        return response
+    except Exception as e:
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        track_event_async(
+            "api_exception",
+            {
+                "method": method,
+                "path": path,
+                "query": query,
+                "duration_ms": duration_ms,
+                "error": str(e),
+            },
+            user_id=user_id,
+            device_id="airecruiter-api",
+        )
+        raise
 
 
 
