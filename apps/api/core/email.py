@@ -52,9 +52,10 @@ SMTP_PASSWORD = _cfg("SMTP_PASSWORD")
 SMTP_FROM     = _cfg("SMTP_FROM") or SMTP_USER  # same as Tira bug-report
 
 # PAIR-specific (not SMTP credentials)
-PAIR_TEAM_EMAIL = _cfg("PAIR_TEAM_EMAIL", "pair-recruiting@pyramidci.com")
-APP_BASE_URL    = _cfg("APP_BASE_URL", "https://qacurate.hoonr.ai")
-JOBDIVA_URL     = _cfg("JOBDIVA_URL", "https://www1.jobdiva.com")
+PAIR_TEAM_EMAIL    = _cfg("PAIR_TEAM_EMAIL",    "pair-recruiting@pyramidci.com")
+JOB_POSTING_EMAIL  = _cfg("JOB_POSTING_EMAIL",  "Jobposting@pyramidci.com")
+APP_BASE_URL       = _cfg("APP_BASE_URL",        "https://qacurate.hoonr.ai")
+JOBDIVA_URL        = _cfg("JOBDIVA_URL",         "https://www1.jobdiva.com")
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +261,167 @@ def notify_pair_launched(
         f"Candidates sourced: {candidate_count}\n"
         f"JobDiva: {jobdiva_link}\n"
         f"Track progress: {rankings_link}\n"
+    )
+
+    return _send(to_list, subject, _base_html(content), plain)
+
+
+def notify_job_posting(
+    *,
+    jobdiva_id: str,
+    job_title: str,
+    recruiter_emails: List[str],
+    job_boards: List[str],
+    ai_description: str,
+) -> bool:
+    """
+    Email #2 – Job Posting Request.
+
+    From : SMTP_FROM
+    To   : Jobposting@pyramidci.com, pair-recruiting@pyramidci.com + recruiter emails
+    Subj : New Job Posting Request Received
+
+    The posting description is rendered with the same logic as the UI's
+    AIPostingJobDescription component (markdown-like → HTML).
+    """
+    import re as _re
+
+    jobdiva_link = f"{JOBDIVA_URL}/jobdiva/servlet/jd?uid={jobdiva_id}"
+
+    jd_hyperlink = (
+        f'<a href="{jobdiva_link}" target="_blank" '
+        f'style="color:#4f46e5;font-weight:600;text-decoration:none;">'
+        f'{jobdiva_id}</a>'
+    )
+
+    recruiter_list_html = ", ".join(recruiter_emails) if recruiter_emails else "—"
+
+    # Job boards as a bulleted list or "—" if none
+    if job_boards:
+        boards_html = "<ul style='margin:4px 0 0 16px;padding:0;font-size:13px;color:#334155;'>" + \
+            "".join(f"<li style='margin:2px 0;'>{b}</li>" for b in job_boards) + "</ul>"
+        boards_plain = ", ".join(job_boards)
+    else:
+        boards_html = "<span style='color:#94a3b8;font-size:13px;'>—</span>"
+        boards_plain = "—"
+
+    # ── Markdown-to-HTML renderer matching the UI AIPostingJobDescription ──
+    def _render_inline(text: str) -> str:
+        """Convert **bold**, *italic*, and [label](url) to HTML spans."""
+        # Links first so inner text isn't mangled
+        text = _re.sub(
+            r'\[([^\]]+)\]\(([^)]+)\)',
+            r'<a href="\2" target="_blank" style="color:#4f46e5;text-decoration:underline;">\1</a>',
+            text,
+        )
+        # Bold
+        text = _re.sub(r'\*\*(.+?)\*\*', r'<strong style="font-weight:600;color:#1e293b;">\1</strong>', text)
+        # Italic (single *)
+        text = _re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<em>\1</em>', text)
+        return text
+
+    def _render_description(raw: str) -> str:
+        """Render the full ai_description as HTML matching the UI component."""
+        if not raw or not raw.strip():
+            return "<em style='color:#94a3b8;'>Not available</em>"
+
+        lines = raw.split("\n")
+        html_parts: list = []
+
+        for line in lines:
+            trimmed = line.strip()
+
+            # Empty line → spacer
+            if not trimmed:
+                html_parts.append('<div style="height:8px;"></div>')
+                continue
+
+            # Header detection: **ALL CAPS** or plain ALL CAPS (3–25 chars)
+            is_header = (
+                bool(_re.match(r'^\*\*[A-Z\s]+\*\*$', trimmed))
+                or bool(_re.match(r'^[A-Z\s]{3,25}$', trimmed))
+            )
+            if is_header:
+                title = trimmed.replace("**", "").strip()
+                html_parts.append(
+                    f'<div style="font-size:14px;font-weight:700;color:#0f172a;'
+                    f'margin-top:20px;margin-bottom:6px;text-transform:uppercase;'
+                    f'letter-spacing:0.04em;">{title}</div>'
+                )
+                continue
+
+            # Bullet points (• or -)
+            if trimmed.startswith("•") or trimmed.startswith("-"):
+                content = _re.sub(r'^[•\-]\s*', '', trimmed)
+                html_parts.append(
+                    f'<div style="display:flex;gap:10px;margin-left:4px;'
+                    f'margin-top:4px;margin-bottom:4px;align-items:flex-start;">'
+                    f'<span style="color:#94a3b8;margin-top:2px;">•</span>'
+                    f'<div style="flex:1;font-size:13px;color:#334155;">'
+                    f'{_render_inline(content)}</div></div>'
+                )
+                continue
+
+            # Normal paragraph line
+            html_parts.append(
+                f'<div style="margin-bottom:6px;font-size:13px;color:#475569;line-height:1.75;">'
+                f'{_render_inline(trimmed)}</div>'
+            )
+
+        return "\n".join(html_parts)
+
+    desc_html  = _render_description(ai_description or "")
+    desc_plain = (ai_description or "—").strip()
+
+    content = f"""
+    <h2 style="margin:0 0 6px;font-size:20px;color:#1e293b;">
+      📋 New Job Posting Request Received
+    </h2>
+    <p style="margin:0 0 20px;font-size:14px;color:#334155;line-height:1.7;">
+      Job posting team, please post the below job on the selected job boards.
+      Please <strong>reply all</strong> here once the posts are live.
+    </p>
+
+    <table cellpadding="0" cellspacing="0"
+           style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;
+                  width:100%;margin-bottom:24px;">
+      <tbody>
+        {_info_row("Job Diva ID", jd_hyperlink)}
+        {_info_row("Job Title", job_title or "—")}
+        {_info_row("Recruiter Requesting", recruiter_list_html)}
+      </tbody>
+    </table>
+
+    <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:#64748b;
+              text-transform:uppercase;letter-spacing:0.05em;">Job Boards</p>
+    <div style="margin-bottom:20px;">{boards_html}</div>
+
+    <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:#64748b;
+              text-transform:uppercase;letter-spacing:0.05em;">Posting Description</p>
+    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;
+                padding:16px;margin-bottom:8px;">
+      {desc_html}
+    </div>
+    """
+
+    # Deduplicated To list: job posting team first, then PAIR team, then recruiters
+    to_list = list(dict.fromkeys(
+        [JOB_POSTING_EMAIL, PAIR_TEAM_EMAIL]
+        + [e.strip() for e in recruiter_emails if e.strip()]
+    ))
+
+    subject = "New Job Posting Request Received"
+
+    plain = (
+        "New Job Posting Request Received\n\n"
+        "Job posting team, please post the below job on selected job boards."
+        " Please reply all here once posts are live.\n\n"
+        f"Job Diva ID: {jobdiva_id}\n"
+        f"JobDiva link: {jobdiva_link}\n"
+        f"Job Title: {job_title or '—'}\n"
+        f"Recruiter Requesting: {recruiter_list_html}\n"
+        f"Job Boards: {boards_plain}\n\n"
+        f"Posting Description:\n{desc_plain}\n"
     )
 
     return _send(to_list, subject, _base_html(content), plain)
