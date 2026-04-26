@@ -22,7 +22,7 @@ import os
 import httpx
 from datetime import datetime, timezone, timedelta
 
-from core.email import notify_pair_launched
+from core.email import notify_pair_launched, notify_job_posting
 
 logger = logging.getLogger(__name__)
 
@@ -269,13 +269,14 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         logger.error(f"❌ generate-payload failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # ---------------------------------------------------------------------------
-# Helper: fire PAIR launch confirmation email (background task)
+# Helper: fire PAIR launch notifications (background task)
+# Fires Email #1 (launch confirmation) + Email #2 (job posting request)
+# from a single DB query so we don't hit monitored_jobs twice.
 # ---------------------------------------------------------------------------
 async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
     """
-    Fetches job metadata from monitored_jobs and fires the launch email.
+    Fetches job metadata from monitored_jobs and fires both launch emails.
     Runs inside asyncio.create_task() so failures are fully isolated.
     """
     if not job_id:
@@ -285,7 +286,8 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute(
             """
-            SELECT job_id, jobdiva_id, title, customer_name, job_configuration
+            SELECT job_id, jobdiva_id, title, customer_name,
+                   ai_description, job_configuration
             FROM monitored_jobs
             WHERE job_id = %s OR jobdiva_id = %s
             LIMIT 1
@@ -300,7 +302,7 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
             logger.warning("📧 _send_pair_launch_email: job '%s' not found in monitored_jobs", job_id)
             return
 
-        # Parse recruiter_emails from job_configuration JSONB column
+        # ── Parse job_configuration ──────────────────────────────────────────
         raw_cfg = row.get("job_configuration") or {}
         if isinstance(raw_cfg, str):
             try:
@@ -308,22 +310,49 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
             except Exception:
                 raw_cfg = {}
 
-        recruiter_emails: list = raw_cfg.get("recruiter_emails", [])
-        if isinstance(recruiter_emails, str):
-            try:
-                recruiter_emails = json.loads(recruiter_emails)
-            except Exception:
-                recruiter_emails = [e.strip() for e in recruiter_emails.split(",") if e.strip()]
+        def _parse_json_list(val) -> list:
+            """Safely parse a value that may be a JSON string, list, or empty."""
+            if isinstance(val, list):
+                return val
+            if isinstance(val, str):
+                try:
+                    parsed = json.loads(val)
+                    return parsed if isinstance(parsed, list) else []
+                except Exception:
+                    return [e.strip() for e in val.split(",") if e.strip()]
+            return []
 
+        recruiter_emails: list = _parse_json_list(raw_cfg.get("recruiter_emails", []))
+        job_boards: list       = _parse_json_list(raw_cfg.get("selected_job_boards", []))
+
+        jobdiva_id    = str(row.get("jobdiva_id") or job_id)
+        job_title     = str(row.get("title") or "")
+        customer_name = str(row.get("customer_name") or "")
+        ai_desc       = str(row.get("ai_description") or "")
+        db_job_id     = str(row.get("job_id") or job_id)
+        clean_emails  = [str(e) for e in recruiter_emails if e]
+
+        # ── Email #1: PAIR Launch Confirmation ───────────────────────────────
         await asyncio.to_thread(
             notify_pair_launched,
-            jobdiva_id=str(row.get("jobdiva_id") or job_id),
-            job_title=str(row.get("title") or ""),
-            customer_name=str(row.get("customer_name") or ""),
+            jobdiva_id=jobdiva_id,
+            job_title=job_title,
+            customer_name=customer_name,
             candidate_count=candidate_count,
-            recruiter_emails=[str(e) for e in recruiter_emails if e],
-            job_id=str(row.get("job_id") or job_id),
+            recruiter_emails=clean_emails,
+            job_id=db_job_id,
         )
+
+        # ── Email #2: Job Posting Request ─────────────────────────────────────
+        await asyncio.to_thread(
+            notify_job_posting,
+            jobdiva_id=jobdiva_id,
+            job_title=job_title,
+            recruiter_emails=clean_emails,
+            job_boards=job_boards,
+            ai_description=ai_desc,
+        )
+
     except Exception as exc:
         logger.warning("📧 _send_pair_launch_email failed silently: %s", exc, exc_info=True)
 
