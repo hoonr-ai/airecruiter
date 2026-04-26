@@ -656,6 +656,7 @@ async def get_job_candidates(job_id_or_ref: str):
         # Resolve the alphanumeric jobdiva_id (e.g. '26-05172') from monitored_jobs.
         # sourced_candidates.jobdiva_id must always store the alphanumeric ref, NOT the numeric PK.
         resolved_jobdiva_id = job_id_or_ref  # fallback: use whatever was passed
+        resolved_numeric_job_id = job_id_or_ref
         # v22: connect_timeout=5 → slow/unreachable DB fails fast instead of
         # hanging worker for TCP default (~2 min).
         with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
@@ -669,18 +670,46 @@ async def get_job_candidates(job_id_or_ref: str):
                 if result:
                     # Prefer the alphanumeric jobdiva_id; fall back to job_id if jobdiva_id is NULL
                     resolved_jobdiva_id = result[0] or result[1]
+                    resolved_numeric_job_id = result[1] or result[0]
 
         # Query sourced_candidates using the resolved alphanumeric jobdiva_id
         with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                      SELECT id, jobdiva_id, candidate_id, name, email, phone, headline, location,
-                          source, profile_url, image_url,
-                          resume_match_percentage as match_score, created_at, data
-                    FROM sourced_candidates
-                    WHERE jobdiva_id = %s
-                    ORDER BY created_at DESC;
-                """, (resolved_jobdiva_id,))
+                    WITH latest_audit AS (
+                        SELECT DISTINCT ON (candidate_id)
+                            candidate_id,
+                            status,
+                            interview_id,
+                            created_at
+                        FROM engage_interview_audit
+                        WHERE (job_id = %s OR job_id = %s)
+                        ORDER BY candidate_id, id DESC
+                    )
+                    SELECT
+                        sc.id,
+                        sc.jobdiva_id,
+                        sc.candidate_id,
+                        sc.name,
+                        sc.email,
+                        sc.phone,
+                        sc.headline,
+                        sc.location,
+                        sc.source,
+                        sc.profile_url,
+                        sc.image_url,
+                        sc.resume_match_percentage as match_score,
+                        sc.created_at,
+                        sc.data,
+                        la.status as audit_status,
+                        la.interview_id as audit_interview_id,
+                        la.created_at as audit_created_at
+                    FROM sourced_candidates sc
+                    LEFT JOIN latest_audit la
+                        ON la.candidate_id = sc.candidate_id
+                    WHERE sc.jobdiva_id = %s
+                    ORDER BY sc.created_at DESC;
+                """, (str(resolved_jobdiva_id), str(resolved_numeric_job_id), resolved_jobdiva_id,))
                 candidates = cur.fetchall()
 
         # Handle the data field (it might be a string or a dict)
@@ -691,9 +720,154 @@ async def get_job_candidates(job_id_or_ref: str):
                 except:
                     pass
 
+            data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else {}
+            # Read-side fallback: audit table is authoritative when candidate
+            # blob doesn't yet have engage status.
+            existing_status = cand.get("engage_status") or data_blob.get("engage_status")
+            if not existing_status and cand.get("audit_status"):
+                cand["engage_status"] = cand.get("audit_status")
+                if isinstance(data_blob, dict):
+                    data_blob["engage_status"] = cand.get("audit_status")
+
+            if not (cand.get("engage_interview_id") or data_blob.get("engage_interview_id")) and cand.get("audit_interview_id"):
+                cand["engage_interview_id"] = cand.get("audit_interview_id")
+                if isinstance(data_blob, dict):
+                    data_blob["engage_interview_id"] = cand.get("audit_interview_id")
+
+            if isinstance(data_blob, dict):
+                cand["data"] = data_blob
+
+            # Hide internal join-only fields from API response payload.
+            cand.pop("audit_status", None)
+            cand.pop("audit_interview_id", None)
+            cand.pop("audit_created_at", None)
+
         return {"status": "success", "candidates": candidates}
     except Exception as e:
         logger.error(f"Error fetching job candidates: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+class RefreshResumeMatchRequest(BaseModel):
+    source: Optional[str] = None
+
+
+@router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id}/refresh-resume-match")
+async def refresh_candidate_resume_match(
+    job_id_or_ref: str,
+    candidate_id: str,
+    request: RefreshResumeMatchRequest,
+):
+    """Re-run resume matching for a single candidate and persist score details."""
+    try:
+        from core.config import DATABASE_URL
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+
+        resolved_jobdiva_id = job_id_or_ref
+        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT jobdiva_id, job_id
+                    FROM monitored_jobs
+                    WHERE job_id = %s OR jobdiva_id = %s
+                    LIMIT 1
+                    """,
+                    (job_id_or_ref, job_id_or_ref),
+                )
+                job_row = cur.fetchone()
+                if job_row:
+                    resolved_jobdiva_id = job_row[0] or job_row[1] or job_id_or_ref
+
+        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                if request.source:
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM sourced_candidates
+                        WHERE jobdiva_id = %s
+                          AND candidate_id = %s
+                          AND source = %s
+                        ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+                        LIMIT 1
+                        """,
+                        (resolved_jobdiva_id, candidate_id, request.source),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT *
+                        FROM sourced_candidates
+                        WHERE jobdiva_id = %s
+                          AND candidate_id = %s
+                        ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+                        LIMIT 1
+                        """,
+                        (resolved_jobdiva_id, candidate_id),
+                    )
+                candidate_row = cur.fetchone()
+
+                if not candidate_row:
+                    raise HTTPException(status_code=404, detail="Candidate not found for this job")
+
+                row_data = dict(candidate_row)
+                data_blob = _json_load_safe(row_data.get("data"), {})
+
+                scoring_payload = {
+                    "candidate_id": row_data.get("candidate_id"),
+                    "name": row_data.get("name"),
+                    "headline": row_data.get("headline"),
+                    "location": row_data.get("location"),
+                    "resume_text": row_data.get("resume_text") or data_blob.get("resume_text") or "",
+                    "skills": data_blob.get("skills") or [],
+                    "experience_years": data_blob.get("experience_years") or 0,
+                    "enhanced_info": data_blob.get("enhanced_info") or {},
+                    "data": data_blob,
+                    "match_score": row_data.get("resume_match_percentage") or data_blob.get("match_score") or 0,
+                }
+
+                criteria = _build_resume_matching_criteria(str(resolved_jobdiva_id))
+                refreshed = _compute_resume_matching(scoring_payload, criteria)
+
+                data_blob["match_score"] = refreshed["score"]
+                data_blob["resume_matching_score"] = refreshed["score"]
+                data_blob["resume_matching_status"] = refreshed["status"]
+                data_blob["resume_matching_scored_at"] = refreshed["scored_at"]
+                data_blob["match_score_details"] = refreshed["score_details"]
+                data_blob["matched_skills"] = refreshed["matched_skills"]
+                data_blob["missing_skills"] = refreshed["missing_skills"]
+                data_blob["explainability"] = refreshed["explainability"]
+
+                cur.execute(
+                    """
+                    UPDATE sourced_candidates
+                    SET resume_match_percentage = %s,
+                        data = %s,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                    """,
+                    (refreshed["score"], json.dumps(data_blob), row_data.get("id")),
+                )
+            conn.commit()
+
+        return {
+            "status": "success",
+            "candidate_id": candidate_id,
+            "jobdiva_id": str(resolved_jobdiva_id),
+            "score": refreshed["score"],
+            "resume_matching_status": refreshed["status"],
+            "resume_matching_scored_at": refreshed["scored_at"],
+            "matched_skills": refreshed["matched_skills"],
+            "missing_skills": refreshed["missing_skills"],
+            "match_score_details": refreshed["score_details"],
+            "explainability": refreshed["explainability"],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"refresh_candidate_resume_match failed for {candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/candidates/save")
