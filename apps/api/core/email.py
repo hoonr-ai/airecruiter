@@ -577,3 +577,72 @@ def notify_candidate_passed(
         attachments.append({"filename": resume_filename, "content": resume_bytes})
 
     return _send(to_list, subject, _base_html(content), plain, attachments=attachments)
+
+
+def notify_pair_inactive(
+    *,
+    jobdiva_id: str,
+    recruiter_emails: List[str],
+) -> bool:
+    """
+    Email #4 – PAIR Is Now Inactive.
+
+    Triggered when PAIR status is updated to Inactive (manual or JobDiva sync).
+    """
+    jobdiva_link = f"{JOBDIVA_URL}/jobdiva/servlet/jd?uid={jobdiva_id}"
+    
+    jd_hyperlink = (
+        f'<a href="{jobdiva_link}" target="_blank" '
+        f'style="color:#4f46e5;text-decoration:none;font-weight:600;">'
+        f'{jobdiva_id}</a>'
+    )
+
+    content = f"""
+    <h2 style="margin:0 0 6px;font-size:20px;color:#1e293b;">
+      ⏸️ PAIR Is Now Inactive
+    </h2>
+    <p style="margin:0 0 20px;font-size:14px;color:#334155;line-height:1.7;">
+      Please note that PAIR’s activity is halted for {jd_hyperlink}. 
+      While inactive, PAIR stops candidate outreach.
+    </p>
+
+    <div style="background:#fff7ed;border-left:4px solid #f97316;padding:16px;margin-bottom:24px;">
+      <p style="margin:0;font-size:14px;color:#9a3412;font-weight:600;">
+        Job posting team, please close external postings related to this job.
+      </p>
+    </div>
+
+    <p style="margin:0 0 16px;font-size:13px;color:#64748b;line-height:1.6;font-style:italic;">
+      <strong>Note:</strong> A job may be marked as inactive in PAIR either manually 
+      by a recruiter or automatically when its status in Job Diva is set to 
+      Closed, Filled, Canceled, Ignored, Declined, or Expired. 
+      PAIR cannot be restarted for the job unless the JobDiva status is Open or On Hold.
+    </p>
+
+    <div style="border-top:1px solid #e2e8f0;padding-top:16px;margin-top:24px;">
+      <p style="margin:0;font-size:14px;color:#475569;">
+        To relaunch PAIR, navigate to the <strong>Jobs List</strong>, and click 
+        <strong>Edit Job Configuration</strong> under Actions.
+      </p>
+    </div>
+    """
+
+    # Combined TO list
+    to_list = list(dict.fromkeys(
+        [PAIR_TEAM_EMAIL, JOB_POSTING_TEAM_EMAIL] + [e.strip() for e in recruiter_emails if e.strip()]
+    ))
+
+    subject = f"PAIR Is Now Inactive for {jobdiva_id}"
+
+    plain = (
+        f"PAIR Is Now Inactive for {jobdiva_id}\n\n"
+        f"Please note that PAIR’s activity is halted for {jobdiva_id} ({jobdiva_link}). "
+        f"While inactive, PAIR stops candidate outreach.\n\n"
+        f"Job posting team, please close external postings related to this job.\n\n"
+        f"Note: A job may be marked as inactive in PAIR either manually by a recruiter or "
+        f"automatically when its status in Job Diva is set to Closed, Filled, Canceled, Ignored, Declined, or Expired. "
+        f"PAIR cannot be restarted for the job unless the JobDiva status is Open or On Hold.\n\n"
+        f"To relaunch PAIR, navigate to the Jobs List, and click Edit Job Configuration under Actions.\n"
+    )
+
+    return _send(to_list, subject, _base_html(content), plain)

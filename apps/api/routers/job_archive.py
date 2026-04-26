@@ -11,6 +11,8 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime, timezone, timedelta
 
 from core.db import get_db_connection
+from core.email import notify_pair_inactive
+import json
 
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
 logger = logging.getLogger(__name__)
@@ -81,9 +83,29 @@ async def archive_job(job_id: str, request: JobArchiveRequest = None):
                 archive_reason = %s,
                 archived_at = %s
             WHERE job_id = %s
+            RETURNING jobdiva_id, recruiter_emails
         """, (readable_ist_now(), archive_reason, readable_ist_now(), actual_job_id))
         
+        ret = cursor.fetchone()
         conn.commit()
+        
+        # Fire Notification (Email #4)
+        if ret:
+            try:
+                emails_raw = ret[1]
+                if isinstance(emails_raw, str):
+                    try: recruiter_emails = json.loads(emails_raw)
+                    except: recruiter_emails = [emails_raw] if emails_raw else []
+                else:
+                    recruiter_emails = emails_raw or []
+                
+                notify_pair_inactive(
+                    jobdiva_id=ret[0] or job_id,
+                    recruiter_emails=recruiter_emails
+                )
+            except Exception as e:
+                logger.error(f"Failed to fire Inactive notification for archived job {job_id}: {e}")
+
         cursor.close()
         conn.close()
         
