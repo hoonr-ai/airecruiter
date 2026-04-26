@@ -110,10 +110,14 @@ async def lifespan(app: FastAPI):
         logger.info("🤖 [AutoSync] Starting built-in 15-minute synchronization cycle...")
         
         try:
-            from psycopg2.extras import RealDictCursor
             conn = get_db_connection()
             cur = conn.cursor(cursor_factory=RealDictCursor)
-            cur.execute("SELECT job_id, title FROM monitored_jobs")
+            cur.execute("""
+                SELECT job_id, title 
+                FROM monitored_jobs 
+                WHERE is_archived IS NOT TRUE 
+                AND (processing_status IN ('monitoring_added', 'manual_created') OR processing_status LIKE 'step_%_complete')
+            """)
             jobs = cur.fetchall()
             cur.close()
             conn.close()
