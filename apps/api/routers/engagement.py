@@ -22,6 +22,8 @@ import os
 import httpx
 from datetime import datetime, timezone, timedelta
 
+from core.email import notify_pair_launched
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Engagement"])
@@ -269,6 +271,64 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
 
 
 # ---------------------------------------------------------------------------
+# Helper: fire PAIR launch confirmation email (background task)
+# ---------------------------------------------------------------------------
+async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
+    """
+    Fetches job metadata from monitored_jobs and fires the launch email.
+    Runs inside asyncio.create_task() so failures are fully isolated.
+    """
+    if not job_id:
+        return
+    try:
+        conn = _get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT job_id, jobdiva_id, title, customer_name, job_configuration
+            FROM monitored_jobs
+            WHERE job_id = %s OR jobdiva_id = %s
+            LIMIT 1
+            """,
+            (job_id, job_id),
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not row:
+            logger.warning("📧 _send_pair_launch_email: job '%s' not found in monitored_jobs", job_id)
+            return
+
+        # Parse recruiter_emails from job_configuration JSONB column
+        raw_cfg = row.get("job_configuration") or {}
+        if isinstance(raw_cfg, str):
+            try:
+                raw_cfg = json.loads(raw_cfg)
+            except Exception:
+                raw_cfg = {}
+
+        recruiter_emails: list = raw_cfg.get("recruiter_emails", [])
+        if isinstance(recruiter_emails, str):
+            try:
+                recruiter_emails = json.loads(recruiter_emails)
+            except Exception:
+                recruiter_emails = [e.strip() for e in recruiter_emails.split(",") if e.strip()]
+
+        await asyncio.to_thread(
+            notify_pair_launched,
+            jobdiva_id=str(row.get("jobdiva_id") or job_id),
+            job_title=str(row.get("title") or ""),
+            customer_name=str(row.get("customer_name") or ""),
+            candidate_count=candidate_count,
+            recruiter_emails=[str(e) for e in recruiter_emails if e],
+            job_id=str(row.get("job_id") or job_id),
+        )
+    except Exception as exc:
+        logger.warning("📧 _send_pair_launch_email failed silently: %s", exc, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # 2. POST /engage/send-bulk-interview
 # ---------------------------------------------------------------------------
 @router.post("/engage/send-bulk-interview")
@@ -459,6 +519,13 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
         conn.close()
 
         if is_success:
+            # ── Fire PAIR launch confirmation email (non-blocking) ──────────
+            asyncio.create_task(
+                _send_pair_launch_email(
+                    job_id=payload_obj.get("jd", {}).get("job_id", ""),
+                    candidate_count=len(interview_results),
+                )
+            )
             return {
                 "success": True,
                 "message": "Interview(s) sent successfully",
