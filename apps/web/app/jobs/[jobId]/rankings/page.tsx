@@ -84,6 +84,7 @@ interface Candidate {
   engage_score?: number;
   engage_status?: string;
   engage_completed_at?: string;
+  engage_created_at?: string;
   availability?: string;
   created_at: string;
   data?: any;
@@ -990,11 +991,29 @@ export default function CandidateRankingsPage() {
                         </TableCell>
 
                         <TableCell className="text-center align-middle py-2">
-                          <div className="flex items-center justify-center w-full min-h-[40px]">
+                          <div className="flex flex-col items-center justify-center gap-1.5 w-full min-h-[60px]">
                             {(candidate.engage_status === "Initiated" || candidate.engage_status === "sent" || candidate.engage_status === "SMS Sent") ? (
-                              <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 font-bold text-[11px] border border-amber-200 shadow-sm leading-none">
-                                SMS Sent
-                              </span>
+                              <div className="flex flex-col items-center gap-1.5">
+                                <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 font-bold text-[11px] border border-amber-200 shadow-sm leading-none">
+                                  Initiated
+                                </span>
+                                {candidate.engage_created_at && (
+                                  <div className="flex flex-col items-center gap-0.5">
+                                    <div className="text-[10px] text-emerald-600 flex items-center gap-1 font-bold">
+                                      <Mail className="w-2.5 h-2.5" /> {formatDate(candidate.engage_created_at)}
+                                    </div>
+                                    {(() => {
+                                      const phoneTime = new Date(new Date(candidate.engage_created_at).getTime() + 30 * 60000);
+                                      const isActive = new Date() > phoneTime;
+                                      return (
+                                        <div className={`text-[10px] flex items-center gap-1 font-bold mt-1 ${isActive ? 'text-emerald-600' : 'text-amber-600'}`}>
+                                          <Phone className="w-2.5 h-2.5" /> {formatDate(phoneTime.toISOString())}
+                                        </div>
+                                      );
+                                    })()}
+                                  </div>
+                                )}
+                              </div>
                             ) : (
                               <span className="font-medium text-[13px] leading-none" style={{ color: candidate.engage_status?.toLowerCase().includes("pass") ? '#059669' : '#64748b' }}>
                                 {candidate.engage_status || "Pending"}
@@ -1053,7 +1072,7 @@ export default function CandidateRankingsPage() {
                               className="h-7 px-2 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[10px] rounded-md shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                               onClick={() => handleSmsCandidate(candidate)}
                               disabled={candidate.engage_status === "Initiated" || candidate.engage_status === "sent" || candidate.engage_status === "SMS Sent"}
-                              title={(candidate.engage_status === "Initiated" || candidate.engage_status === "sent" || candidate.engage_status === "SMS Sent") ? "SMS outreach already initiated" : ""}
+                              title={(candidate.engage_status === "Initiated" || candidate.engage_status === "sent" || candidate.engage_status === "SMS Sent") ? "Outreach already initiated" : ""}
                             >
                               <Send className="w-3 h-3 mr-0.5" />
                               SMS

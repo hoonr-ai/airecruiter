@@ -681,10 +681,10 @@ async def get_job_candidates(job_id_or_ref: str):
                         sc.id, sc.jobdiva_id, sc.candidate_id, sc.name, sc.email, sc.phone, sc.headline, sc.location,
                         sc.source, sc.profile_url, sc.image_url,
                         sc.resume_match_percentage as match_score, sc.created_at, sc.data,
-                        audit.status as engage_status
+                        audit.status as engage_status, audit.created_at as engage_created_at
                     FROM sourced_candidates sc
                     LEFT JOIN LATERAL (
-                        SELECT status 
+                        SELECT status, created_at 
                         FROM engage_interview_audit 
                         WHERE candidate_id = sc.candidate_id 
                           AND (job_id = %s OR job_id = %s)
