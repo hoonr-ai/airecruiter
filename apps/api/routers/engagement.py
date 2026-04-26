@@ -316,8 +316,8 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 candidate_name = interview_info.get("candidate_name", "")
                 candidate_email = interview_info.get("candidate_email", "")
 
-                # Extract job_id from payload
-                job_id = payload_obj.get("jd", {}).get("job_id", "")
+                # Extract job_id from payload (prefer reference jobdiva_id for UI consistency)
+                job_id = payload_obj.get("jd", {}).get("jobdiva_id") or payload_obj.get("jd", {}).get("job_id", "")
 
                 cur.execute("""
                     INSERT INTO engage_interview_audit
@@ -331,7 +331,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                     candidate_email,
                     json.dumps(payload_obj),
                     json.dumps(interview_info),
-                    "sent"
+                    "SMS Sent"
                 ))
 
                 interview_results.append({

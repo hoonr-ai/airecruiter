@@ -36,7 +36,11 @@ function emit(level: LogLevel, msg: string, ctx?: Context) {
     level === "info"  ? console.info :
     level === "warn"  ? console.warn :
                          console.error;
-  consoleFn(record);
+  
+  // Log message and context separately for better browser inspection and to
+  // prevent some Next.js overlays from showing a generic {} for the record.
+  consoleFn(`[${level.toUpperCase()}] ${msg}`, ctx ?? {});
+  
   remoteSink(record);
 }
 

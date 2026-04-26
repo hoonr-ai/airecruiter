@@ -666,21 +666,34 @@ async def get_job_candidates(job_id_or_ref: str):
                     LIMIT 1
                 """, (job_id_or_ref, job_id_or_ref))
                 result = cur.fetchone()
+                resolved_jobdiva_id = job_id_or_ref
+                resolved_numeric_id = job_id_or_ref
                 if result:
-                    # Prefer the alphanumeric jobdiva_id; fall back to job_id if jobdiva_id is NULL
                     resolved_jobdiva_id = result[0] or result[1]
+                    resolved_numeric_id = result[1]
 
         # Query sourced_candidates using the resolved alphanumeric jobdiva_id
+        # Join with engage_interview_audit to get the latest engagement status (e.g. 'Initiated', 'Completed')
         with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                      SELECT id, jobdiva_id, candidate_id, name, email, phone, headline, location,
-                          source, profile_url, image_url,
-                          resume_match_percentage as match_score, created_at, data
-                    FROM sourced_candidates
-                    WHERE jobdiva_id = %s
-                    ORDER BY created_at DESC;
-                """, (resolved_jobdiva_id,))
+                    SELECT 
+                        sc.id, sc.jobdiva_id, sc.candidate_id, sc.name, sc.email, sc.phone, sc.headline, sc.location,
+                        sc.source, sc.profile_url, sc.image_url,
+                        sc.resume_match_percentage as match_score, sc.created_at, sc.data,
+                        audit.status as engage_status
+                    FROM sourced_candidates sc
+                    LEFT JOIN LATERAL (
+                        SELECT status 
+                        FROM engage_interview_audit 
+                        WHERE candidate_id = sc.candidate_id 
+                          AND (job_id = %s OR job_id = %s)
+                        ORDER BY created_at DESC 
+                        LIMIT 1
+                    ) audit ON TRUE
+                    WHERE sc.jobdiva_id = %s
+                    ORDER BY sc.created_at DESC;
+                """, (resolved_jobdiva_id, resolved_numeric_id, resolved_jobdiva_id))
                 candidates = cur.fetchall()
 
         # Handle the data field (it might be a string or a dict)

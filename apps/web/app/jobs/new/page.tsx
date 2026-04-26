@@ -71,6 +71,7 @@ import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { PasteResumeModal } from "@/components/jobs/PasteResumeModal";
 import { BulkUploadSection } from "@/components/jobs/BulkUploadSection";
 import { PhoneIndicator } from "@/components/phone-indicator";
+import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { API_BASE } from "@/lib/api";
 import { logger } from "@/lib/logger";
 
@@ -224,6 +225,7 @@ export default function NewJobPage() {
 function NewJobPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const engagement = useEngagementFlow();
   const [currentStep, setCurrentStepState] = useState<Step>(1);
   // Track the highest step the user has ever reached so the pipeline/stepper
   // at the top allows jumping back to any step they've visited, not just
@@ -4267,15 +4269,43 @@ function NewJobPageContent() {
 
       if (response.ok && result.status === 'success') {
         const saved = result.saved_count || selectedCount;
-        showToast(`${saved} candidates saved to Master Pool — redirecting...`, "success");
+        showToast(`${saved} candidates saved to Master Pool.`, "success");
+        
+        // Auto-initiate PAIR calls (Requirement: "the call must go automaticlaly")
         const redirectJobRef = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
+        try {
+          const candIds = candidatesPayload.map(c => c.candidate_id);
+          if (candIds.length > 0 && redirectJobRef) {
+            showToast(`Initiating PAIR calls for ${candIds.length} candidates...`, "info");
+            
+            const payloadData = await engagement.generatePayload({
+              candidateIds: candIds,
+              jobId: redirectJobRef
+            });
+            
+            const bulkResult = await engagement.sendBulkInterview({
+              payload: payloadData.payload,
+              realCandidateIds: candIds
+            });
+            
+            if (bulkResult.success) {
+              showToast("PAIR calls initiated successfully!", "success");
+            } else {
+              showToast(`Auto-call failed: ${bulkResult.message || "Unknown error"}`, "error");
+            }
+          }
+        } catch (e) {
+          console.error("Auto-initiation failed:", e);
+          showToast("Failed to auto-initiate calls, but candidates were saved.", "error");
+        }
+
         setTimeout(() => {
           if (redirectJobRef) {
             router.push(`/jobs/${encodeURIComponent(redirectJobRef)}/rankings`);
           } else {
             router.push(`/`);
           }
-        }, 1500);
+        }, 2000); // Slightly longer delay to allow toast reading
       } else {
         console.error('Save failed details:', JSON.stringify(result, null, 2));
         const errorMsg = result.detail
