@@ -69,6 +69,7 @@ interface Candidate {
   id: number;
   jobdiva_id?: string;
   candidate_id?: string;
+  engage_interview_id?: string;
   name: string;
   email: string;
   phone?: string;
@@ -89,7 +90,6 @@ interface Candidate {
 }
 
 type EnrichStatus = { type: "info" | "error" | "success"; message: string };
-type ToastState = { type: "info" | "error" | "success"; message: string } | null;
 type ToastState = { type: "info" | "error" | "success"; message: string } | null;
 
 export default function CandidateRankingsPage() {
@@ -133,6 +133,118 @@ export default function CandidateRankingsPage() {
       c.availability ||
       null
     );
+  };
+
+  const deriveInterviewId = (c: Candidate): string | null => {
+    const raw =
+      c.data?.engage_interview_id ||
+      c.engage_interview_id ||
+      null;
+    const v = String(raw || "").trim();
+    return v || null;
+  };
+
+  const normalizeScreenStatus = (c: Candidate): { label: string; color: string } => {
+    const interviewId = deriveInterviewId(c);
+    if (!interviewId) {
+      return { label: "N/A", color: "#94a3b8" };
+    }
+
+    const raw = String(c.engage_status || c.data?.engage_status || "").trim().toLowerCase();
+    if (!raw) {
+      return { label: "Pending", color: "#64748b" };
+    }
+
+    const pendingStates = new Set([
+      "pending",
+      "sent",
+      "created",
+      "queued",
+      "scheduled",
+      "in_progress",
+      "in-progress",
+      "inprogress",
+      "started",
+    ]);
+    if (pendingStates.has(raw)) {
+      return { label: "Pending", color: "#64748b" };
+    }
+
+    if (raw.includes("complete")) {
+      return { label: "Completed", color: "#059669" };
+    }
+    if (raw.includes("fail")) {
+      return { label: "Failed", color: "#dc2626" };
+    }
+    if (raw.includes("pass")) {
+      return { label: "Passed", color: "#059669" };
+    }
+
+    const label = raw.charAt(0).toUpperCase() + raw.slice(1);
+    return { label, color: "#64748b" };
+  };
+
+  const syncInterviewDetails = async (rows: Candidate[]): Promise<Candidate[]> => {
+    const interviewIds = Array.from(
+      new Set(
+        rows
+          .map((c) => deriveInterviewId(c))
+          .filter((id): id is string => Boolean(id))
+          .map((id) => Number.parseInt(id, 10))
+          .filter((n) => Number.isFinite(n) && n > 0)
+      )
+    );
+
+    if (!interviewIds.length) return rows;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/engagement/interviews/details-sync`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ interview_ids: interviewIds }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok || !Array.isArray(payload?.results)) {
+        return rows;
+      }
+
+      const detailByInterviewId = new Map<string, Record<string, unknown>>();
+      for (const item of payload.results) {
+        const iid = String(item?.interview_id || "").trim();
+        if (!iid || !item?.success) continue;
+        detailByInterviewId.set(iid, item as Record<string, unknown>);
+      }
+
+      return rows.map((c) => {
+        const iid = deriveInterviewId(c);
+        if (!iid) return c;
+
+        const detail = detailByInterviewId.get(String(Number.parseInt(iid, 10)) || iid) || detailByInterviewId.get(iid);
+        if (!detail) return c;
+
+        const interview = (detail.detail as Record<string, unknown> | undefined)?.interview as Record<string, unknown> | undefined;
+        const nextStatus = String(interview?.status || detail.status || c.engage_status || "").trim();
+        const scoreRaw = interview?.overall_score ?? detail.overall_score;
+        const score = Number(scoreRaw);
+        const completedAt = interview?.completed_at || detail.completed_at || c.data?.engage_completed_at || null;
+
+        return {
+          ...c,
+          engage_status: nextStatus || c.engage_status,
+          engage_score: Number.isFinite(score) ? score : c.engage_score,
+          data: {
+            ...(c.data || {}),
+            engage_interview_id: iid,
+            ...(nextStatus ? { engage_status: nextStatus } : {}),
+            ...(Number.isFinite(score) ? { engage_score: score } : {}),
+            ...(completedAt ? { engage_completed_at: completedAt } : {}),
+          },
+        };
+      });
+    } catch (error) {
+      console.warn("Failed to sync interview details", error);
+      return rows;
+    }
   };
 
   const availabilityPillClasses = (raw: string | null): string => {
@@ -642,12 +754,13 @@ export default function CandidateRankingsPage() {
           const totalB = (b.match_score || b.resume_match_percentage || 0);
           return totalB - totalA;
         });
-        setCandidates(sorted);
+        const synced = await syncInterviewDetails(sorted as Candidate[]);
+        setCandidates(synced);
 
         // EXTRA FALLBACK: If job title is still Unknown, borrow from candidates
         setJob(prev => {
           if (!prev || prev.title === `Job ${jobId}`) {
-            const firstCand = sorted[0];
+            const firstCand = synced[0];
             const recoveredTitle = firstCand?.headline || firstCand?.job_title || `Job ${jobId}`;
             return {
               ...(prev || {}),
@@ -1063,9 +1176,14 @@ export default function CandidateRankingsPage() {
                         </TableCell>
 
                         <TableCell className="text-center align-middle py-1">
-                          <span className="font-medium text-[13px]" style={{ color: candidate.engage_status?.toLowerCase().includes("pass") ? '#059669' : '#64748b' }}>
-                            {candidate.engage_status || "Pending"}
-                          </span>
+                          {(() => {
+                            const screenStatus = normalizeScreenStatus(candidate);
+                            return (
+                              <span className="font-medium text-[13px]" style={{ color: screenStatus.color }}>
+                                {screenStatus.label}
+                              </span>
+                            );
+                          })()}
                         </TableCell>
 
                         <TableCell className="text-center align-middle py-1 font-medium text-slate-700 text-[12px]">

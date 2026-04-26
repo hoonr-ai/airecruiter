@@ -119,6 +119,9 @@ class SendBulkInterviewRequest(BaseModel):
     payload: str  # JSON string (editable by user in modal)
     real_candidate_ids: List[str]
 
+class SyncInterviewDetailsRequest(BaseModel):
+    interview_ids: List[Any]
+
 # ---------------------------------------------------------------------------
 # 1. POST /engage/generate-payload
 # ---------------------------------------------------------------------------
@@ -525,7 +528,164 @@ async def get_latest_interview(candidate_id: str):
 
 
 # ---------------------------------------------------------------------------
-# 4. GET /assess/{interview_id}  (Proxy for PAIR dashboard data)
+# 4. POST /engage/interviews/details-sync
+# ---------------------------------------------------------------------------
+@router.post("/engage/interviews/details-sync")
+@router.post("/interviews/details-sync")
+async def sync_interview_details(request: SyncInterviewDetailsRequest):
+    """
+    Fetch interview detail(s) from PAIR for provided interview IDs, then:
+      1) store the full detail payload in engage_interview_audit.response
+      2) update engage_interview_audit.status from detail.interview.status
+      3) sync sourced_candidates.data engage fields for rank-list consumption
+
+    Note: PAIR detail endpoint currently supports single interview_id per call,
+    so this endpoint fans out one request per id and returns aggregated results.
+    """
+    # Normalize incoming IDs: keep only positive integers, de-duplicated.
+    normalized_ids: List[int] = []
+    seen = set()
+    for raw_id in request.interview_ids or []:
+        try:
+            parsed = int(str(raw_id).strip())
+            if parsed <= 0:
+                continue
+            if parsed in seen:
+                continue
+            seen.add(parsed)
+            normalized_ids.append(parsed)
+        except Exception:
+            continue
+
+    if not normalized_ids:
+        return {"success": True, "count": 0, "results": []}
+
+    conn = _get_db_connection()
+    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    results: List[Dict[str, Any]] = []
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for interview_id in normalized_ids:
+                try:
+                    pair_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/interviews/{interview_id}/detail"
+                    pair_res = await client.get(pair_url)
+
+                    if pair_res.status_code != 200:
+                        results.append({
+                            "interview_id": interview_id,
+                            "success": False,
+                            "error": f"PAIR returned {pair_res.status_code}",
+                        })
+                        continue
+
+                    detail_payload = pair_res.json()
+                    interview_block = detail_payload.get("interview", {}) if isinstance(detail_payload, dict) else {}
+                    status_value = str(interview_block.get("status") or "pending")
+                    overall_score = interview_block.get("overall_score")
+                    completed_at = interview_block.get("completed_at")
+                    now_iso = datetime.now(timezone.utc).isoformat()
+
+                    # Update only the latest audit row for this interview_id.
+                    cur.execute(
+                        """
+                        WITH latest AS (
+                            SELECT id
+                            FROM engage_interview_audit
+                            WHERE interview_id = %s
+                            ORDER BY id DESC
+                            LIMIT 1
+                        )
+                        UPDATE engage_interview_audit eia
+                        SET response = %s::jsonb,
+                            status = %s,
+                            updated_at = CURRENT_TIMESTAMP
+                        FROM latest
+                        WHERE eia.id = latest.id
+                        RETURNING eia.candidate_id, eia.job_id
+                        """,
+                        (str(interview_id), json.dumps(detail_payload), status_value),
+                    )
+                    audit_row = cur.fetchone()
+
+                    candidate_id = str((audit_row or {}).get("candidate_id") or "")
+                    job_id = str((audit_row or {}).get("job_id") or "")
+
+                    candidate_blob: Dict[str, Any] = {
+                        "engage_status": status_value,
+                        "engage_updated_at": now_iso,
+                        "engage_interview_id": str(interview_id),
+                        "engage_last_response": detail_payload,
+                    }
+                    if overall_score is not None:
+                        candidate_blob["engage_score"] = overall_score
+                    if completed_at:
+                        candidate_blob["engage_completed_at"] = completed_at
+
+                    candidate_rows_updated = 0
+                    if candidate_id:
+                        if job_id:
+                            cur.execute(
+                                """
+                                UPDATE sourced_candidates
+                                SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE candidate_id = %s
+                                  AND (jobdiva_id = %s OR jobdiva_id = %s)
+                                """,
+                                (json.dumps(candidate_blob), candidate_id, job_id, job_id),
+                            )
+                            candidate_rows_updated = cur.rowcount or 0
+
+                        # Fallback when job_id does not map directly to sourced_candidates.jobdiva_id.
+                        if candidate_rows_updated == 0:
+                            cur.execute(
+                                """
+                                UPDATE sourced_candidates
+                                SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb,
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE candidate_id = %s
+                                """,
+                                (json.dumps(candidate_blob), candidate_id),
+                            )
+                            candidate_rows_updated = cur.rowcount or 0
+
+                    conn.commit()
+
+                    results.append({
+                        "interview_id": interview_id,
+                        "success": True,
+                        "status": status_value,
+                        "overall_score": overall_score,
+                        "completed_at": completed_at,
+                        "candidate_id": candidate_id or None,
+                        "candidate_rows_updated": candidate_rows_updated,
+                        "detail": detail_payload,
+                    })
+                except Exception as item_err:
+                    conn.rollback()
+                    logger.warning(
+                        f"⚠️ interview detail sync failed for {interview_id}: {item_err}",
+                        exc_info=True,
+                    )
+                    results.append({
+                        "interview_id": interview_id,
+                        "success": False,
+                        "error": str(item_err),
+                    })
+    finally:
+        cur.close()
+        conn.close()
+
+    return {
+        "success": True,
+        "count": len(results),
+        "results": results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 5. GET /assess/{interview_id}  (Proxy for PAIR dashboard data)
 # ---------------------------------------------------------------------------
 @router.get("/assess/{interview_id}")
 async def get_assessment_data(interview_id: str):
@@ -590,7 +750,7 @@ async def get_assessment_data(interview_id: str):
 
 
 # ---------------------------------------------------------------------------
-# 5. Outreach API Proxies
+# 6. Outreach API Proxies
 # ---------------------------------------------------------------------------
 async def _proxy_get(path: str, params: dict = None):
     try:
@@ -644,7 +804,7 @@ async def trigger_phase2(interview_id: str):
 
 
 # ---------------------------------------------------------------------------
-# 6. Retrieval of Transcripts API Proxies
+# 7. Retrieval of Transcripts API Proxies
 # ---------------------------------------------------------------------------
 @router.get("/interviews/{interview_id}/transcriptions")
 async def get_transcriptions(interview_id: str):
