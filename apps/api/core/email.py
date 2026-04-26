@@ -629,7 +629,7 @@ def notify_pair_inactive(
 
     # Combined TO list
     to_list = list(dict.fromkeys(
-        [PAIR_TEAM_EMAIL, JOB_POSTING_TEAM_EMAIL] + [e.strip() for e in recruiter_emails if e.strip()]
+        [PAIR_TEAM_EMAIL, JOB_POSTING_EMAIL] + [e.strip() for e in recruiter_emails if e.strip()]
     ))
 
     subject = f"PAIR Is Now Inactive for {jobdiva_id}"
