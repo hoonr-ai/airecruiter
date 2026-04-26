@@ -67,10 +67,15 @@ def _smtp_configured() -> bool:
     return bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD)
 
 
-def _send(to_addresses: List[str], subject: str, html_body: str, text_body: str = "") -> bool:
+def _send(
+    to_addresses: List[str],
+    subject: str,
+    html_body: str,
+    text_body: str = "",
+    attachments: Optional[List[dict]] = None  # List of {"filename": str, "content": bytes}
+) -> bool:
     """
-    Low-level send helper.  Returns True on success, False on any failure
-    (never raises so callers don't fail the primary request on email errors).
+    Low-level send helper.  Returns True on success, False on any failure.
     """
     if not _smtp_configured():
         logger.warning(
@@ -92,6 +97,18 @@ def _send(to_addresses: List[str], subject: str, html_body: str, text_body: str 
         msg.attach(MIMEText(text_body, "plain"))
     msg.attach(MIMEText(html_body, "html"))
 
+    # Attachments
+    if attachments:
+        from email.mime.application import MIMEApplication
+        for att in attachments:
+            filename = att.get("filename", "attachment")
+            content  = att.get("content")
+            if not content:
+                continue
+            part = MIMEApplication(content)
+            part.add_header("Content-Disposition", "attachment", filename=filename)
+            msg.attach(part)
+
     try:
         if SMTP_USE_SSL:
             context = ssl.create_default_context()
@@ -102,6 +119,7 @@ def _send(to_addresses: List[str], subject: str, html_body: str, text_body: str 
             with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
                 server.ehlo()
                 server.starttls()
+                server.ehlo()
                 server.login(SMTP_USER, SMTP_PASSWORD)
                 server.sendmail(SMTP_FROM, to_addresses, msg.as_string())
 
@@ -425,3 +443,137 @@ def notify_job_posting(
     )
 
     return _send(to_list, subject, _base_html(content), plain)
+
+def notify_candidate_passed(
+    *,
+    candidate_name: str,
+    candidate_email: str,
+    candidate_phone: str,
+    screen_score: str,
+    summary: str,
+    screening_summary: List[Dict[str, str]],
+    jobdiva_id: str,
+    job_title: str,
+    location: str,
+    salary_range: str,
+    recruiter_emails: List[str],
+    resume_bytes: Optional[bytes] = None,
+    resume_filename: Optional[str] = None,
+    candidate_id: str = "",
+    job_id: str = "",
+) -> bool:
+    """
+    Email #3 – Candidate Passed Phone Screen.
+
+    From : pair@pyramidci.com
+    To   : pair-recruiting@pyramidci.com + recruiter emails
+    Subj : [Candidate Name] – Passed Phone Screen for [jobdiva_id]
+    """
+    jobdiva_link   = f"{JOBDIVA_URL}/jobdiva/servlet/jd?uid={jobdiva_id}"
+    rankings_link  = f"{APP_BASE_URL}/jobs/{job_id}/rankings"
+    report_link    = f"{APP_BASE_URL}/jobs/{job_id}/candidates/{candidate_id}"
+
+    jd_hyperlink = (
+        f'<a href="{jobdiva_link}" target="_blank" '
+        f'style="color:#4f46e5;font-weight:600;text-decoration:none;">'
+        f'{jobdiva_id}</a>'
+    )
+    rankings_hyperlink = (
+        f'<a href="{rankings_link}" target="_blank" '
+        f'style="color:#4f46e5;font-weight:600;text-decoration:none;">'
+        f'{job_title or "PAIR Rank List"}</a>'
+    )
+
+    # Screening Summary Rows
+    summary_rows_html = ""
+    for item in screening_summary:
+        f = item.get("field") or "—"
+        v = item.get("value") or "—"
+        summary_rows_html += _info_row(f, v)
+
+    content = f"""
+    <h2 style="margin:0 0 6px;font-size:20px;color:#1e293b;">
+      ✅ Candidate Passed Phone Screen
+    </h2>
+    <p style="margin:0 0 20px;font-size:14px;color:#64748b;">
+      Great news! <strong>{candidate_name}</strong> has successfully cleared the initial screening.
+    </p>
+
+    <p style="margin:0 0 8px;font-size:13px;font-weight:600;color:#64748b;
+              text-transform:uppercase;letter-spacing:0.05em;">Job Details</p>
+    <table cellpadding="0" cellspacing="0"
+           style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;
+                  width:100%;margin-bottom:20px;">
+      <tbody>
+        {_info_row("Job Diva ID", jd_hyperlink)}
+        {_info_row("Job Title", rankings_hyperlink)}
+        {_info_row("Location", location or "—")}
+        {_info_row("Salary Range", salary_range or "—")}
+      </tbody>
+    </table>
+
+    <p style="margin:0 0 8px;font-size:13px;font-weight:600;color:#64748b;
+              text-transform:uppercase;letter-spacing:0.05em;">Candidate Details</p>
+    <table cellpadding="0" cellspacing="0"
+           style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;
+                  width:100%;margin-bottom:20px;">
+      <tbody>
+        {_info_row("Name", candidate_name)}
+        {_info_row("Email", candidate_email or "—")}
+        {_info_row("Phone", candidate_phone or "—")}
+        {_info_row("Screen Score", f"<strong>{screen_score}</strong>" if screen_score else "—")}
+      </tbody>
+    </table>
+
+    <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:#64748b;
+              text-transform:uppercase;letter-spacing:0.05em;">Summary</p>
+    <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;
+                padding:16px;font-size:13px;color:#334155;line-height:1.7;margin-bottom:20px;">
+      {summary or "No summary available."}
+    </div>
+
+    <p style="margin:0 0 8px;font-size:13px;font-weight:600;color:#64748b;
+              text-transform:uppercase;letter-spacing:0.05em;">Screening Summary</p>
+    <table cellpadding="0" cellspacing="0"
+           style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;
+                  width:100%;margin-bottom:24px;">
+      <tbody>
+        {summary_rows_html if summary_rows_html else '<tr><td style="padding:12px;color:#94a3b8;font-style:italic;">No detailed screening fields.</td></tr>'}
+      </tbody>
+    </table>
+
+    <p style="margin:24px 0 12px;text-align:center;">
+      <span style="font-size:13px;color:#64748b;display:block;margin-bottom:12px;">
+        View Full Candidate Report (Coming Soon)
+      </span>
+      {_btn("#", "View Full Report", color="#94a3b8")}
+    </p>
+    """
+
+    to_list = list(dict.fromkeys(
+        [PAIR_TEAM_EMAIL] + [e.strip() for e in recruiter_emails if e.strip()]
+    ))
+
+    subject = f"{candidate_name} – Passed Phone Screen for {jobdiva_id}"
+
+    plain = (
+        f"{candidate_name} – Passed Phone Screen for {jobdiva_id}\n\n"
+        f"Job Details:\n"
+        f"Job Diva ID: {jobdiva_id} ({jobdiva_link})\n"
+        f"Job Title: {job_title}\n"
+        f"Location: {location}\n"
+        f"Salary: {salary_range}\n\n"
+        f"Candidate Details:\n"
+        f"Name: {candidate_name}\n"
+        f"Email: {candidate_email}\n"
+        f"Phone: {candidate_phone}\n"
+        f"Screen Score: {screen_score}\n\n"
+        f"Summary:\n{summary}\n\n"
+        f"Report: {report_link}\n"
+    )
+
+    attachments = []
+    if resume_bytes and resume_filename:
+        attachments.append({"filename": resume_filename, "content": resume_bytes})
+
+    return _send(to_list, subject, _base_html(content), plain, attachments=attachments)
