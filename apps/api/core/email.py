@@ -26,7 +26,7 @@ import smtplib
 import ssl
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -37,19 +37,14 @@ def _cfg(key: str, default: str = "") -> str:
     return os.getenv(key, default).strip()
 
 
-def _cfg_bool(key: str, default: bool = True) -> bool:
-    val = os.getenv(key, "").strip().lower()
-    if not val:
-        return default
-    return val in {"1", "true", "yes", "on"}
 
 
 SMTP_HOST     = _cfg("SMTP_HOST")
-SMTP_PORT     = int(_cfg("SMTP_PORT", "465"))
-SMTP_USE_SSL  = _cfg_bool("SMTP_USE_SSL", True)
-SMTP_USER     = _cfg("SMTP_USER")
-SMTP_PASSWORD = _cfg("SMTP_PASSWORD")
-SMTP_FROM     = _cfg("SMTP_FROM") or SMTP_USER  # same as Tira bug-report
+SMTP_PORT     = int(_cfg("SMTP_PORT", "587"))
+SMTP_USE_SSL  = (SMTP_PORT == 465)
+SMTP_USER     = _cfg("SMTP_USER") or _cfg("EMAIL_FROM")
+SMTP_PASSWORD = _cfg("SMTP_PASSWORD") or _cfg("EMAIL_PASSWORD")
+SMTP_FROM     = _cfg("SMTP_FROM") or _cfg("EMAIL_FROM") or SMTP_USER
 
 # PAIR-specific (not SMTP credentials)
 PAIR_TEAM_EMAIL    = _cfg("PAIR_TEAM_EMAIL",    "pair-recruiting@pyramidci.com")
@@ -598,44 +593,31 @@ def notify_pair_inactive(
     )
 
     content = f"""
-    <h2 style="margin:0 0 6px;font-size:20px;color:#1e293b;">
-      ⏸️ PAIR Is Now Inactive
-    </h2>
-    <p style="margin:0 0 20px;font-size:14px;color:#334155;line-height:1.7;">
+    <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.6;">
       Please note that PAIR’s activity is halted for {jd_hyperlink}. 
       While inactive, PAIR stops candidate outreach.
     </p>
-
-    <div style="background:#fff7ed;border-left:4px solid #f97316;padding:16px;margin-bottom:24px;">
-      <p style="margin:0;font-size:14px;color:#9a3412;font-weight:600;">
-        Job posting team, please close external postings related to this job.
-      </p>
-    </div>
-
-    <p style="margin:0 0 16px;font-size:13px;color:#64748b;line-height:1.6;font-style:italic;">
-      <strong>Note:</strong> A job may be marked as inactive in PAIR either manually 
-      by a recruiter or automatically when its status in Job Diva is set to 
-      Closed, Filled, Canceled, Ignored, Declined, or Expired. 
+    <p style="margin:0 0 16px;font-size:14px;color:#334155;line-height:1.6;font-weight:600;">
+      Job posting team, please close external postings related to this job.
+    </p>
+    <p style="margin:0 0 16px;font-size:13px;color:#64748b;line-height:1.6;">
+      Note: A job may be marked as inactive in PAIR either manually by a recruiter or 
+      automatically when its status in Job Diva is set to Closed, Filled, Canceled, Ignored, Declined, or Expired. 
       PAIR cannot be restarted for the job unless the JobDiva status is Open or On Hold.
     </p>
-
-    <div style="border-top:1px solid #e2e8f0;padding-top:16px;margin-top:24px;">
-      <p style="margin:0;font-size:14px;color:#475569;">
-        To relaunch PAIR, navigate to the <strong>Jobs List</strong>, and click 
-        <strong>Edit Job Configuration</strong> under Actions.
-      </p>
-    </div>
+    <p style="margin:0;font-size:13px;color:#64748b;line-height:1.6;">
+      To relaunch PAIR, navigate to the Jobs List, and click <strong>Edit Job Configuration</strong> under Actions.
+    </p>
     """
 
     # Combined TO list
     to_list = list(dict.fromkeys(
-        [PAIR_TEAM_EMAIL, JOB_POSTING_EMAIL] + [e.strip() for e in recruiter_emails if e.strip()]
+        [PAIR_TEAM_EMAIL, "Jobposting@pyramidci.com"] + [e.strip() for e in recruiter_emails if e.strip()]
     ))
 
     subject = f"PAIR Is Now Inactive for {jobdiva_id}"
 
     plain = (
-        f"PAIR Is Now Inactive for {jobdiva_id}\n\n"
         f"Please note that PAIR’s activity is halted for {jobdiva_id} ({jobdiva_link}). "
         f"While inactive, PAIR stops candidate outreach.\n\n"
         f"Job posting team, please close external postings related to this job.\n\n"

@@ -102,22 +102,7 @@ async def archive_job(job_id: str, request: JobArchiveRequest = None):
         ret = cursor.fetchone()
         conn.commit()
         
-        # Fire Notification (Email #4)
-        if ret:
-            try:
-                emails_raw = ret[1]
-                if isinstance(emails_raw, str):
-                    try: recruiter_emails = json.loads(emails_raw)
-                    except: recruiter_emails = [emails_raw] if emails_raw else []
-                else:
-                    recruiter_emails = emails_raw or []
-                
-                notify_pair_inactive(
-                    jobdiva_id=ret[0] or job_id,
-                    recruiter_emails=recruiter_emails
-                )
-            except Exception as e:
-                logger.error(f"Failed to fire Inactive notification for archived job {job_id}: {e}")
+        # Email notification for archived jobs has been disabled per user request
 
         cursor.close()
         conn.close()
