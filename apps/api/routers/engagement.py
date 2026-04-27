@@ -14,13 +14,13 @@ import asyncio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Any, Dict
-import psycopg2
 import psycopg2.extras
 import json
 import logging
 import os
 import httpx
 from datetime import datetime, timezone, timedelta
+from routers._helpers import get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,6 @@ router = APIRouter(tags=["Engagement"])
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:root@localhost:5432/airecruiter")
 EXTERNAL_INTERVIEW_API_URL = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai")
 
 # ---------------------------------------------------------------------------
@@ -42,7 +41,7 @@ def _ensure_audit_table():
         # unbounded wait here (called at module import) could hang FastAPI
         # startup past systemd's TimeoutStartSec, triggering a restart loop
         # that returned 404 for every route until the DB recovered.
-        conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
+        conn = get_db_connection()
         cur = conn.cursor()
         # Create table (no-op if already exists)
         cur.execute("""
@@ -84,6 +83,10 @@ def _ensure_audit_table():
             CREATE INDEX IF NOT EXISTS idx_engage_audit_interview
             ON engage_interview_audit(interview_id);
         """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_engage_audit_job_candidate_id_desc
+            ON engage_interview_audit(job_id, candidate_id, id DESC);
+        """)
         conn.commit()
         cur.close()
         conn.close()
@@ -106,7 +109,7 @@ async def init_engagement_tables() -> None:
 # Helper
 # ---------------------------------------------------------------------------
 def _get_db_connection():
-    return psycopg2.connect(DATABASE_URL, connect_timeout=5)
+    return get_db_connection()
 
 # ---------------------------------------------------------------------------
 # Request / Response Models
