@@ -3536,11 +3536,14 @@ function NewJobPageContent() {
   };
 
   const relaxBooleanString = (input: string, tier: number): { query: string; label: string } => {
-    let query = input;
+    const original = String(input || "").replace(/\s+/g, " ").trim();
+    let query = original;
     let label = "";
     if (tier === 1) {
       query = query.replace(/within\s+(\d+)\s+mi/gi, (_m, n) => `within ${Math.max(50, Number(n) * 2)} mi`);
       query = query.replace(/\s+AND\s+"\d+\+\s*years?"/gi, "");
+      // JobDiva dialect uses: "TERM" OVER N YRS
+      query = query.replace(/\s+OVER\s+\d+\s+YRS\b/gi, "");
       label = "Widened radius · dropped year thresholds";
     } else if (tier === 2) {
       query = query.replace(/within\s+(\d+)\s+mi/gi, (_m, n) => `within ${Math.max(100, Number(n) * 2)} mi`);
@@ -3549,6 +3552,8 @@ function NewJobPageContent() {
         return parts.length > 1 ? `(${parts.join(" OR ")})` : `(${inner})`;
       });
       query = query.replace(/\s+AND\s+recent/gi, "");
+      // If JobDiva year clauses remain outside parentheses, drop them.
+      query = query.replace(/\s+OVER\s+\d+\s+YRS\b/gi, "");
       label = "Radius widened further · required clauses OR-joined";
     } else {
       query = query.replace(/\s+NOT\s+\([^)]*\)/gi, "");
@@ -3559,7 +3564,25 @@ function NewJobPageContent() {
       query = keep.length ? keep.join(" AND ") : andParts[0] || query;
       label = "Kept only role + location";
     }
-    return { query: query.replace(/\s+/g, " ").trim(), label };
+
+    query = query.replace(/\s+/g, " ").trim();
+
+    // Safety net: if tier transform produced no effective change, make one
+    // deterministic loosening so retries are meaningfully different.
+    if (query === original) {
+      const withoutYears = query.replace(/\s+OVER\s+\d+\s+YRS\b/gi, "").replace(/\s+AND\s+"\d+\+\s*years?"/gi, "").trim();
+      if (withoutYears && withoutYears !== query) {
+        query = withoutYears;
+        label = label || "Dropped year thresholds";
+      } else if (/\s+AND\s+/i.test(query)) {
+        const parts = query.split(/\s+AND\s+/i).map(p => p.trim()).filter(Boolean);
+        query = parts.slice(0, -1).join(" AND ") || query;
+        label = label || "Broadened query scope";
+      }
+      query = query.replace(/\s+/g, " ").trim();
+    }
+
+    return { query, label };
   };
 
   const countQualified = (list: any[]) =>
@@ -4428,7 +4451,7 @@ function NewJobPageContent() {
           <div className="flex-1 text-left">
             <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight mb-1">Source</h2>
             <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">
-              Build your candidate search using structured filters. Hoonr-Curate generates the Boolean string, searches JobDiva applicants first, then uses JobDiva Talent Search if fewer than 3 applicants match.
+              Build your candidate search using structured filters. Hoonr-Curate generates the Boolean string and runs JobDiva Talent Search. JobDiva applicants are synced automatically and shown on the rank-list page with source as Job-Diva Applicant.
             </p>
           </div>
         </div>
@@ -4456,7 +4479,7 @@ function NewJobPageContent() {
                       // auto-enroll via jobdiva_applicant_auto_sync regardless
                       // of this switchboard. Exposing it here implied they
                       // were a gated source, which they aren't.
-                      { id: 'jobdiva', label: 'JobDiva', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false },
+                      { id: 'jobdiva', label: 'JobDiva Talent', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false },
                       { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: false },
                       { id: 'dice', label: 'Dice', icon: <Box className="w-4 h-4 text-slate-700" />, disabled: false },
                       { id: 'exa', label: 'Exa', icon: <Search className="w-4 h-4 text-pink-500" />, disabled: false }
