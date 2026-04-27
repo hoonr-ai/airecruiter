@@ -157,6 +157,8 @@ def _ensure_sourced_candidates_schema() -> None:
             for stmt in (
                 "CREATE INDEX IF NOT EXISTS idx_sourced_candidates_candidate_created_at "
                 "ON sourced_candidates (candidate_id, created_at DESC)",
+                "CREATE INDEX IF NOT EXISTS idx_sourced_candidates_jobdiva_created_at "
+                "ON sourced_candidates (jobdiva_id, created_at DESC)",
                 "CREATE INDEX IF NOT EXISTS idx_sourced_candidates_jobdiva_id "
                 "ON sourced_candidates (jobdiva_id)",
                 "CREATE INDEX IF NOT EXISTS idx_sourced_candidates_source "
