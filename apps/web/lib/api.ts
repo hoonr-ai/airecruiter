@@ -2,6 +2,8 @@
 // place. Streaming and multipart calls pass `API_BASE` directly; the `req`
 // helper handles the JSON case.
 
+import { trackEvent } from "@/lib/analytics";
+
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL!;
 
 type JsonInit = Omit<RequestInit, "body" | "headers"> & {
@@ -12,19 +14,55 @@ type JsonInit = Omit<RequestInit, "body" | "headers"> & {
 
 async function req<T>(path: string, init: JsonInit = {}): Promise<T> {
   const { body, headers, ...rest } = init;
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...rest,
-    headers: {
-      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      ...(headers || {}),
-    },
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`${res.status} ${path}${text ? `: ${text}` : ""}`);
+  const method = (rest.method || "GET").toUpperCase();
+  const started = typeof performance !== "undefined" ? performance.now() : Date.now();
+  let trackedError = false;
+
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      ...rest,
+      headers: {
+        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...(headers || {}),
+      },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+
+    const ended = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const durationMs = Math.round((ended - started) * 100) / 100;
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      trackedError = true;
+      trackEvent("api_request_error", {
+        path,
+        method,
+        status: res.status,
+        duration_ms: durationMs,
+      });
+      throw new Error(`${res.status} ${path}${text ? `: ${text}` : ""}`);
+    }
+
+    trackEvent("api_request_success", {
+      path,
+      method,
+      status: res.status,
+      duration_ms: durationMs,
+    });
+    return res.json() as Promise<T>;
+  } catch (error: any) {
+    if (!trackedError) {
+      const ended = typeof performance !== "undefined" ? performance.now() : Date.now();
+      const durationMs = Math.round((ended - started) * 100) / 100;
+      trackEvent("api_request_exception", {
+        path,
+        method,
+        duration_ms: durationMs,
+        message: error?.message || "unknown_error",
+      });
+    }
+    throw error;
   }
-  return res.json() as Promise<T>;
 }
 
 export const api = {

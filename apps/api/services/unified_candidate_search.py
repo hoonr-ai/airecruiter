@@ -123,17 +123,19 @@ class UnifiedCandidateSearch:
             cand["match_score_details"] = score_result.get("score_details", {})
             return cand
 
-        # JobDiva is now two independent sources that run in parallel:
-        #   - "JobDiva Applicants": all people who applied to this job_id (no boolean)
-        #   - "JobDiva": talent-pool boolean search
-        # Back-compat: if only "JobDiva" is selected, we still run Applicants too
-        # (the previous behaviour — Applicants first, Talent only if <3 qualified —
-        # has been replaced with unconditional parallel execution of both).
+        # JobDiva is split into two explicit sources:
+        #   - "JobDiva Applicants": people who applied to this job_id (no boolean)
+        #   - "JobDiva": talent-pool boolean search only
+        # Product requirement (Apr 2026): Step-5 sourcing must NOT fetch applicants.
+        # Applicants are surfaced automatically via sync + rank-list.
         applicants_selected = (
             "JobDiva Applicants" in criteria.sources
-            or "JobDiva" in criteria.sources
+            or "JobDiva-Applicants" in criteria.sources
         )
-        talent_selected = "JobDiva" in criteria.sources
+        talent_selected = (
+            "JobDiva" in criteria.sources
+            or "JobDiva-TalentSearch" in criteria.sources
+        )
 
         queue: asyncio.Queue = asyncio.Queue()
         SENTINEL = object()

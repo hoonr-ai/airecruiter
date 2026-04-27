@@ -115,8 +115,8 @@ export function SourcedCandidatesView({
     if (onLaunchPair) {
       onLaunchPair(selectedCandidates);
     } else {
-      // Default behavior: navigate to Master Candidate Pool
-      window.location.href = '/candidates';
+      // Candidates tab is disabled in current mode; keep flow in jobs dashboard.
+      window.location.href = '/';
     }
   };
 

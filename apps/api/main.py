@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, Query, UploadFile, File
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Body, Query, UploadFile, File, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Dict, Any, Optional
@@ -36,6 +36,7 @@ def readable_ist_now() -> str:
 # local dev readability) and picks up LOG_LEVEL from env. New Relic /
 # Datadog / OpenTelemetry can layer on later with zero code change.
 from core.logging import configure_logging, RequestIDMiddleware
+from core.amplitude import track_event_async
 configure_logging()
 logger = logging.getLogger(__name__)
 
@@ -109,10 +110,14 @@ async def lifespan(app: FastAPI):
         logger.info("🤖 [AutoSync] Starting built-in 15-minute synchronization cycle...")
         
         try:
-            from psycopg2.extras import RealDictCursor
             conn = get_db_connection()
             cur = conn.cursor(cursor_factory=RealDictCursor)
-            cur.execute("SELECT job_id, title FROM monitored_jobs")
+            cur.execute("""
+                SELECT job_id, title 
+                FROM monitored_jobs 
+                WHERE is_archived IS NOT TRUE 
+                AND (processing_status IN ('monitoring_added', 'manual_created') OR processing_status LIKE 'step_%_complete')
+            """)
             jobs = cur.fetchall()
             cur.close()
             conn.close()
@@ -223,7 +228,12 @@ manual_candidates_router = _safe_import("manual_candidates")
 candidates_router = _safe_import("candidates")
 jobs_router = _safe_import("jobs")
 
-app = FastAPI(title="Hoonr.ai API", lifespan=lifespan)
+# redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
+# prod reverse proxy a 307 with the wrong scheme (when uvicorn isn't running
+# with --proxy-headers, or if a future deploy drops that flag) becomes an
+# http↔https loop via nginx. Failing loudly with 404 on slash mismatch is a
+# cheap fence around that whole class of misconfig.
+app = FastAPI(title="Hoonr.ai API", lifespan=lifespan, redirect_slashes=False)
 # Request-correlation middleware. Must wrap every route so downstream
 # handlers and services see the same request_id via contextvars.
 app.add_middleware(RequestIDMiddleware)
@@ -263,6 +273,60 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def amplitude_request_tracking(request: Request, call_next):
+    """Best-effort API telemetry: request journey + failures."""
+    started = time.perf_counter()
+    method = request.method
+    path = request.url.path
+    query = request.url.query
+    user_id = request.headers.get("x-user-id") or request.headers.get("x-user-email")
+
+    try:
+        response = await call_next(request)
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        track_event_async(
+            "api_request",
+            {
+                "method": method,
+                "path": path,
+                "query": query,
+                "status_code": response.status_code,
+                "duration_ms": duration_ms,
+            },
+            user_id=user_id,
+            device_id="airecruiter-api",
+        )
+        if response.status_code >= 500:
+            track_event_async(
+                "api_server_error",
+                {
+                    "method": method,
+                    "path": path,
+                    "status_code": response.status_code,
+                    "duration_ms": duration_ms,
+                },
+                user_id=user_id,
+                device_id="airecruiter-api",
+            )
+        return response
+    except Exception as e:
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        track_event_async(
+            "api_exception",
+            {
+                "method": method,
+                "path": path,
+                "query": query,
+                "duration_ms": duration_ms,
+                "error": str(e),
+            },
+            user_id=user_id,
+            device_id="airecruiter-api",
+        )
+        raise
 
 
 

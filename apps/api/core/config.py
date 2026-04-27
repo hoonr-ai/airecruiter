@@ -15,6 +15,13 @@ def get_env_with_default(var_name: str, default: str) -> str:
     """Retrieve an environment variable with a default value."""
     return os.getenv(var_name, default)
 
+def get_env_bool(var_name: str, default: bool = False) -> bool:
+    """Retrieve a boolean env var with common truthy values."""
+    val = os.getenv(var_name)
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "yes", "on"}
+
 # ---- API/Environment Settings ----
 ALLOWED_ORIGINS = get_env_with_default("ALLOWED_ORIGINS", "*").split(",")
 
@@ -80,6 +87,16 @@ AZURE_AI_AGENT_NAME       = os.getenv("AZURE_AI_AGENT_NAME", "skill-role-extract
 
 # ---- Exa API ----
 EXA_API_KEY = get_env_with_default("EXA_API_KEY", "")
+
+# ---- ZoomInfo Contact Enrichment ----
+ZOOMINFO_ENRICH_URL = get_env_with_default("ZOOMINFO_ENRICH_URL", "https://api.zoominfo.com/enrich/contact")
+ZOOMINFO_BEARER_TOKEN = get_env_with_default("ZOOMINFO_BEARER_TOKEN", "")
+ZOOMINFO_CLIENT_ID = get_env_with_default("ZOOMINFO_CLIENT_ID", "")
+
+# ---- Amplitude Telemetry ----
+AMPLITUDE_API_KEY = get_env_with_default("AMPLITUDE_API_KEY", "")
+AMPLITUDE_API_URL = get_env_with_default("AMPLITUDE_API_URL", "https://api2.amplitude.com/2/httpapi")
+AMPLITUDE_TRACK_LOGS = get_env_bool("AMPLITUDE_TRACK_LOGS", True)
 
 # ---- Candidate Scoring Calibration ----
 # These knobs tune how harsh the match_score curve is. Defaults were calibrated

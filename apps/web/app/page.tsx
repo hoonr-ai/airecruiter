@@ -53,6 +53,10 @@ export default function DashboardPage() {
   const [allJobs, setAllJobs] = useState<Job[]>([]);
   const [filteredJobs, setFilteredJobs] = useState<Job[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  // True when the currently-displayed jobs came from a previous fetch
+  // (the latest attempt timed out or errored). The list still renders so
+  // the user never sees a blank dashboard during a backend slow spike.
+  const [isStale, setIsStale] = useState(false);
   
   // Archive dialog state
   const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
@@ -82,9 +86,17 @@ export default function DashboardPage() {
 
   const fetchJobs = async () => {
     setIsLoading(true);
+    // Bound the fetch — backend `/jobs/monitored` can spike to 20-30s during
+    // poll-loop lock contention. Aborting after 8s and falling back to the
+    // last successful list keeps the dashboard from going blank.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
     try {
       const includeArchived = activeTab === "archived";
-      const response = await fetch(`${API_BASE}/jobs/monitored?include_archived=${includeArchived}`);
+      const response = await fetch(
+        `${API_BASE}/jobs/monitored?include_archived=${includeArchived}`,
+        { signal: controller.signal },
+      );
       const data = await response.json();
 
       const jobs: Job[] = Object.entries(data.jobs).map(([id, details]: [string, any]) => {
@@ -138,9 +150,16 @@ export default function DashboardPage() {
 
       setAllJobs(jobs);
       setFilteredJobs(jobs);
+      setIsStale(false);
     } catch (error) {
       console.error("Error fetching jobs:", error);
+      // Keep showing whatever we had before. Mark the list as stale so the
+      // user sees something is off, instead of a blank "No job results" pane.
+      if (allJobs.length > 0) {
+        setIsStale(true);
+      }
     } finally {
+      clearTimeout(timeoutId);
       setIsLoading(false);
     }
   };
@@ -288,6 +307,22 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {isStale && (
+        <div className="mt-2 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] text-amber-800">
+          <AlertTriangle className="h-4 w-4" />
+          <span>
+            Couldn’t refresh — showing last loaded data.{" "}
+            <button
+              type="button"
+              className="font-semibold underline decoration-amber-400 underline-offset-2 hover:text-amber-900"
+              onClick={fetchJobs}
+            >
+              Retry
+            </button>
+          </span>
+        </div>
+      )}
+
       {/* Controls Bar */}
       <div className="flex justify-between items-center gap-4 mt-4">
         <div className="relative w-[360px]">
@@ -304,11 +339,15 @@ export default function DashboardPage() {
             <FileText className="h-4 w-4" />
             Export to Excel
           </Button>
-          <Button asChild variant="outline" className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-700 font-semibold text-[13px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all">
-            <Link href="/candidates">
-              <Users className="h-4 w-4" />
-              All Candidates
-            </Link>
+          <Button
+            variant="outline"
+            disabled
+            aria-disabled="true"
+            title="Temporarily disabled"
+            className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-400 font-semibold text-[13px] rounded-lg bg-slate-50 shadow-sm cursor-not-allowed"
+          >
+            <Users className="h-4 w-4" />
+            All Candidates (Disabled)
           </Button>
           <Button asChild className="flex items-center gap-2 h-10 px-5 bg-[#4f46e5] hover:bg-[#4338ca] text-white font-semibold text-[13px] rounded-lg shadow-sm transition-all active:scale-95 border-none">
             <Link href="/jobs/new">
@@ -351,6 +390,7 @@ export default function DashboardPage() {
                 <tr key={job.id} className="hover:bg-slate-50/70 transition-colors group">
                   <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-[#4f46e5]">
                     <Link 
+                      prefetch={false}
                       href={`/jobs/${job.jobdiva_id || job.id}/rankings`}
                       className="flex items-center gap-1.5 hover:underline decoration-[#4f46e5]/40 underline-offset-4"
                     >
@@ -422,20 +462,20 @@ export default function DashboardPage() {
                       <DropdownMenuContent align="end" className="rounded-xl border-slate-200 font-medium text-[13px] shadow-lg">
                         {job.pairStatus === 'Unpublished' ? (
                           <DropdownMenuItem className="cursor-pointer bg-primary/5 text-primary font-bold">
-                            <Link href={`/jobs/new?jobId=${job.jobdiva_id || job.id}`} className="w-full">
+                            <Link prefetch={false} href={`/jobs/new?jobId=${job.jobdiva_id || job.id}`} className="w-full">
                               Resume Setup
                             </Link>
                           </DropdownMenuItem>
                         ) : (
                           <DropdownMenuItem className="cursor-pointer">
-                            <Link href={`/jobs/${job.jobdiva_id || job.id}`} className="w-full">
+                            <Link prefetch={false} href={`/jobs/${job.jobdiva_id || job.id}`} className="w-full">
                               View Details
                             </Link>
                           </DropdownMenuItem>
                         )}
                         {activeTab !== "archived" && (
                           <DropdownMenuItem className="cursor-pointer" asChild>
-                            <Link href={`/jobs/${job.jobdiva_id || job.id}`} className="w-full">
+                            <Link prefetch={false} href={`/jobs/${job.jobdiva_id || job.id}`} className="w-full">
                               Edit Job
                             </Link>
                           </DropdownMenuItem>

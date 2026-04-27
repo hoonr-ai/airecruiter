@@ -4,6 +4,8 @@ from typing import List, Dict, Any, Optional
 import json
 import logging
 import time
+import copy
+import threading
 
 import psycopg2
 import psycopg2.extras
@@ -22,10 +24,56 @@ from models import (
     SkillsExtractionRequest, SkillsExtractionResponse, JobSkillsSummaryResponse,
     ExternalJobCreateRequest,
 )
-from routers._helpers import get_db_connection
+from routers._helpers import get_db_connection, get_dict_cursor_connection
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+# Short-lived cache + DB timeout guards for the monitored jobs list endpoint.
+# Rationale: when concurrent write traffic/locks briefly delay monitored_jobs,
+# recruiters should still get a near-instant dashboard response from fresh
+# in-memory data instead of waiting 60-90s for lock release.
+_monitored_jobs_cache: Dict[str, Dict[str, Any]] = {}
+_monitored_jobs_cache_lock = threading.Lock()
+_MONITORED_JOBS_CACHE_TTL_SECONDS = 30
+_MONITORED_JOBS_LOCK_TIMEOUT_MS = 2000
+_MONITORED_JOBS_STATEMENT_TIMEOUT_MS = 8000
+
+
+def _monitored_jobs_cache_key(include_archived: bool, view: str) -> str:
+    return f"{int(include_archived)}:{view}"
+
+
+def _get_cached_monitored_jobs(include_archived: bool, view: str, allow_stale: bool = False) -> Optional[Dict[str, Any]]:
+    key = _monitored_jobs_cache_key(include_archived, view)
+    now = time.time()
+    with _monitored_jobs_cache_lock:
+        cached = _monitored_jobs_cache.get(key)
+        if not cached:
+            return None
+        if not allow_stale and now - cached.get("ts", 0) > _MONITORED_JOBS_CACHE_TTL_SECONDS:
+            return None
+        return copy.deepcopy(cached.get("data"))
+
+
+def _set_cached_monitored_jobs(include_archived: bool, view: str, payload: Dict[str, Any]) -> None:
+    key = _monitored_jobs_cache_key(include_archived, view)
+    with _monitored_jobs_cache_lock:
+        _monitored_jobs_cache[key] = {
+            "ts": time.time(),
+            "data": copy.deepcopy(payload),
+        }
+
+
+def invalidate_monitored_jobs_cache() -> None:
+    """Drop all cached /jobs/monitored payloads.
+
+    Called from archive/unarchive handlers in routers/job_archive.py so the
+    next dashboard fetch sees the write rather than a cached pre-write list.
+    """
+    with _monitored_jobs_cache_lock:
+        _monitored_jobs_cache.clear()
 
 
 # Proxies to scheduler-tangled helpers that remain in main.py.
@@ -72,10 +120,13 @@ def _ensure_monitored_jobs_schema() -> None:
     """
     try:
         conn = get_db_connection()
+        conn.autocommit = True
         cur = conn.cursor()
         for stmt in (
             # v21 columns
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS archive_reason TEXT",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS job_requirements JSONB DEFAULT '[]'",
             # v22: extraction columns (previously ALTER'd per write in
             # services/monitored_jobs_storage.py).
@@ -87,12 +138,19 @@ def _ensure_monitored_jobs_schema() -> None:
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS bot_introduction TEXT",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS sourcing_filters JSONB",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS resume_match_filters JSONB",
+            # v30: keep job rubric screen-question schema changes out of request path.
+            "ALTER TABLE IF EXISTS job_screen_questions ADD COLUMN IF NOT EXISTS is_hard_filter BOOLEAN NOT NULL DEFAULT FALSE",
+            # v28: hot-path read optimizations for GET /jobs/monitored
+            "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_active_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS NOT TRUE",
+            "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_archived_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS TRUE",
+            # v29: direct job-scoped lookup indexes for /jobs/{id}/... APIs
+            "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_job_id_lookup ON monitored_jobs (job_id)",
+            "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_jobdiva_id_lookup ON monitored_jobs (jobdiva_id)",
         ):
             try:
                 cur.execute(stmt)
             except Exception as e:
                 logger.warning(f"monitored_jobs ALTER skipped: {stmt!r}: {e}")
-        conn.commit()
         cur.close()
         conn.close()
         logger.info("monitored_jobs schema ready")
@@ -879,21 +937,29 @@ def _get_job_draft_sync(job_id: str) -> dict:
         try: return json.loads(val)
         except: return []
 
+    def _fetch_one_monitored_job(cursor, requested_job_id: str):
+        # Avoid `OR` predicates on job_id/jobdiva_id so planner can use single-column
+        # indexes more reliably under load.
+        cursor.execute(
+            """
+            SELECT * FROM monitored_jobs
+            WHERE job_id = %s
+            UNION ALL
+            SELECT * FROM monitored_jobs
+            WHERE jobdiva_id = %s AND job_id <> %s
+            LIMIT 1
+            """,
+            (requested_job_id, requested_job_id, requested_job_id),
+        )
+        return cursor.fetchone()
+
     conn = get_dict_cursor_connection()
     cursor = conn.cursor()
     try:
-        # jobdiva_id format contains '-' (e.g. '26-08807'); pure numeric → job_id PK
-        if '-' in job_id:
-            cursor.execute(
-                "SELECT * FROM monitored_jobs WHERE jobdiva_id = %s",
-                (job_id,)
-            )
-        else:
-            cursor.execute(
-                "SELECT * FROM monitored_jobs WHERE job_id = %s OR job_id = %s",
-                (job_id, job_id.lstrip('0'))
-            )
-        job_row = cursor.fetchone()
+        normalized_job_id = job_id.lstrip('0') if job_id and '-' not in job_id else job_id
+        job_row = _fetch_one_monitored_job(cursor, job_id)
+        if not job_row and normalized_job_id != job_id:
+            job_row = _fetch_one_monitored_job(cursor, normalized_job_id)
     finally:
         cursor.close()
         conn.close()
@@ -1267,15 +1333,25 @@ async def get_monitored_job_data(job_id: str):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        
+
         cursor.execute("""
             SELECT job_id, title, enhanced_title, ai_description, selected_job_boards,
-                   recruiter_notes, recruiter_emails, selected_employment_types,
-                   work_authorization, screening_level, current_step, processing_status,
-                   job_requirements, ai_enhanced, created_at, updated_at, jobdiva_id
-            FROM monitored_jobs 
-            WHERE job_id = %s OR jobdiva_id = %s
-        """, (job_id, job_id))
+                recruiter_notes, recruiter_emails, selected_employment_types,
+                work_authorization, screening_level, current_step, processing_status,
+                job_requirements, ai_enhanced, created_at, updated_at, jobdiva_id,
+                is_archived, archive_reason, archived_at
+            FROM monitored_jobs
+            WHERE job_id = %s
+            UNION ALL
+            SELECT job_id, title, enhanced_title, ai_description, selected_job_boards,
+                recruiter_notes, recruiter_emails, selected_employment_types,
+                work_authorization, screening_level, current_step, processing_status,
+                job_requirements, ai_enhanced, created_at, updated_at, jobdiva_id,
+                is_archived, archive_reason, archived_at
+            FROM monitored_jobs
+            WHERE jobdiva_id = %s AND job_id <> %s
+            LIMIT 1
+        """, (job_id, job_id, job_id))
         
         row = cursor.fetchone()
         cursor.close()
@@ -1288,7 +1364,8 @@ async def get_monitored_job_data(job_id: str):
         columns = ["job_id", "title", "enhanced_title", "ai_description", "selected_job_boards",
                    "recruiter_notes", "recruiter_emails", "selected_employment_types", 
                    "work_authorization", "screening_level", "current_step", "processing_status",
-                   "job_requirements", "ai_enhanced", "created_at", "updated_at", "jobdiva_id"]
+                   "job_requirements", "ai_enhanced", "created_at", "updated_at", "jobdiva_id",
+                   "is_archived", "archive_reason", "archived_at"]
         
         data = dict(zip(columns, row))
         
@@ -1301,7 +1378,7 @@ async def get_monitored_job_data(job_id: str):
                     pass
         
         # Convert datetime objects to strings if they aren't already strings
-        for date_field in ["created_at", "updated_at"]:
+        for date_field in ["created_at", "updated_at", "archived_at"]:
             if data.get(date_field) and not isinstance(data[date_field], str):
                 try:
                     data[date_field] = data[date_field].isoformat()
@@ -1592,7 +1669,7 @@ async def remove_job_from_monitoring(job_id: str):
     else:
         raise HTTPException(status_code=404, detail="Job not in monitoring list")
 
-def _get_monitored_jobs_sync(include_archived: bool):
+def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
     """
     Sync body for the /jobs/monitored endpoint. Runs off the event loop via
     asyncio.to_thread so the psycopg2 round-trip does not stall concurrent
@@ -1602,55 +1679,95 @@ def _get_monitored_jobs_sync(include_archived: bool):
     conn = get_db_connection()
     cursor = conn.cursor()
 
-    if include_archived:
-        cursor.execute(
-            "SELECT * FROM monitored_jobs WHERE is_archived = TRUE ORDER BY created_at DESC"
-        )
-    else:
-        cursor.execute(
-            "SELECT * FROM monitored_jobs "
-            "WHERE is_archived = FALSE OR is_archived IS NULL "
-            "ORDER BY created_at DESC"
-        )
+    try:
+        # Fail fast on lock/statement contention rather than hanging dashboard
+        # requests for tens of seconds.
+        cursor.execute("SET LOCAL lock_timeout = %s", (f"{_MONITORED_JOBS_LOCK_TIMEOUT_MS}ms",))
+        cursor.execute("SET LOCAL statement_timeout = %s", (f"{_MONITORED_JOBS_STATEMENT_TIMEOUT_MS}ms",))
 
-    columns = [desc[0] for desc in cursor.description]
-    rows = cursor.fetchall()
+        if view == "full":
+            select_sql = "SELECT * FROM monitored_jobs"
+        else:
+            # Summary view for dashboard/read-heavy lists. Avoid shipping heavy text/json
+            # blobs (jobdiva_description, ai_description, notes, filters, etc.) when
+            # only list-level metadata is needed.
+            select_sql = (
+                "SELECT job_id, jobdiva_id, title, customer_name, status, "
+                "city, state, zip_code, priority, program_duration, max_allowed_submittals, "
+                "processing_status, is_archived, "
+                "candidates_sourced, resumes_shortlisted, complete_submissions, "
+                "pass_submissions, pair_external_subs, feedback_completed, "
+                "time_to_first_pass, created_at, updated_at "
+                "FROM monitored_jobs"
+            )
 
-    jobs = {}
-    for row in rows:
-        job_data = dict(zip(columns, row))
-        jid = str(job_data.get("jobdiva_id") or job_data.get("job_id"))
+        if include_archived:
+            cursor.execute(
+                f"{select_sql} WHERE is_archived IS TRUE ORDER BY created_at DESC"
+            )
+        else:
+            cursor.execute(
+                f"{select_sql} WHERE is_archived IS NOT TRUE ORDER BY created_at DESC"
+            )
 
-        if job_data.get("created_at") and hasattr(job_data["created_at"], "isoformat"):
-            job_data["created_at"] = job_data["created_at"].isoformat()
-        if job_data.get("updated_at") and hasattr(job_data["updated_at"], "isoformat"):
-            job_data["updated_at"] = job_data["updated_at"].isoformat()
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
 
-        jobs[jid] = job_data
+        jobs = {}
+        for row in rows:
+            job_data = dict(zip(columns, row))
+            jid = str(job_data.get("jobdiva_id") or job_data.get("job_id"))
 
-    cursor.close()
-    conn.close()
+            if job_data.get("created_at") and hasattr(job_data["created_at"], "isoformat"):
+                job_data["created_at"] = job_data["created_at"].isoformat()
+            if job_data.get("updated_at") and hasattr(job_data["updated_at"], "isoformat"):
+                job_data["updated_at"] = job_data["updated_at"].isoformat()
 
-    return {
-        "jobs": jobs,
-        "total_count": len(jobs),
-        "source": "database",
-    }
+            jobs[jid] = job_data
+
+        return {
+            "jobs": jobs,
+            "total_count": len(jobs),
+            "source": "database",
+        }
+    finally:
+        cursor.close()
+        conn.close()
 
 
 @router.get("/jobs/monitored")
-async def get_monitored_jobs(include_archived: bool = False):
+async def get_monitored_jobs(
+    include_archived: bool = False,
+    view: str = Query("summary", pattern="^(summary|full)$")
+):
     """
     Get all jobs currently being monitored from the database.
     By default, excludes archived jobs unless include_archived=true is passed.
     """
+    cached = _get_cached_monitored_jobs(include_archived, view)
+    if cached is not None:
+        cached["source"] = "cache"
+        return cached
+
     try:
-        return await asyncio.to_thread(_get_monitored_jobs_sync, include_archived)
+        payload = await asyncio.to_thread(_get_monitored_jobs_sync, include_archived, view)
+        _set_cached_monitored_jobs(include_archived, view, payload)
+        return payload
     except Exception as e:
         logger.error(f"Error fetching monitored jobs from DB: {e}")
-        # Fallback to legacy file only on catastrophic DB failure
-        jobs_data = load_monitored_jobs()
-        return jobs_data
+        # Serve stale cache if available to avoid long blank-loads during
+        # transient lock contention/timeouts.
+        stale_cached = _get_cached_monitored_jobs(include_archived, view, allow_stale=True)
+        if stale_cached is not None:
+            stale_cached["source"] = "cache_stale"
+            stale_cached["warning"] = "Returned stale cache due DB contention"
+            return stale_cached
+
+        # Fail fast when DB and cache are both unavailable.
+        raise HTTPException(
+            status_code=503,
+            detail="Monitored jobs temporarily unavailable due to database contention",
+        )
 
 @router.post("/jobs/poll-now")
 async def trigger_manual_poll(background_tasks: BackgroundTasks):
