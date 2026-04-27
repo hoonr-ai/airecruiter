@@ -87,6 +87,11 @@ def _ensure_monitored_jobs_schema() -> None:
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS bot_introduction TEXT",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS sourcing_filters JSONB",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS resume_match_filters JSONB",
+            # Backs the /jobs/monitored list query (filter on is_archived,
+            # order by created_at DESC). Without this the planner falls back
+            # to a seq scan + sort as the table grows.
+            "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_archived_created "
+            "ON monitored_jobs (is_archived, created_at DESC)",
         ):
             try:
                 cur.execute(stmt)
@@ -1592,6 +1597,58 @@ async def remove_job_from_monitoring(job_id: str):
     else:
         raise HTTPException(status_code=404, detail="Job not in monitoring list")
 
+# ---------------------------------------------------------------------------
+# /jobs/monitored response cache
+# ---------------------------------------------------------------------------
+# The dashboard at qacurate.hoonr.ai/ fires this on every page load. The query
+# itself is cheap, but it shares the `monitored_jobs` table with the background
+# poll loop's UPSERTs — when the loop is mid-write, readers used to wait the
+# full row-lock cycle (observed: 27s+ spikes in production).
+#
+# A short TTL absorbs that contention without changing semantics: archive/
+# unarchive handlers call ``invalidate_monitored_jobs_cache()`` so writes feel
+# instant. Anything else (background poll updates) is allowed to lag by ~TTL.
+_MONITORED_JOBS_CACHE: dict[bool, tuple[float, dict]] = {}
+_MONITORED_JOBS_TTL_SECONDS = 15.0
+_MONITORED_JOBS_CACHE_LOCK = asyncio.Lock()
+
+
+def invalidate_monitored_jobs_cache() -> None:
+    """Drop cached /jobs/monitored payloads. Called from archive/unarchive."""
+    _MONITORED_JOBS_CACHE.clear()
+
+
+# Columns the dashboard list view actually consumes (apps/web/app/page.tsx).
+# Keeping this list explicit avoids shipping heavy JSONB blobs (summary,
+# hard_skills, soft_skills, extraction_metadata, sourcing_filters,
+# resume_match_filters, job_requirements) on every page load.
+_MONITORED_JOBS_LIST_COLUMNS = (
+    "job_id",
+    "jobdiva_id",
+    "title",
+    "customer_name",
+    "status",
+    "processing_status",
+    "is_archived",
+    "city",
+    "state",
+    "zip_code",
+    "priority",
+    "program_duration",
+    "max_allowed_submittals",
+    "candidates_sourced",
+    "resumes_shortlisted",
+    "complete_submissions",
+    "pass_submissions",
+    "pair_external_subs",
+    "feedback_completed",
+    "time_to_first_pass",
+    "created_at",
+    "updated_at",
+)
+_MONITORED_JOBS_ROW_LIMIT = 500
+
+
 def _get_monitored_jobs_sync(include_archived: bool):
     """
     Sync body for the /jobs/monitored endpoint. Runs off the event loop via
@@ -1602,23 +1659,38 @@ def _get_monitored_jobs_sync(include_archived: bool):
     conn = get_db_connection()
     cursor = conn.cursor()
 
+    # Bound the worst case so a stuck row lock can't hang the request for 30s.
+    # SET LOCAL applies for the duration of the implicit transaction; psycopg2
+    # opens one on the first statement.
+    try:
+        cursor.execute("SET LOCAL lock_timeout = '2s'")
+        cursor.execute("SET LOCAL statement_timeout = '5s'")
+    except Exception as e:
+        logger.warning(f"monitored_jobs: could not set per-request timeouts: {e}")
+
+    column_list = ", ".join(_MONITORED_JOBS_LIST_COLUMNS)
     if include_archived:
         cursor.execute(
-            "SELECT * FROM monitored_jobs WHERE is_archived = TRUE ORDER BY created_at DESC"
+            f"SELECT {column_list} FROM monitored_jobs "
+            "WHERE is_archived = TRUE "
+            "ORDER BY created_at DESC "
+            "LIMIT %s",
+            (_MONITORED_JOBS_ROW_LIMIT,),
         )
     else:
         cursor.execute(
-            "SELECT * FROM monitored_jobs "
+            f"SELECT {column_list} FROM monitored_jobs "
             "WHERE is_archived = FALSE OR is_archived IS NULL "
-            "ORDER BY created_at DESC"
+            "ORDER BY created_at DESC "
+            "LIMIT %s",
+            (_MONITORED_JOBS_ROW_LIMIT,),
         )
 
-    columns = [desc[0] for desc in cursor.description]
     rows = cursor.fetchall()
 
     jobs = {}
     for row in rows:
-        job_data = dict(zip(columns, row))
+        job_data = dict(zip(_MONITORED_JOBS_LIST_COLUMNS, row))
         jid = str(job_data.get("jobdiva_id") or job_data.get("job_id"))
 
         if job_data.get("created_at") and hasattr(job_data["created_at"], "isoformat"):
@@ -1643,14 +1715,37 @@ async def get_monitored_jobs(include_archived: bool = False):
     """
     Get all jobs currently being monitored from the database.
     By default, excludes archived jobs unless include_archived=true is passed.
+
+    Wrapped in a 15s TTL cache to absorb lock-contention spikes against the
+    background poll loop (see comment near _MONITORED_JOBS_CACHE).
     """
-    try:
-        return await asyncio.to_thread(_get_monitored_jobs_sync, include_archived)
-    except Exception as e:
-        logger.error(f"Error fetching monitored jobs from DB: {e}")
-        # Fallback to legacy file only on catastrophic DB failure
-        jobs_data = load_monitored_jobs()
-        return jobs_data
+    now = time.monotonic()
+    cached = _MONITORED_JOBS_CACHE.get(include_archived)
+    if cached and (now - cached[0]) < _MONITORED_JOBS_TTL_SECONDS:
+        return cached[1]
+
+    # Single-flight: while one coroutine is fetching, others wait on the lock
+    # rather than each kicking off their own slow query.
+    async with _MONITORED_JOBS_CACHE_LOCK:
+        cached = _MONITORED_JOBS_CACHE.get(include_archived)
+        if cached and (time.monotonic() - cached[0]) < _MONITORED_JOBS_TTL_SECONDS:
+            return cached[1]
+
+        try:
+            payload = await asyncio.to_thread(_get_monitored_jobs_sync, include_archived)
+            _MONITORED_JOBS_CACHE[include_archived] = (time.monotonic(), payload)
+            return payload
+        except Exception as e:
+            logger.error(f"Error fetching monitored jobs from DB: {e}")
+            # If we have a stale cached payload, serve it rather than the
+            # legacy file (which can be empty / out of date) — the frontend
+            # will at least show real data while the DB recovers.
+            if cached:
+                stale = dict(cached[1])
+                stale["source"] = "cache_stale"
+                return stale
+            jobs_data = load_monitored_jobs()
+            return jobs_data
 
 @router.post("/jobs/poll-now")
 async def trigger_manual_poll(background_tasks: BackgroundTasks):
