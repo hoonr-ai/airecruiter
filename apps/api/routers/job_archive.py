@@ -16,6 +16,19 @@ router = APIRouter(prefix="/jobs", tags=["Jobs"])
 logger = logging.getLogger(__name__)
 
 
+def _invalidate_monitored_jobs_cache() -> None:
+    """Drop the /jobs/monitored TTL cache so the next read sees this write.
+
+    Lazy-imported because main.py loads job_archive before jobs; we don't
+    want a load-time failure in jobs.py to take down archive too.
+    """
+    try:
+        from routers.jobs import invalidate_monitored_jobs_cache
+        invalidate_monitored_jobs_cache()
+    except Exception as e:
+        logger.warning(f"monitored_jobs cache invalidation skipped: {e}")
+
+
 # Helper function for readable IST timestamps
 def readable_ist_now() -> str:
     """Returns current IST time in readable format: 2026-02-24 16:25:59 IST"""
@@ -86,14 +99,16 @@ async def archive_job(job_id: str, request: JobArchiveRequest = None):
         conn.commit()
         cursor.close()
         conn.close()
-        
+
+        _invalidate_monitored_jobs_cache()
+
         logger.info(f"✅ Job {job_id} archived successfully")
         return {
-            "status": "SUCCESS", 
-            "job_id": job_id, 
+            "status": "SUCCESS",
+            "job_id": job_id,
             "message": "Job archived successfully"
         }
-            
+
     except HTTPException:
         raise
     except Exception as e:
@@ -142,11 +157,13 @@ async def unarchive_job(job_id: str):
         conn.commit()
         cursor.close()
         conn.close()
-        
+
+        _invalidate_monitored_jobs_cache()
+
         logger.info(f"✅ Job {job_id} unarchived successfully")
         return {
-            "status": "SUCCESS", 
-            "job_id": job_id, 
+            "status": "SUCCESS",
+            "job_id": job_id,
             "message": "Job unarchived successfully"
         }
             

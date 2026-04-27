@@ -53,6 +53,10 @@ export default function DashboardPage() {
   const [allJobs, setAllJobs] = useState<Job[]>([]);
   const [filteredJobs, setFilteredJobs] = useState<Job[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  // True when the currently-displayed jobs came from a previous fetch
+  // (the latest attempt timed out or errored). The list still renders so
+  // the user never sees a blank dashboard during a backend slow spike.
+  const [isStale, setIsStale] = useState(false);
   
   // Archive dialog state
   const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
@@ -82,9 +86,17 @@ export default function DashboardPage() {
 
   const fetchJobs = async () => {
     setIsLoading(true);
+    // Bound the fetch — backend `/jobs/monitored` can spike to 20-30s during
+    // poll-loop lock contention. Aborting after 8s and falling back to the
+    // last successful list keeps the dashboard from going blank.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
     try {
       const includeArchived = activeTab === "archived";
-      const response = await fetch(`${API_BASE}/jobs/monitored?include_archived=${includeArchived}`);
+      const response = await fetch(
+        `${API_BASE}/jobs/monitored?include_archived=${includeArchived}`,
+        { signal: controller.signal },
+      );
       const data = await response.json();
 
       const jobs: Job[] = Object.entries(data.jobs).map(([id, details]: [string, any]) => {
@@ -138,9 +150,16 @@ export default function DashboardPage() {
 
       setAllJobs(jobs);
       setFilteredJobs(jobs);
+      setIsStale(false);
     } catch (error) {
       console.error("Error fetching jobs:", error);
+      // Keep showing whatever we had before. Mark the list as stale so the
+      // user sees something is off, instead of a blank "No job results" pane.
+      if (allJobs.length > 0) {
+        setIsStale(true);
+      }
     } finally {
+      clearTimeout(timeoutId);
       setIsLoading(false);
     }
   };
@@ -287,6 +306,22 @@ export default function DashboardPage() {
           </button>
         </div>
       </div>
+
+      {isStale && (
+        <div className="mt-2 flex items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] text-amber-800">
+          <AlertTriangle className="h-4 w-4" />
+          <span>
+            Couldn’t refresh — showing last loaded data.{" "}
+            <button
+              type="button"
+              className="font-semibold underline decoration-amber-400 underline-offset-2 hover:text-amber-900"
+              onClick={fetchJobs}
+            >
+              Retry
+            </button>
+          </span>
+        </div>
+      )}
 
       {/* Controls Bar */}
       <div className="flex justify-between items-center gap-4 mt-4">
