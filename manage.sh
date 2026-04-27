@@ -12,6 +12,30 @@ NC='\033[0m'
 API_DIR="/home/ubuntu/codebase/airecruiter/apps/api"
 WEB_DIR="/home/ubuntu/codebase/airecruiter/apps/web"
 
+# Function to detect environment domain (same logic as deploy scripts)
+detect_domain() {
+    if [ -n "$DOMAIN_NAME" ]; then
+        echo "$DOMAIN_NAME"
+        return
+    fi
+    
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    case "$current_branch" in
+        "main"|"master")
+            echo "curate.hoonr.ai"
+            ;;
+        "develop"|"development")
+            echo "qacurate.hoonr.ai"
+            ;;
+        *)
+            echo "qacurate.hoonr.ai"
+            ;;
+    esac
+}
+
+# Set domain for status checks
+DETECTED_DOMAIN=$(detect_domain)
+
 show_help() {
     echo -e "${BLUE}AI Recruiter Management Script${NC}"
     echo ""
@@ -19,6 +43,7 @@ show_help() {
     echo ""
     echo "Commands:"
     echo "  status      - Show status of all services"
+    echo "  env         - Show environment and domain information"
     echo "  start       - Start all services"  
     echo "  stop        - Stop all services"
     echo "  restart     - Restart all services"
@@ -69,28 +94,68 @@ show_status() {
     fi
     
     # Check external access if domain is configured
-    if [ ! -z "$DOMAIN_NAME" ]; then
-        if curl -s http://$DOMAIN_NAME/api/docs > /dev/null 2>&1; then
-            echo -e "${GREEN}✓${NC} API: Responding externally via $DOMAIN_NAME"
+    if [ ! -z "$DETECTED_DOMAIN" ]; then
+        echo -e "${BLUE}🌍 External Access (${DETECTED_DOMAIN})${NC}"
+        echo "===================="
+        if curl -s --max-time 5 http://$DETECTED_DOMAIN/api/docs > /dev/null 2>&1; then
+            echo -e "${GREEN}✓${NC} API: Responding externally via $DETECTED_DOMAIN"
         else
-            echo -e "${YELLOW}⚠${NC} API: Not accessible via $DOMAIN_NAME (check DNS/firewall)"
+            echo -e "${YELLOW}⚠${NC} API: Not accessible via $DETECTED_DOMAIN (check DNS/firewall)"
         fi
         
-        if curl -s http://$DOMAIN_NAME > /dev/null 2>&1; then
-            echo -e "${GREEN}✓${NC} Web: Responding externally via $DOMAIN_NAME"
+        if curl -s --max-time 5 http://$DETECTED_DOMAIN > /dev/null 2>&1; then
+            echo -e "${GREEN}✓${NC} Web: Responding externally via $DETECTED_DOMAIN"
         else
-            echo -e "${YELLOW}⚠${NC} Web: Not accessible via $DOMAIN_NAME (check DNS/firewall)"
+            echo -e "${YELLOW}⚠${NC} Web: Not accessible via $DETECTED_DOMAIN (check DNS/firewall)"
         fi
     fi
+    echo ""
+}
+
+show_env() {
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    
+    echo -e "${BLUE}🌍 Environment Information${NC}"
+    echo "===================="
+    echo -e "Git Branch: ${YELLOW}$current_branch${NC}"
+    echo -e "Detected Domain: ${YELLOW}$DETECTED_DOMAIN${NC}"
+    
+    # Show which environment this maps to
+    case "$current_branch" in
+        "main"|"master")
+            echo -e "Environment: ${GREEN}PRODUCTION${NC}"
+            ;;
+        "develop"|"development")
+            echo -e "Environment: ${BLUE}QA${NC}"
+            ;;
+        *)
+            echo -e "Environment: ${YELLOW}QA (default for feature branches)${NC}"
+            ;;
+    esac
+    
+    echo ""
+    echo -e "${BLUE}🚀 Deployment Commands${NC}"
+    echo "===================="
+    echo "Deploy to current environment:"
+    echo "  ./deploy-azure.sh"
+    echo ""
+    echo "Deploy to specific domain:"
+    echo "  ./deploy-azure.sh $DETECTED_DOMAIN"
+    echo ""
+    echo "Setup SSL for current domain:"
+    echo "  ./setup-ssl.sh"
     echo ""
 }
 
 deploy_application() {
     echo -e "${BLUE}🚀 Deploying AI Recruiter application...${NC}"
     
+    # Detect current branch
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+    
     # Pull latest code
-    echo -e "${BLUE}📥 Pulling latest code...${NC}"
-    git pull || {
+    echo -e "${BLUE}📥 Pulling latest code from branch: ${YELLOW}$current_branch${NC}..."
+    git pull origin $current_branch || {
         echo -e "${RED}✗${NC} Git pull failed"
         return 1
     }
@@ -174,25 +239,12 @@ health_check() {
     echo -e "${BLUE}🏥 Performing health checks...${NC}"
     echo ""
     
-    # Database connection check
-    echo -n "Database connection: "
-    if sudo -u postgres psql -d airecruiter_db -c "SELECT 1;" > /dev/null 2>&1; then
-        echo -e "${GREEN}OK${NC}"
-    else
-        echo -e "${RED}FAILED${NC}"
-    fi
-    
-    # Redis connection check (currently not used)
-    # echo -n "Redis connection: "
-    # if redis-cli ping > /dev/null 2>&1; then
-    #     echo -e "${GREEN}OK${NC}"
-    # else
-    #     echo -e "${RED}FAILED${NC}"
-    # fi
+    # Note: Database connection check skipped (using Azure Database for PostgreSQL)
+    echo -e "${BLUE}ℹ${NC} Database: Using Azure Database for PostgreSQL (managed service)"
     
     # API endpoint check
     echo -n "API health: "
-    if curl -s http://localhost:8000/docs > /dev/null 2>&1; then
+    if curl -s --max-time 5 http://localhost:8000/docs > /dev/null 2>&1; then
         echo -e "${GREEN}OK${NC}"
     else
         echo -e "${RED}FAILED${NC}"
@@ -200,7 +252,7 @@ health_check() {
     
     # Web app check  
     echo -n "Web app: "
-    if curl -s http://localhost:3000 > /dev/null 2>&1; then
+    if curl -s --max-time 5 http://localhost:3000 > /dev/null 2>&1; then
         echo -e "${GREEN}OK${NC}"
     else
         echo -e "${RED}FAILED${NC}"
@@ -233,8 +285,12 @@ health_check() {
 update_app() {
     echo -e "${BLUE}📥 Updating application...${NC}"
     
+    # Detect current branch
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+    
     # Pull latest code
-    git pull origin main
+    echo -e "${BLUE}📥 Pulling latest code from branch: ${YELLOW}$current_branch${NC}..."
+    git pull origin $current_branch
     
     # Update API dependencies
     echo -e "${BLUE}🐍 Updating API dependencies...${NC}"
@@ -313,6 +369,9 @@ cleanup() {
 case "${1:-help}" in
     "status")
         show_status
+        ;;
+    "env")
+        show_env
         ;;
     "start")
         start_services
