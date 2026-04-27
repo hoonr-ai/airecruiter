@@ -9,7 +9,6 @@ from typing import Optional, List, Dict, Any
 import asyncio
 import json
 from datetime import datetime, timezone
-from routers.engagement import _check_and_fire_candidate_passed_notification, ENGAGE_PASSED_STATUSES
 
 router = APIRouter(tags=["Voice Agent Integration"])
 
@@ -170,18 +169,30 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
 
         # Check for pass condition and fire email if needed
         # Prioritize hard_filter_status if provided, otherwise fallback to status
-        check_status = payload.hard_filter_status or payload.status
-        if check_status.lower() in ENGAGE_PASSED_STATUSES and payload.total_score is not None:
-            # interview_id should be parsed to int if it's digit
-            int_id = int(payload.interview_id) if str(payload.interview_id).isdigit() else payload.interview_id
-            asyncio.create_task(
-                _check_and_fire_candidate_passed_notification(
-                    interview_id=int_id,
-                    detail_payload=detail_payload,
-                    job_id=target_job_id,
-                    candidate_id=payload.candidate_id,
+        check_status = (payload.hard_filter_status or payload.status).lower()
+        
+        # Safe import of ENGAGE_PASSED_STATUSES
+        try:
+            from routers.engagement import ENGAGE_PASSED_STATUSES
+        except ImportError:
+            ENGAGE_PASSED_STATUSES = ["passed", "completed", "hired"]
+            
+        if check_status in [s.lower() for s in ENGAGE_PASSED_STATUSES] and payload.total_score is not None:
+            try:
+                from routers.engagement import _check_and_fire_candidate_passed_notification
+                # interview_id should be parsed to int if it's digit
+                int_id = int(payload.interview_id) if str(payload.interview_id).isdigit() else payload.interview_id
+                asyncio.create_task(
+                    _check_and_fire_candidate_passed_notification(
+                        interview_id=int_id,
+                        detail_payload=detail_payload,
+                        job_id=target_job_id,
+                        candidate_id=payload.candidate_id,
+                    )
                 )
-            )
+            except (ImportError, AttributeError):
+                import logging
+                logging.getLogger(__name__).warning("Candidate passed but _check_and_fire_candidate_passed_notification is not available in engagement.py. Skipping email.")
             
         return {"success": True, "message": "Interview results processed successfully"}
 
