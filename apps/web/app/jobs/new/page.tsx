@@ -5348,6 +5348,30 @@ function NewJobPageContent() {
                                     );
                                   }}
                                 />
+                                {(() => {
+                                  const recentAvailability = String(
+                                    candidate.recent_availability ||
+                                    candidate.recentAvailability ||
+                                    candidate.availability_status ||
+                                    candidate.available ||
+                                    ""
+                                  ).trim();
+                                  if (!recentAvailability) return null;
+
+                                  const low = recentAvailability.toLowerCase();
+                                  const chipClass =
+                                    low.includes("available") || low.includes("open")
+                                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                      : low.includes("placed") || low.includes("assignment") || low.includes("employed")
+                                        ? "bg-slate-100 text-slate-600 border-slate-200"
+                                        : "bg-amber-50 text-amber-700 border-amber-200";
+
+                                  return (
+                                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${chipClass}`} title="Recent availability from JobDiva">
+                                      {recentAvailability}
+                                    </span>
+                                  );
+                                })()}
                               </div>
 
                               <div className="flex items-center gap-3 shrink-0">
@@ -5420,7 +5444,11 @@ function NewJobPageContent() {
                               mapper. All three are optional — only render the
                               strip if at least one is present. */}
                           {(() => {
-                            const availability = candidate.availability_status || candidate.available;
+                            const availability =
+                              candidate.recent_availability ||
+                              candidate.recentAvailability ||
+                              candidate.availability_status ||
+                              candidate.available;
                             const abstract = candidate.abstract || "";
                             const locationStr = candidate.location || (candidate.city || candidate.state ? `${candidate.city || ""}${candidate.city && candidate.state ? ", " : ""}${candidate.state || ""}` : "");
                             if (!availability && !abstract && !locationStr) return null;
