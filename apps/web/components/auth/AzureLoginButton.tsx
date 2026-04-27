@@ -7,6 +7,10 @@ import { LogOut, LogIn } from "lucide-react";
 export function AzureLoginButton() {
     const { instance, accounts } = useMsal();
 
+    if (process.env.NEXT_PUBLIC_HIDE_MICROSOFT_LOGIN === "true" && accounts.length === 0) {
+        return null;
+    }
+
     const handleLogin = () => {
         instance.loginPopup(loginRequest).catch((e) => {
             console.error(e);
