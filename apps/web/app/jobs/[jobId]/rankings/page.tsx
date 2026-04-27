@@ -147,6 +147,16 @@ export default function CandidateRankingsPage() {
     return v || null;
   };
 
+  const normalizeSourceLabel = (source: string | null | undefined): string => {
+    const raw = String(source || "").trim();
+    const s = raw.toLowerCase();
+    if (!s) return "—";
+    if (s.includes("applicant")) return "Job-Diva Applicant";
+    if (s.includes("talentsearch") || s.includes("talent_search")) return "Job-Diva Candidate";
+    if (s.includes("linkedin")) return "LinkedIn";
+    return raw;
+  };
+
   const normalizeScreenStatus = (c: Candidate): { label: string; color: string } => {
     const interviewId = deriveInterviewId(c);
     if (!interviewId) {
@@ -993,7 +1003,7 @@ export default function CandidateRankingsPage() {
         {/* HTML Exact Replica Table */}
         <div className="bg-white rounded-[12px] border border-slate-200 shadow-sm overflow-hidden relative max-w-full">
           <div className="overflow-x-auto pb-1">
-            <Table className="table-fixed min-w-[1120px] w-full">
+            <Table className="table-fixed min-w-[1200px] w-full">
               <TableHeader>
                 <TableRow className="bg-white border-b border-slate-200 hover:bg-white h-[34px]">
                   <TableHead className="w-[44px] text-center font-bold text-slate-900 text-[11px] uppercase tracking-wider border-r border-[#e2e8f0] py-1 px-1">#</TableHead>
@@ -1023,6 +1033,13 @@ export default function CandidateRankingsPage() {
                           : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
                       </div>
                     </button>
+                  </TableHead>
+                  <TableHead className="w-[120px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                    <div className="flex items-center justify-between w-full h-full px-1">
+                      <div className="w-[20px]" />
+                      <span className="flex-1 text-center leading-tight">SOURCE</span>
+                      <div className="w-[20px]" />
+                    </div>
                   </TableHead>
                   <TableHead className="w-[118px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
                     <div className="flex items-center justify-between w-full h-full px-1">
@@ -1186,6 +1203,12 @@ export default function CandidateRankingsPage() {
                           )}
                           <span className={`text-[11px] block text-center mt-0.5 ${availabilityPillClasses(deriveAvailability(candidate))}`}>
                             <Calendar className="w-3.5 h-3.5 inline mr-1 opacity-70" /> Available: {deriveAvailability(candidate) || <span className="font-normal opacity-50">—</span>}
+                          </span>
+                        </TableCell>
+
+                        <TableCell className="text-center align-middle py-1">
+                          <span className="text-[11px] font-semibold text-slate-700">
+                            {normalizeSourceLabel(candidate.source)}
                           </span>
                         </TableCell>
 
