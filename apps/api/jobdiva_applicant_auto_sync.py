@@ -31,7 +31,12 @@ def get_monitored_jobs():
                 # We target all jobs that have been 'monitored'. 
                 # If there's an is_archived column, we should use it.
                 # Checking schema for common column names.
-                cur.execute("SELECT job_id, jobdiva_id, title FROM monitored_jobs")
+                cur.execute("""
+                    SELECT job_id, jobdiva_id, title 
+                    FROM monitored_jobs 
+                    WHERE is_archived IS NOT TRUE 
+                    AND (processing_status IN ('monitoring_added', 'manual_created') OR processing_status LIKE 'step_%_complete')
+                """)
                 return cur.fetchall()
     except Exception as e:
         logger.error(f"Failed to fetch monitored jobs: {e}")

@@ -8,6 +8,8 @@
 // Production wiring is deliberately a stub today; filling in `remoteSink`
 // should be all that's needed to go live.
 
+import { trackEvent } from "@/lib/analytics";
+
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 const LEVEL_ORDER: Record<LogLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
@@ -43,7 +45,11 @@ function emit(level: LogLevel, msg: string, ctx?: Context) {
 // Deliberately a no-op for now — keeps this file free of fetch timing
 // concerns and failure modes.
 function remoteSink(_record: unknown) {
-  // TODO: wire to POST `${API_BASE}/api/v1/logs/client` with batching.
+  const record = (_record ?? {}) as Record<string, unknown>;
+  trackEvent("frontend_log", record);
+  if (record.level === "error") {
+    trackEvent("frontend_error_log", record);
+  }
 }
 
 export const logger = {

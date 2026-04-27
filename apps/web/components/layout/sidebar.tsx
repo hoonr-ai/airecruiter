@@ -10,9 +10,9 @@ export function Sidebar() {
     const pathname = usePathname();
 
     const navItems = [
-        { label: "Jobs", href: "/", icon: Briefcase },
-        { label: "Candidates", href: "/candidates", icon: Users },
-        { label: "Settings", href: "/settings", icon: Settings },
+        { label: "Jobs", href: "/", icon: Briefcase, disabled: false },
+        { label: "Candidates", href: "/candidates", icon: Users, disabled: true },
+        { label: "Settings", href: "/settings", icon: Settings, disabled: false },
     ];
 
     return (
@@ -40,21 +40,32 @@ export function Sidebar() {
 
                         return (
                             <li key={item.label}>
-                                <Link 
-                                    href={item.href} 
-                                    className={cn(
-                                        "flex items-center px-4 py-3 text-[14px] font-medium rounded-lg transition-all duration-200 group",
-                                        isActive 
-                                            ? "bg-primary text-white shadow-md shadow-primary/20" 
-                                            : "text-slate-500 hover:bg-slate-50 hover:text-slate-900"
-                                    )}
-                                >
-                                    <Icon className={cn(
-                                        "mr-3 h-[20px] w-[20px] transition-colors duration-200",
-                                        isActive ? "text-white" : "text-slate-400 group-hover:text-slate-600"
-                                    )} />
-                                    {item.label}
-                                </Link>
+                                {item.disabled ? (
+                                    <div
+                                        aria-disabled="true"
+                                        title="Temporarily disabled"
+                                        className="flex items-center px-4 py-3 text-[14px] font-medium rounded-lg transition-all duration-200 text-slate-400 bg-slate-50 cursor-not-allowed opacity-70"
+                                    >
+                                        <Icon className="mr-3 h-[20px] w-[20px] text-slate-300" />
+                                        {item.label}
+                                    </div>
+                                ) : (
+                                    <Link
+                                        href={item.href}
+                                        className={cn(
+                                            "flex items-center px-4 py-3 text-[14px] font-medium rounded-lg transition-all duration-200 group",
+                                            isActive
+                                                ? "bg-primary text-white shadow-md shadow-primary/20"
+                                                : "text-slate-500 hover:bg-slate-50 hover:text-slate-900"
+                                        )}
+                                    >
+                                        <Icon className={cn(
+                                            "mr-3 h-[20px] w-[20px] transition-colors duration-200",
+                                            isActive ? "text-white" : "text-slate-400 group-hover:text-slate-600"
+                                        )} />
+                                        {item.label}
+                                    </Link>
+                                )}
                             </li>
                         );
                     })}

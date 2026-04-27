@@ -21,7 +21,7 @@ class AutoAssignService:
         and upserts them into sourced_candidates.
         """
         try:
-            logger.info(f"🤖 [AutoAssignService] Starting sync for job {job_id}")
+            logger.debug(f"🤖 [AutoAssignService] Starting sync for job {job_id}")
 
             # 1. Load job rubric / filters from DB
             resume_match_filters = []
@@ -32,7 +32,7 @@ class AutoAssignService:
                 with self._get_db_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
-                            "SELECT resume_match_filters, sourcing_filters, jobdiva_id FROM monitored_jobs "
+                            "SELECT resume_match_filters, sourcing_filters, jobdiva_id, status FROM monitored_jobs "
                             "WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
                             (job_id, job_id)
                         )
@@ -41,11 +41,17 @@ class AutoAssignService:
                             resume_match_filters = row[0] if isinstance(row[0], list) else (json.loads(row[0]) if row[0] else [])
                             sourcing_filters = row[1] if isinstance(row[1], dict) else (json.loads(row[1]) if row[1] else {})
                             jobdiva_numeric_id = row[2]
+                            job_status = row[3]
+                            
+                            # Skip if job is clearly inactive
+                            if job_status and job_status.lower() in ['closed', 'cancelled', 'filled', 'inactive']:
+                                logger.debug(f"🤖 [AutoAssignService] Skipping sync for job {job_id} - status is {job_status}")
+                                return 0
             except Exception as e:
                 logger.warning(f"[AutoAssignService] Could not load filters for job {job_id}: {e}")
 
             search_job_id = jobdiva_numeric_id if jobdiva_numeric_id else job_id
-            logger.info(f"🤖 [AutoAssignService] Targeting JobDiva ID {search_job_id}")
+            logger.debug(f"🤖 [AutoAssignService] Targeting JobDiva ID {search_job_id}")
 
             # 2. Build SearchCriteria
             title_criteria = []
@@ -78,11 +84,26 @@ class AutoAssignService:
                 resume_match_filters=resume_match_filters,
                 location=primary_location,
                 page_size=500,
-                sources=["JobDiva"],
+                # Explicit applicants source so auto-sync remains applicant-only
+                # even though Step-5 "JobDiva" now maps to talent search only.
+                sources=["JobDiva Applicants"],
                 bypass_screening=True,
             )
 
-            # 3. Process candidates
+            # 3. Fetch existing candidates to avoid redundant inserts
+            existing_ids = set()
+            try:
+                with self._get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "SELECT candidate_id FROM sourced_candidates WHERE jobdiva_id = %s",
+                            (job_id,)
+                        )
+                        existing_ids = {str(row[0]) for row in cur.fetchall()}
+            except Exception as e:
+                logger.warning(f"[AutoAssignService] Could not fetch existing candidates for {job_id}: {e}")
+
+            # 4. Process candidates
             total_assigned = 0
             with self._get_db_connection() as conn:
                 with conn.cursor() as cur:
@@ -93,6 +114,10 @@ class AutoAssignService:
                         try:
                             candidate_id = str(cand.get("candidate_id") or cand.get("id") or "")
                             
+                            # Skip if already exists to reduce DB write volume
+                            if candidate_id in existing_ids:
+                                continue
+
                             candidate_data_json = json.dumps({
                                 "skills": cand.get("skills") or [],
                                 "experience_years": cand.get("experience_years") or 0,
@@ -144,9 +169,8 @@ class AutoAssignService:
                                 candidate_data_json,
                                 "sourced",
                                 cand.get("match_score") or 0,
-                            ))
+                             ))
                             total_assigned += 1
-                            conn.commit()
 
                             # Populate normalized tables
                             try:
@@ -155,6 +179,11 @@ class AutoAssignService:
                                 logger.warning(f"[AutoAssignService] Failed normalized upsert for {candidate_id}: {norm_err}")
                         except Exception as row_err:
                             logger.warning(f"[AutoAssignService] Failed upsert for {cand.get('candidate_id')}: {row_err}")
+
+                    # Commit once at the end of the job sync to reduce transaction overhead
+                    if total_assigned > 0:
+                        conn.commit()
+                        logger.debug(f"🤖 [AutoAssignService] Committed {total_assigned} candidates for job {job_id}")
 
             logger.info(f"✅ [AutoAssignService] Completed. Total assigned: {total_assigned} for job {job_id}")
             return total_assigned
