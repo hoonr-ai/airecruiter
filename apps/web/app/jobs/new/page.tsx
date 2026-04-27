@@ -5622,9 +5622,9 @@ function NewJobPageContent() {
                 {hasSearched && !isSearching ? `${selectedCandidates.size} candidates selected` : ''}
               </span>
               <Button
-                className={`h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group ${candidates.length > 0 && selectedCandidates.size > 0 && process.env.NEXT_PUBLIC_DISABLE_LAUNCH_PAIR !== "true" ? "bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98]" : "bg-slate-300 cursor-not-allowed"}`}
+                className="h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md bg-slate-300 cursor-not-allowed"
                 onClick={handleLaunchPairClick}
-                disabled={!hasSearched || isSearching || isEnrichingContacts || selectedCandidates.size === 0 || process.env.NEXT_PUBLIC_DISABLE_LAUNCH_PAIR === "true"}
+                disabled
               >
                 {isEnrichingContacts ? (
                   <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
