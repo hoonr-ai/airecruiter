@@ -40,11 +40,9 @@ def _json_load_safe(value: Any, default: Any):
 
 def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
     """Build SearchCriteria from monitored_jobs for detailed resume re-scoring."""
-    import psycopg2
-    from core.config import DATABASE_URL
-
     try:
-        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        conn = get_db_connection()
+        try:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -58,6 +56,8 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
                 row = cur.fetchone()
                 if not row:
                     return None
+        finally:
+            conn.close()
 
         resume_match_filters = _json_load_safe(row[0], [])
         sourcing_filters = _json_load_safe(row[1], {})
@@ -651,8 +651,6 @@ async def get_job_candidates(job_id_or_ref: str):
     Supports both numeric job_id and reference jobdiva_id.
     """
     try:
-        from core.config import DATABASE_URL
-        import psycopg2
         from psycopg2.extras import RealDictCursor
 
         # Resolve the alphanumeric jobdiva_id (e.g. '26-05172') from monitored_jobs.
@@ -661,7 +659,8 @@ async def get_job_candidates(job_id_or_ref: str):
         resolved_numeric_job_id = job_id_or_ref
         # v22: connect_timeout=5 → slow/unreachable DB fails fast instead of
         # hanging worker for TCP default (~2 min).
-        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        conn = get_db_connection()
+        try:
             with conn.cursor() as cur:
                 cur.execute("""
                     SELECT jobdiva_id, job_id FROM monitored_jobs
@@ -673,9 +672,12 @@ async def get_job_candidates(job_id_or_ref: str):
                     # Prefer the alphanumeric jobdiva_id; fall back to job_id if jobdiva_id is NULL
                     resolved_jobdiva_id = result[0] or result[1]
                     resolved_numeric_job_id = result[1] or result[0]
+        finally:
+            conn.close()
 
         # Query sourced_candidates using the resolved alphanumeric jobdiva_id
-        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        conn = get_db_connection()
+        try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
                     WITH latest_audit AS (
@@ -713,6 +715,8 @@ async def get_job_candidates(job_id_or_ref: str):
                     ORDER BY sc.created_at DESC;
                 """, (str(resolved_jobdiva_id), str(resolved_numeric_job_id), resolved_jobdiva_id,))
                 candidates = cur.fetchall()
+        finally:
+            conn.close()
 
         # Handle the data field (it might be a string or a dict)
         for cand in candidates:
@@ -773,12 +777,11 @@ async def refresh_candidate_resume_match(
 ):
     """Re-run resume matching for a single candidate and persist score details."""
     try:
-        from core.config import DATABASE_URL
-        import psycopg2
         from psycopg2.extras import RealDictCursor
 
         resolved_jobdiva_id = job_id_or_ref
-        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        conn = get_db_connection()
+        try:
             with conn.cursor() as cur:
                 cur.execute(
                     """
@@ -792,8 +795,11 @@ async def refresh_candidate_resume_match(
                 job_row = cur.fetchone()
                 if job_row:
                     resolved_jobdiva_id = job_row[0] or job_row[1] or job_id_or_ref
+        finally:
+            conn.close()
 
-        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        conn = get_db_connection()
+        try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 if request.source:
                     cur.execute(
@@ -864,6 +870,8 @@ async def refresh_candidate_resume_match(
                     (refreshed["score"], json.dumps(data_blob), row_data.get("id")),
                 )
             conn.commit()
+        finally:
+            conn.close()
 
         return {
             "status": "success",
@@ -894,11 +902,10 @@ async def save_candidates(request: CandidatesSaveRequest):
 
         # Resolve the true alphanumeric jobdiva_id from monitored_jobs.
         # The frontend may send the numeric job_id; we always normalise to the alphanumeric ref.
-        import psycopg2 as _psycopg2
-        from core.config import DATABASE_URL as _DB_URL
         resolved_jobdiva_id = request.jobdiva_id  # safe fallback
         try:
-            with _psycopg2.connect(_DB_URL, connect_timeout=5) as _conn:
+            _conn = get_db_connection()
+            try:
                 with _conn.cursor() as _cur:
                     _cur.execute("""
                         SELECT jobdiva_id, job_id FROM monitored_jobs
@@ -909,6 +916,8 @@ async def save_candidates(request: CandidatesSaveRequest):
                     if _row:
                         # jobdiva_id (alphanumeric) preferred; fall back to job_id if NULL
                         resolved_jobdiva_id = _row[0] or _row[1]
+            finally:
+                _conn.close()
         except Exception as _resolve_err:
             print(f"⚠️ Could not resolve jobdiva_id, using as-is: {_resolve_err}")
 
@@ -921,15 +930,14 @@ async def save_candidates(request: CandidatesSaveRequest):
         for idx, c in enumerate(selected_candidates):
             print(f"   Selected Candidate {idx+1}: {c.name} (ID: {c.candidate_id}, Source: {c.source})")
 
-        import psycopg2
         import json
-        from core.config import DATABASE_URL
 
         saved_count = 0
         processing_payloads = []
         scoring_criteria = _build_resume_matching_criteria(str(resolved_jobdiva_id))
 
-        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        conn = get_db_connection()
+        try:
             with conn.cursor() as cur:
                 for c in selected_candidates:
                     try:
@@ -1067,6 +1075,8 @@ async def save_candidates(request: CandidatesSaveRequest):
                         continue
 
             conn.commit()
+        finally:
+            conn.close()
 
         print(f"✅ Successfully saved {saved_count} sourced candidates to database")
         enhanced_count = 0
@@ -1125,9 +1135,8 @@ async def save_candidates(request: CandidatesSaveRequest):
                     data_blob["missing_skills"] = detailed_scoring["missing_skills"]
                     data_blob["explainability"] = detailed_scoring["explainability"]
 
-                    import psycopg2 as _psycopg2
-                    from core.config import DATABASE_URL as _DB_URL
-                    with _psycopg2.connect(_DB_URL, connect_timeout=5) as _conn:
+                    _conn = get_db_connection()
+                    try:
                         with _conn.cursor() as _cur:
                             _cur.execute(
                                 """
@@ -1148,6 +1157,8 @@ async def save_candidates(request: CandidatesSaveRequest):
                                 ),
                             )
                         _conn.commit()
+                    finally:
+                        _conn.close()
                 except Exception as e:
                     print(f"⚠️ Enhanced processing failed for candidate {payload.get('candidate_id')}: {e}")
 
@@ -1302,10 +1313,8 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     Enrich candidate contact details from ZoomInfo using LinkedIn URL.
     If sourced_candidates rows already exist, updates phone/email + data blob.
     """
-    import psycopg2
     from psycopg2.extras import RealDictCursor
     from core.config import (
-        DATABASE_URL,
         ZOOMINFO_ENRICH_URL,
         ZOOMINFO_BEARER_TOKEN,
         ZOOMINFO_CLIENT_ID,
@@ -1320,7 +1329,8 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
 
     # If linkedin_url not passed, try to infer it from sourced_candidates.profile_url.
     try:
-        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        conn = get_db_connection()
+        try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 query = """
                     SELECT id, candidate_id, jobdiva_id, source, name, headline, profile_url, email, phone, data
@@ -1345,6 +1355,8 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                         if candidate_profile:
                             linkedin_url = candidate_profile
                             break
+        finally:
+            conn.close()
     except Exception as e:
         logger.warning(f"enrich_contact prefetch failed for {candidate_id}: {e}")
 
@@ -1602,7 +1614,8 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     updated_rows = 0
     if existing_rows and (enriched_phone or enriched_email):
         try:
-            with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+            conn = get_db_connection()
+            try:
                 with conn.cursor() as cur:
                     for row in existing_rows:
                         data_blob = _json_load_safe(row.get("data"), {})
@@ -1633,6 +1646,8 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                         )
                         updated_rows += cur.rowcount
                 conn.commit()
+            finally:
+                conn.close()
         except Exception as e:
             logger.error(f"Failed persisting ZoomInfo enrichment for {candidate_id}: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to persist enrichment: {str(e)}")
@@ -1676,11 +1691,9 @@ async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhon
     if digit_count < 7:
         raise HTTPException(status_code=400, detail="Phone number must contain at least 7 digits")
 
-    import psycopg2
-    from core.config import DATABASE_URL
-
     try:
-        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        conn = get_db_connection()
+        try:
             with conn.cursor() as cur:
                 if request.jobdiva_id:
                     cur.execute(
@@ -1702,6 +1715,8 @@ async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhon
                     )
                 updated = cur.rowcount
             conn.commit()
+        finally:
+            conn.close()
         return {"status": "success", "candidate_id": candidate_id, "phone": normalised, "updated_rows": updated}
     except HTTPException:
         raise

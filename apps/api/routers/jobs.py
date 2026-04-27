@@ -45,14 +45,14 @@ def _monitored_jobs_cache_key(include_archived: bool, view: str) -> str:
     return f"{int(include_archived)}:{view}"
 
 
-def _get_cached_monitored_jobs(include_archived: bool, view: str) -> Optional[Dict[str, Any]]:
+def _get_cached_monitored_jobs(include_archived: bool, view: str, allow_stale: bool = False) -> Optional[Dict[str, Any]]:
     key = _monitored_jobs_cache_key(include_archived, view)
     now = time.time()
     with _monitored_jobs_cache_lock:
         cached = _monitored_jobs_cache.get(key)
         if not cached:
             return None
-        if now - cached.get("ts", 0) > _MONITORED_JOBS_CACHE_TTL_SECONDS:
+        if not allow_stale and now - cached.get("ts", 0) > _MONITORED_JOBS_CACHE_TTL_SECONDS:
             return None
         return copy.deepcopy(cached.get("data"))
 
@@ -1747,15 +1747,17 @@ async def get_monitored_jobs(
         logger.error(f"Error fetching monitored jobs from DB: {e}")
         # Serve stale cache if available to avoid long blank-loads during
         # transient lock contention/timeouts.
-        stale_cached = _get_cached_monitored_jobs(include_archived, view)
+        stale_cached = _get_cached_monitored_jobs(include_archived, view, allow_stale=True)
         if stale_cached is not None:
             stale_cached["source"] = "cache_stale"
             stale_cached["warning"] = "Returned stale cache due DB contention"
             return stale_cached
 
-        # Final fallback to legacy source only on catastrophic DB failure.
-        jobs_data = load_monitored_jobs()
-        return jobs_data
+        # Fail fast when DB and cache are both unavailable.
+        raise HTTPException(
+            status_code=503,
+            detail="Monitored jobs temporarily unavailable due to database contention",
+        )
 
 @router.post("/jobs/poll-now")
 async def trigger_manual_poll(background_tasks: BackgroundTasks):
