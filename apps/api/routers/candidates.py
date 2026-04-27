@@ -931,6 +931,16 @@ async def save_candidates(request: CandidatesSaveRequest):
             with conn.cursor() as cur:
                 for c in selected_candidates:
                     try:
+                        incoming_match_score: Optional[float] = None
+                        try:
+                            raw_incoming_score = getattr(c, 'match_score', None)
+                            if raw_incoming_score is not None:
+                                parsed_incoming_score = float(raw_incoming_score)
+                                if parsed_incoming_score >= 0:
+                                    incoming_match_score = parsed_incoming_score
+                        except Exception:
+                            incoming_match_score = None
+
                         raw_urls = getattr(c, 'urls', {})
                         if not isinstance(raw_urls, dict):
                             raw_urls = {}
@@ -969,7 +979,20 @@ async def save_candidates(request: CandidatesSaveRequest):
                             },
                             "match_score": getattr(c, 'match_score', 0),
                         }
-                        scoring = _compute_resume_matching(pre_score_payload, scoring_criteria)
+                        if incoming_match_score is not None:
+                            # Canonical score from Step-5 sourcing UI. Keep this
+                            # value stable across Launch PAIR -> Rank List.
+                            scoring = {
+                                "score": incoming_match_score,
+                                "status": "done",
+                                "missing_skills": [],
+                                "matched_skills": [],
+                                "explainability": ["Score preserved from Step-5 sourcing"],
+                                "score_details": {},
+                                "scored_at": datetime.now(timezone.utc).isoformat(),
+                            }
+                        else:
+                            scoring = _compute_resume_matching(pre_score_payload, scoring_criteria)
 
                         # Prepare candidate data with clean schema
                         candidate_data = {
@@ -994,6 +1017,7 @@ async def save_candidates(request: CandidatesSaveRequest):
                                 "company_experience": getattr(c, 'company_experience', []),
                                 "urls": urls_payload,
                                 "is_selected": True,
+                                "score_locked_from_step5": incoming_match_score is not None,
                                 "match_score": scoring["score"],
                                 "resume_matching_score": scoring["score"],
                                 "resume_matching_status": scoring["status"],
@@ -1083,8 +1107,13 @@ async def save_candidates(request: CandidatesSaveRequest):
 
                     # Re-score after enrichment pass so rank-list gets detailed
                     # resume-matching status/score from the latest profile data.
-                    detailed_scoring = _compute_resume_matching(payload, scoring_criteria)
                     data_blob = _json_load_safe(payload.get("data"), {})
+                    if data_blob.get("score_locked_from_step5"):
+                        # Preserve Launch PAIR score selected in Step-5.
+                        # Do not overwrite with a second backend recomputation.
+                        continue
+
+                    detailed_scoring = _compute_resume_matching(payload, scoring_criteria)
                     data_blob["match_score"] = detailed_scoring["score"]
                     data_blob["resume_matching_score"] = detailed_scoring["score"]
                     data_blob["resume_matching_status"] = detailed_scoring["status"]
