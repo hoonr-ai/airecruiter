@@ -355,6 +355,7 @@ export default function DashboardPage() {
                 <tr key={job.id} className="hover:bg-slate-50/70 transition-colors group">
                   <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-[#4f46e5]">
                     <Link 
+                      prefetch={false}
                       href={`/jobs/${job.jobdiva_id || job.id}/rankings`}
                       className="flex items-center gap-1.5 hover:underline decoration-[#4f46e5]/40 underline-offset-4"
                     >
@@ -426,20 +427,20 @@ export default function DashboardPage() {
                       <DropdownMenuContent align="end" className="rounded-xl border-slate-200 font-medium text-[13px] shadow-lg">
                         {job.pairStatus === 'Unpublished' ? (
                           <DropdownMenuItem className="cursor-pointer bg-primary/5 text-primary font-bold">
-                            <Link href={`/jobs/new?jobId=${job.jobdiva_id || job.id}`} className="w-full">
+                            <Link prefetch={false} href={`/jobs/new?jobId=${job.jobdiva_id || job.id}`} className="w-full">
                               Resume Setup
                             </Link>
                           </DropdownMenuItem>
                         ) : (
                           <DropdownMenuItem className="cursor-pointer">
-                            <Link href={`/jobs/${job.jobdiva_id || job.id}`} className="w-full">
+                            <Link prefetch={false} href={`/jobs/${job.jobdiva_id || job.id}`} className="w-full">
                               View Details
                             </Link>
                           </DropdownMenuItem>
                         )}
                         {activeTab !== "archived" && (
                           <DropdownMenuItem className="cursor-pointer" asChild>
-                            <Link href={`/jobs/${job.jobdiva_id || job.id}`} className="w-full">
+                            <Link prefetch={false} href={`/jobs/${job.jobdiva_id || job.id}`} className="w-full">
                               Edit Job
                             </Link>
                           </DropdownMenuItem>
