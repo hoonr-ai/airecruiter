@@ -66,6 +66,16 @@ def _set_cached_monitored_jobs(include_archived: bool, view: str, payload: Dict[
         }
 
 
+def invalidate_monitored_jobs_cache() -> None:
+    """Drop all cached /jobs/monitored payloads.
+
+    Called from archive/unarchive handlers in routers/job_archive.py so the
+    next dashboard fetch sees the write rather than a cached pre-write list.
+    """
+    with _monitored_jobs_cache_lock:
+        _monitored_jobs_cache.clear()
+
+
 # Proxies to scheduler-tangled helpers that remain in main.py.
 # These use late-binding via ``import main`` so module-level
 # import order remains safe (main imports this router, so we
