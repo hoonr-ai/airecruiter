@@ -89,6 +89,12 @@ class _PooledConnection:
     def __getattr__(self, name):
         return getattr(self._conn, name)
 
+    def __setattr__(self, name, value):
+        if name in ("_conn", "_pool", "_closed"):
+            super().__setattr__(name, value)
+        else:
+            setattr(self._conn, name, value)
+
     def __enter__(self):
         return self._conn.__enter__()
 

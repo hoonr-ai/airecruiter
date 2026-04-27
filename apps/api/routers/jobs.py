@@ -120,6 +120,7 @@ def _ensure_monitored_jobs_schema() -> None:
     """
     try:
         conn = get_db_connection()
+        conn.autocommit = True
         cur = conn.cursor()
         for stmt in (
             # v21 columns
@@ -150,7 +151,6 @@ def _ensure_monitored_jobs_schema() -> None:
                 cur.execute(stmt)
             except Exception as e:
                 logger.warning(f"monitored_jobs ALTER skipped: {stmt!r}: {e}")
-        conn.commit()
         cur.close()
         conn.close()
         logger.info("monitored_jobs schema ready")
