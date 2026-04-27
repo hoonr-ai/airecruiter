@@ -74,6 +74,7 @@ import { PhoneIndicator } from "@/components/phone-indicator";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { API_BASE } from "@/lib/api";
 import { logger } from "@/lib/logger";
+import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 
 // Utility function to clean location_type values and filter out employment terms
 function cleanLocationType(locationType: string | null | undefined): string {
@@ -224,6 +225,7 @@ export default function NewJobPage() {
 
 function NewJobPageContent() {
   const router = useRouter();
+  const engagement = useEngagementFlow();
   const searchParams = useSearchParams();
   const engagement = useEngagementFlow();
   const [currentStep, setCurrentStepState] = useState<Step>(1);
@@ -4291,44 +4293,36 @@ function NewJobPageContent() {
       const result = await response.json();
 
       if (response.ok && result.status === 'success') {
-        const saved = result.saved_count || selectedCount;
-        showToast(`${saved} candidates saved to Master Pool.`, "success");
-        
-        // Auto-initiate PAIR calls (Requirement: "the call must go automaticlaly")
-        const redirectJobRef = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
-        try {
-          const candIds = candidatesPayload.map(c => c.candidate_id);
-          if (candIds.length > 0 && redirectJobRef) {
-            showToast(`Initiating PAIR calls for ${candIds.length} candidates...`, "info");
-            
-            const payloadData = await engagement.generatePayload({
-              candidateIds: candIds,
-              jobId: redirectJobRef
-            });
-            
-            const bulkResult = await engagement.sendBulkInterview({
-              payload: payloadData.payload,
-              realCandidateIds: candIds
-            });
-            
-            if (bulkResult.success) {
-              showToast("PAIR calls initiated successfully!", "success");
-            } else {
-              showToast(`Auto-call failed: ${bulkResult.message || "Unknown error"}`, "error");
-            }
-          }
-        } catch (e) {
-          console.error("Auto-initiation failed:", e);
-          showToast("Failed to auto-initiate calls, but candidates were saved.", "error");
-        }
+        const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
+        const selectedIds = candidatesPayload.map(c => c.candidate_id);
 
+        // ── Fire Emails Immediately ──────────────────────────────────────────
+        try {
+          const engageData = await engagement.generatePayload({
+            candidateIds: selectedIds,
+            jobId: jobIdForEngage,
+          });
+          
+          if (engageData?.payload) {
+            await engagement.sendBulkInterview({
+              payload: engageData.payload,
+              realCandidateIds: selectedIds,
+              isInitialLaunch: true,
+            });
+          }
+        } catch (engageErr) {
+          console.warn("Engagement emails failed to fire, but candidates saved:", engageErr);
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
+        const saved = result.saved_count || selectedCount;
         setTimeout(() => {
-          if (redirectJobRef) {
-            router.push(`/jobs/${encodeURIComponent(redirectJobRef)}/rankings`);
+          if (jobIdForEngage) {
+            router.push(`/jobs/${encodeURIComponent(jobIdForEngage)}/rankings`);
           } else {
             router.push(`/`);
           }
-        }, 2000); // Slightly longer delay to allow toast reading
+        }, 1000);
       } else {
         console.error('Save failed details:', JSON.stringify(result, null, 2));
         const errorMsg = result.detail

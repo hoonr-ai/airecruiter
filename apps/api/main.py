@@ -24,6 +24,8 @@ from core import (
 )
 from core.email import notify_pair_launched, notify_job_posting, notify_pair_inactive
 
+PAIR_INACTIVE_STATUSES = os.getenv("PAIR_INACTIVE_STATUSES", "closed,filled,cancelled,canceled,expired,ignored,declined").lower().split(",")
+
 # Load environment variables (core handles .env, but keeping load_dotenv for compatibility)
 load_dotenv()
 
@@ -277,6 +279,13 @@ app.add_middleware(
 
 
 @app.middleware("http")
+async def log_requests(request: Request, call_next):
+    print(f"DEBUG: Incoming {request.method} {request.url.path}")
+    response = await call_next(request)
+    print(f"DEBUG: Response {response.status_code} for {request.url.path}")
+    return response
+
+@app.middleware("http")
 async def amplitude_request_tracking(request: Request, call_next):
     """Best-effort API telemetry: request journey + failures."""
     started = time.perf_counter()
@@ -413,8 +422,7 @@ async def poll_all_jobs():
         jobdiva_service.monitor_job_locally(job_id, db_data)
 
         # ── Email #4: PAIR Inactive Notification ─────────────────────────
-        inactive_statuses = ["closed", "filled", "cancelled", "expired", "ignored", "declined"]
-        if current_status.lower() in inactive_statuses and old_status.lower() not in inactive_statuses:
+        if current_status.lower() in PAIR_INACTIVE_STATUSES and old_status.lower() not in PAIR_INACTIVE_STATUSES:
             logger.info(f"⏸️ Job {job_id} switched to Inactive ({current_status}). Triggering notification...")
             asyncio.create_task(_fire_pair_inactive_notification(job_id))
     
@@ -463,11 +471,12 @@ async def _fire_pair_inactive_notification(job_id: str):
             else:
                 recruiter_emails = emails_raw or []
 
-            await asyncio.to_thread(
-                notify_pair_inactive,
-                jobdiva_id=row["jobdiva_id"] or job_id,
-                recruiter_emails=recruiter_emails
-            )
+            if recruiter_emails or True:
+                await asyncio.to_thread(
+                    notify_pair_inactive,
+                    jobdiva_id=row["jobdiva_id"] or job_id,
+                    recruiter_emails=recruiter_emails
+                )
             
         cur.close()
         conn.close()

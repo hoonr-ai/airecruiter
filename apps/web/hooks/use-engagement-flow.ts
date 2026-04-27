@@ -21,6 +21,7 @@ export type GeneratePayloadResult = {
 export type SendBulkInterviewInput = {
   payload: string;
   realCandidateIds: string[];
+  isInitialLaunch?: boolean;
 };
 
 export type SendBulkInterviewResult = {
@@ -66,7 +67,11 @@ export function useEngagementFlow() {
     const res = await fetch(`${API_BASE}/api/v1/engagement/engage/send-bulk-interview`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ payload: input.payload, real_candidate_ids: input.realCandidateIds }),
+      body: JSON.stringify({ 
+        payload: input.payload, 
+        real_candidate_ids: input.realCandidateIds,
+        is_initial_launch: input.isInitialLaunch ?? false
+      }),
     });
     const data = (await res.json()) as any;
     if (!res.ok) {

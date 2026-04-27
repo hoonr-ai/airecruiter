@@ -32,6 +32,9 @@ router = APIRouter(tags=["Engagement"])
 # Configuration
 # ---------------------------------------------------------------------------
 EXTERNAL_INTERVIEW_API_URL = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai")
+PASS_SCORE_THRESHOLD = float(os.getenv("PASS_SCORE_THRESHOLD", "70"))
+HARD_FILTER_PASS_STATUS = os.getenv("HARD_FILTER_PASS_STATUS", "pass").lower()
+ENGAGE_PASSED_STATUSES = os.getenv("ENGAGE_PASSED_STATUSES", "completed,passed").lower().split(",")
 
 # ---------------------------------------------------------------------------
 # Auto-Migration: Ensure audit table exists
@@ -123,6 +126,7 @@ class GeneratePayloadRequest(BaseModel):
 class SendBulkInterviewRequest(BaseModel):
     payload: str  # JSON string (editable by user in modal)
     real_candidate_ids: List[str]
+    is_initial_launch: bool = False
 
 class SyncInterviewDetailsRequest(BaseModel):
     interview_ids: List[Any]
@@ -290,7 +294,8 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
         cur.execute(
             """
             SELECT job_id, jobdiva_id, title, customer_name,
-                   ai_description, job_configuration
+                   recruiter_emails, ai_description, recruiter_notes,
+                   selected_job_boards
             FROM monitored_jobs
             WHERE job_id = %s OR jobdiva_id = %s
             LIMIT 1
@@ -305,14 +310,6 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
             logger.warning("📧 _send_pair_launch_email: job '%s' not found in monitored_jobs", job_id)
             return
 
-        # ── Parse job_configuration ──────────────────────────────────────────
-        raw_cfg = row.get("job_configuration") or {}
-        if isinstance(raw_cfg, str):
-            try:
-                raw_cfg = json.loads(raw_cfg)
-            except Exception:
-                raw_cfg = {}
-
         def _parse_json_list(val) -> list:
             """Safely parse a value that may be a JSON string, list, or empty."""
             if isinstance(val, list):
@@ -325,8 +322,8 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
                     return [e.strip() for e in val.split(",") if e.strip()]
             return []
 
-        recruiter_emails: list = _parse_json_list(raw_cfg.get("recruiter_emails", []))
-        job_boards: list       = _parse_json_list(raw_cfg.get("selected_job_boards", []))
+        recruiter_emails: list = _parse_json_list(row.get("recruiter_emails", []))
+        job_boards: list       = _parse_json_list(row.get("selected_job_boards", []))
 
         jobdiva_id    = str(row.get("jobdiva_id") or job_id)
         job_title     = str(row.get("title") or "")
@@ -373,6 +370,9 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
         # Parse the payload
         try:
             payload_obj = json.loads(request.payload)
+            jd_block = payload_obj.get("jd", {})
+            job_id = jd_block.get("job_id") or jd_block.get("jobdiva_id") or "unknown"
+            print(f"DEBUG: send_bulk_interview called for job {job_id}")
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid JSON format in payload")
 
@@ -552,12 +552,13 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
 
         if is_success:
             # ── Fire PAIR launch confirmation email (non-blocking) ──────────
-            asyncio.create_task(
-                _send_pair_launch_email(
-                    job_id=payload_obj.get("jd", {}).get("job_id", ""),
-                    candidate_count=len(interview_results),
+            if request.is_initial_launch:
+                asyncio.create_task(
+                    _send_pair_launch_email(
+                        job_id=payload_obj.get("jd", {}).get("job_id", ""),
+                        candidate_count=len(interview_results),
+                    )
                 )
-            )
             return {
                 "success": True,
                 "message": "Interview(s) sent successfully",
@@ -751,7 +752,7 @@ async def sync_interview_details(request: SyncInterviewDetailsRequest):
                     conn.commit()
 
                     # ── Fire Candidate Passed notification (non-blocking) ────────────
-                    if status_value.lower() in ("completed", "passed") and overall_score is not None:
+                    if status_value.lower() in ENGAGE_PASSED_STATUSES and overall_score is not None:
                         asyncio.create_task(
                             _check_and_fire_candidate_passed_notification(
                                 interview_id=interview_id,
@@ -953,7 +954,7 @@ async def _check_and_fire_candidate_passed_notification(
         # 1. Score check
         interview_block = detail_payload.get("interview", {})
         score = interview_block.get("overall_score")
-        if score is None or float(score) <= 70:
+        if score is None or float(score) <= PASS_SCORE_THRESHOLD:
             return
 
         # 2. Fetch evaluation if not in payload (usually it's not)
@@ -992,7 +993,7 @@ async def _check_and_fire_candidate_passed_notification(
                 q_text = str(ev.get("question", "")).strip().lower()
                 if q_text in hard_filter_texts:
                     ev_status = str(ev.get("status", "")).lower()
-                    if ev_status != "pass":
+                    if ev_status != HARD_FILTER_PASS_STATUS:
                         logger.info(f"⏭️ Candidate {candidate_id} failed hard filter '{q_text}' for job {job_id}. Skipping email.")
                         cur.close()
                         conn.close()
