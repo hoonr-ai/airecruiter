@@ -326,15 +326,17 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             from services.unified_candidate_search import unified_search_service, SearchCriteria
             jobdiva_service = JobDivaService()
 
-            # Lightweight fallback: do not hydrate every applicant during search.
+            # Lightweight fallback: talent-pool search only (no applicants in Step-5).
             token = await jobdiva_service.authenticate()
-            candidates = await jobdiva_service._get_all_job_applicants(
-                request.job_id,
-                request.limit or 100,
-                token
+            candidates = await jobdiva_service.search_candidates(
+                skills=[],
+                location=request.location or "",
+                limit=request.limit or 100,
+                job_id=None,
+                boolean_string=request.boolean_string or "",
             ) if token else []
             for candidate in candidates:
-                candidate["source"] = "JobDiva-Applicants"
+                candidate["source"] = "JobDiva-TalentSearch"
 
             # Fix 3 (Path C): score fallback candidates so the UI doesn't render
             # every applicant at 0%. We rebuild SearchCriteria from the request
@@ -385,8 +387,8 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             return {
                 "candidates": candidates[:request.limit or 100],
                 "total": len(candidates),
-                "job_applicants": len(candidates),
-                "talent_pool": 0,
+                "job_applicants": 0,
+                "talent_pool": len(candidates),
                 "message": f"Found {len(candidates)} candidates using fallback search (unified search failed)"
             }
 

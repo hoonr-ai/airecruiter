@@ -78,7 +78,9 @@ class AutoAssignService:
                 resume_match_filters=resume_match_filters,
                 location=primary_location,
                 page_size=500,
-                sources=["JobDiva"],
+                # Explicit applicants source so auto-sync remains applicant-only
+                # even though Step-5 "JobDiva" now maps to talent search only.
+                sources=["JobDiva Applicants"],
                 bypass_screening=True,
             )
 

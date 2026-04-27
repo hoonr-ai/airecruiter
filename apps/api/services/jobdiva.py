@@ -619,7 +619,7 @@ class JobDivaService:
                             "city": get_field(c, ["CITY", "city", "locationCity", "workCity"]) or "",
                             "state": get_field(c, ["STATE", "state", "locationState", "workState"]) or "",
                             "title": get_field(c, ["TITLE", "title", "candidateTitle", "jobTitle"]) or "",
-                            "source": "JobDiva Applicants",
+                            "source": "JobDiva-Applicants",
                             "match_score": match_score,
                             "skills": candidate_skills,
                             "experience_years": self._extract_experience_years(c),
@@ -706,6 +706,7 @@ class JobDivaService:
         )
 
         dropped_no_resume = 0
+        profile_only_results: List[Dict[str, Any]] = []
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.post(url, json=payload, headers=headers)
@@ -737,6 +738,56 @@ class JobDivaService:
                     # and hurt the recruiter's trust in the match ranking.
                     if require_resume and not has_resume:
                         dropped_no_resume += 1
+                        # Keep a bounded fallback copy so we can avoid the
+                        # "always empty" failure mode when all JobDiva hits
+                        # are profile-only (common in some markets/roles).
+                        profile_only_results.append({
+                            "candidate_id": candidate_id,
+                            "id": candidate_id,
+                            "name": full_name,
+                            "first_name": first_name,
+                            "last_name": last_name,
+                            "firstName": first_name,
+                            "lastName": last_name,
+                            "email": get_field(c, ["email", "EMAIL"]) or "",
+                            "city": get_field(c, ["city", "locationCity", "CITY"]) or "",
+                            "state": get_field(c, ["state", "locationState", "STATE"]) or "",
+                            "location": ", ".join([p for p in [
+                                get_field(c, ["city", "locationCity", "CITY"]) or "",
+                                get_field(c, ["state", "locationState", "STATE"]) or "",
+                            ] if p]).strip(),
+                            "title": get_field(c, ["title", "candidateTitle", "TITLE"]) or "",
+                            "source": "JobDiva-TalentSearch",
+                            "match_score": 75,
+                            "skills": self._extract_candidate_skills(c),
+                            "experience_years": self._extract_experience_years(c),
+                            "resume_text": resume_text,
+                            "resume_id": resume_id,
+                            "received": get_field(c, ["received", "RECEIVED"]),
+                            "recent_availability": get_field(
+                                c,
+                                [
+                                    "recentAvailability",
+                                    "RECENTAVAILABILITY",
+                                    "recent_availability",
+                                    "RECENT_AVAILABILITY",
+                                    "recentAvailable",
+                                    "RECENTAVAILABLE",
+                                    "recent_status",
+                                    "RECENT_STATUS",
+                                ],
+                            ) or "",
+                            "available": get_field(c, ["available", "AVAILABLE", "availability", "AVAILABILITY", "status", "STATUS"]) or "",
+                            "availability_status": get_field(c, ["available", "AVAILABLE", "availability", "AVAILABILITY", "status", "STATUS"]) or "",
+                            "abstract": (
+                                get_field(c, ["summary", "SUMMARY", "abstract", "ABSTRACT", "comments", "COMMENTS", "notes", "NOTES"])
+                                or ((resume_text or "")[:240].replace("\n", " ").strip())
+                            ),
+                            "profile_url": get_field(c, ["profileUrl", "PROFILEURL", "profile_url", "PROFILE_URL"]),
+                            "lastnote": get_field(c, ["lastNote", "LASTNOTE"]),
+                            "phone": get_field(c, ["phone", "phoneNumber", "PHONE"]) or "",
+                            "resume_missing": True,
+                        })
                         continue
 
                     city = get_field(c, ["city", "locationCity", "CITY"]) or ""
@@ -816,6 +867,17 @@ class JobDivaService:
                         f"profile-only candidates (no resume). Toggle "
                         f"'Include candidates without resumes' on the UI to keep them."
                     )
+
+                # Safety fallback: if strict resume filtering removed everything,
+                # return profile-only hits instead of an empty result set.
+                if require_resume and not jd_results and profile_only_results:
+                    jd_results = profile_only_results[:limit]
+                    logger.warning(
+                        "JobDiva Talent Search fallback activated: strict require_resume "
+                        "yielded 0 results, returning %s profile-only candidate(s)",
+                        len(jd_results),
+                    )
+
                 logger.debug(f"JobDiva Talent Search returned {len(jd_results)} candidates")
         except Exception as e:
             logger.error(f"Talent Search Error: {e}")
