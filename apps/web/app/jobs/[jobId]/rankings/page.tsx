@@ -18,6 +18,7 @@ import {
   X,
   MessageSquare,
   Send,
+  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -127,6 +128,8 @@ export default function CandidateRankingsPage() {
   const deriveAvailability = (c: Candidate): string | null => {
     const d = c.data || {};
     return (
+      d.recent_availability ||
+      d.recentAvailability ||
       d.availability_status ||
       d.available ||
       d.availability ||
@@ -363,6 +366,7 @@ export default function CandidateRankingsPage() {
     setToast({ message, type });
   };
   const [refreshingResumeMatchIds, setRefreshingResumeMatchIds] = useState<Set<string>>(new Set());
+  const [candidateProfileUrls, setCandidateProfileUrls] = useState<Record<string, string>>({});
 
   const [missingPhonesOpen, setMissingPhonesOpen] = useState(false);
   const [missingPhoneCandidates, setMissingPhoneCandidates] = useState<MissingPhoneCandidate[]>([]);
@@ -407,6 +411,53 @@ export default function CandidateRankingsPage() {
       .filter(Boolean);
 
     return candidates.find(u => looksLikeLinkedInProfile(u)) || "";
+  };
+
+  const openCandidateProfileUrl = async (candidate: Candidate) => {
+    const candidateKey = String(candidate.candidate_id || candidate.id || "").trim();
+    if (!candidateKey) return;
+
+    const source = String(candidate.source || "").toLowerCase();
+    const isLinkedInSource = source.includes("linkedin");
+
+    if (isLinkedInSource) {
+      const linkedinUrl = resolveCandidateLinkedInUrl(candidate);
+      if (linkedinUrl) {
+        window.open(linkedinUrl, "_blank", "noopener,noreferrer");
+      } else {
+        pushToast("LinkedIn profile URL not available", "info");
+      }
+      return;
+    }
+
+    const existingJobDivaUrl =
+      String(candidate.profile_url || "").trim() ||
+      String(candidate.data?.profile_url || "").trim() ||
+      String(candidateProfileUrls[candidateKey] || "").trim();
+
+    if (existingJobDivaUrl) {
+      window.open(existingJobDivaUrl, "_blank", "noopener,noreferrer");
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/candidates/${encodeURIComponent(candidateKey)}/profile-url`);
+      if (!res.ok) {
+        pushToast("JobDiva profile URL not available", "info");
+        return;
+      }
+      const payload = await res.json().catch(() => ({}));
+      const url = String(payload?.profile_url || "").trim();
+      if (!url) {
+        pushToast("JobDiva profile URL not available", "info");
+        return;
+      }
+
+      setCandidateProfileUrls(prev => ({ ...prev, [candidateKey]: url }));
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch {
+      pushToast("Failed to fetch profile URL", "error");
+    }
   };
 
   const handleEnrichContact = async (candidate: Candidate) => {
@@ -1092,6 +1143,15 @@ export default function CandidateRankingsPage() {
                           <span className="text-[11px] text-[#64748b] block mb-0 text-center">
                             <Phone className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {candidate.phone || <span className="font-normal opacity-50">—</span>}
                           </span>
+                          <button
+                            type="button"
+                            onClick={() => openCandidateProfileUrl(candidate)}
+                            className="text-[11px] text-[#6366f1] hover:underline inline-flex items-center justify-center gap-1 mt-0.5"
+                            title={String(candidate.source || "").toLowerCase().includes("linkedin") ? "Open LinkedIn profile" : "Open JobDiva profile"}
+                          >
+                            <ExternalLink className="w-3 h-3" />
+                            {String(candidate.source || "").toLowerCase().includes("linkedin") ? "LinkedIn URL" : "JobDiva URL"}
+                          </button>
                           {needsContactEnrichment(candidate) && (
                             <div className="text-center mt-1">
                               {(() => {

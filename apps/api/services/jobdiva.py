@@ -755,8 +755,25 @@ class JobDivaService:
                     if raw_abstract and len(raw_abstract) > 240:
                         raw_abstract = raw_abstract[:237].rstrip() + "..."
 
+                    recent_availability = (
+                        get_field(
+                            c,
+                            [
+                                "recentAvailability",
+                                "RECENTAVAILABILITY",
+                                "recent_availability",
+                                "RECENT_AVAILABILITY",
+                                "recentAvailable",
+                                "RECENTAVAILABLE",
+                                "recent_status",
+                                "RECENT_STATUS",
+                            ],
+                        )
+                        or ""
+                    )
                     availability_status = (
-                        get_field(c, ["available", "AVAILABLE", "availability", "AVAILABILITY", "status", "STATUS"])
+                        recent_availability
+                        or get_field(c, ["available", "AVAILABLE", "availability", "AVAILABILITY", "status", "STATUS"])
                         or ""
                     )
                     profile_url = get_field(
@@ -784,6 +801,7 @@ class JobDivaService:
                         "resume_text": resume_text,
                         "resume_id": resume_id,
                         "received": get_field(c, ["received", "RECEIVED"]),
+                        "recent_availability": recent_availability,
                         "available": availability_status,
                         "availability_status": availability_status,
                         "abstract": raw_abstract,
