@@ -1281,7 +1281,7 @@ export default function CandidateRankingsPage() {
                                           const isActive = new Date() > phoneTime;
                                           return (
                                             <div 
-                                              className={}
+                                              className={`text-[10px] flex items-center gap-1 font-bold ${isActive ? 'text-blue-600' : 'text-slate-400'}`}
                                               title={isActive ? "Automated follow-up call has been triggered" : "Scheduled time for automated follow-up call if no response"}
                                             >
                                               <Phone className="w-2.5 h-2.5" /> {formatDate(phoneTime.toISOString())}
