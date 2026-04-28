@@ -83,10 +83,7 @@ interface Candidate {
   match_score: number;
   resume_match_percentage?: number;
   engage_score?: number;
-  engage_candidate_score?: number;
-  engage_total_score?: number;
   engage_status?: string;
-  engage_hard_filter_status?: string;
   engage_completed_at?: string;
   engage_created_at?: string;
   availability?: string;
@@ -161,7 +158,7 @@ export default function CandidateRankingsPage() {
     return raw;
   };
 
-  const normalizeInterviewStatus = (c: Candidate): { label: string; color: string } => {
+  const normalizeScreenStatus = (c: Candidate): { label: string; color: string } => {
     const interviewId = deriveInterviewId(c);
     if (!interviewId) {
       return { label: "N/A", color: "#94a3b8" };
@@ -190,17 +187,6 @@ export default function CandidateRankingsPage() {
     if (raw.includes("complete")) {
       return { label: "Completed", color: "#059669" };
     }
-
-    const label = raw.charAt(0).toUpperCase() + raw.slice(1);
-    return { label, color: "#64748b" };
-  };
-
-  const normalizeHardFilterStatus = (c: Candidate): { label: string; color: string } => {
-    const raw = String(c.engage_hard_filter_status || c.data?.engage_hard_filter_status || "").trim().toLowerCase();
-    if (!raw) {
-      return { label: "—", color: "#94a3b8" };
-    }
-
     if (raw.includes("fail")) {
       return { label: "Failed", color: "#dc2626" };
     }
@@ -666,19 +652,6 @@ export default function CandidateRankingsPage() {
       });
       setScreenApiResponse(data);
       if (data.success) {
-        // Optimistically update status to Initiated for all selected candidates
-        setCandidates(prev => prev.map(c => {
-          const cid = String(c.candidate_id || c.id || "");
-          if (selectedScreenCandidateIds.includes(cid)) {
-            return {
-              ...c,
-              engage_status: "Initiated",
-              engage_created_at: new Date().toISOString()
-            };
-          }
-          return c;
-        }));
-
         setTimeout(() => {
           setIsScreenModalOpen(false);
           fetchData();
@@ -1029,12 +1002,12 @@ export default function CandidateRankingsPage() {
         </div>
 
         {/* HTML Exact Replica Table */}
-        <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm overflow-hidden relative max-w-full">
-          <div className="overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
-            <Table className="table-fixed min-w-[1200px] w-full border-collapse">
+        <div className="bg-white rounded-[12px] border border-slate-200 shadow-sm overflow-hidden relative max-w-full">
+          <div className="overflow-x-auto pb-1">
+            <Table className="table-fixed min-w-[1200px] w-full">
               <TableHeader>
-                <TableRow className="bg-slate-50/80 border-b border-slate-200 hover:bg-slate-50/80 h-[42px] transition-colors">
-                  <TableHead className="w-[44px] sticky left-0 z-10 bg-white text-center font-bold text-slate-900 text-[11px] uppercase tracking-wider border-r border-[#e2e8f0] py-1 px-1">#</TableHead>
+                <TableRow className="bg-white border-b border-slate-200 hover:bg-white h-[34px]">
+                  <TableHead className="w-[44px] text-center font-bold text-slate-900 text-[11px] uppercase tracking-wider border-r border-[#e2e8f0] py-1 px-1">#</TableHead>
                   {(() => {
                     // Helper that turns a column header into a sortable button.
                     // Shows an active arrow when that column is the current sort.
@@ -1048,109 +1021,102 @@ export default function CandidateRankingsPage() {
                     };
                     return null; // just a hoist trick; the component is used inline below
                   })()}
-                  <TableHead className="w-[160px] sticky left-[44px] z-10 bg-white font-bold text-slate-900 text-[9.5px] uppercase tracking-wide border-r border-slate-200 py-0">
+                  <TableHead className="w-[180px] font-bold text-slate-900 text-[10px] uppercase tracking-wide border-r border-slate-200 py-0">
                     <button
                       onClick={() => toggleSort("name")}
                       className="flex items-center justify-between w-full h-full px-1.5 cursor-pointer hover:bg-slate-50 transition-colors"
                     >
-                      <div className="w-[10px]" />
-                      <span className="whitespace-nowrap flex-1 text-center">CANDIDATE</span>
-                      <div className="w-[10px] flex items-center justify-end gap-1 px-0.5">
+                      <div className="w-[20px]" />
+                      <span className="whitespace-nowrap flex-1 text-center">CANDIDATE NAME</span>
+                      <div className="w-[20px] flex items-center justify-end gap-1 px-0.5">
                         {sortField === "name"
                           ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
                           : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
                       </div>
                     </button>
                   </TableHead>
-                  <TableHead className="w-[90px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                  <TableHead className="w-[120px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
                     <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[10px]" />
+                      <div className="w-[20px]" />
                       <span className="flex-1 text-center leading-tight">SOURCE</span>
-                      <div className="w-[10px]" />
+                      <div className="w-[20px]" />
                     </div>
                   </TableHead>
-                  <TableHead className="w-[100px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                  <TableHead className="w-[118px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
                     <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[10px]" />
-                      <span className="flex-1 text-center leading-tight">RESUME STATUS</span>
-                      <div className="w-[10px]" />
+                      <div className="w-[20px]" />
+                      <span className="flex-1 text-center leading-tight">RESUME MATCHING STATUS</span>
+                      <div className="w-[20px]" />
                     </div>
                   </TableHead>
-                  <TableHead className="w-[90px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                  <TableHead className="w-[108px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
                     <button
                       onClick={() => toggleSort("screening_score")}
                       className="flex items-center justify-between w-full h-full px-1 cursor-pointer hover:bg-slate-50 transition-colors"
                     >
-                      <div className="w-[10px]" />
-                      <span className="flex-1 text-center leading-tight">MATCH SCORE</span>
-                      <div className="w-[10px] flex items-center justify-end gap-1 px-0.5">
+                      <div className="w-[20px]" />
+                      <span className="flex-1 text-center leading-tight">RESUME MATCHING SCORE</span>
+                      <div className="w-[20px] flex items-center justify-end gap-1 px-0.5">
                         {sortField === "screening_score"
                           ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
                           : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
                       </div>
                     </button>
                   </TableHead>
-                   <TableHead className="w-[120px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                  <TableHead className="w-[98px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
                     <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[10px]" />
+                      <div className="w-[20px]" />
                       <span className="flex-1 text-center leading-tight">SCREEN STATUS</span>
-                      <div className="w-[10px]" />
+                      <div className="w-[20px]" />
                     </div>
                   </TableHead>
-                  <TableHead className="w-[100px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
-                    <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[10px]" />
-                      <span className="flex-1 text-center leading-tight">HARD FILTER</span>
-                      <div className="w-[10px]" />
-                    </div>
-                  </TableHead>
-                  <TableHead className="w-[90px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                  <TableHead className="w-[98px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
                     <button
                       onClick={() => toggleSort("engage_score")}
                       className="flex items-center justify-between w-full h-full px-1 cursor-pointer hover:bg-slate-50 transition-colors"
                     >
-                      <div className="w-[10px]" />
+                      <div className="w-[20px]" />
                       <span className="flex-1 text-center leading-tight">SCREEN SCORE</span>
-                      <div className="w-[10px] flex items-center justify-end gap-1 px-0.5">
+                      <div className="w-[20px] flex items-center justify-end gap-1 px-0.5">
                         {sortField === "engage_score"
                           ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
                           : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
                       </div>
                     </button>
                   </TableHead>
-                  <TableHead className="w-[125px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                  <TableHead className="w-[128px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
                     <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[10px]" />
+                      <div className="w-[20px]" />
                       <span className="flex-1 text-center leading-tight">SCREEN COMPLETED AT</span>
-                      <div className="w-[10px]" />
+                      <div className="w-[20px]" />
                     </div>
                   </TableHead>
-                  <TableHead className="w-[100px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                  <TableHead className="w-[88px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
                     <button
                       onClick={() => toggleSort("total_score")}
                       className="flex items-center justify-between w-full h-full px-1 cursor-pointer hover:bg-slate-50 transition-colors"
                     >
-                      <div className="w-[10px]" />
+                      <div className="w-[20px]" />
                       <span className="flex-1 text-center leading-tight">TOTAL FIT SCORE</span>
-                      <div className="w-[10px] flex items-center justify-end gap-1 px-0.5">
+                      <div className="w-[20px] flex items-center justify-end gap-1 px-0.5">
                         {sortField === "total_score"
                           ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
                           : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
                       </div>
                     </button>
                   </TableHead>
-                  <TableHead className="w-[90px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                  <TableHead className="w-[78px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
                     <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[10px]" />
+                      <div className="w-[20px]" />
                       <span className="flex-1 text-center leading-tight">JOB CONFIG</span>
-                      <div className="w-[10px]" />
+                      <div className="w-[20px]" />
                     </div>
                   </TableHead>
-                  <TableHead className="w-[240px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide border-l border-slate-200 py-0">
+                  <TableHead className="w-[150px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide border-l border-slate-200 py-0">
                     <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[10px]" />
+                      <div className="w-[20px]" />
                       <span className="flex-1 text-center leading-tight">ACTIONS</span>
-                      <div className="w-[10px]" />
+                      <div className="w-[20px]" />
                     </div>
                   </TableHead>
                 </TableRow>
@@ -1159,8 +1125,8 @@ export default function CandidateRankingsPage() {
                 {isInitialLoading ? (
                   Array.from({ length: 5 }).map((_, i) => (
                     <TableRow key={i} className="h-20">
-                      <TableCell className="w-[44px] sticky left-0 z-10 bg-white border-r border-slate-200/50 px-1"><Skeleton className="h-4 w-4 mx-auto" /></TableCell>
-                      <TableCell className="w-[160px] sticky left-[44px] z-10 bg-white border-r border-slate-200/50 px-1"><Skeleton className="h-12 w-40 mx-auto" /></TableCell>
+                      <TableCell className="pl-4"><Skeleton className="h-4 w-4 mx-auto" /></TableCell>
+                      <TableCell className="sticky left-0 bg-white z-20 border-r border-slate-200/50"><Skeleton className="h-12 w-64" /></TableCell>
                       <TableCell className="pl-6"><Skeleton className="h-8 w-24 mx-auto" /></TableCell>
                       <TableCell><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
                       <TableCell><Skeleton className="h-8 w-20 mx-auto" /></TableCell>
@@ -1178,11 +1144,11 @@ export default function CandidateRankingsPage() {
                     const totalScore = screeningScore + engageScore;
 
                     return (
-                      <TableRow key={`${candidate.id || candidate.candidate_id}-${idx}`} className="border-b border-slate-100 hover:bg-indigo-50/30 transition-all duration-200 h-auto group leading-tight relative">
-                        <TableCell className="w-[44px] sticky left-0 z-10 bg-white border-r border-[#e2e8f0] py-1 px-1 align-middle text-center">
+                      <TableRow key={`${candidate.id || candidate.candidate_id}-${idx}`} className="border-b border-[#e2e8f0] hover:bg-slate-50/80 transition-colors h-auto group leading-tight">
+                        <TableCell className="relative text-center font-semibold text-slate-500 text-[11px] border-r border-[#e2e8f0] w-[44px] p-0 align-middle">
                           <div className="absolute inset-0 flex items-center justify-center">{idx + 1}</div>
                         </TableCell>
-                        <TableCell className="sticky left-[44px] z-10 bg-white border-r border-[#e2e8f0] w-[160px] py-1 px-1 align-middle text-center">
+                        <TableCell className="border-r border-[#e2e8f0] w-[180px] py-1 px-1 align-middle text-center">
                           <button
                             onClick={() => openDetails(candidate)}
                             className="text-[14px] font-bold text-indigo-600 hover:underline text-center w-full block mb-0.5"
@@ -1251,8 +1217,11 @@ export default function CandidateRankingsPage() {
                           <div className="flex items-center justify-center gap-1.5">
                             {(() => {
                               const statusFromData = String(candidate.data?.resume_matching_status || "").toLowerCase();
-                              if (statusFromData === "done" || screeningScore > 0) {
-                                return <span className="font-medium text-[12px] text-emerald-600">Completed</span>;
+                              if (statusFromData === "done") {
+                                return <span className="font-medium text-[12px] text-emerald-600">Done</span>;
+                              }
+                              if (screeningScore > 0) {
+                                return <span className="font-medium text-[12px] text-emerald-600">Done</span>;
                               }
                               const cid = String(candidate.candidate_id || candidate.id || "");
                               const isRefreshing = refreshingResumeMatchIds.has(cid);
@@ -1280,31 +1249,31 @@ export default function CandidateRankingsPage() {
                             {screeningScore > 0 ? (
                               <button
                                 onClick={() => openDetails(candidate)}
-                                className="font-bold text-slate-700 hover:text-indigo-600 transition-colors"
-                                title="View details"
+                                className="font-semibold text-indigo-600 hover:underline"
+                                title="View detailed resume matching breakdown"
                               >
                                 {screeningScore}
                               </button>
                             ) : (
-                              <span className="font-normal opacity-40 italic text-slate-400">Pending</span>
+                              <span className="font-normal opacity-50">—</span>
                             )}
                           </div>
                         </TableCell>
 
-                        <TableCell className="text-center align-middle py-2 group-hover:bg-indigo-50/5 transition-colors">
-                          {(() => {
-                            const rawStatus = String(candidate.engage_status || candidate.data?.engage_status || "").trim().toLowerCase();
-                            // If in outreach phase, show the timeline
-                            if (rawStatus === "initiated" || rawStatus === "sent" || rawStatus === "sms sent") {
+                        <TableCell className="text-center align-middle py-1">
+                          <div className="flex items-center justify-center w-full min-h-[40px]">
+                            {(() => {
+                              /*
+                              const rawStatus = String(candidate.engage_status || candidate.data?.engage_status || "").trim().toLowerCase();
+                              if (rawStatus === "initiated" || rawStatus === "sent" || rawStatus === "sms sent") {
                                 return (
-                                  <div className="flex flex-col items-center gap-1 py-1">
-                                    <div className="flex items-center gap-1 mb-1">
-                                      <div className="w-1.5 h-1.5 rounded-full bg-yellow-500 animate-pulse" />
-                                      <span className="text-[10px] font-bold text-yellow-600 tracking-wide">Initiated</span>
-                                    </div>
+                                  <div className="flex flex-col items-center gap-1.5 py-1">
+                                    <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 font-bold text-[11px] border border-amber-200 shadow-sm leading-none">
+                                      SMS Sent
+                                    </span>
                                     {(candidate.engage_created_at || candidate.data?.engage_created_at) && (
-                                      <div className="flex flex-col items-center gap-0.5 px-2 py-1 rounded-lg bg-slate-50 border border-slate-100">
-                                        <div className="text-[10px] text-emerald-600 flex items-center gap-1 font-semibold" title="Outreach initiated">
+                                      <div className="flex flex-col items-center gap-0.5">
+                                        <div className="text-[10px] text-emerald-600 flex items-center gap-1 font-bold" title="Time when automated outreach was first initiated">
                                           <Mail className="w-2.5 h-2.5" /> {formatDate(candidate.engage_created_at || candidate.data?.engage_created_at)}
                                         </div>
                                         {(() => {
@@ -1313,8 +1282,8 @@ export default function CandidateRankingsPage() {
                                           const isActive = new Date() > phoneTime;
                                           return (
                                             <div
-                                              className={`text-[10px] flex items-center gap-1 font-semibold ${isActive ? 'text-blue-600' : 'text-slate-400'}`}
-                                              title={isActive ? "Follow-up triggered" : "Scheduled follow-up"}
+                                              className={`text-[10px] flex items-center gap-1 font-bold ${isActive ? 'text-blue-600' : 'text-slate-400'}`}
+                                              title={isActive ? "Automated follow-up call has been triggered" : "Scheduled time for automated follow-up call if no response"}
                                             >
                                               <Phone className="w-2.5 h-2.5" /> {formatDate(phoneTime.toISOString())}
                                             </div>
@@ -1324,67 +1293,35 @@ export default function CandidateRankingsPage() {
                                     )}
                                   </div>
                                 );
-                            }
-                            const { label, color } = normalizeInterviewStatus(candidate);
-                            return (
-                              <div className="flex justify-center items-center w-full">
-                                <span 
-                                  className="px-2.5 py-0.5 rounded-full text-[10px] font-bold border" 
-                                  style={{ backgroundColor: `${color}08`, color, borderColor: `${color}30` }}
-                                >
-                                  {label}
-                                </span>
-                              </div>
-                            );
-                          })()}
-                        </TableCell>
-
-                        <TableCell className="text-center align-middle py-2 group-hover:bg-indigo-50/5 transition-colors">
-                          {(() => {
-                            const { label, color } = normalizeHardFilterStatus(candidate);
-                            return (
-                              <div className="flex justify-center items-center w-full">
-                                <span 
-                                  className="px-2.5 py-0.5 rounded-full text-[10px] font-bold border" 
-                                  style={{ backgroundColor: `${color}08`, color, borderColor: `${color}30` }}
-                                >
-                                  {label}
-                                </span>
-                              </div>
-                            );
-                          })()}
-                        </TableCell>
-
-                        <TableCell className="text-center align-middle py-2 font-medium text-slate-700 text-[12px] group-hover:bg-indigo-50/5 transition-colors">
-                          {(() => {
-                            const cScore = candidate.engage_candidate_score;
-                            const tScore = candidate.engage_total_score || candidate.engage_score;
-                            if (cScore !== undefined && tScore !== undefined) {
+                              }
+                              */
+                              const screenStatus = normalizeScreenStatus(candidate);
                               return (
-                                <div className="text-center w-full font-bold text-slate-900 bg-slate-50/50 px-2 py-1 rounded border border-slate-100 inline-block mx-auto">
-                                  {cScore}<span className="text-slate-400 font-normal mx-0.5">/</span>{tScore}
-                                </div>
+                                <span className="font-medium text-[13px]" style={{ color: screenStatus.color }}>
+                                  {screenStatus.label}
+                                </span>
                               );
-                            }
-                            if (tScore) {
-                              return <div className="text-center w-full font-bold text-slate-900">{tScore}</div>;
-                            }
-                            return <span className="font-normal opacity-40 italic">Waiting</span>;
-                          })()}
+                            })()}
+                          </div>
                         </TableCell>
 
-                        <TableCell className="text-center font-medium text-slate-600 text-[11px] align-middle py-1 group-hover:bg-indigo-50/5 transition-colors">
-                          {candidate.engage_completed_at || candidate.data?.engage_completed_at ? formatDate(candidate.engage_completed_at || candidate.data.engage_completed_at) : <span className="font-normal opacity-30 italic">—</span>}
-                        </TableCell>
 
-                        <TableCell className="text-center font-bold text-indigo-700 text-[13px] align-middle py-2 bg-indigo-50/10 group-hover:bg-indigo-50/30 transition-colors">
-                          {totalScore ? (
-                            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-100 shadow-sm">
-                              {totalScore}
+                        <TableCell className="text-center align-middle py-1 font-medium text-slate-700 text-[12px]">
+                          {engageScore > 0 ? (
+                            <div className="flex items-center justify-center gap-1.5 w-full text-center">
+                              {engageScore}
                             </div>
                           ) : (
-                            <span className="font-normal opacity-30 italic">—</span>
+                            <span className="font-normal opacity-50">—</span>
                           )}
+                        </TableCell>
+
+                        <TableCell className="text-center font-medium text-slate-700 text-[11px] align-middle py-1">
+                          {candidate.data?.engage_completed_at ? formatDate(candidate.data.engage_completed_at) : <span className="font-normal opacity-50">—</span>}
+                        </TableCell>
+
+                        <TableCell className="text-center font-medium text-slate-700 text-[12px] align-middle py-1">
+                          {totalScore || <span className="font-normal opacity-50">—</span>}
                         </TableCell>
 
                         <TableCell className="text-center align-middle py-1 font-medium text-slate-700 text-[11px]">
@@ -1393,28 +1330,28 @@ export default function CandidateRankingsPage() {
                           </div>
                         </TableCell>
 
-                        <TableCell className="text-center pr-4 pl-4 border-l border-[#e2e8f0] py-2 align-middle transition-colors group-hover:bg-indigo-50/5">
-                          <div className="flex items-center justify-center gap-3">
+                        <TableCell className="text-center pr-0.5 pl-0.5 border-l border-[#e2e8f0] py-1 align-middle transition-colors group-hover:bg-slate-50/80">
+                          <div className="flex items-center justify-center gap-0.5">
                             <Button
                               size="sm"
-                              className="h-7 px-2.5 bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-600 hover:text-white font-bold text-[9px] rounded-md shadow-sm transition-all duration-200"
+                              className="h-6 px-1 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[8.5px] rounded-md shadow-sm"
                               onClick={() => handleEmailCandidate(candidate)}
                             >
-                              <Mail className="w-3.5 h-3.5 mr-1" />
+                              <Mail className="w-3 h-3 mr-0.5" />
                               Email
                             </Button>
                             <Button
                               size="sm"
-                              className="h-7 px-2.5 bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-600 hover:text-white font-bold text-[9px] rounded-md shadow-sm transition-all duration-200"
+                              className="h-6 px-1 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[8.5px] rounded-md shadow-sm"
                               onClick={() => handleScreenClick(candidate)}
                               disabled={screenLoading}
                             >
-                              <MessageSquare className="w-3.5 h-3.5 mr-1" />
+                              <MessageSquare className="w-3 h-3 mr-0.5" />
                               Screen
                             </Button>
                             <Button
                               size="sm"
-                              className="h-7 px-2.5 bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-600 hover:text-white font-bold text-[9px] rounded-md shadow-sm transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                              className="h-6 px-1 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[8.5px] rounded-md shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
 
                               onClick={() => handleSmsCandidate(candidate)}
                               disabled={candidate.engage_status === "Initiated" || candidate.engage_status === "sent" || candidate.engage_status === "SMS Sent"}

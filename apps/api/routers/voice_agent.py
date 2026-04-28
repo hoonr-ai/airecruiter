@@ -109,37 +109,24 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
         # Update DB - similar to sync_interview_details
         with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
             with conn.cursor() as cur:
-                # 0. Lookup the real candidate_id and job_id from our audit logs using interview_id
-                # This handles the case where LiveKit sends back its own interview_id as candidate_id
-                cur.execute(
-                    "SELECT candidate_id, job_id FROM engage_interview_audit WHERE interview_id = %s LIMIT 1",
-                    (str(payload.interview_id),)
-                )
-                audit_row = cur.fetchone()
-                
-                target_candidate_id = payload.candidate_id
-                target_job_id = payload.jobdiva_id
-                
-                if audit_row:
-                    target_candidate_id = audit_row[0]
-                    # Only override jobdiva_id if it's missing from payload
-                    if not target_job_id or target_job_id == "unknown":
-                        target_job_id = audit_row[1]
-                    logger.info(f"Webhook: Matched interview {payload.interview_id} to candidate {target_candidate_id} for job {target_job_id}")
-                else:
-                    logger.warning(f"Webhook: No audit log found for interview {payload.interview_id}")
-
-                # 1. Update engage_interview_audit (matching interview_id)
-
+                # 1. Update engage_interview_audit (latest matching interview_id)
                 cur.execute(
                     """
-                    UPDATE engage_interview_audit
-                    SET status = %s,
-                        response = %s::jsonb,
+                    WITH latest AS (
+                        SELECT id
+                        FROM engage_interview_audit
+                        WHERE interview_id = %s
+                        ORDER BY id DESC
+                        LIMIT 1
+                    )
+                    UPDATE engage_interview_audit eia
+                    SET response = %s::jsonb,
+                        status = %s,
                         updated_at = CURRENT_TIMESTAMP
-                    WHERE interview_id = %s
+                    FROM latest
+                    WHERE eia.id = latest.id
                     """,
-                    (payload.status, json.dumps(payload.dict()), str(payload.interview_id))
+                    (str(payload.interview_id), json.dumps(detail_payload), payload.status)
                 )
                 
                 # 2. Update sourced_candidates.data
@@ -152,13 +139,8 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 }
                 if payload.total_score is not None:
                     candidate_blob["engage_score"] = payload.total_score
-                    candidate_blob["engage_total_score"] = payload.total_score
-                if payload.candidate_score is not None:
-                    candidate_blob["engage_candidate_score"] = payload.candidate_score
                 if payload.completed_at:
                     candidate_blob["engage_completed_at"] = payload.completed_at
-                if payload.hard_filter_status:
-                    candidate_blob["engage_hard_filter_status"] = payload.hard_filter_status
 
                 cur.execute(
                     """
@@ -168,7 +150,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     WHERE candidate_id = %s
                       AND (jobdiva_id = %s OR jobdiva_id = %s)
                     """,
-                    (json.dumps(candidate_blob), target_candidate_id, target_job_id, target_job_id),
+                    (json.dumps(candidate_blob), payload.candidate_id, target_job_id, target_job_id),
                 )
                 
                 # Fallback if job_id mapping missing
@@ -180,9 +162,8 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                             updated_at = CURRENT_TIMESTAMP
                         WHERE candidate_id = %s
                         """,
-                        (json.dumps(candidate_blob), target_candidate_id),
+                        (json.dumps(candidate_blob), payload.candidate_id),
                     )
-
                 
             conn.commit()
 
