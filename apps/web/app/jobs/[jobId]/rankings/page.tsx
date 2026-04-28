@@ -44,9 +44,9 @@ const formatDate = (dateStr: string) => {
   try {
     const date = new Date(dateStr);
     if (isNaN(date.getTime())) return dateStr;
-    return date.toLocaleString('en-GB', { 
-      day: '2-digit', 
-      month: '2-digit', 
+    return date.toLocaleString('en-GB', {
+      day: '2-digit',
+      month: '2-digit',
       year: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
@@ -757,10 +757,10 @@ export default function CandidateRankingsPage() {
       // Fetch job details
       const jobRes = await fetch(`${apiBase}/jobs/${jobId}/monitored-data`);
       const jobData = await jobRes.json();
-      
+
       // Handle both { data: { ... } } and flat { ... } structures
       const data = jobData.data || jobData;
-      
+
       if (data) {
         setJob({
           job_id: jobId as string,
@@ -872,7 +872,7 @@ export default function CandidateRankingsPage() {
               <>
                 <Medal className="w-[24px] h-[24px] text-indigo-600" />
                 <h2 className="text-[24px] font-bold text-slate-900 m-0 leading-none flex items-center gap-1.5">
-                  {job?.title} 
+                  {job?.title}
                   <span className="text-slate-500 font-medium text-[16px]">
                     ({job?.jobdiva_id || job?.job_id || jobId}) <span className="text-indigo-600 text-[14px] ml-1">🔗</span>
                   </span>
@@ -1263,6 +1263,7 @@ export default function CandidateRankingsPage() {
                         <TableCell className="text-center align-middle py-1">
                           <div className="flex items-center justify-center w-full min-h-[40px]">
                             {(() => {
+                              /*
                               const rawStatus = String(candidate.engage_status || candidate.data?.engage_status || "").trim().toLowerCase();
                               if (rawStatus === "initiated" || rawStatus === "sent" || rawStatus === "sms sent") {
                                 return (
@@ -1280,7 +1281,7 @@ export default function CandidateRankingsPage() {
                                           const phoneTime = new Date(new Date(baseTime).getTime() + 30 * 60000);
                                           const isActive = new Date() > phoneTime;
                                           return (
-                                            <div 
+                                            <div
                                               className={`text-[10px] flex items-center gap-1 font-bold ${isActive ? 'text-blue-600' : 'text-slate-400'}`}
                                               title={isActive ? "Automated follow-up call has been triggered" : "Scheduled time for automated follow-up call if no response"}
                                             >
@@ -1293,6 +1294,7 @@ export default function CandidateRankingsPage() {
                                   </div>
                                 );
                               }
+                              */
                               const screenStatus = normalizeScreenStatus(candidate);
                               return (
                                 <span className="font-medium text-[13px]" style={{ color: screenStatus.color }}>
@@ -1440,13 +1442,12 @@ export default function CandidateRankingsPage() {
       {toast && (
         <div className="fixed right-4 top-4 z-[90]">
           <div
-            className={`rounded-lg border px-3 py-2 text-[12px] font-semibold shadow-md transition-all ${
-              toast.type === "success"
+            className={`rounded-lg border px-3 py-2 text-[12px] font-semibold shadow-md transition-all ${toast.type === "success"
                 ? "border-emerald-200 bg-emerald-50 text-emerald-700"
                 : toast.type === "error"
                   ? "border-rose-200 bg-rose-50 text-rose-700"
                   : "border-slate-200 bg-white text-slate-700"
-            }`}
+              }`}
           >
             {toast.message}
           </div>
