@@ -74,7 +74,6 @@ import { PhoneIndicator } from "@/components/phone-indicator";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { API_BASE } from "@/lib/api";
 import { logger } from "@/lib/logger";
-import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 
 // Utility function to clean location_type values and filter out employment terms
 function cleanLocationType(locationType: string | null | undefined): string {
@@ -227,7 +226,6 @@ function NewJobPageContent() {
   const router = useRouter();
   const engagement = useEngagementFlow();
   const searchParams = useSearchParams();
-  const engagement = useEngagementFlow();
   const [currentStep, setCurrentStepState] = useState<Step>(1);
   // Track the highest step the user has ever reached so the pipeline/stepper
   // at the top allows jumping back to any step they've visited, not just
