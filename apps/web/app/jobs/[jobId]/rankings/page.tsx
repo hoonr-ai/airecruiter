@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
+import Link from "next/link";
 import {
   ArrowLeft,
   Search,
@@ -1183,12 +1184,12 @@ export default function CandidateRankingsPage() {
                           <div className="absolute inset-0 flex items-center justify-center">{idx + 1}</div>
                         </TableCell>
                         <TableCell className="sticky left-[44px] z-10 bg-white border-r border-[#e2e8f0] w-[160px] py-1 px-1 align-middle text-center">
-                          <button
-                            onClick={() => openDetails(candidate)}
+                          <Link
+                            href={`/jobs/${jobId}/candidates/${candidate.candidate_id || candidate.id}/report`}
                             className="text-[14px] font-bold text-indigo-600 hover:underline text-center w-full block mb-0.5"
                           >
                             {candidate.name}
-                          </button>
+                          </Link>
                           <span className="text-[11px] text-[#64748b] block mb-0 text-center">
                             <Mail className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {candidate.email || <span className="font-normal opacity-50">—</span>}
                           </span>
@@ -1278,13 +1279,13 @@ export default function CandidateRankingsPage() {
                           <div className="flex items-center justify-center gap-1.5 w-full text-center">
 
                             {screeningScore > 0 ? (
-                              <button
-                                onClick={() => openDetails(candidate)}
+                              <Link
+                                href={`/jobs/${jobId}/candidates/${candidate.candidate_id || candidate.id}/report`}
                                 className="font-bold text-slate-700 hover:text-indigo-600 transition-colors"
-                                title="View details"
+                                title="View detailed report"
                               >
                                 {screeningScore}
-                              </button>
+                              </Link>
                             ) : (
                               <span className="font-normal opacity-40 italic text-slate-400">Pending</span>
                             )}
@@ -1361,13 +1362,23 @@ export default function CandidateRankingsPage() {
                             const tScore = candidate.engage_total_score || candidate.engage_score;
                             if (cScore !== undefined && tScore !== undefined) {
                               return (
-                                <div className="text-center w-full font-bold text-slate-900 bg-slate-50/50 px-2 py-1 rounded border border-slate-100 inline-block mx-auto">
+                                <Link 
+                                  href={`/jobs/${jobId}/candidates/${candidate.candidate_id || candidate.id}/report`}
+                                  className="text-center w-full font-bold text-slate-900 bg-slate-50/50 px-2 py-1 rounded border border-slate-100 inline-block mx-auto hover:border-indigo-300 hover:text-indigo-600 transition-colors"
+                                >
                                   {cScore}<span className="text-slate-400 font-normal mx-0.5">/</span>{tScore}
-                                </div>
+                                </Link>
                               );
                             }
                             if (tScore) {
-                              return <div className="text-center w-full font-bold text-slate-900">{tScore}</div>;
+                              return (
+                                <Link 
+                                  href={`/jobs/${jobId}/candidates/${candidate.candidate_id || candidate.id}/report`}
+                                  className="text-center w-full font-bold text-slate-900 hover:text-indigo-600 transition-colors"
+                                >
+                                  {tScore}
+                                </Link>
+                              );
                             }
                             return <span className="font-normal opacity-40 italic">Waiting</span>;
                           })()}
@@ -1379,9 +1390,12 @@ export default function CandidateRankingsPage() {
 
                         <TableCell className="text-center font-bold text-indigo-700 text-[13px] align-middle py-2 bg-indigo-50/10 group-hover:bg-indigo-50/30 transition-colors">
                           {totalScore ? (
-                            <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-100 shadow-sm">
+                            <Link 
+                              href={`/jobs/${jobId}/candidates/${candidate.candidate_id || candidate.id}/report`}
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-100 shadow-sm hover:bg-indigo-100 hover:border-indigo-200 transition-all"
+                            >
                               {totalScore}
-                            </div>
+                            </Link>
                           ) : (
                             <span className="font-normal opacity-30 italic">—</span>
                           )}
