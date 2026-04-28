@@ -1330,36 +1330,72 @@ def _extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, str]:
     if not isinstance(person, dict):
         person = {}
 
-    work_email = str(person.get("email") or "").strip()
+    def _first_non_empty(*values: Any) -> str:
+        for value in values:
+            candidate = str(value or "").strip()
+            if candidate:
+                return candidate
+        return ""
+
+    def _extract_phone_value(item: Any) -> str:
+        if isinstance(item, str):
+            return str(item).strip()
+        if isinstance(item, dict):
+            return _first_non_empty(
+                item.get("sanitized_number"),
+                item.get("raw_number"),
+                item.get("number"),
+                item.get("value"),
+            )
+        return ""
+
+    work_email = _first_non_empty(person.get("email"), person.get("work_email"))
 
     personal_email = ""
     personal_emails = person.get("personal_emails")
     if isinstance(personal_emails, list):
         for item in personal_emails:
-            candidate = str(item or "").strip()
+            candidate = _first_non_empty(
+                item.get("email") if isinstance(item, dict) else None,
+                item,
+            )
             if candidate:
                 personal_email = candidate
                 break
 
-    mobile_phone = str(person.get("mobile_phone") or "").strip()
-    work_phone = str(person.get("sanitized_phone") or person.get("phone") or "").strip()
+    mobile_phone = _first_non_empty(
+        person.get("mobile_phone"),
+        person.get("mobile"),
+        person.get("cell_phone"),
+    )
+    work_phone = _first_non_empty(
+        person.get("sanitized_phone"),
+        person.get("work_phone"),
+        person.get("organization_phone"),
+        person.get("direct_phone"),
+        person.get("phone"),
+        person.get("phone_number"),
+    )
 
     phone_numbers = person.get("phone_numbers")
     if isinstance(phone_numbers, list):
         for item in phone_numbers:
-            if not isinstance(item, dict):
-                continue
-            number = str(item.get("sanitized_number") or item.get("raw_number") or "").strip()
+            number = _extract_phone_value(item)
             if not number:
                 continue
 
-            ptype = str(item.get("type") or "").strip().lower()
+            ptype = str(item.get("type") or "").strip().lower() if isinstance(item, dict) else ""
             if not mobile_phone and ptype in {"mobile", "cell", "cellphone"}:
                 mobile_phone = number
             elif not work_phone and ptype in {"work", "office", "direct"}:
                 work_phone = number
             elif not work_phone:
                 work_phone = number
+
+    if not mobile_phone:
+        mobile_phone = _extract_phone_value(payload.get("mobile_phone"))
+    if not work_phone:
+        work_phone = _extract_phone_value(payload.get("phone"))
 
     return {
         "mobilePhone": mobile_phone,
@@ -1419,9 +1455,6 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     )
     zoominfo_new_enrich_url = "https://api.zoominfo.com/gtm/data/v1/contacts/enrich"
 
-    if not ZOOMINFO_BEARER_TOKEN:
-        raise HTTPException(status_code=500, detail="ZOOMINFO_BEARER_TOKEN is not configured")
-
     linkedin_url = (request.linkedin_url or "").strip()
     existing_rows: List[Dict[str, Any]] = []
 
@@ -1466,6 +1499,21 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             "updated_rows": 0,
         }
 
+    provider_used = "zoominfo"
+    extracted: Dict[str, str] = {}
+    zres: Optional[httpx.Response] = None
+    zoominfo_data: Dict[str, Any] = {}
+
+    if not ZOOMINFO_BEARER_TOKEN:
+        logger.warning("ZoomInfo token missing for %s, attempting Apollo fallback", candidate_id)
+        apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+        if apollo_result.get("ok"):
+            provider_used = "apollo"
+            extracted = apollo_result.get("fields") or {}
+            logger.info("Apollo fallback succeeded for %s when ZoomInfo token missing", candidate_id)
+        else:
+            raise HTTPException(status_code=500, detail="ZOOMINFO_BEARER_TOKEN is not configured and Apollo fallback failed")
+
     headers = {
         "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
         "Content-Type": "application/json",
@@ -1484,27 +1532,28 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         "outputFields": ["workPhone", "mobilePhone", "workEmail", "personalEmail"],
     }
 
-    provider_used = "zoominfo"
-    extracted: Dict[str, str] = {}
+    if provider_used == "zoominfo":
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                zres = await client.post(ZOOMINFO_ENRICH_URL, headers=headers, json=zoominfo_payload)
+        except Exception as e:
+            logger.error(f"ZoomInfo enrich request failed for {candidate_id}: {e}")
+            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+            if apollo_result.get("ok"):
+                provider_used = "apollo"
+                extracted = apollo_result.get("fields") or {}
+                logger.info("Apollo fallback succeeded for %s after ZoomInfo request failure", candidate_id)
+            else:
+                raise HTTPException(status_code=502, detail=f"ZoomInfo request failed: {str(e)}")
 
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            zres = await client.post(ZOOMINFO_ENRICH_URL, headers=headers, json=zoominfo_payload)
-    except Exception as e:
-        logger.error(f"ZoomInfo enrich request failed for {candidate_id}: {e}")
-        apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
-        if apollo_result.get("ok"):
-            provider_used = "apollo"
-            extracted = apollo_result.get("fields") or {}
-            logger.info("Apollo fallback succeeded for %s after ZoomInfo request failure", candidate_id)
-        else:
-            raise HTTPException(status_code=502, detail=f"ZoomInfo request failed: {str(e)}")
-
-    response_text = zres.text
-    try:
-        zoominfo_data = zres.json()
-    except Exception:
-        zoominfo_data = {"raw": response_text}
+    if provider_used == "zoominfo" and zres is not None:
+        response_text = zres.text
+        try:
+            zoominfo_data = zres.json()
+        except Exception:
+            zoominfo_data = {"raw": response_text}
+    else:
+        response_text = ""
 
     if provider_used == "zoominfo" and zres.status_code == 401:
         # Legacy endpoint rejected this token. Fallback to the new OAuth Data API.
