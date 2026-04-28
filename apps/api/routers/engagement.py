@@ -127,6 +127,7 @@ class SendBulkInterviewRequest(BaseModel):
     payload: str  # JSON string (editable by user in modal)
     real_candidate_ids: List[str]
     is_initial_launch: bool = False
+    dry_run: bool = False
 
 class SyncInterviewDetailsRequest(BaseModel):
     interview_ids: List[Any]
@@ -376,21 +377,35 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid JSON format in payload")
 
-        # Send to external PAIR API
-        external_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/bulk-interviews"
-        logger.info(f"📤 Sending bulk interview to {external_url}")
+        is_success = False
+        response_data = {}
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                external_url,
-                json=payload_obj,
-                headers={"Content-Type": "application/json"}
-            )
+        if request.dry_run:
+            logger.info("🧪 Dry run enabled: Skipping external PAIR API call.")
+            is_success = True
+            response_data = {
+                "status": "success",
+                "message": "DRY RUN: External call skipped, but local processing continued.",
+                "data": [
+                    {"interview_id": f"dry_run_{cid}", "candidate_id": cid}
+                    for cid in request.real_candidate_ids
+                ]
+            }
+        else:
+            # Send to external PAIR API
+            external_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/bulk-interviews"
+            logger.info(f"📤 Sending bulk interview to {external_url}")
 
-        response_data = response.json()
-        is_success = response.status_code == 200
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    external_url,
+                    json=payload_obj,
+                    headers={"Content-Type": "application/json"}
+                )
 
-        logger.info(f"📥 PAIR API response status: {response.status_code}")
+            response_data = response.json()
+            is_success = response.status_code == 200
+            logger.info(f"📥 PAIR API response status: {response.status_code}")
 
         # Save audit log for each candidate
         conn = _get_db_connection()
