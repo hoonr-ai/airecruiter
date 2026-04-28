@@ -240,7 +240,12 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
             return job
 
         # 1. Fetch from JobDiva to get the ULTIMATE source of truth (both IDs)
-        job = await jobdiva_service.get_job_by_id(search_id)
+        try:
+            job = await jobdiva_service.get_job_by_id(search_id)
+        except Exception as e:
+            logger.error(f"❌ jobdiva_service.get_job_by_id failed: {e}", exc_info=True)
+            job = None
+
         if job:
             numeric_id = str(job.get("id"))
             # Safely fetch the explicitly mapped job reference string (26-06182)

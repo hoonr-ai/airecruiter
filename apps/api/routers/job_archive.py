@@ -11,6 +11,8 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime, timezone, timedelta
 
 from core.db import get_db_connection
+from core.email import notify_pair_inactive
+import json
 
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
 logger = logging.getLogger(__name__)
@@ -94,9 +96,14 @@ async def archive_job(job_id: str, request: JobArchiveRequest = None):
                 archive_reason = %s,
                 archived_at = %s
             WHERE job_id = %s
+            RETURNING jobdiva_id, recruiter_emails
         """, (readable_ist_now(), archive_reason, readable_ist_now(), actual_job_id))
         
+        ret = cursor.fetchone()
         conn.commit()
+        
+        # Email notification for archived jobs has been disabled per user request
+
         cursor.close()
         conn.close()
 

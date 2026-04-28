@@ -22,6 +22,8 @@ import httpx
 from datetime import datetime, timezone, timedelta
 from routers._helpers import get_db_connection
 
+from core.email import notify_pair_launched, notify_job_posting, notify_candidate_passed
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Engagement"])
@@ -30,6 +32,9 @@ router = APIRouter(tags=["Engagement"])
 # Configuration
 # ---------------------------------------------------------------------------
 EXTERNAL_INTERVIEW_API_URL = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai")
+PASS_SCORE_THRESHOLD = float(os.getenv("PASS_SCORE_THRESHOLD", "70"))
+HARD_FILTER_PASS_STATUS = os.getenv("HARD_FILTER_PASS_STATUS", "pass").lower()
+ENGAGE_PASSED_STATUSES = os.getenv("ENGAGE_PASSED_STATUSES", "completed,passed").lower().split(",")
 
 # ---------------------------------------------------------------------------
 # Auto-Migration: Ensure audit table exists
@@ -121,6 +126,7 @@ class GeneratePayloadRequest(BaseModel):
 class SendBulkInterviewRequest(BaseModel):
     payload: str  # JSON string (editable by user in modal)
     real_candidate_ids: List[str]
+    is_initial_launch: bool = False
 
 class SyncInterviewDetailsRequest(BaseModel):
     interview_ids: List[Any]
@@ -270,6 +276,86 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         logger.error(f"❌ generate-payload failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+# ---------------------------------------------------------------------------
+# Helper: fire PAIR launch notifications (background task)
+# Fires Email #1 (launch confirmation) + Email #2 (job posting request)
+# from a single DB query so we don't hit monitored_jobs twice.
+# ---------------------------------------------------------------------------
+async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
+    """
+    Fetches job metadata from monitored_jobs and fires both launch emails.
+    Runs inside asyncio.create_task() so failures are fully isolated.
+    """
+    if not job_id:
+        return
+    try:
+        conn = _get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(
+            """
+            SELECT job_id, jobdiva_id, title, customer_name,
+                   recruiter_emails, ai_description, recruiter_notes,
+                   selected_job_boards
+            FROM monitored_jobs
+            WHERE job_id = %s OR jobdiva_id = %s
+            LIMIT 1
+            """,
+            (job_id, job_id),
+        )
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        if not row:
+            logger.warning("📧 _send_pair_launch_email: job '%s' not found in monitored_jobs", job_id)
+            return
+
+        def _parse_json_list(val) -> list:
+            """Safely parse a value that may be a JSON string, list, or empty."""
+            if isinstance(val, list):
+                return val
+            if isinstance(val, str):
+                try:
+                    parsed = json.loads(val)
+                    return parsed if isinstance(parsed, list) else []
+                except Exception:
+                    return [e.strip() for e in val.split(",") if e.strip()]
+            return []
+
+        recruiter_emails: list = _parse_json_list(row.get("recruiter_emails", []))
+        job_boards: list       = _parse_json_list(row.get("selected_job_boards", []))
+
+        jobdiva_id    = str(row.get("jobdiva_id") or job_id)
+        job_title     = str(row.get("title") or "")
+        customer_name = str(row.get("customer_name") or "")
+        ai_desc       = str(row.get("ai_description") or "")
+        db_job_id     = str(row.get("job_id") or job_id)
+        clean_emails  = [str(e) for e in recruiter_emails if e]
+
+        # ── Email #1: PAIR Launch Confirmation ───────────────────────────────
+        await asyncio.to_thread(
+            notify_pair_launched,
+            jobdiva_id=jobdiva_id,
+            job_title=job_title,
+            customer_name=customer_name,
+            candidate_count=candidate_count,
+            recruiter_emails=clean_emails,
+            job_id=db_job_id,
+        )
+
+        # ── Email #2: Job Posting Request ─────────────────────────────────────
+        await asyncio.to_thread(
+            notify_job_posting,
+            jobdiva_id=jobdiva_id,
+            job_title=job_title,
+            recruiter_emails=clean_emails,
+            job_boards=job_boards,
+            ai_description=ai_desc,
+        )
+
+    except Exception as exc:
+        logger.warning("📧 _send_pair_launch_email failed silently: %s", exc, exc_info=True)
+
 
 # ---------------------------------------------------------------------------
 # 2. POST /engage/send-bulk-interview
@@ -284,6 +370,9 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
         # Parse the payload
         try:
             payload_obj = json.loads(request.payload)
+            jd_block = payload_obj.get("jd", {})
+            job_id = jd_block.get("job_id") or jd_block.get("jobdiva_id") or "unknown"
+            print(f"DEBUG: send_bulk_interview called for job {job_id}")
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid JSON format in payload")
 
@@ -462,6 +551,14 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
         conn.close()
 
         if is_success:
+            # ── Fire PAIR launch confirmation email (non-blocking) ──────────
+            if request.is_initial_launch:
+                asyncio.create_task(
+                    _send_pair_launch_email(
+                        job_id=payload_obj.get("jd", {}).get("job_id", ""),
+                        candidate_count=len(interview_results),
+                    )
+                )
             return {
                 "success": True,
                 "message": "Interview(s) sent successfully",
@@ -609,10 +706,9 @@ async def sync_interview_details(request: SyncInterviewDetailsRequest):
                         """,
                         (str(interview_id), json.dumps(detail_payload), status_value),
                     )
-                    audit_row = cur.fetchone()
-
-                    candidate_id = str((audit_row or {}).get("candidate_id") or "")
-                    job_id = str((audit_row or {}).get("job_id") or "")
+                    audit_row = cur.fetchone() or {}
+                    candidate_id = str(audit_row.get("candidate_id") or "")
+                    job_id = str(audit_row.get("job_id") or "")
 
                     candidate_blob: Dict[str, Any] = {
                         "engage_status": status_value,
@@ -654,6 +750,17 @@ async def sync_interview_details(request: SyncInterviewDetailsRequest):
                             candidate_rows_updated = cur.rowcount or 0
 
                     conn.commit()
+
+                    # ── Fire Candidate Passed notification (non-blocking) ────────────
+                    if status_value.lower() in ENGAGE_PASSED_STATUSES and overall_score is not None:
+                        asyncio.create_task(
+                            _check_and_fire_candidate_passed_notification(
+                                interview_id=interview_id,
+                                detail_payload=detail_payload,
+                                job_id=job_id,
+                                candidate_id=candidate_id,
+                            )
+                        )
 
                     results.append({
                         "interview_id": interview_id,
@@ -825,3 +932,154 @@ async def download_transcriptions(interview_id: str):
     except Exception as e:
         logger.error(f"❌ download_transcriptions failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+# ---------------------------------------------------------------------------
+# Notification Helpers
+# ---------------------------------------------------------------------------
+
+async def _check_and_fire_candidate_passed_notification(
+    interview_id: int,
+    detail_payload: Dict[str, Any],
+    job_id: str,
+    candidate_id: str,
+):
+    """
+    Checks if a candidate passed the phone screen criteria and fires Email #3.
+    Criteria: PASS on all hard filters AND match score > 70%.
+    """
+    try:
+        if not job_id or not candidate_id:
+            return
+
+        # 1. Score check
+        interview_block = detail_payload.get("interview", {})
+        score = interview_block.get("overall_score")
+        if score is None or float(score) <= PASS_SCORE_THRESHOLD:
+            return
+
+        # 2. Fetch evaluation if not in payload (usually it's not)
+        evaluation = detail_payload.get("evaluation")
+        if not evaluation:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                pair_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/interviews/{interview_id}/evaluation"
+                res = await client.get(pair_url)
+                if res.status_code == 200:
+                    ev_payload = res.json()
+                    evaluation = ev_payload.get("data") or ev_payload
+                else:
+                    logger.warning(f"⚠️ Could not fetch evaluation for {interview_id} (HTTP {res.status_code})")
+                    return
+
+        if not evaluation or not isinstance(evaluation, list):
+            return
+
+        # 3. Check hard filters from database
+        conn = _get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # Get hard filter questions for this job
+        cur.execute("""
+            SELECT question_text 
+            FROM job_screen_questions 
+            WHERE (jobdiva_id = %s OR jobdiva_id = %s) AND is_hard_filter = TRUE
+        """, (job_id, job_id))
+        hard_filter_rows = cur.fetchall()
+        hard_filter_texts = {r["question_text"].strip().lower() for r in hard_filter_rows}
+
+        # If no hard filters defined, we proceed based on score
+        if hard_filter_texts:
+            # Match evaluation items to hard filters
+            for ev in evaluation:
+                q_text = str(ev.get("question", "")).strip().lower()
+                if q_text in hard_filter_texts:
+                    ev_status = str(ev.get("status", "")).lower()
+                    if ev_status != HARD_FILTER_PASS_STATUS:
+                        logger.info(f"⏭️ Candidate {candidate_id} failed hard filter '{q_text}' for job {job_id}. Skipping email.")
+                        cur.close()
+                        conn.close()
+                        return
+
+        # 4. Fetch Job & Candidate metadata for email
+        cur.execute("""
+            SELECT title, city, state, pay_rate, recruiter_emails, jobdiva_id
+            FROM monitored_jobs
+            WHERE job_id = %s OR jobdiva_id = %s
+            LIMIT 1
+        """, (job_id, job_id))
+        job_row = cur.fetchone()
+        
+        cur.execute("""
+            SELECT name, email, phone, resume_text, data
+            FROM sourced_candidates
+            WHERE candidate_id = %s AND jobdiva_id = %s
+            LIMIT 1
+        """, (candidate_id, job_row["jobdiva_id"] if job_row else job_id))
+        cand_row = cur.fetchone()
+
+        if not job_row or not cand_row:
+            cur.close()
+            conn.close()
+            return
+
+        # Deduplication: Check if we already sent the passed email
+        cand_data = cand_row.get("data") or {}
+        if cand_data.get("engage_passed_email_sent"):
+            cur.close()
+            conn.close()
+            return
+
+        # 5. Build screening summary (all items in evaluation)
+        screening_summary = []
+        for ev in evaluation:
+            screening_summary.append({
+                "field": ev.get("question", "Question"),
+                "value": ev.get("answer", ev.get("status", "—"))
+            })
+
+        # 6. Prepare attachment (resume text as .txt fallback)
+        resume_bytes = None
+        resume_filename = None
+        resume_text = cand_row.get("resume_text")
+        if resume_text:
+            resume_bytes = resume_text.encode("utf-8")
+            # Try to get name from candidate
+            safe_name = "".join(c for c in (cand_row["name"] or "Candidate") if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
+            resume_filename = f"Resume_{safe_name}_{job_id}.txt"
+
+        # 7. Fire the email
+        recruiter_emails = _parse_json_list(job_row.get("recruiter_emails", []))
+        
+        success = await asyncio.to_thread(
+            notify_candidate_passed,
+            candidate_name=cand_row["name"] or "Candidate",
+            candidate_email=cand_row["email"],
+            candidate_phone=cand_row["phone"],
+            screen_score=f"{score}%",
+            summary=interview_block.get("summary") or "Passed screening criteria.",
+            screening_summary=screening_summary,
+            jobdiva_id=job_row["jobdiva_id"] or job_id,
+            job_title=job_row["title"],
+            location=f"{job_row['city']}, {job_row['state']}" if job_row['city'] else "—",
+            salary_range=job_row["pay_rate"] or "—",
+            recruiter_emails=recruiter_emails,
+            resume_bytes=resume_bytes,
+            resume_filename=resume_filename,
+            candidate_id=candidate_id,
+            job_id=job_id
+        )
+
+        if success:
+            # Mark as sent
+            cand_data["engage_passed_email_sent"] = True
+            cur.execute("""
+                UPDATE sourced_candidates
+                SET data = %s
+                WHERE candidate_id = %s AND jobdiva_id = %s
+            """, (json.dumps(cand_data), candidate_id, job_row["jobdiva_id"]))
+            conn.commit()
+
+        cur.close()
+        conn.close()
+
+    except Exception as e:
+        logger.error(f"❌ Failed to process Candidate Passed notification: {e}", exc_info=True)
