@@ -1325,7 +1325,7 @@ APOLLO_ENRICH_URL = "https://api.apollo.io/api/v1/people/enrich"
 APOLLO_API_KEY = "cB7rogHZj4XRrhnTEqTlXQ"
 
 
-def _extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, str]:
+def _extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     person = payload.get("person") if isinstance(payload, dict) else {}
     if not isinstance(person, dict):
         person = {}
@@ -1349,6 +1349,20 @@ def _extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, str]:
             )
         return ""
 
+    phone_candidates: List[str] = []
+    seen_phone_candidates = set()
+
+    def _add_phone_candidate(raw_phone: Any):
+        candidate = _normalise_phone(str(raw_phone or "").strip())
+        if not candidate:
+            return
+        if sum(1 for ch in candidate if ch.isdigit()) < 7:
+            return
+        if candidate in seen_phone_candidates:
+            return
+        seen_phone_candidates.add(candidate)
+        phone_candidates.append(candidate)
+
     work_email = _first_non_empty(person.get("email"), person.get("work_email"))
 
     personal_email = ""
@@ -1367,15 +1381,21 @@ def _extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, str]:
         person.get("mobile_phone"),
         person.get("mobile"),
         person.get("cell_phone"),
+        person.get("cell"),
     )
     work_phone = _first_non_empty(
         person.get("sanitized_phone"),
         person.get("work_phone"),
         person.get("organization_phone"),
         person.get("direct_phone"),
+        person.get("office_phone"),
+        person.get("home_phone"),
         person.get("phone"),
         person.get("phone_number"),
     )
+
+    _add_phone_candidate(mobile_phone)
+    _add_phone_candidate(work_phone)
 
     phone_numbers = person.get("phone_numbers")
     if isinstance(phone_numbers, list):
@@ -1391,17 +1411,40 @@ def _extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, str]:
                 work_phone = number
             elif not work_phone:
                 work_phone = number
+            _add_phone_candidate(number)
+
+    person_organization = person.get("organization")
+    if isinstance(person_organization, dict):
+        for key in ("phone", "phone_number", "sanitized_phone", "work_phone", "main_phone", "direct_phone"):
+            _add_phone_candidate(person_organization.get(key))
+
+    payload_organization = payload.get("organization") if isinstance(payload, dict) else None
+    if isinstance(payload_organization, dict):
+        for key in ("phone", "phone_number", "sanitized_phone", "work_phone", "main_phone", "direct_phone"):
+            _add_phone_candidate(payload_organization.get(key))
 
     if not mobile_phone:
         mobile_phone = _extract_phone_value(payload.get("mobile_phone"))
     if not work_phone:
         work_phone = _extract_phone_value(payload.get("phone"))
 
+    _add_phone_candidate(payload.get("mobile_phone") if isinstance(payload, dict) else "")
+    _add_phone_candidate(payload.get("phone") if isinstance(payload, dict) else "")
+    _add_phone_candidate(payload.get("phone_number") if isinstance(payload, dict) else "")
+
+    if not mobile_phone and phone_candidates:
+        mobile_phone = phone_candidates[0]
+    if not work_phone and len(phone_candidates) > 1:
+        work_phone = phone_candidates[1]
+    elif not work_phone and phone_candidates:
+        work_phone = phone_candidates[0]
+
     return {
         "mobilePhone": mobile_phone,
         "workPhone": work_phone,
         "workEmail": work_email,
         "personalEmail": personal_email,
+        "phoneCandidates": phone_candidates,
     }
 
 
@@ -1500,7 +1543,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         }
 
     provider_used = "zoominfo"
-    extracted: Dict[str, str] = {}
+    extracted: Dict[str, Any] = {}
     zres: Optional[httpx.Response] = None
     zoominfo_data: Dict[str, Any] = {}
 
@@ -1531,6 +1574,61 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         ],
         "outputFields": ["workPhone", "mobilePhone", "workEmail", "personalEmail"],
     }
+
+    async def _zoominfo_crossfill_from_email_or_phone(seed_email: str, seed_phone: str) -> Dict[str, str]:
+        """If we only have email or phone, query ZoomInfo new API to fetch the missing side."""
+        if not ZOOMINFO_BEARER_TOKEN:
+            return {}
+
+        normalised_email = str(seed_email or "").strip().lower()
+        normalised_phone = _normalise_phone(seed_phone or "")
+        if sum(1 for ch in normalised_phone if ch.isdigit()) < 7:
+            normalised_phone = ""
+
+        match_person_input: Dict[str, Any] = {}
+        if normalised_email:
+            match_person_input["emailAddress"] = normalised_email
+        elif normalised_phone:
+            match_person_input["phone"] = normalised_phone
+        else:
+            return {}
+
+        headers = {
+            "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
+            "accept": "application/vnd.api+json",
+            "content-type": "application/vnd.api+json",
+        }
+        payload = {
+            "data": {
+                "type": "ContactEnrich",
+                "attributes": {
+                    "matchPersonInput": [match_person_input],
+                    "outputFields": ["mobilePhone", "phone", "email", "emailAlt"],
+                },
+            }
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                res = await client.post(zoominfo_new_enrich_url, headers=headers, json=payload)
+        except Exception as e:
+            logger.warning("ZoomInfo cross-fill request failed for %s: %s", candidate_id, e)
+            return {}
+
+        if res.status_code >= 400:
+            logger.info(
+                "ZoomInfo cross-fill non-2xx for %s: %s",
+                candidate_id,
+                res.status_code,
+            )
+            return {}
+
+        try:
+            payload_data = res.json()
+        except Exception:
+            return {}
+
+        return _extract_new_zoominfo_contact_fields(payload_data)
 
     if provider_used == "zoominfo":
         try:
@@ -1655,6 +1753,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                     "linkedin_url": linkedin_url,
                     "phone_source": "none",
                     "phone": None,
+                    "phoneCandidates": [],
                     "email": None,
                     "workPhone": None,
                     "mobilePhone": None,
@@ -1713,6 +1812,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                     "linkedin_url": linkedin_url,
                     "phone_source": "none",
                     "phone": None,
+                    "phoneCandidates": [],
                     "email": None,
                     "workPhone": None,
                     "mobilePhone": None,
@@ -1748,6 +1848,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                 "linkedin_url": linkedin_url,
                 "phone_source": "none",
                 "phone": None,
+                "phoneCandidates": [],
                 "email": None,
                 "workPhone": None,
                 "mobilePhone": None,
@@ -1762,31 +1863,144 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     elif provider_used == "zoominfo":
         extracted = _extract_enrichment_fields(zoominfo_data)
 
+    # Cross-fill pass: if we have only one side (email OR phone), use it to fetch the other.
+    seed_phone = _normalise_phone((extracted.get("mobilePhone") or extracted.get("workPhone") or ""))
+    if sum(1 for ch in seed_phone if ch.isdigit()) < 7:
+        seed_phone = ""
+    seed_email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip().lower()
+
+    if (seed_email and not seed_phone) or (seed_phone and not seed_email):
+        supplemental = await _zoominfo_crossfill_from_email_or_phone(seed_email, seed_phone)
+        if supplemental:
+            for key in ("mobilePhone", "workPhone", "workEmail", "personalEmail"):
+                if not extracted.get(key) and supplemental.get(key):
+                    extracted[key] = supplemental.get(key)
+
+            existing_candidates = extracted.get("phoneCandidates") if isinstance(extracted.get("phoneCandidates"), list) else []
+            supplemental_candidates = [supplemental.get("mobilePhone"), supplemental.get("workPhone")]
+            merged_candidates: List[str] = []
+            merged_seen = set()
+            for candidate in [*existing_candidates, *supplemental_candidates]:
+                n = _normalise_phone(str(candidate or ""))
+                if not n:
+                    continue
+                if sum(1 for ch in n if ch.isdigit()) < 7:
+                    continue
+                if n in merged_seen:
+                    continue
+                merged_seen.add(n)
+                merged_candidates.append(n)
+            if merged_candidates:
+                extracted["phoneCandidates"] = merged_candidates
+
+            logger.info(
+                "Contact enrich cross-fill succeeded for %s | had_email=%s | had_phone=%s",
+                candidate_id,
+                bool(seed_email),
+                bool(seed_phone),
+            )
+
     if provider_used == "zoominfo":
         probe_phone = _normalise_phone((extracted.get("mobilePhone") or extracted.get("workPhone") or ""))
         probe_email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip().lower()
         if sum(1 for ch in probe_phone if ch.isdigit()) < 7:
             probe_phone = ""
 
-        if not probe_phone and not probe_email:
+        need_apollo_supplement = (not probe_phone) or (not probe_email)
+        if need_apollo_supplement:
             apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
             if apollo_result.get("ok"):
-                provider_used = "apollo"
-                extracted = apollo_result.get("fields") or {}
-                logger.info("Apollo fallback succeeded for %s after ZoomInfo returned no usable contact", candidate_id)
+                apollo_fields = apollo_result.get("fields") or {}
 
-    raw_mobile_phone = extracted.get("mobilePhone") or ""
-    raw_work_phone = extracted.get("workPhone") or ""
+                # Fill only missing sides so ZoomInfo data remains preferred.
+                if not probe_phone:
+                    if not extracted.get("mobilePhone") and apollo_fields.get("mobilePhone"):
+                        extracted["mobilePhone"] = apollo_fields.get("mobilePhone")
+                    if not extracted.get("workPhone") and apollo_fields.get("workPhone"):
+                        extracted["workPhone"] = apollo_fields.get("workPhone")
+
+                if not probe_email:
+                    if not extracted.get("workEmail") and apollo_fields.get("workEmail"):
+                        extracted["workEmail"] = apollo_fields.get("workEmail")
+                    if not extracted.get("personalEmail") and apollo_fields.get("personalEmail"):
+                        extracted["personalEmail"] = apollo_fields.get("personalEmail")
+
+                # Merge phone candidates from both providers.
+                existing_candidates = extracted.get("phoneCandidates") if isinstance(extracted.get("phoneCandidates"), list) else []
+                apollo_candidates = apollo_fields.get("phoneCandidates") if isinstance(apollo_fields.get("phoneCandidates"), list) else []
+                merged_candidates: List[str] = []
+                merged_seen = set()
+                for candidate in [*existing_candidates, *apollo_candidates, apollo_fields.get("mobilePhone"), apollo_fields.get("workPhone")]:
+                    n = _normalise_phone(str(candidate or ""))
+                    if not n:
+                        continue
+                    if sum(1 for ch in n if ch.isdigit()) < 7:
+                        continue
+                    if n in merged_seen:
+                        continue
+                    merged_seen.add(n)
+                    merged_candidates.append(n)
+                if merged_candidates:
+                    extracted["phoneCandidates"] = merged_candidates
+
+                # Re-probe after merge; if ZoomInfo had nothing and Apollo filled,
+                # mark provider as Apollo for accurate telemetry/response.
+                post_probe_phone = _normalise_phone((extracted.get("mobilePhone") or extracted.get("workPhone") or ""))
+                post_probe_email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip().lower()
+                if sum(1 for ch in post_probe_phone if ch.isdigit()) < 7:
+                    post_probe_phone = ""
+                if not probe_phone and not probe_email and (post_probe_phone or post_probe_email):
+                    provider_used = "apollo"
+
+                logger.info(
+                    "Apollo supplement merged for %s | needed_phone=%s | needed_email=%s | has_phone=%s | has_email=%s",
+                    candidate_id,
+                    not bool(probe_phone),
+                    not bool(probe_email),
+                    bool(post_probe_phone),
+                    bool(post_probe_email),
+                )
+
+    raw_mobile_phone = str(extracted.get("mobilePhone") or "").strip()
+    raw_work_phone = str(extracted.get("workPhone") or "").strip()
     raw_work_email = extracted.get("workEmail") or ""
     raw_personal_email = extracted.get("personalEmail") or ""
 
-    phone_source = "none"
-    if raw_mobile_phone:
-        phone_source = "mobilePhone"
-    elif raw_work_phone:
-        phone_source = "workPhone"
+    raw_phone_candidates = extracted.get("phoneCandidates") if isinstance(extracted, dict) else []
+    if not isinstance(raw_phone_candidates, list):
+        raw_phone_candidates = []
 
-    enriched_phone = _normalise_phone(raw_mobile_phone or raw_work_phone or "")
+    normalised_candidates: List[str] = []
+    seen_candidates = set()
+    for candidate in [raw_mobile_phone, raw_work_phone, *raw_phone_candidates]:
+        n = _normalise_phone(str(candidate or ""))
+        if not n:
+            continue
+        if sum(1 for ch in n if ch.isdigit()) < 7:
+            continue
+        if n in seen_candidates:
+            continue
+        seen_candidates.add(n)
+        normalised_candidates.append(n)
+
+    phone_candidates_top2 = normalised_candidates[:2]
+
+    mobile_phone_normalised = _normalise_phone(raw_mobile_phone)
+    work_phone_normalised = _normalise_phone(raw_work_phone)
+    if sum(1 for ch in mobile_phone_normalised if ch.isdigit()) < 7:
+        mobile_phone_normalised = ""
+    if sum(1 for ch in work_phone_normalised if ch.isdigit()) < 7:
+        work_phone_normalised = ""
+
+    phone_source = "none"
+    if mobile_phone_normalised:
+        phone_source = "mobilePhone"
+    elif work_phone_normalised:
+        phone_source = "workPhone"
+    elif phone_candidates_top2:
+        phone_source = "phoneCandidates"
+
+    enriched_phone = _normalise_phone(raw_mobile_phone or raw_work_phone or (phone_candidates_top2[0] if phone_candidates_top2 else ""))
     if sum(1 for ch in enriched_phone if ch.isdigit()) < 7:
         enriched_phone = ""
 
@@ -1797,13 +2011,14 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     ).strip().lower()
 
     logger.info(
-        "Contact enrich parsed for %s | provider=%s | phone_source=%s | has_mobile=%s | has_work=%s | has_email=%s | mobile=%s | work=%s | email=%s",
+        "Contact enrich parsed for %s | provider=%s | phone_source=%s | has_mobile=%s | has_work=%s | has_email=%s | phone_candidates=%s | mobile=%s | work=%s | email=%s",
         candidate_id,
         provider_used,
         phone_source,
         bool(raw_mobile_phone),
         bool(raw_work_phone),
         bool(enriched_email),
+        len(phone_candidates_top2),
         _mask_phone_for_log(raw_mobile_phone),
         _mask_phone_for_log(raw_work_phone),
         _mask_email_for_log(enriched_email),
@@ -1824,6 +2039,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                             "provider": provider_used,
                             "workPhone": extracted.get("workPhone"),
                             "mobilePhone": extracted.get("mobilePhone"),
+                            "phoneCandidates": phone_candidates_top2,
                             "workEmail": extracted.get("workEmail"),
                             "personalEmail": extracted.get("personalEmail"),
                             "enriched_at": datetime.now(timezone.utc).isoformat(),
@@ -1860,6 +2076,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         "provider": provider_used,
         "phone_source": phone_source,
         "phone": enriched_phone or None,
+        "phoneCandidates": phone_candidates_top2,
         "email": enriched_email or None,
         "workPhone": raw_work_phone or None,
         "mobilePhone": raw_mobile_phone or None,
