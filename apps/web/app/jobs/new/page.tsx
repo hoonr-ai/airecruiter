@@ -4769,7 +4769,14 @@ function NewJobPageContent() {
   // Entry point wired to Launch PAIR. Before save, auto-enrich selected
   // candidates missing phone via ZoomInfo using LinkedIn URL.
   const handleLaunchPairClick = async () => {
-    if (selectedCandidates.size === 0) return;
+    if (!hasSearched) {
+      showToast("Run Search first to source candidates.", "info");
+      return;
+    }
+    if (selectedCandidates.size === 0) {
+      showToast("Select at least one candidate before launching PAIR.", "info");
+      return;
+    }
     trackEvent("job_wizard_step5_launch_pair_clicked", {
       step: 5,
       selected_candidates_count: selectedCandidates.size,
@@ -6127,9 +6134,9 @@ function NewJobPageContent() {
                 {hasSearched && !isSearching ? `${selectedCandidates.size} candidates selected` : ''}
               </span>
               <Button
-                className={`h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group ${candidates.length > 0 && selectedCandidates.size > 0 && process.env.NEXT_PUBLIC_DISABLE_LAUNCH_PAIR !== "true" ? "bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98]" : "bg-slate-300 cursor-not-allowed"}`}
+                className="h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98]"
                 onClick={handleLaunchPairClick}
-                disabled={!hasSearched || isSearching || isEnrichingContacts || selectedCandidates.size === 0 || process.env.NEXT_PUBLIC_DISABLE_LAUNCH_PAIR === "true"}
+                disabled={isSearching || isEnrichingContacts}
               >
                 {isEnrichingContacts ? (
                   <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
