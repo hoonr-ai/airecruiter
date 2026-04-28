@@ -2273,6 +2273,13 @@ function NewJobPageContent() {
       }
       return updated;
     });
+    trackEvent("job_wizard_step3_rubric_item_changed", {
+      step: 3,
+      category,
+      index,
+      field,
+      value: truncateForTelemetry(value, 180),
+    });
   };
 
   const moveRubricItem = (category: string, from: number, to: number) => {
@@ -2285,16 +2292,29 @@ function NewJobPageContent() {
       updated[category] = items;
       return updated;
     });
+    trackEvent("job_wizard_step3_rubric_item_reordered", {
+      step: 3,
+      category,
+      from_index: from,
+      to_index: to,
+    });
   };
 
   const removeRubricItem = (category: string, index: number) => {
     console.log(`🗑️ Removing ${category} at index ${index}`);
+    const itemToRemove = rubricData?.[category]?.[index];
     setRubricData((prev: any) => {
       if (!prev || !prev[category]) return prev;
       return {
         ...prev,
         [category]: prev[category].filter((_: any, i: number) => i !== index)
       };
+    });
+    trackEvent("job_wizard_step3_rubric_item_removed", {
+      step: 3,
+      category,
+      index,
+      value: truncateForTelemetry(itemToRemove?.value ?? itemToRemove?.field ?? itemToRemove, 180),
     });
   };
 
@@ -2321,6 +2341,11 @@ function NewJobPageContent() {
         updated[category] = [...updated[category], newItem];
       }
       return updated;
+    });
+    trackEvent("job_wizard_step3_rubric_item_added", {
+      step: 3,
+      category,
+      value: truncateForTelemetry(newItem?.value ?? newItem?.field ?? newItem, 180),
     });
   };
 
@@ -4311,16 +4336,31 @@ function NewJobPageContent() {
     userHasEditedQuestionsRef.current = true;
     setScreenQuestions([...screenQuestions, newQuestion]);
     setQuestionIdCounter(questionIdCounter + 1);
+    trackEvent("job_wizard_step4_screen_question_added", {
+      step: 4,
+      question_id: newQuestion.id,
+      total_questions: screenQuestions.length + 1,
+    });
   };
 
   const updateScreenQuestion = (id: number, field: keyof ScreenQuestion, value: any) => {
     userHasEditedQuestionsRef.current = true;
     setScreenQuestions(prev => prev.map(q => q.id === id ? { ...q, [field]: value } : q));
+    trackEvent("job_wizard_step4_screen_question_changed", {
+      step: 4,
+      question_id: id,
+      field,
+      value: truncateForTelemetry(value, 180),
+    });
   };
 
   const deleteScreenQuestion = (id: number) => {
     userHasEditedQuestionsRef.current = true;
     setScreenQuestions(prev => prev.filter(q => q.id !== id));
+    trackEvent("job_wizard_step4_screen_question_removed", {
+      step: 4,
+      question_id: id,
+    });
   };
 
   const setFiltersStep = (
@@ -4523,6 +4563,13 @@ function NewJobPageContent() {
             <textarea
               value={botIntroduction}
               onChange={(e) => setBotIntroduction(e.target.value)}
+              onBlur={(e) => {
+                trackEvent("job_wizard_step4_bot_introduction_saved", {
+                  step: 4,
+                  length: e.target.value.length,
+                  preview: truncateForTelemetry(e.target.value, 220),
+                });
+              }}
               className="w-full bg-transparent border-none outline-none text-[13px] text-slate-600 leading-relaxed resize-none h-24"
               placeholder="Enter bot introduction..."
             />
@@ -5038,13 +5085,34 @@ function NewJobPageContent() {
                             </div>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="start" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
-                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'must' } : t))}>
+                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => {
+                              setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'must' } : t));
+                              trackEvent("job_wizard_step5_source_title_match_type_changed", {
+                                step: 5,
+                                title: truncateForTelemetry(title.value, 100),
+                                match_type: "must",
+                              });
+                            }}>
                               Must have
                             </DropdownMenuItem>
-                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'can' } : t))}>
+                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => {
+                              setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'can' } : t));
+                              trackEvent("job_wizard_step5_source_title_match_type_changed", {
+                                step: 5,
+                                title: truncateForTelemetry(title.value, 100),
+                                match_type: "can",
+                              });
+                            }}>
                               Can have
                             </DropdownMenuItem>
-                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px] text-red-600" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'exclude' } : t))}>
+                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px] text-red-600" onClick={() => {
+                              setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'exclude' } : t));
+                              trackEvent("job_wizard_step5_source_title_match_type_changed", {
+                                step: 5,
+                                title: truncateForTelemetry(title.value, 100),
+                                match_type: "exclude",
+                              });
+                            }}>
                               Must not have
                             </DropdownMenuItem>
                           </DropdownMenuContent>
@@ -5052,15 +5120,39 @@ function NewJobPageContent() {
                         <span className="flex-1 text-[13px] font-bold text-slate-800 px-1">{title.value}</span>
 
                         <div className="flex items-center h-8 bg-white border border-slate-200 rounded-lg overflow-hidden ml-auto shadow-sm">
-                          <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, years: Math.max(0, t.years - 1) } : t))}>-</button>
+                          <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => {
+                            const nextYears = Math.max(0, title.years - 1);
+                            setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, years: nextYears } : t));
+                            trackEvent("job_wizard_step5_source_title_years_changed", {
+                              step: 5,
+                              title: truncateForTelemetry(title.value, 100),
+                              years: nextYears,
+                            });
+                          }}>-</button>
                           <span className="px-2 h-full flex items-center justify-center text-[11px] font-bold text-slate-700 min-w-[58px] text-center border-x border-slate-100">{title.years === 0 ? 'Any exp' : `${title.years}+ yr${title.years > 1 ? 's' : ''}`}</span>
-                          <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, years: t.years + 1 } : t))}>+</button>
+                          <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => {
+                            const nextYears = title.years + 1;
+                            setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, years: nextYears } : t));
+                            trackEvent("job_wizard_step5_source_title_years_changed", {
+                              step: 5,
+                              title: truncateForTelemetry(title.value, 100),
+                              years: nextYears,
+                            });
+                          }}>+</button>
                         </div>
 
                         <button
                           className={`flex items-center gap-1.5 px-2.5 h-8 rounded-xl text-[11px] font-bold transition-all border shadow-sm ${title.recent ? 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
                             }`}
-                          onClick={() => setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, recent: !t.recent } : t))}
+                          onClick={() => {
+                            const nextRecent = !title.recent;
+                            setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, recent: nextRecent } : t));
+                            trackEvent("job_wizard_step5_source_title_recent_toggled", {
+                              step: 5,
+                              title: truncateForTelemetry(title.value, 100),
+                              recent: nextRecent,
+                            });
+                          }}
                         >
                           <History className={`w-3.5 h-3.5 ${title.recent ? 'text-[#6366f1]' : 'text-slate-400'}`} />
                           Recent
@@ -5080,7 +5172,13 @@ function NewJobPageContent() {
 
                         <button
                           className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
-                          onClick={() => setSourceTitles(prev => prev.filter(t => t.id !== title.id))}
+                          onClick={() => {
+                            setSourceTitles(prev => prev.filter(t => t.id !== title.id));
+                            trackEvent("job_wizard_step5_source_title_removed", {
+                              step: 5,
+                              title: truncateForTelemetry(title.value, 100),
+                            });
+                          }}
                         >
                           <X className="w-4 h-4" />
                         </button>
@@ -5168,13 +5266,34 @@ function NewJobPageContent() {
                             </div>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="start" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
-                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'must' } : s))}>
+                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => {
+                              setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'must' } : s));
+                              trackEvent("job_wizard_step5_source_skill_match_type_changed", {
+                                step: 5,
+                                skill: truncateForTelemetry(skill.value, 100),
+                                match_type: "must",
+                              });
+                            }}>
                               Must have
                             </DropdownMenuItem>
-                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'can' } : s))}>
+                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => {
+                              setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'can' } : s));
+                              trackEvent("job_wizard_step5_source_skill_match_type_changed", {
+                                step: 5,
+                                skill: truncateForTelemetry(skill.value, 100),
+                                match_type: "can",
+                              });
+                            }}>
                               Can have
                             </DropdownMenuItem>
-                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px] text-red-600" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'exclude' } : s))}>
+                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px] text-red-600" onClick={() => {
+                              setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'exclude' } : s));
+                              trackEvent("job_wizard_step5_source_skill_match_type_changed", {
+                                step: 5,
+                                skill: truncateForTelemetry(skill.value, 100),
+                                match_type: "exclude",
+                              });
+                            }}>
                               Must not have
                             </DropdownMenuItem>
                           </DropdownMenuContent>
@@ -5182,15 +5301,39 @@ function NewJobPageContent() {
                         <span className="flex-1 text-[13px] font-bold text-slate-800 px-1">{skill.value}</span>
 
                         <div className="flex items-center h-8 bg-white border border-slate-200 rounded-lg overflow-hidden ml-auto shadow-sm">
-                          <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, years: Math.max(0, s.years - 1) } : s))}>-</button>
+                          <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => {
+                            const nextYears = Math.max(0, skill.years - 1);
+                            setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, years: nextYears } : s));
+                            trackEvent("job_wizard_step5_source_skill_years_changed", {
+                              step: 5,
+                              skill: truncateForTelemetry(skill.value, 100),
+                              years: nextYears,
+                            });
+                          }}>-</button>
                           <span className="px-2 h-full flex items-center justify-center text-[11px] font-bold text-slate-700 min-w-[58px] text-center border-x border-slate-100">{skill.years === 0 ? 'Any exp' : `${skill.years}+ yr${skill.years > 1 ? 's' : ''}`}</span>
-                          <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, years: s.years + 1 } : s))}>+</button>
+                          <button className="w-8 h-full flex items-center justify-center hover:bg-slate-50 transition-colors text-slate-400 font-bold text-[14px]" onClick={() => {
+                            const nextYears = skill.years + 1;
+                            setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, years: nextYears } : s));
+                            trackEvent("job_wizard_step5_source_skill_years_changed", {
+                              step: 5,
+                              skill: truncateForTelemetry(skill.value, 100),
+                              years: nextYears,
+                            });
+                          }}>+</button>
                         </div>
 
                         <button
                           className={`flex items-center gap-1.5 px-2.5 h-8 rounded-xl text-[11px] font-bold transition-all border shadow-sm ${skill.recent ? 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'
                             }`}
-                          onClick={() => setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, recent: !s.recent } : s))}
+                          onClick={() => {
+                            const nextRecent = !skill.recent;
+                            setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, recent: nextRecent } : s));
+                            trackEvent("job_wizard_step5_source_skill_recent_toggled", {
+                              step: 5,
+                              skill: truncateForTelemetry(skill.value, 100),
+                              recent: nextRecent,
+                            });
+                          }}
                         >
                           <History className={`w-3.5 h-3.5 ${skill.recent ? 'text-[#6366f1]' : 'text-slate-400'}`} />
                           Recent
@@ -5210,7 +5353,13 @@ function NewJobPageContent() {
 
                         <button
                           className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
-                          onClick={() => setSourceSkills(prev => prev.filter(s => s.id !== skill.id))}
+                          onClick={() => {
+                            setSourceSkills(prev => prev.filter(s => s.id !== skill.id));
+                            trackEvent("job_wizard_step5_source_skill_removed", {
+                              step: 5,
+                              skill: truncateForTelemetry(skill.value, 100),
+                            });
+                          }}
                         >
                           <X className="w-4 h-4" />
                         </button>
@@ -5296,7 +5445,13 @@ function NewJobPageContent() {
                           </div>
                           <button
                             className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-8 h-8 flex items-center justify-center rounded-lg transition-all duration-200"
-                            onClick={() => setSourceLocations(prev => prev.filter(l => l.id !== loc.id))}
+                            onClick={() => {
+                              setSourceLocations(prev => prev.filter(l => l.id !== loc.id));
+                              trackEvent("job_wizard_step5_source_location_removed", {
+                                step: 5,
+                                value: truncateForTelemetry(loc.value, 100),
+                              });
+                            }}
                           >
                             <X className="w-4 h-4" />
                           </button>
@@ -5336,6 +5491,10 @@ function NewJobPageContent() {
                             onClick={() => {
                               setSourceLocationRadius(radius);
                               setGeneratedBoolean("");
+                              trackEvent("job_wizard_step5_location_radius_changed", {
+                                step: 5,
+                                radius,
+                              });
                             }}
                           >
                             {radius}
@@ -5387,6 +5546,10 @@ function NewJobPageContent() {
                           onClick={() => {
                             setSourceCompanies(prev => prev.filter(item => item !== company));
                             setGeneratedBoolean("");
+                            trackEvent("job_wizard_step5_source_company_removed", {
+                              step: 5,
+                              value: truncateForTelemetry(company, 100),
+                            });
                           }}
                         >
                           <X className="w-3 h-3" />
@@ -5412,7 +5575,13 @@ function NewJobPageContent() {
                         {tag}
                         <button
                           className="text-slate-400 hover:text-rose-500 hover:bg-rose-50 w-5 h-5 flex items-center justify-center rounded-md transition-all duration-200"
-                          onClick={() => setSourceKeywords(prev => prev.filter(t => t !== tag))}
+                          onClick={() => {
+                            setSourceKeywords(prev => prev.filter(t => t !== tag));
+                            trackEvent("job_wizard_step5_source_keyword_removed", {
+                              step: 5,
+                              value: truncateForTelemetry(tag, 100),
+                            });
+                          }}
                         >
                           <X className="w-3 h-3" />
                         </button>
@@ -5440,6 +5609,10 @@ function NewJobPageContent() {
                       onClick={async () => {
                         const nextState = !booleanStringOpen;
                         setBooleanStringOpen(nextState);
+                        trackEvent("job_wizard_step5_boolean_panel_toggled", {
+                          step: 5,
+                          opened: nextState,
+                        });
 
                         // Auto-save when expanding the boolean string view to feed the agent
                         if (nextState) {
@@ -5485,6 +5658,9 @@ function NewJobPageContent() {
                                     onClick={() => {
                                       setBooleanUserEdited(false);
                                       setGeneratedBoolean(buildGeneratedBooleanString());
+                                      trackEvent("job_wizard_step5_boolean_reset", {
+                                        step: 5,
+                                      });
                                     }}
                                     className="text-[11px] font-bold text-slate-500 hover:text-[#6366f1] px-2.5 py-1 rounded-md border border-slate-200 bg-white hover:bg-slate-50 transition-colors"
                                   >
@@ -5506,6 +5682,16 @@ function NewJobPageContent() {
                               onChange={(e) => {
                                 setBooleanUserEdited(true);
                                 setGeneratedBoolean(e.target.value);
+                                trackEvent("job_wizard_step5_boolean_edited", {
+                                  step: 5,
+                                  length: e.target.value.length,
+                                });
+                              }}
+                              onBlur={(e) => {
+                                trackEvent("job_wizard_step5_boolean_edit_saved", {
+                                  step: 5,
+                                  query: truncateForTelemetry(e.target.value, 320),
+                                });
                               }}
                               rows={Math.min(8, Math.max(2, resolvedGeneratedBoolean.split("\n").length))}
                               className="w-full resize-y text-[13px] font-mono font-medium text-slate-700 leading-relaxed tracking-tight bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30 focus:border-[#6366f1]"
@@ -5553,6 +5739,11 @@ function NewJobPageContent() {
                                           type="button"
                                           onClick={() => {
                                             navigator.clipboard?.writeText(attempt.query).catch(() => { });
+                                            trackEvent("job_wizard_step5_boolean_history_copied", {
+                                              step: 5,
+                                              attempt: idx + 1,
+                                              query: truncateForTelemetry(attempt.query, 260),
+                                            });
                                           }}
                                           className="text-[10px] font-bold text-slate-500 hover:text-[#6366f1] px-2 py-0.5 rounded-md border border-slate-200 bg-white hover:bg-slate-50 transition-colors"
                                         >
