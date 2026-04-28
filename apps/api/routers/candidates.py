@@ -668,8 +668,9 @@ async def get_job_candidates(job_id_or_ref: str):
                     LIMIT 1
                 """, (job_id_or_ref, job_id_or_ref))
                 result = cur.fetchone()
+                resolved_jobdiva_id = job_id_or_ref
+                resolved_numeric_id = job_id_or_ref
                 if result:
-                    # Prefer the alphanumeric jobdiva_id; fall back to job_id if jobdiva_id is NULL
                     resolved_jobdiva_id = result[0] or result[1]
                     resolved_numeric_job_id = result[1] or result[0]
         finally:
@@ -711,9 +712,11 @@ async def get_job_candidates(job_id_or_ref: str):
                     FROM sourced_candidates sc
                     LEFT JOIN latest_audit la
                         ON la.candidate_id = sc.candidate_id
+
                     WHERE sc.jobdiva_id = %s
                     ORDER BY sc.created_at DESC;
                 """, (str(resolved_jobdiva_id), str(resolved_numeric_job_id), resolved_jobdiva_id,))
+
                 candidates = cur.fetchall()
         finally:
             conn.close()
@@ -750,6 +753,9 @@ async def get_job_candidates(job_id_or_ref: str):
                 cand["engage_interview_id"] = cand.get("audit_interview_id")
                 if isinstance(data_blob, dict):
                     data_blob["engage_interview_id"] = cand.get("audit_interview_id")
+
+            if not cand.get("engage_created_at") and cand.get("audit_created_at"):
+                cand["engage_created_at"] = cand.get("audit_created_at")
 
             if isinstance(data_blob, dict):
                 cand["data"] = data_blob

@@ -85,6 +85,7 @@ interface Candidate {
   engage_score?: number;
   engage_status?: string;
   engage_completed_at?: string;
+  engage_created_at?: string;
   availability?: string;
   created_at: string;
   data?: any;
@@ -1244,6 +1245,7 @@ export default function CandidateRankingsPage() {
 
                         <TableCell className="text-center align-middle py-1 font-medium text-[#0f172a] text-[12px]">
                           <div className="flex items-center justify-center gap-1.5 w-full text-center">
+
                             {screeningScore > 0 ? (
                               <button
                                 onClick={() => openDetails(candidate)}
@@ -1259,15 +1261,48 @@ export default function CandidateRankingsPage() {
                         </TableCell>
 
                         <TableCell className="text-center align-middle py-1">
-                          {(() => {
-                            const screenStatus = normalizeScreenStatus(candidate);
-                            return (
-                              <span className="font-medium text-[13px]" style={{ color: screenStatus.color }}>
-                                {screenStatus.label}
-                              </span>
-                            );
-                          })()}
+                          <div className="flex items-center justify-center w-full min-h-[40px]">
+                            {(() => {
+                              const rawStatus = String(candidate.engage_status || candidate.data?.engage_status || "").trim().toLowerCase();
+                              if (rawStatus === "initiated" || rawStatus === "sent" || rawStatus === "sms sent") {
+                                return (
+                                  <div className="flex flex-col items-center gap-1.5 py-1">
+                                    <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 font-bold text-[11px] border border-amber-200 shadow-sm leading-none">
+                                      SMS Sent
+                                    </span>
+                                    {(candidate.engage_created_at || candidate.data?.engage_created_at) && (
+                                      <div className="flex flex-col items-center gap-0.5">
+                                        <div className="text-[10px] text-emerald-600 flex items-center gap-1 font-bold" title="Time when automated outreach was first initiated">
+                                          <Mail className="w-2.5 h-2.5" /> {formatDate(candidate.engage_created_at || candidate.data?.engage_created_at)}
+                                        </div>
+                                        {(() => {
+                                          const baseTime = candidate.engage_created_at || candidate.data?.engage_created_at;
+                                          const phoneTime = new Date(new Date(baseTime).getTime() + 30 * 60000);
+                                          const isActive = new Date() > phoneTime;
+                                          return (
+                                            <div 
+                                              className={}
+                                              title={isActive ? "Automated follow-up call has been triggered" : "Scheduled time for automated follow-up call if no response"}
+                                            >
+                                              <Phone className="w-2.5 h-2.5" /> {formatDate(phoneTime.toISOString())}
+                                            </div>
+                                          );
+                                        })()}
+                                      </div>
+                                    )}
+                                  </div>
+                                );
+                              }
+                              const screenStatus = normalizeScreenStatus(candidate);
+                              return (
+                                <span className="font-medium text-[13px]" style={{ color: screenStatus.color }}>
+                                  {screenStatus.label}
+                                </span>
+                              );
+                            })()}
+                          </div>
                         </TableCell>
+
 
                         <TableCell className="text-center align-middle py-1 font-medium text-slate-700 text-[12px]">
                           {engageScore > 0 ? (
@@ -1314,8 +1349,11 @@ export default function CandidateRankingsPage() {
                             </Button>
                             <Button
                               size="sm"
-                              className="h-6 px-1 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[8.5px] rounded-md shadow-sm"
+                              className="h-6 px-1 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[8.5px] rounded-md shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+
                               onClick={() => handleSmsCandidate(candidate)}
+                              disabled={candidate.engage_status === "Initiated" || candidate.engage_status === "sent" || candidate.engage_status === "SMS Sent"}
+                              title={(candidate.engage_status === "Initiated" || candidate.engage_status === "sent" || candidate.engage_status === "SMS Sent") ? "Outreach already initiated" : ""}
                             >
                               <Send className="w-3 h-3 mr-0.5" />
                               SMS
