@@ -695,10 +695,16 @@ async def sync_interview_details(request: SyncInterviewDetailsRequest):
                         continue
 
                     detail_payload = pair_res.json()
-                    interview_block = detail_payload.get("interview", {}) if isinstance(detail_payload, dict) else {}
+                    # The PAIR/LiveKit API wraps the response in a "data" object
+                    data_wrapper = detail_payload.get("data", {}) if isinstance(detail_payload, dict) else {}
+                    interview_block = data_wrapper.get("interview", {}) if isinstance(data_wrapper, dict) else {}
+                    
                     status_value = str(interview_block.get("status") or "pending")
                     overall_score = interview_block.get("overall_score")
-                    completed_at = interview_block.get("completed_at")
+                    # Try both potential completion timestamp fields
+                    completed_at = interview_block.get("completed_at") or interview_block.get("evaluation_completed_at")
+
+
                     now_iso = datetime.now(timezone.utc).isoformat()
 
                     # Update only the latest audit row for this interview_id.
@@ -725,6 +731,42 @@ async def sync_interview_details(request: SyncInterviewDetailsRequest):
                     candidate_id = str(audit_row.get("candidate_id") or "")
                     job_id = str(audit_row.get("job_id") or "")
 
+                    # Try both potential completion timestamp fields
+                    completed_at = interview_block.get("completed_at") or interview_block.get("evaluation_completed_at")
+                    
+                    # Deep Sync Fallback: If timing is still missing, use the latest session_end
+                    if not completed_at:
+                        sessions = data_wrapper.get("sessions", [])
+                        if sessions:
+                            # Get the most recent session_end
+                            session_ends = [s.get("session_end") for s in sessions if s.get("session_end")]
+                            if session_ends:
+                                completed_at = max(session_ends)
+
+                    # Extract rich metrics from the data wrapper
+                    hard_filter = interview_block.get("hard_filter_overall") or interview_block.get("hard_filter_status") or data_wrapper.get("hard_filter_status")
+                    
+                    # Deep Sync Fallback: if hard_filter is missing, cross-reference questions_answers with assigned_questions
+                    if not hard_filter:
+                        qa_list = data_wrapper.get("questions_answers", [])
+                        assigned_list = data_wrapper.get("assigned_questions", [])
+                        
+                        # Find IDs of questions marked as hard filters
+                        hard_filter_question_ids = {q.get("id") for q in assigned_list if q.get("is_hard_filter") or q.get("question_type") == "hard_filter"}
+                        
+                        if hard_filter_question_ids:
+                            # Check if any of these specific questions failed
+                            relevant_qas = [qa for qa in qa_list if qa.get("question_id") in hard_filter_question_ids]
+                            if any(qa.get("pass_fail") == "FAIL" for qa in relevant_qas):
+                                hard_filter = "FAILED"
+                            elif any(qa.get("pass_fail") == "PASS" for qa in relevant_qas):
+                                hard_filter = "PASSED"
+
+                    total_score = interview_block.get("total_score") or data_wrapper.get("total_score")
+                    cand_score = interview_block.get("candidate_score") or data_wrapper.get("candidate_score")
+
+                    now_iso = datetime.now(timezone.utc).isoformat()
+
                     candidate_blob: Dict[str, Any] = {
                         "engage_status": status_value,
                         "engage_updated_at": now_iso,
@@ -733,8 +775,15 @@ async def sync_interview_details(request: SyncInterviewDetailsRequest):
                     }
                     if overall_score is not None:
                         candidate_blob["engage_score"] = overall_score
+                    if total_score is not None:
+                        candidate_blob["engage_total_score"] = total_score
+                    if cand_score is not None:
+                        candidate_blob["engage_candidate_score"] = cand_score
+                    if hard_filter:
+                        candidate_blob["engage_hard_filter_status"] = hard_filter
                     if completed_at:
                         candidate_blob["engage_completed_at"] = completed_at
+
 
                     candidate_rows_updated = 0
                     if candidate_id:

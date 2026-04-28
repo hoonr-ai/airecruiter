@@ -739,6 +739,12 @@ async def get_job_candidates(job_id_or_ref: str):
                     cand["engage_interview_id"] = data_blob.get("engage_interview_id")
                 if data_blob.get("engage_score") is not None:
                     cand["engage_score"] = data_blob.get("engage_score")
+                if data_blob.get("engage_candidate_score") is not None:
+                    cand["engage_candidate_score"] = data_blob.get("engage_candidate_score")
+                if data_blob.get("engage_total_score") is not None:
+                    cand["engage_total_score"] = data_blob.get("engage_total_score")
+                if data_blob.get("engage_hard_filter_status"):
+                    cand["engage_hard_filter_status"] = data_blob.get("engage_hard_filter_status")
                 if data_blob.get("engage_completed_at"):
                     cand["engage_completed_at"] = data_blob.get("engage_completed_at")
 
