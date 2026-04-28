@@ -1950,3 +1950,340 @@ async def analyze_candidates(request: CandidateAnalysisRequest):
         structured_jd=request.structured_jd
     )
     return {"results": results, "name": "", "email": "", "skills": [], "experience_years": 0} # Dummy fields to satisfy model if strict
+
+
+# ---------------------------------------------------------------------------
+# Candidate Evaluation Report
+# ---------------------------------------------------------------------------
+@router.get("/candidates/{candidate_id}/evaluation-report")
+async def get_candidate_evaluation_report(
+    candidate_id: str,
+    job_id: Optional[str] = Query(None, description="Job ID or JobDiva ID"),
+):
+    """
+    Aggregate a full Candidate Evaluation Report from multiple data sources:
+      - sourced_candidates      : basic profile, resume, match scores
+      - monitored_jobs          : position details, rubric, screening questions
+      - engage_interview_audit  : interview history, send timestamps
+      - PAIR API                : live evaluation, Q&A, transcriptions, outreach
+    """
+    import os, httpx as _httpx
+    PAIR_BASE = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai")
+
+    try:
+        from psycopg2.extras import RealDictCursor
+
+        conn = get_db_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # 1. sourced_candidates — prefer the row tied to this job
+                if job_id:
+                    cur.execute(
+                        """
+                        SELECT sc.*
+                        FROM sourced_candidates sc
+                        JOIN monitored_jobs mj
+                          ON mj.jobdiva_id = sc.jobdiva_id
+                         OR mj.job_id      = sc.jobdiva_id
+                        WHERE sc.candidate_id = %s
+                          AND (mj.job_id = %s OR mj.jobdiva_id = %s)
+                        ORDER BY sc.updated_at DESC
+                        LIMIT 1
+                        """,
+                        (candidate_id, job_id, job_id),
+                    )
+                    cand_row = cur.fetchone()
+                    if not cand_row:
+                        # Fallback: any row for this candidate
+                        cur.execute(
+                            "SELECT * FROM sourced_candidates WHERE candidate_id = %s ORDER BY updated_at DESC LIMIT 1",
+                            (candidate_id,),
+                        )
+                        cand_row = cur.fetchone()
+                else:
+                    cur.execute(
+                        "SELECT * FROM sourced_candidates WHERE candidate_id = %s ORDER BY updated_at DESC LIMIT 1",
+                        (candidate_id,),
+                    )
+                    cand_row = cur.fetchone()
+
+                if not cand_row:
+                    raise HTTPException(status_code=404, detail=f"Candidate {candidate_id} not found")
+
+                # Parse data blob
+                data_blob = cand_row.get("data") or {}
+                if isinstance(data_blob, str):
+                    try:
+                        data_blob = json.loads(data_blob)
+                    except Exception:
+                        data_blob = {}
+
+                # Resolve effective jobdiva_id for job lookup
+                effective_jobdiva_id = cand_row.get("jobdiva_id") or job_id or ""
+
+                # 2. monitored_jobs
+                job_row = None
+                if effective_jobdiva_id or job_id:
+                    cur.execute(
+                        """
+                        SELECT mj.*,
+                               mj.resume_match_filters,
+                               mj.sourcing_filters,
+                               mj.bot_introduction
+                        FROM monitored_jobs mj
+                        WHERE mj.job_id = %s OR mj.jobdiva_id = %s
+                        LIMIT 1
+                        """,
+                        (effective_jobdiva_id, effective_jobdiva_id),
+                    )
+                    job_row = cur.fetchone()
+                    if not job_row and job_id and job_id != effective_jobdiva_id:
+                        cur.execute(
+                            "SELECT * FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
+                            (job_id, job_id),
+                        )
+                        job_row = cur.fetchone()
+
+                # 3. Fetch structured rubric using service
+                from services.job_rubric_db import JobRubricDB
+                rubric_db = JobRubricDB()
+                rubric = rubric_db.get_full_rubric(effective_jobdiva_id) or {}
+
+                # 4. engage_interview_audit — most recent row for this candidate + job
+                audit_row = None
+                audit_where = ["candidate_id = %s"]
+                audit_params: list = [candidate_id]
+                if effective_jobdiva_id:
+                    audit_where.append("(job_id = %s OR job_id = %s)")
+                    audit_params += [effective_jobdiva_id, job_id or effective_jobdiva_id]
+                cur.execute(
+                    f"""
+                    SELECT * FROM engage_interview_audit
+                    WHERE {' AND '.join(audit_where)}
+                      AND interview_id IS NOT NULL AND interview_id::text != ''
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    tuple(audit_params),
+                )
+                audit_row = cur.fetchone()
+
+                # 4. screening questions
+                screen_questions = []
+                if job_row:
+                    jd_id = job_row.get("jobdiva_id") or effective_jobdiva_id or ""
+                    job_pk = job_row.get("job_id") or ""
+                    cur.execute(
+                        """
+                        SELECT question_text, pass_criteria, is_default, category, order_index
+                        FROM job_screen_questions
+                        WHERE jobdiva_id = %s OR jobdiva_id = %s
+                        ORDER BY order_index
+                        """,
+                        (jd_id, job_pk),
+                    )
+                    screen_questions = [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+        # ----------------------------------------------------------------
+        # Parse sourced_candidates fields
+        # ----------------------------------------------------------------
+        def _jl(val, default):
+            if val is None:
+                return default
+            if isinstance(val, type(default)):
+                return val
+            if isinstance(val, str):
+                try:
+                    p = json.loads(val)
+                    return p if isinstance(p, type(default)) else default
+                except Exception:
+                    return default
+            return default
+
+        resume_match_score = float(cand_row.get("resume_match_percentage") or 0)
+        engage_score       = float(data_blob.get("engage_score") or 0)
+        engage_total_score = float(data_blob.get("engage_total_score") or 0)
+        engage_status      = str(data_blob.get("engage_status") or "")
+        hard_filter_status = str(data_blob.get("engage_hard_filter_status") or "")
+        engage_interview_id = str(data_blob.get("engage_interview_id") or (audit_row or {}).get("interview_id") or "")
+        engage_completed_at = data_blob.get("engage_completed_at") or (audit_row or {}).get("updated_at") or None
+        engage_created_at   = (audit_row or {}).get("created_at") or None
+
+        # ----------------------------------------------------------------
+        # Webhook payload fallback (questions & answers)
+        # ----------------------------------------------------------------
+        webhook_payload = data_blob.get("engage_last_response")
+        if isinstance(webhook_payload, str):
+            try:
+                webhook_payload = json.loads(webhook_payload)
+            except:
+                webhook_payload = {}
+
+        # ----------------------------------------------------------------
+        # Build job details block
+        # ----------------------------------------------------------------
+        job_details: dict = {}
+        if job_row:
+            sourcing_filters = _jl(job_row.get("sourcing_filters"), {})
+            resume_match_filters = _jl(job_row.get("resume_match_filters"), [])
+            job_details = {
+                "job_id":            job_row.get("job_id"),
+                "jobdiva_id":        job_row.get("jobdiva_id"),
+                "title":             job_row.get("title") or job_row.get("enhanced_title"),
+                "customer_name":     job_row.get("customer_name"),
+                "city":              job_row.get("city"),
+                "state":             job_row.get("state"),
+                "job_location":      f"{job_row.get('city') or ''}, {job_row.get('state') or ''}".strip(", "),
+                "pay_rate":          job_row.get("pay_rate"),
+                "start_date":        str(job_row.get("start_date") or ""),
+                "posted_date":       str(job_row.get("posted_date") or ""),
+                "openings":          job_row.get("openings"),
+                "max_allowed_submittals": job_row.get("max_allowed_submittals"),
+                "employment_type":   job_row.get("employment_type"),
+                "work_authorization":job_row.get("work_authorization"),
+                "ai_description":    job_row.get("ai_description") or job_row.get("jobdiva_description"),
+                "recruiter_notes":   job_row.get("recruiter_notes"),
+                "bot_introduction":  job_row.get("bot_introduction"),
+                "rubric":            rubric,
+                "sourcing_filters":  sourcing_filters,
+                "resume_match_filters": resume_match_filters,
+                "screen_questions":  screen_questions,
+            }
+
+        # ----------------------------------------------------------------
+        # Fetch PAIR live data if we have an interview_id
+        # ----------------------------------------------------------------
+        pair_data: dict = {}
+        
+        # Pre-populate from webhook payload if present
+        if webhook_payload:
+            wp_data = webhook_payload.get("data", webhook_payload)
+            pair_data = {
+                "interview":      wp_data.get("interview"),
+                "evaluation":     wp_data.get("evaluation") or wp_data,
+                "transcriptions": wp_data.get("transcriptions") or wp_data.get("conversation") or [],
+                "outreach":       wp_data.get("outreach"),
+                "questions_answers": wp_data.get("questions_answers", []),
+            }
+
+        if engage_interview_id:
+            try:
+                async with _httpx.AsyncClient(timeout=20.0) as client:
+                    interview_res, evaluation_res, transcription_res, outreach_res = await asyncio.gather(
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}"),
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/evaluation"),
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/transcriptions"),
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/outreach-status"),
+                        return_exceptions=True,
+                    )
+
+                def _safe(res):
+                    if isinstance(res, Exception):
+                        return None
+                    try:
+                        if res.status_code == 200:
+                            d = res.json()
+                            return d.get("data", d)
+                        return None
+                    except Exception:
+                        return None
+
+                interview_data    = _safe(interview_res)
+                evaluation_data   = _safe(evaluation_res)
+                transcription_data= _safe(transcription_res)
+                outreach_data     = _safe(outreach_res)
+
+                # Merge live data into pair_data (live data takes precedence)
+                if interview_data: pair_data["interview"] = interview_data
+                if evaluation_data: pair_data["evaluation"] = evaluation_data
+                if transcription_data: 
+                    pair_data["transcriptions"] = transcription_data if isinstance(transcription_data, list) else (transcription_data or [])
+                if outreach_data: pair_data["outreach"] = outreach_data
+
+                # Dynamic mapping of questions to evaluation fields
+                qa_list = pair_data.get("questions_answers") or []
+                eval_map = {}
+                for qa in qa_list:
+                    txt = (qa.get("question_text") or "").lower()
+                    ans = qa.get("answer_text") or ""
+                    if "open to exploring new job" in txt: eval_map["isActivelyLookingForJob"] = ans
+                    elif "current or most recent role" in txt: eval_map["currentRole"] = ans
+                    elif "current location" in txt: eval_map["currentLocation"] = ans
+                    elif "authorized to work in the united states" in txt: eval_map["isAuthorizedToWorkInUS"] = ans
+                    elif "visa sponsorship" in txt: eval_map["requireVisaSponsorship"] = ans
+                    elif "onsite work arrangement" in txt: eval_map["isOpenToRelocation"] = ans
+                    elif "availability to start" in txt: eval_map["isAvailableToStartSoon"] = ans
+                    elif "compensation" in txt: eval_map["expectedPayRate"] = ans
+                
+                # Merge into evaluation object
+                if isinstance(pair_data.get("evaluation"), dict):
+                    pair_data["evaluation"].update(eval_map)
+                else:
+                    pair_data["evaluation"] = eval_map
+
+                # Refresh scores from live PAIR data
+                if isinstance(interview_data, dict):
+                    iv = interview_data.get("interview") or interview_data
+                    if iv.get("overall_score") is not None:
+                        engage_score = float(iv["overall_score"])
+                    if iv.get("hard_filter_overall") or iv.get("hard_filter_status"):
+                        hard_filter_status = str(iv.get("hard_filter_overall") or iv.get("hard_filter_status") or hard_filter_status)
+                    if iv.get("status"):
+                        engage_status = str(iv["status"])
+                    if iv.get("completed_at"):
+                        engage_completed_at = iv["completed_at"]
+            except Exception as pair_err:
+                logger.warning(f"PAIR data fetch failed for interview {engage_interview_id}: {pair_err}")
+
+        # ----------------------------------------------------------------
+        # Compose final report
+        # ----------------------------------------------------------------
+        candidate_info = {
+            "candidate_id":    candidate_id,
+            "name":            cand_row.get("name"),
+            "email":           cand_row.get("email"),
+            "phone":           cand_row.get("phone"),
+            "headline":        cand_row.get("headline"),
+            "location":        cand_row.get("location"),
+            "source":          cand_row.get("source"),
+            "profile_url":     cand_row.get("profile_url"),
+            "image_url":       cand_row.get("image_url"),
+            "availability":    data_blob.get("recent_availability") or data_blob.get("recentAvailability") or data_blob.get("availability_status") or data_blob.get("availability"),
+            "resume_text":     cand_row.get("resume_text") or data_blob.get("resume_text"),
+            "skills":          _jl(data_blob.get("skills"), []),
+            "experience_years":data_blob.get("experience_years"),
+            "company_experience": _jl(data_blob.get("company_experience"), []),
+            "education":       _jl(data_blob.get("education"), []),
+            "certifications":  _jl(data_blob.get("certifications"), []),
+        }
+
+        scores = {
+            "resume_match_score":    resume_match_score,
+            "resume_match_status":   str(data_blob.get("resume_matching_status") or ("done" if resume_match_score > 0 else "pending")),
+            "engage_score":          engage_score,
+            "engage_total_score":    engage_total_score,
+            "engage_status":         engage_status,
+            "hard_filter_status":    hard_filter_status,
+            "engage_interview_id":   engage_interview_id,
+            "engage_completed_at":   str(engage_completed_at) if engage_completed_at else None,
+            "engage_created_at":     str(engage_created_at) if engage_created_at else None,
+            "matched_skills":        _jl(data_blob.get("matched_skills"), []),
+            "missing_skills":        _jl(data_blob.get("missing_skills"), []),
+            "explainability":        _jl(data_blob.get("explainability"), []),
+            "score_details":         _jl(data_blob.get("match_score_details"), {}),
+        }
+
+        return {
+            "status":    "success",
+            "candidate": candidate_info,
+            "scores":    scores,
+            "job":       job_details,
+            "pair":      pair_data,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"evaluation-report failed for {candidate_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
