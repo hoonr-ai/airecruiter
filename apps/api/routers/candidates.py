@@ -1320,6 +1320,92 @@ def _extract_new_zoominfo_contact_fields(payload: Dict[str, Any]) -> Dict[str, s
     }
 
 
+APOLLO_ENRICH_URL = "https://api.apollo.io/api/v1/people/enrich"
+# TODO: Move to env var (e.g., APOLLO_API_KEY) after initial rollout.
+APOLLO_API_KEY = "cB7rogHZj4XRrhnTEqTlXQ"
+
+
+def _extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, str]:
+    person = payload.get("person") if isinstance(payload, dict) else {}
+    if not isinstance(person, dict):
+        person = {}
+
+    work_email = str(person.get("email") or "").strip()
+
+    personal_email = ""
+    personal_emails = person.get("personal_emails")
+    if isinstance(personal_emails, list):
+        for item in personal_emails:
+            candidate = str(item or "").strip()
+            if candidate:
+                personal_email = candidate
+                break
+
+    mobile_phone = str(person.get("mobile_phone") or "").strip()
+    work_phone = str(person.get("sanitized_phone") or person.get("phone") or "").strip()
+
+    phone_numbers = person.get("phone_numbers")
+    if isinstance(phone_numbers, list):
+        for item in phone_numbers:
+            if not isinstance(item, dict):
+                continue
+            number = str(item.get("sanitized_number") or item.get("raw_number") or "").strip()
+            if not number:
+                continue
+
+            ptype = str(item.get("type") or "").strip().lower()
+            if not mobile_phone and ptype in {"mobile", "cell", "cellphone"}:
+                mobile_phone = number
+            elif not work_phone and ptype in {"work", "office", "direct"}:
+                work_phone = number
+            elif not work_phone:
+                work_phone = number
+
+    return {
+        "mobilePhone": mobile_phone,
+        "workPhone": work_phone,
+        "workEmail": work_email,
+        "personalEmail": personal_email,
+    }
+
+
+async def _apollo_enrich_by_linkedin(candidate_id: str, linkedin_url: str) -> Dict[str, Any]:
+    if not APOLLO_API_KEY or APOLLO_API_KEY == "PASTE_APOLLO_API_KEY_HERE":
+        logger.warning("Apollo fallback skipped for %s: API key not configured", candidate_id)
+        return {"ok": False, "message": "Apollo API key not configured"}
+
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-API-Key": APOLLO_API_KEY,
+    }
+    payload = {"linkedin_url": linkedin_url}
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            ares = await client.post(APOLLO_ENRICH_URL, headers=headers, json=payload)
+    except Exception as e:
+        logger.warning("Apollo fallback request failed for %s: %s", candidate_id, e)
+        return {"ok": False, "message": f"Apollo request failed: {str(e)}"}
+
+    if ares.status_code >= 400:
+        logger.warning(
+            "Apollo fallback non-2xx for %s: %s %s",
+            candidate_id,
+            ares.status_code,
+            ares.text[:300],
+        )
+        return {"ok": False, "message": f"Apollo API error ({ares.status_code})"}
+
+    try:
+        apollo_data = ares.json()
+    except Exception:
+        apollo_data = {"raw": ares.text}
+
+    extracted = _extract_apollo_contact_fields(apollo_data)
+    return {"ok": True, "fields": extracted}
+
+
 async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandidateContactRequest):
     """
     Enrich candidate contact details from ZoomInfo using LinkedIn URL.
@@ -1398,12 +1484,21 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         "outputFields": ["workPhone", "mobilePhone", "workEmail", "personalEmail"],
     }
 
+    provider_used = "zoominfo"
+    extracted: Dict[str, str] = {}
+
     try:
         async with httpx.AsyncClient(timeout=20.0) as client:
             zres = await client.post(ZOOMINFO_ENRICH_URL, headers=headers, json=zoominfo_payload)
     except Exception as e:
         logger.error(f"ZoomInfo enrich request failed for {candidate_id}: {e}")
-        raise HTTPException(status_code=502, detail=f"ZoomInfo request failed: {str(e)}")
+        apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+        if apollo_result.get("ok"):
+            provider_used = "apollo"
+            extracted = apollo_result.get("fields") or {}
+            logger.info("Apollo fallback succeeded for %s after ZoomInfo request failure", candidate_id)
+        else:
+            raise HTTPException(status_code=502, detail=f"ZoomInfo request failed: {str(e)}")
 
     response_text = zres.text
     try:
@@ -1411,7 +1506,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     except Exception:
         zoominfo_data = {"raw": response_text}
 
-    if zres.status_code == 401:
+    if provider_used == "zoominfo" and zres.status_code == 401:
         # Legacy endpoint rejected this token. Fallback to the new OAuth Data API.
         row0 = existing_rows[0] if existing_rows else {}
         row_data = _json_load_safe(row0.get("data"), {}) if isinstance(row0, dict) else {}
@@ -1499,20 +1594,27 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                 "ZoomInfo fallback insufficient inputs for %s; returning no-contact result",
                 candidate_id,
             )
-            return {
-                "status": "success",
-                "candidate_id": candidate_id,
-                "linkedin_url": linkedin_url,
-                "phone_source": "none",
-                "phone": None,
-                "email": None,
-                "workPhone": None,
-                "mobilePhone": None,
-                "workEmail": None,
-                "personalEmail": None,
-                "updated_rows": 0,
-                "message": "ZoomInfo fallback skipped: insufficient match inputs (no reliable person match).",
-            }
+            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+            if apollo_result.get("ok"):
+                provider_used = "apollo"
+                extracted = apollo_result.get("fields") or {}
+                logger.info("Apollo fallback succeeded for %s after ZoomInfo insufficient match inputs", candidate_id)
+            else:
+                return {
+                    "status": "success",
+                    "candidate_id": candidate_id,
+                    "linkedin_url": linkedin_url,
+                    "phone_source": "none",
+                    "phone": None,
+                    "email": None,
+                    "workPhone": None,
+                    "mobilePhone": None,
+                    "workEmail": None,
+                    "personalEmail": None,
+                    "provider": "none",
+                    "updated_rows": 0,
+                    "message": "ZoomInfo fallback skipped: insufficient match inputs (no reliable person match).",
+                }
 
         new_headers = {
             "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
@@ -1529,21 +1631,33 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             }
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                new_res = await client.post(zoominfo_new_enrich_url, headers=new_headers, json=new_payload)
-        except Exception as e:
-            logger.error(f"ZoomInfo new API fallback request failed for {candidate_id}: {e}")
-            raise HTTPException(status_code=502, detail=f"ZoomInfo fallback request failed: {str(e)}")
+        if provider_used == "zoominfo":
+            try:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    new_res = await client.post(zoominfo_new_enrich_url, headers=new_headers, json=new_payload)
+            except Exception as e:
+                logger.error(f"ZoomInfo new API fallback request failed for {candidate_id}: {e}")
+                apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+                if apollo_result.get("ok"):
+                    provider_used = "apollo"
+                    extracted = apollo_result.get("fields") or {}
+                    logger.info("Apollo fallback succeeded for %s after ZoomInfo new API request failure", candidate_id)
+                else:
+                    raise HTTPException(status_code=502, detail=f"ZoomInfo fallback request failed: {str(e)}")
 
-        if new_res.status_code >= 400:
+        if provider_used == "zoominfo" and new_res.status_code >= 400:
             logger.warning(
                 "ZoomInfo fallback non-2xx for %s: %s %s",
                 candidate_id,
                 new_res.status_code,
                 new_res.text[:300],
             )
-            if 400 <= new_res.status_code < 500:
+            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+            if apollo_result.get("ok"):
+                provider_used = "apollo"
+                extracted = apollo_result.get("fields") or {}
+                logger.info("Apollo fallback succeeded for %s after ZoomInfo non-2xx fallback response", candidate_id)
+            elif 400 <= new_res.status_code < 500:
                 return {
                     "status": "success",
                     "candidate_id": candidate_id,
@@ -1555,22 +1669,30 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                     "mobilePhone": None,
                     "workEmail": None,
                     "personalEmail": None,
+                    "provider": "none",
                     "updated_rows": 0,
                     "message": f"ZoomInfo returned no contact match ({new_res.status_code}).",
                 }
-            raise HTTPException(status_code=502, detail=f"ZoomInfo API error ({new_res.status_code})")
+            else:
+                raise HTTPException(status_code=502, detail=f"ZoomInfo API error ({new_res.status_code})")
 
-        try:
-            new_data = new_res.json()
-        except Exception:
-            new_data = {"raw": new_res.text}
+        if provider_used == "zoominfo":
+            try:
+                new_data = new_res.json()
+            except Exception:
+                new_data = {"raw": new_res.text}
 
-        extracted = _extract_new_zoominfo_contact_fields(new_data)
-    elif zres.status_code >= 400:
+            extracted = _extract_new_zoominfo_contact_fields(new_data)
+    elif provider_used == "zoominfo" and zres.status_code >= 400:
         logger.warning(
             f"ZoomInfo enrich non-2xx for {candidate_id}: {zres.status_code} {response_text[:300]}"
         )
-        if 400 <= zres.status_code < 500:
+        apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+        if apollo_result.get("ok"):
+            provider_used = "apollo"
+            extracted = apollo_result.get("fields") or {}
+            logger.info("Apollo fallback succeeded for %s after ZoomInfo non-2xx response", candidate_id)
+        elif 400 <= zres.status_code < 500:
             return {
                 "status": "success",
                 "candidate_id": candidate_id,
@@ -1582,12 +1704,28 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                 "mobilePhone": None,
                 "workEmail": None,
                 "personalEmail": None,
+                "provider": "none",
                 "updated_rows": 0,
                 "message": f"ZoomInfo returned no contact match ({zres.status_code}).",
             }
-        raise HTTPException(status_code=502, detail=f"ZoomInfo API error ({zres.status_code})")
-    else:
+        else:
+            raise HTTPException(status_code=502, detail=f"ZoomInfo API error ({zres.status_code})")
+    elif provider_used == "zoominfo":
         extracted = _extract_enrichment_fields(zoominfo_data)
+
+    if provider_used == "zoominfo":
+        probe_phone = _normalise_phone((extracted.get("mobilePhone") or extracted.get("workPhone") or ""))
+        probe_email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip().lower()
+        if sum(1 for ch in probe_phone if ch.isdigit()) < 7:
+            probe_phone = ""
+
+        if not probe_phone and not probe_email:
+            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+            if apollo_result.get("ok"):
+                provider_used = "apollo"
+                extracted = apollo_result.get("fields") or {}
+                logger.info("Apollo fallback succeeded for %s after ZoomInfo returned no usable contact", candidate_id)
+
     raw_mobile_phone = extracted.get("mobilePhone") or ""
     raw_work_phone = extracted.get("workPhone") or ""
     raw_work_email = extracted.get("workEmail") or ""
@@ -1610,8 +1748,9 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     ).strip().lower()
 
     logger.info(
-        "ZoomInfo enrich parsed for %s | phone_source=%s | has_mobile=%s | has_work=%s | has_email=%s | mobile=%s | work=%s | email=%s",
+        "Contact enrich parsed for %s | provider=%s | phone_source=%s | has_mobile=%s | has_work=%s | has_email=%s | mobile=%s | work=%s | email=%s",
         candidate_id,
+        provider_used,
         phone_source,
         bool(raw_mobile_phone),
         bool(raw_work_phone),
@@ -1633,6 +1772,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                         data_blob = _json_load_safe(row.get("data"), {})
                         data_blob["zoominfo_contact_enrichment"] = {
                             "linkedin_url": linkedin_url,
+                            "provider": provider_used,
                             "workPhone": extracted.get("workPhone"),
                             "mobilePhone": extracted.get("mobilePhone"),
                             "workEmail": extracted.get("workEmail"),
@@ -1668,6 +1808,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         "status": "success",
         "candidate_id": candidate_id,
         "linkedin_url": linkedin_url,
+        "provider": provider_used,
         "phone_source": phone_source,
         "phone": enriched_phone or None,
         "email": enriched_email or None,
