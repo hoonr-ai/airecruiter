@@ -73,6 +73,7 @@ import { BulkUploadSection } from "@/components/jobs/BulkUploadSection";
 import { PhoneIndicator } from "@/components/phone-indicator";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { API_BASE } from "@/lib/api";
+import { trackEvent } from "@/lib/analytics";
 import { logger } from "@/lib/logger";
 
 // Utility function to clean location_type values and filter out employment terms
@@ -164,6 +165,35 @@ const STEP_DESCRIPTIONS: Record<Step, string> = {
   3: "Define evaluation criteria and rubric for candidate assessment.",
   4: "Configure filters and requirements for candidate matching.",
   5: "Launch sourcing and begin candidate collection."
+};
+
+type StepSnapshot = Record<string, unknown>;
+
+const truncateForTelemetry = (value: unknown, max = 220): string | number | boolean | null => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "string") return value.length > max ? `${value.slice(0, max)}…` : value;
+  const serialized = JSON.stringify(value);
+  if (serialized.length > max) return `${serialized.slice(0, max)}…`;
+  return serialized;
+};
+
+const diffSnapshots = (before: StepSnapshot = {}, after: StepSnapshot = {}) => {
+  const keys = Array.from(new Set([...Object.keys(before), ...Object.keys(after)]));
+  const changes: Array<{ field: string; before: unknown; after: unknown }> = [];
+
+  for (const key of keys) {
+    const prev = before[key];
+    const next = after[key];
+    if (JSON.stringify(prev) === JSON.stringify(next)) continue;
+    changes.push({
+      field: key,
+      before: truncateForTelemetry(prev),
+      after: truncateForTelemetry(next),
+    });
+  }
+
+  return changes;
 };
 
 // Stable handle tying a rubric item to its Step-4 resume_match filter.
@@ -499,6 +529,8 @@ function NewJobPageContent() {
   };
   const [selectedCandidates, setSelectedCandidates] = useState<Set<string>>(new Set());
   const [searchStatus, setSearchStatus] = useState("Fetching applicants...");
+  const [lastSearchRuntimeSec, setLastSearchRuntimeSec] = useState<number | null>(null);
+  const [lastSearchRunsExecuted, setLastSearchRunsExecuted] = useState<number | null>(null);
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
@@ -540,6 +572,9 @@ function NewJobPageContent() {
     (currentPage - 1) * candidatesPerPage,
     currentPage * candidatesPerPage
   );
+  const qualityScorecard = hasSearched ? collectCandidateQualityStats(candidates) : null;
+  const topMatchedPreview = (qualityScorecard?.top_matched_skills || []).slice(0, 2).map((item: any) => item.term).filter(Boolean);
+  const topMissingPreview = (qualityScorecard?.top_missing_skills || []).slice(0, 2).map((item: any) => item.term).filter(Boolean);
 
   const visiblePages = (() => {
     if (totalPages <= 5) return Array.from({ length: totalPages }, (_, i) => i + 1);
@@ -557,6 +592,101 @@ function NewJobPageContent() {
   // Resume Setup load state. Gates the wizard shell so the user sees a full-page
   // loader instead of a flash-of-empty-form while we hydrate from /jobs/{id}/draft.
   const [isLoadingDraft, setIsLoadingDraft] = useState(false);
+  const stepEntrySnapshotRef = useRef<Partial<Record<Step, StepSnapshot>>>({});
+  const stepStartMsRef = useRef<number>(Date.now());
+
+  const getStepSnapshot = (step: Step): StepSnapshot => {
+    switch (step) {
+      case 1:
+        return {
+          isExternal,
+          jobdivaId,
+          numericJobId,
+          hasJobData: !!jobData,
+          jobTitle,
+          recruiterNotes,
+          selectedEmpTypes,
+          recruiterEmails,
+          screeningLevel,
+          workAuthorization,
+          selectedJobBoards,
+        };
+      case 2:
+        return {
+          enhancedTitle,
+          postingLength: (jobPosting || "").length,
+          postingPreview: truncateForTelemetry(jobPosting, 180),
+          selectedJobBoards,
+        };
+      case 3:
+        return {
+          titleCount: rubricData?.titles?.length || 0,
+          skillCount: rubricData?.skills?.length || 0,
+          educationCount: rubricData?.education?.length || 0,
+          domainCount: rubricData?.domain?.length || 0,
+          customerRequirementsCount: rubricData?.customer_requirements?.length || 0,
+          otherRequirementsCount: rubricData?.other_requirements?.length || 0,
+          titleSignature: (rubricData?.titles || []).map((t: any) => `${t.value}|${t.required}|${t.minYears}|${t.matchType}`).slice(0, 20),
+          skillSignature: (rubricData?.skills || []).map((s: any) => `${s.value}|${s.required}|${s.minYears}|${s.matchType}`).slice(0, 20),
+        };
+      case 4:
+        return {
+          resumeFiltersCount: resumeMatchFilters.length,
+          activeResumeFiltersCount: resumeMatchFilters.filter(f => f.active).length,
+          resumeFiltersSignature: resumeMatchFilters.map(f => `${f.category}|${f.value}|${f.active}`).slice(0, 40),
+          screenQuestionCount: screenQuestions.length,
+          screenQuestionsSignature: screenQuestions.map(q => `${q.question_text}|${q.pass_criteria}`).slice(0, 40),
+          botIntroPreview: truncateForTelemetry(botIntroduction, 180),
+        };
+      case 5:
+        return {
+          searchSources,
+          recentDaysFilter,
+          includeNoResume,
+          sourceTitlesCount: sourceTitles.length,
+          sourceSkillsCount: sourceSkills.length,
+          sourceLocationsCount: sourceLocations.length,
+          sourceCompaniesCount: sourceCompanies.length,
+          sourceKeywordsCount: sourceKeywords.length,
+          sourceFilter,
+          booleanQuery: truncateForTelemetry(resolvedGeneratedBoolean, 260),
+        };
+      default:
+        return {};
+    }
+  };
+
+  const trackStepStart = (step: Step) => {
+    const snapshot = getStepSnapshot(step);
+    stepEntrySnapshotRef.current[step] = snapshot;
+    stepStartMsRef.current = Date.now();
+
+    trackEvent("job_wizard_step_started", {
+      step,
+      step_label: STEP_LABELS[step],
+      job_ref: (jobdivaId || numericJobId || "new").toString(),
+      state: snapshot,
+    });
+  };
+
+  const trackStepAdvance = (fromStep: Step, toStep: Step, context?: Record<string, unknown>) => {
+    const before = stepEntrySnapshotRef.current[fromStep] || {};
+    const after = getStepSnapshot(fromStep);
+    const changes = diffSnapshots(before, after).slice(0, 80);
+
+    trackEvent("job_wizard_step_completed", {
+      from_step: fromStep,
+      from_step_label: STEP_LABELS[fromStep],
+      to_step: toStep,
+      to_step_label: STEP_LABELS[toStep],
+      duration_ms: Date.now() - stepStartMsRef.current,
+      job_ref: (jobdivaId || numericJobId || "new").toString(),
+      changes_count: changes.length,
+      changed_fields: changes.map(c => c.field),
+      changes,
+      ...(context || {}),
+    });
+  };
 
   useEffect(() => {
     const jobIdFromUrl = searchParams.get("jobId");
@@ -574,6 +704,11 @@ function NewJobPageContent() {
   useEffect(() => {
     setHasSeededSourceLocation(false);
   }, [numericJobId, jobdivaId]);
+
+  useEffect(() => {
+    trackStepStart(currentStep);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep]);
 
   const showToast = (message: string, type: "success" | "info" | "error" = "success") => {
     setToast({ message, type });
@@ -914,6 +1049,11 @@ function NewJobPageContent() {
     setIsFetching(true);
     setIsFetched(false);
 
+    trackEvent("job_wizard_step1_job_search_started", {
+      step: 1,
+      job_ref_input: searchId,
+    });
+
     // RESET all states before new fetch to prevent stale data
     setJobTitle("");
     setEnhancedTitle("");
@@ -1034,9 +1174,22 @@ function NewJobPageContent() {
       setCurrentStep(1);
       setPageSubtitle(`${displayData.title} · ${displayData.customer_name}`);
       showToast("Job intake form auto-populated from JobDiva.", "success");
+
+      trackEvent("job_wizard_step1_job_search_success", {
+        step: 1,
+        job_ref_input: searchId,
+        resolved_job_id: data.id?.toString?.() || "",
+        resolved_jobdiva_id: data.jobdiva_id?.toString?.() || "",
+        title: truncateForTelemetry(data.title),
+      });
     } catch (error: any) {
       console.error("Error fetching job:", error);
       showToast(error.message === "Job not found or incomplete data from JobDiva." ? "Job not found. Check the ID." : "Failed to fetch job. Use format: 26-06182", "info");
+      trackEvent("job_wizard_step1_job_search_failed", {
+        step: 1,
+        job_ref_input: searchId,
+        error: truncateForTelemetry(error?.message || String(error)),
+      });
     } finally {
       setIsFetching(false);
     }
@@ -1044,6 +1197,13 @@ function NewJobPageContent() {
 
   const handleEnhanceJob = async (titleOverride?: string, descOverride?: string, notesOverride?: string) => {
     setIsGeneratingJD(true);
+    trackEvent("job_wizard_step2_jd_regenerate_requested", {
+      step: 2,
+      job_ref: (numericJobId || jobdivaId || "new").toString(),
+      has_title_override: !!titleOverride,
+      has_description_override: !!descOverride,
+      has_notes_override: notesOverride !== undefined,
+    });
     try {
       const response = await fetch(`${API_BASE}/api/v1/ai-generation/jobs/${numericJobId || jobdivaId || 'new'}/generate-description`, {
         method: "POST",
@@ -1084,10 +1244,18 @@ function NewJobPageContent() {
       setJobPosting(data.description);
 
       showToast("AI Job Description enriched!", "success");
+      trackEvent("job_wizard_step2_jd_regenerate_success", {
+        step: 2,
+        generated_length: (data?.description || "").length,
+      });
     } catch (error) {
       const message = (error as Error)?.message ?? "unknown error";
       logger.error("ai_jd.enhance.exception", { message });
       showToast(`JD generation failed: ${message}`, "info");
+      trackEvent("job_wizard_step2_jd_regenerate_failed", {
+        step: 2,
+        error: truncateForTelemetry(message),
+      });
     } finally {
       setIsGeneratingJD(false);
     }
@@ -1119,6 +1287,10 @@ function NewJobPageContent() {
   const handleEnhanceTitle = async () => {
     if (!jobTitle) return;
     setIsEnhancingTitle(true);
+    trackEvent("job_wizard_step2_title_enhance_requested", {
+      step: 2,
+      title: truncateForTelemetry(jobTitle),
+    });
     try {
       const apiUrl = API_BASE;
       const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-title`, {
@@ -1136,14 +1308,26 @@ function NewJobPageContent() {
         setEnhancedTitle(data.title);
 
         showToast("Title enhanced by Hoonr-Curate.", "success");
+        trackEvent("job_wizard_step2_title_enhance_success", {
+          step: 2,
+          title: truncateForTelemetry(data?.title),
+        });
       } else {
         const err = await res.text();
         console.error("Title enhance failed:", err);
         showToast("Failed to enhance title.", "info");
+        trackEvent("job_wizard_step2_title_enhance_failed", {
+          step: 2,
+          error: truncateForTelemetry(err),
+        });
       }
     } catch (e) {
       console.error(e);
       showToast("Failed to enhance title.", "info");
+      trackEvent("job_wizard_step2_title_enhance_failed", {
+        step: 2,
+        error: truncateForTelemetry((e as Error)?.message || String(e)),
+      });
     } finally {
       setIsEnhancingTitle(false);
     }
@@ -1176,6 +1360,11 @@ function NewJobPageContent() {
   const toggleEmpType = (type: EmploymentType) => {
     setSelectedEmpTypes(prev => {
       const newTypes = prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type];
+      trackEvent("job_wizard_step1_employment_type_changed", {
+        step: 1,
+        changed_type: type,
+        selected_types: newTypes,
+      });
       return newTypes;
     });
   };
@@ -1183,6 +1372,11 @@ function NewJobPageContent() {
   const toggleJobBoard = (board: string) => {
     setSelectedJobBoards(prev => {
       const newSelection = prev.includes(board) ? prev.filter(b => b !== board) : [...prev, board];
+      trackEvent("job_wizard_step2_publish_targets_changed", {
+        step: 2,
+        changed_board: board,
+        selected_boards: newSelection,
+      });
       return newSelection;
     });
   };
@@ -1288,7 +1482,19 @@ function NewJobPageContent() {
           <div key={step} className="flex-1 flex flex-col items-center relative z-10">
             <div
               className={`flex flex-col items-center w-full ${isClickable ? "cursor-pointer" : "cursor-not-allowed"}`}
-              onClick={() => isClickable && setCurrentStep(stepNumber)}
+              onClick={() => {
+                if (!isClickable) return;
+                const fromStep = currentStep;
+                if (stepNumber !== fromStep) {
+                  trackEvent("job_wizard_step_jumped", {
+                    from_step: fromStep,
+                    to_step: stepNumber,
+                    from_step_label: STEP_LABELS[fromStep],
+                    to_step_label: STEP_LABELS[stepNumber],
+                  });
+                }
+                setCurrentStep(stepNumber);
+              }}
             >
               <div className="relative flex items-center justify-center w-full mb-3">
                 {/* Connector Line — pinned perfectly between bubbles */}
@@ -2676,11 +2882,19 @@ function NewJobPageContent() {
 
   // Filter management functions
   const toggleResumeFilter = (id: number, active: boolean) => {
+    const target = resumeMatchFilters.find(f => f.id === id);
     setResumeMatchFilters(prev =>
       prev.map(filter =>
         filter.id === id ? { ...filter, active } : filter
       )
     );
+    trackEvent("job_wizard_step4_resume_filter_toggled", {
+      step: 4,
+      filter_id: id,
+      filter_category: target?.category || "",
+      filter_value: truncateForTelemetry(target?.value),
+      active,
+    });
   };
 
   const updateResumeFilter = (id: number, value: string) => {
@@ -2689,10 +2903,22 @@ function NewJobPageContent() {
         filter.id === id ? { ...filter, value } : filter
       )
     );
+    trackEvent("job_wizard_step4_resume_filter_value_changed", {
+      step: 4,
+      filter_id: id,
+      value: truncateForTelemetry(value),
+    });
   };
 
   const deleteResumeFilter = (id: number) => {
+    const target = resumeMatchFilters.find(f => f.id === id);
     setResumeMatchFilters(prev => prev.filter(filter => filter.id !== id));
+    trackEvent("job_wizard_step4_resume_filter_removed", {
+      step: 4,
+      filter_id: id,
+      filter_category: target?.category || "",
+      filter_value: truncateForTelemetry(target?.value),
+    });
   };
 
   const addResumeFilter = () => {
@@ -2712,12 +2938,21 @@ function NewJobPageContent() {
       }
     ]);
     setFilterIdCounter(prev => prev + 1);
+    trackEvent("job_wizard_step4_resume_filter_added", {
+      step: 4,
+      initial_category: "Custom",
+    });
   };
 
   const updateResumeFilterCategory = (id: number, category: string) => {
     setResumeMatchFilters(prev =>
       prev.map(filter => (filter.id === id ? { ...filter, category } : filter))
     );
+    trackEvent("job_wizard_step4_resume_filter_category_changed", {
+      step: 4,
+      filter_id: id,
+      category: truncateForTelemetry(category),
+    });
   };
 
   // Initialize filters from rubric data when moving to step 4
@@ -3336,6 +3571,10 @@ function NewJobPageContent() {
     ]);
     setSourceTitleInput("");
     setGeneratedBoolean("");
+    trackEvent("job_wizard_step5_source_title_added", {
+      step: 5,
+      value: truncateForTelemetry(cleanValue),
+    });
   };
 
   const addSourceSkill = (value: string) => {
@@ -3358,6 +3597,10 @@ function NewJobPageContent() {
     ]);
     setSourceSkillInput("");
     setGeneratedBoolean("");
+    trackEvent("job_wizard_step5_source_skill_added", {
+      step: 5,
+      value: truncateForTelemetry(cleanValue),
+    });
   };
 
   const addSourceLocation = (value: string) => {
@@ -3373,6 +3616,11 @@ function NewJobPageContent() {
     ]);
     setSourceLocationInput("");
     setGeneratedBoolean("");
+    trackEvent("job_wizard_step5_source_location_added", {
+      step: 5,
+      value: truncateForTelemetry(cleanValue),
+      radius: sourceLocationRadius,
+    });
   };
 
   const addSourceCompany = (value: string) => {
@@ -3381,6 +3629,10 @@ function NewJobPageContent() {
     setSourceCompanies(prev => [...prev, cleanValue]);
     setSourceCompanyInput("");
     setGeneratedBoolean("");
+    trackEvent("job_wizard_step5_source_company_added", {
+      step: 5,
+      value: truncateForTelemetry(cleanValue),
+    });
   };
 
   const addSourceKeyword = (value: string) => {
@@ -3389,6 +3641,10 @@ function NewJobPageContent() {
     setSourceKeywords(prev => [...prev, cleanValue]);
     setSourceKeywordInput("");
     setGeneratedBoolean("");
+    trackEvent("job_wizard_step5_source_keyword_added", {
+      step: 5,
+      value: truncateForTelemetry(cleanValue),
+    });
   };
 
   const buildGeneratedBooleanString = () => {
@@ -3590,6 +3846,92 @@ function NewJobPageContent() {
 
   const countQualified = (list: any[]) =>
     list.filter(c => (c.match_score || 0) >= QUALIFIED_SCORE_THRESHOLD).length;
+
+  function summarizeTopTerms(values: string[], limit = 10) {
+    const counts = new Map<string, number>();
+    values
+      .map(v => String(v || "").trim())
+      .filter(Boolean)
+      .forEach(v => counts.set(v, (counts.get(v) || 0) + 1));
+
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit)
+      .map(([term, count]) => ({ term: truncateForTelemetry(term, 80), count }));
+  }
+
+  function collectCandidateQualityStats(list: any[]) {
+    const total = list.length;
+    const scoreList = list
+      .map(c => Number(c?.match_score))
+      .filter(score => Number.isFinite(score));
+
+    const tier90 = scoreList.filter(score => score >= 90).length;
+    const tier80 = scoreList.filter(score => score >= 80).length;
+    const tier70 = scoreList.filter(score => score >= 70).length;
+
+    const sourceCounts = list.reduce((acc: Record<string, number>, c: any) => {
+      const source = String(c?.source || "unknown");
+      acc[source] = (acc[source] || 0) + 1;
+      return acc;
+    }, {});
+
+    const matchedSkills = list.flatMap((c: any) =>
+      Array.isArray(c?.matched_skills)
+        ? c.matched_skills.map((s: any) => String(s || "")).filter(Boolean)
+        : []
+    );
+
+    const missingSkills = list.flatMap((c: any) =>
+      Array.isArray(c?.missing_skills)
+        ? c.missing_skills.map((s: any) => String(s || "")).filter(Boolean)
+        : []
+    );
+
+    return {
+      total_results: total,
+      scored_results: scoreList.length,
+      average_match_score: scoreList.length
+        ? Number((scoreList.reduce((sum, score) => sum + score, 0) / scoreList.length).toFixed(2))
+        : null,
+      quality_tier_counts: {
+        gte_90: tier90,
+        gte_80: tier80,
+        gte_70: tier70,
+        lt_70: Math.max(0, scoreList.length - tier70),
+      },
+      quality_tier_pct: {
+        gte_90: total ? Number(((tier90 / total) * 100).toFixed(2)) : 0,
+        gte_80: total ? Number(((tier80 / total) * 100).toFixed(2)) : 0,
+        gte_70: total ? Number(((tier70 / total) * 100).toFixed(2)) : 0,
+      },
+      source_counts: sourceCounts,
+      top_matched_skills: summarizeTopTerms(matchedSkills, 12),
+      top_missing_skills: summarizeTopTerms(missingSkills, 12),
+    };
+  }
+
+  const buildStep5FilterContext = () => ({
+    search_sources: Object.keys(searchSources).filter(k => (searchSources as any)[k]),
+    recent_days: recentDaysFilter,
+    include_no_resume: includeNoResume,
+    active_resume_filters_count: resumeMatchFilters.filter(f => f.active).length,
+    active_resume_filters: resumeMatchFilters
+      .filter(f => f.active)
+      .slice(0, 40)
+      .map(f => ({
+        category: truncateForTelemetry(f.category, 60),
+        value: truncateForTelemetry(f.value, 120),
+        weight: f.weight,
+      })),
+    source_criteria: {
+      titles: sourceTitles.slice(0, 20).map(t => ({ value: truncateForTelemetry(t.value, 100), match_type: t.matchType, years: t.years, recent: t.recent })),
+      skills: sourceSkills.slice(0, 20).map(s => ({ value: truncateForTelemetry(s.value, 100), match_type: s.matchType, years: s.years, recent: s.recent })),
+      locations: sourceLocations.slice(0, 10).map(l => ({ value: truncateForTelemetry(l.value, 80), radius: l.radius })),
+      companies: sourceCompanies.slice(0, 20).map(c => truncateForTelemetry(c, 80)),
+      keywords: sourceKeywords.slice(0, 30).map(k => truncateForTelemetry(k, 80)),
+    },
+  });
 
   const buildSearchPayload = (booleanString: string, overrides?: { withinMilesOverride?: number; resumeMatchFiltersOverride?: typeof resumeMatchFilters }) => {
     const titleCriteria = sourceTitles.map(t => ({
@@ -3802,23 +4144,49 @@ function NewJobPageContent() {
   }, [currentStep, sourcingResultsKey]);
 
   const handleRunSearch = async () => {
+    const searchStartMs = Date.now();
+    let accumulated: any[] = [];
+    let runBreakdown: Array<Record<string, unknown>> = [];
+    let currentAttempts: { query: string; label: string }[] = [];
+
     setIsSearching(true);
     setHasSearched(true);
     setRestoredFromCache(false);
+    trackEvent("job_wizard_step5_candidate_search_started", {
+      step: 5,
+      query: truncateForTelemetry(resolvedGeneratedBoolean, 260),
+      sources: Object.keys(searchSources).filter(k => (searchSources as any)[k]),
+      recent_days: recentDaysFilter,
+      include_no_resume: includeNoResume,
+    });
     try {
       const initial = resolvedGeneratedBoolean;
       setGeneratedBoolean(initial);
       const attempts: { query: string; label: string }[] = [{ query: initial, label: "Hoonr-Curate generated" }];
       setBooleanAttempts(attempts);
+      currentAttempts = attempts;
       setSearchStatus("Searching candidates...");
+
+      const firstRunStartMs = Date.now();
       const firstRun = await runSearchStream(initial, "replace");
-      let accumulated = [...firstRun];
+      accumulated = [...firstRun];
+      const firstQuality = collectCandidateQualityStats(firstRun);
+      runBreakdown = [
+        {
+          attempt: 1,
+          label: "Hoonr-Curate generated",
+          query: truncateForTelemetry(initial, 260),
+          duration_seconds: Number(((Date.now() - firstRunStartMs) / 1000).toFixed(2)),
+          results_count: firstRun.length,
+          quality_tier_counts: firstQuality.quality_tier_counts,
+          average_match_score: firstQuality.average_match_score,
+        },
+      ];
 
       const baseWithinMiles = (() => {
         const m = sourceLocations[0]?.radius?.match(/(\d+)/)?.[1];
         return m ? Number(m) : 25;
       })();
-      let currentAttempts = attempts;
       while (currentAttempts.length < MAX_BOOLEAN_ATTEMPTS) {
         if (searchAbortRef.current?.signal.aborted) break;
         const qualified = countQualified(accumulated);
@@ -3831,13 +4199,47 @@ function NewJobPageContent() {
         setBooleanAttempts(currentAttempts);
         setGeneratedBoolean(relaxed.query);
         setSearchStatus(`Only ${qualified}/${QUALIFIED_TARGET_COUNT} strong matches — relaxing boolean (attempt ${currentAttempts.length}/${MAX_BOOLEAN_ATTEMPTS})...`);
+
+        const relaxedRunStartMs = Date.now();
         const nextRun = await runSearchStream(relaxed.query, "append", structuralOverrides);
+        const relaxedQuality = collectCandidateQualityStats(nextRun);
+        runBreakdown.push({
+          attempt: currentAttempts.length,
+          label: relaxed.label,
+          query: truncateForTelemetry(relaxed.query, 260),
+          duration_seconds: Number(((Date.now() - relaxedRunStartMs) / 1000).toFixed(2)),
+          results_count: nextRun.length,
+          quality_tier_counts: relaxedQuality.quality_tier_counts,
+          average_match_score: relaxedQuality.average_match_score,
+        });
         accumulated = [...accumulated, ...nextRun];
       }
     } catch (error) {
       console.error("Failed to search candidates:", error);
+      trackEvent("job_wizard_step5_candidate_search_failed", {
+        step: 5,
+        error: truncateForTelemetry((error as Error)?.message || String(error)),
+      });
     } finally {
       setIsSearching(false);
+      const runtimeSeconds = Number(((Date.now() - searchStartMs) / 1000).toFixed(2));
+      setLastSearchRuntimeSec(runtimeSeconds);
+      setLastSearchRunsExecuted(runBreakdown.length || 1);
+      const overallQuality = collectCandidateQualityStats(accumulated);
+      trackEvent("job_wizard_step5_candidate_search_finished", {
+        step: 5,
+        candidates_found: accumulated.length,
+        runtime_seconds: runtimeSeconds,
+        runs_executed: runBreakdown.length,
+        runs: runBreakdown,
+        boolean_attempts: currentAttempts.map((attempt, idx) => ({
+          attempt: idx + 1,
+          label: attempt.label,
+          query: truncateForTelemetry(attempt.query, 260),
+        })),
+        quality: overallQuality,
+        ...buildStep5FilterContext(),
+      });
     }
   };
 
@@ -3855,6 +4257,15 @@ function NewJobPageContent() {
     setBooleanUserEdited(true);
     setIsSearching(true);
     setHasSearched(true);
+    const runStartMs = Date.now();
+    let runResults: any[] = [];
+    trackEvent("job_wizard_step5_boolean_relaxed", {
+      step: 5,
+      previous_query: truncateForTelemetry(base, 220),
+      relaxed_query: truncateForTelemetry(relaxed.query, 220),
+      reason: relaxed.label,
+      attempt: nextAttempts.length,
+    });
     try {
       const baseWithinMiles = (() => {
         const m = sourceLocations[0]?.radius?.match(/(\d+)/)?.[1];
@@ -3862,9 +4273,28 @@ function NewJobPageContent() {
       })();
       const structuralOverrides = relaxStructuralOverrides(tier, baseWithinMiles, resumeMatchFilters);
       setSearchStatus(`Extending search with more lenient boolean (attempt ${nextAttempts.length}/${MAX_BOOLEAN_ATTEMPTS})...`);
-      await runSearchStream(relaxed.query, "append", structuralOverrides);
+      runResults = await runSearchStream(relaxed.query, "append", structuralOverrides);
     } finally {
       setIsSearching(false);
+      const runtimeSeconds = Number(((Date.now() - runStartMs) / 1000).toFixed(2));
+      setLastSearchRuntimeSec(runtimeSeconds);
+      setLastSearchRunsExecuted(1);
+      const runQuality = collectCandidateQualityStats(runResults);
+      trackEvent("job_wizard_step5_boolean_relaxed_finished", {
+        step: 5,
+        attempt: nextAttempts.length,
+        relaxed_query: truncateForTelemetry(relaxed.query, 260),
+        reason: relaxed.label,
+        runtime_seconds: runtimeSeconds,
+        results_count: runResults.length,
+        quality: runQuality,
+        boolean_attempts: nextAttempts.map((attempt, idx) => ({
+          attempt: idx + 1,
+          label: attempt.label,
+          query: truncateForTelemetry(attempt.query, 260),
+        })),
+        ...buildStep5FilterContext(),
+      });
     }
   };
 
@@ -4340,6 +4770,10 @@ function NewJobPageContent() {
   // candidates missing phone via ZoomInfo using LinkedIn URL.
   const handleLaunchPairClick = async () => {
     if (selectedCandidates.size === 0) return;
+    trackEvent("job_wizard_step5_launch_pair_clicked", {
+      step: 5,
+      selected_candidates_count: selectedCandidates.size,
+    });
     setIsEnrichingContacts(true);
     try {
       const candidatesMissingPhone = candidates.filter(c => {
@@ -4511,7 +4945,16 @@ function NewJobPageContent() {
                       <label key={source.id} className={`flex items-center gap-2 ${source.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer group'}`} title={source.disabled ? "Integration coming soon" : ""}>
                         <Checkbox
                           checked={source.disabled ? false : (searchSources as any)[source.id]}
-                          onCheckedChange={(checked) => !source.disabled && setSearchSources(prev => ({ ...prev, [source.id]: !!checked }))}
+                          onCheckedChange={(checked) => {
+                            if (source.disabled) return;
+                            const enabled = !!checked;
+                            setSearchSources(prev => ({ ...prev, [source.id]: enabled }));
+                            trackEvent("job_wizard_step5_source_toggled", {
+                              step: 5,
+                              source: source.id,
+                              enabled,
+                            });
+                          }}
                           className={`w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-[#6366f1] data-[state=checked]:border-[#6366f1] ${source.disabled ? 'opacity-50' : ''}`}
                           disabled={source.disabled}
                         />
@@ -4531,7 +4974,14 @@ function NewJobPageContent() {
                     <span className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Recent Availability:</span>
                     <select
                       value={recentDaysFilter}
-                      onChange={(e) => setRecentDaysFilter(Number(e.target.value))}
+                      onChange={(e) => {
+                        const value = Number(e.target.value);
+                        setRecentDaysFilter(value);
+                        trackEvent("job_wizard_step5_recent_days_changed", {
+                          step: 5,
+                          recent_days: value,
+                        });
+                      }}
                       className="h-8 px-2 text-[12px] font-medium text-slate-700 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30"
                     >
                       <option value={30}>Last 30 days</option>
@@ -4544,7 +4994,14 @@ function NewJobPageContent() {
                   <label className="flex items-center gap-2 cursor-pointer">
                     <Checkbox
                       checked={includeNoResume}
-                      onCheckedChange={(checked) => setIncludeNoResume(!!checked)}
+                      onCheckedChange={(checked) => {
+                        const enabled = !!checked;
+                        setIncludeNoResume(enabled);
+                        trackEvent("job_wizard_step5_include_no_resume_toggled", {
+                          step: 5,
+                          enabled,
+                        });
+                      }}
                       className="w-4 h-4 rounded border-slate-300 data-[state=checked]:bg-[#6366f1] data-[state=checked]:border-[#6366f1]"
                     />
                     <span className="text-[12px] font-medium text-slate-600">Include candidates without resumes</span>
@@ -5164,6 +5621,37 @@ function NewJobPageContent() {
                       isSearching ? `Sourcing candidates... ${candidates.length} found so far` : `${candidates.length} candidates found${sourceFilter !== "all" ? ` · showing ${sortedCandidates.length}` : ""}`
                     ) : 'Run a search to find candidates.'}
                   </p>
+                  {hasSearched && !isSearching && candidates.length > 0 && qualityScorecard && (
+                    <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                      <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-[#ede9fe] text-[#5b21b6] text-[10.5px] font-bold uppercase tracking-wider border border-[#ddd6fe]">
+                        {qualityScorecard.quality_tier_counts.gte_70} / {qualityScorecard.total_results} ≥ 70%
+                      </span>
+                      <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-700 text-[10.5px] font-bold uppercase tracking-wider border border-emerald-200">
+                        Avg {qualityScorecard.average_match_score ?? "—"}%
+                      </span>
+                      <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-white text-slate-600 text-[10.5px] font-bold uppercase tracking-wider border border-slate-200">
+                        {qualityScorecard.quality_tier_counts.gte_80} ≥ 80%
+                      </span>
+                      <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-white text-slate-600 text-[10.5px] font-bold uppercase tracking-wider border border-slate-200">
+                        {qualityScorecard.quality_tier_counts.gte_90} ≥ 90%
+                      </span>
+                      {lastSearchRuntimeSec !== null && (
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-white text-slate-600 text-[10.5px] font-bold uppercase tracking-wider border border-slate-200">
+                          {lastSearchRuntimeSec}s{lastSearchRunsExecuted ? ` · ${lastSearchRunsExecuted} run${lastSearchRunsExecuted === 1 ? "" : "s"}` : ""}
+                        </span>
+                      )}
+                      {topMatchedPreview.length > 0 && (
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-sky-50 text-sky-700 text-[10.5px] font-semibold border border-sky-200">
+                          Top matched: {topMatchedPreview.join(", ")}
+                        </span>
+                      )}
+                      {topMissingPreview.length > 0 && (
+                        <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 text-[10.5px] font-semibold border border-amber-200">
+                          Top missing: {topMissingPreview.join(", ")}
+                        </span>
+                      )}
+                    </div>
+                  )}
                   {restoredFromCache && !isSearching && (
                     <p className="text-[11.5px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1 mt-2 inline-block">
                       Restored from last run · Re-run to refresh
@@ -5719,7 +6207,16 @@ function NewJobPageContent() {
         <div className="flex items-center gap-4">
           {currentStep > 1 && (
             <button
-              onClick={() => setCurrentStep((currentStep - 1) as Step)}
+              onClick={() => {
+                const toStep = (currentStep - 1) as Step;
+                trackEvent("job_wizard_step_back_clicked", {
+                  from_step: currentStep,
+                  to_step: toStep,
+                  from_step_label: STEP_LABELS[currentStep],
+                  to_step_label: STEP_LABELS[toStep],
+                });
+                setCurrentStep(toStep);
+              }}
               className="flex items-center gap-2.5 px-6 py-2.5 bg-white border border-slate-200 rounded-xl font-bold text-slate-700 hover:bg-slate-50 transition-all active:scale-95 shadow-sm"
             >
               <ArrowLeft className="w-4.5 h-4.5" />
@@ -5775,6 +6272,7 @@ function NewJobPageContent() {
                       showToast("Failed to save Step 1 data. Please try again.", "info");
                       return;
                     }
+                    trackStepAdvance(1, 2, { via: "next_button" });
                     setCurrentStep(2);
                   } finally {
                     setIsAdvancingStep(false);
@@ -5834,6 +6332,10 @@ function NewJobPageContent() {
                         setIsGeneratingRubric(false);
                       }
                     }
+                    trackStepAdvance(2, 3, {
+                      via: "next_button",
+                      rubric_regenerated: rubricIsEmpty || jdChanged,
+                    });
                     setCurrentStep(3);
                     return;
                   } finally {
@@ -5844,6 +6346,7 @@ function NewJobPageContent() {
                   try {
                     const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
                     if (!saved) return;
+                    trackStepAdvance(3, 4, { via: "next_button" });
                   } finally {
                     setIsAdvancingStep(false);
                   }
@@ -5858,6 +6361,7 @@ function NewJobPageContent() {
                       initializeSourceFromRubric();
                       sourcingCriteriaInitializedRef.current = true;
                     }
+                    trackStepAdvance(4, 5, { via: "next_button" });
                   } finally {
                     setIsAdvancingStep(false);
                   }
