@@ -68,11 +68,12 @@ export function useEngagementFlow() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ payload: input.payload, real_candidate_ids: input.realCandidateIds }),
     });
-    const data = (await res.json()) as SendBulkInterviewResult;
+    const data = (await res.json()) as any;
     if (!res.ok) {
-      logger.error("engagement.send_bulk.failed", { status: res.status, message: data?.message });
+      const errorMsg = data?.message || (typeof data?.detail === 'string' ? data.detail : "API request failed");
+      logger.error("engagement.send_bulk.failed", { status: res.status, message: errorMsg });
     }
-    return data;
+    return data as SendBulkInterviewResult;
   }
 
   async function latestInterviewById(candidateId: string): Promise<LatestInterviewResult> {
