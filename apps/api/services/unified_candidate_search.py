@@ -34,6 +34,11 @@ class SearchCriteria(BaseModel):
     resume_match_filters: List[Dict[str, Any]] = []
     location: str = ""
     within_miles: int = 25
+    # Structured geo for JobDiva talentSearchDef. Optional — backend will
+    # derive these from `location` when the frontend doesn't send them.
+    countries: List[str] = []
+    states: List[str] = []
+    page_number: int = 0
     companies: List[str] = []
     page_size: int = 100
     sources: List[str] = ["JobDiva", "LinkedIn", "Exa"]
@@ -364,18 +369,27 @@ class UnifiedCandidateSearch:
         
     async def _search_jobdiva_talent(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
-            # Pass through the freshness window (5.6) and profile-only filter
-            # (5.10). The JobDiva service handles both — Boolean prepends a
-            # LASTMODIFIED cutoff when recent_days is set, and drops profile-
-            # only candidates when require_resume is true.
+            countries, states = self._resolve_jobdiva_geo(criteria)
+            # The global boolean string keeps its location term so Exa / other
+            # sources that rely on textual location matching still work. JobDiva
+            # gets country/state via structured talentSearchDef fields, so we
+            # strip the location term out of the boolean before handing it off —
+            # otherwise a quoted city/region in `skills` collapses JobDiva recall.
+            jobdiva_boolean = self._strip_location_from_boolean(
+                criteria.boolean_string or self._build_boolean_string(criteria),
+                criteria.location,
+            )
             candidates = await self.jobdiva_service.search_candidates(
                 skills=self._jobdiva_search_terms(criteria),
                 location=criteria.location,
                 limit=criteria.page_size,
                 job_id=None,
-                boolean_string=criteria.boolean_string or self._build_boolean_string(criteria),
+                boolean_string=jobdiva_boolean,
                 recent_days=getattr(criteria, "recent_days", None),
                 require_resume=getattr(criteria, "require_resume", True),
+                countries=countries,
+                states=states,
+                page_number=getattr(criteria, "page_number", 0) or 0,
             )
             self._log_stage("TalentSearch", f"JobDiva returned {len(candidates)} candidate(s)")
             for c in candidates:
@@ -407,6 +421,108 @@ class UnifiedCandidateSearch:
         except Exception as e:
             logger.error(f"JobDiva Applicants search failed: {e}")
             return {"candidates": [], "source_type": "JobDiva-Applicants"}
+
+    # 2-letter US state codes for the location heuristic.
+    _US_STATE_CODES = frozenset({
+        "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+        "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+        "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+        "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+        "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+        "DC",
+    })
+
+    # Country aliases → JobDiva expects the 2-letter code in talentSearchDef.
+    _COUNTRY_ALIASES = {
+        "US": "US", "USA": "US", "U.S.": "US", "U.S.A.": "US",
+        "UNITED STATES": "US", "UNITED STATES OF AMERICA": "US",
+        "CA": "CA", "CAN": "CA", "CANADA": "CA",
+        "UK": "GB", "U.K.": "GB", "UNITED KINGDOM": "GB", "GREAT BRITAIN": "GB", "GB": "GB",
+        "IN": "IN", "INDIA": "IN",
+        "AU": "AU", "AUS": "AU", "AUSTRALIA": "AU",
+        "DE": "DE", "GERMANY": "DE",
+        "FR": "FR", "FRANCE": "FR",
+        "MX": "MX", "MEXICO": "MX",
+        "BR": "BR", "BRAZIL": "BR",
+        "JP": "JP", "JAPAN": "JP",
+        "CN": "CN", "CHINA": "CN",
+        "SG": "SG", "SINGAPORE": "SG",
+        "IE": "IE", "IRELAND": "IE",
+        "NL": "NL", "NETHERLANDS": "NL",
+        "ES": "ES", "SPAIN": "ES",
+        "IT": "IT", "ITALY": "IT",
+    }
+
+    def _resolve_jobdiva_geo(self, criteria: SearchCriteria) -> tuple[List[str], List[str]]:
+        """
+        Produce (countries, states) for JobDiva's talentSearchDef.
+
+        Priority: explicit `criteria.countries` / `criteria.states` if set;
+        otherwise heuristically split `criteria.location` by comma and pick
+        out a US state code and/or a country.
+        """
+        countries = [c.strip() for c in (criteria.countries or []) if c and c.strip()]
+        states = [s.strip() for s in (criteria.states or []) if s and s.strip()]
+        if countries or states:
+            return countries, states
+
+        loc = (criteria.location or "").strip()
+        if not loc:
+            return [], []
+
+        tokens = [t.strip() for t in loc.split(",") if t.strip()]
+        if not tokens:
+            return [], []
+
+        # Walk tokens right-to-left: first match country, then state.
+        consumed: set = set()
+        for idx in range(len(tokens) - 1, -1, -1):
+            token_upper = tokens[idx].upper()
+            if token_upper in self._COUNTRY_ALIASES:
+                countries.append(self._COUNTRY_ALIASES[token_upper])
+                consumed.add(idx)
+                break
+
+        for idx in range(len(tokens) - 1, -1, -1):
+            if idx in consumed:
+                continue
+            token_upper = tokens[idx].upper()
+            if len(token_upper) == 2 and token_upper in self._US_STATE_CODES:
+                states.append(token_upper)
+                if not countries:
+                    countries.append("US")
+                break
+
+        return countries, states
+
+    @staticmethod
+    def _strip_location_from_boolean(boolean: str, location: str) -> str:
+        """Remove the auto-appended `"<location>"` term from a boolean string.
+
+        Conservative: only strips an exact quoted match (case-insensitive)
+        with adjacent ` AND ` glue. If the location can't be found cleanly,
+        returns the input unchanged so user-typed booleans aren't mangled.
+        """
+        if not boolean:
+            return boolean
+        loc = (location or "").strip()
+        if not loc:
+            return boolean
+
+        quoted = re.escape(f'"{loc}"')
+        patterns = [
+            rf'\s+AND\s+{quoted}(?=\s|$|\))',  # mid/tail: " AND \"X\""
+            rf'(?<=^){quoted}\s+AND\s+',       # leading: "\"X\" AND "
+            rf'(?<=\()\s*{quoted}\s+AND\s+',   # inside group: "(\"X\" AND ..."
+            rf'\s+AND\s+{quoted}(?=\))',       # before group close
+        ]
+        out = boolean
+        for pat in patterns:
+            new_out = re.sub(pat, lambda m: ' ' if m.group(0).startswith(' AND ') else '', out, flags=re.IGNORECASE)
+            if new_out != out:
+                out = new_out
+                break
+        return re.sub(r'\s+', ' ', out).strip()
 
     def _jobdiva_search_terms(self, criteria: SearchCriteria) -> List[Dict[str, Any]]:
         terms: List[Dict[str, Any]] = []
