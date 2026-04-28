@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 import time
@@ -506,6 +507,9 @@ class JobDivaService:
         boolean_string: str = "",
         recent_days: Optional[int] = None,
         require_resume: bool = True,
+        countries: Optional[List[str]] = None,
+        states: Optional[List[str]] = None,
+        page_number: int = 0,
     ) -> List[Dict[str, Any]]:
         """
         Search for candidates.
@@ -534,6 +538,9 @@ class JobDivaService:
             boolean_string=boolean_string,
             recent_days=recent_days,
             require_resume=require_resume,
+            countries=countries or [],
+            states=states or [],
+            page_number=page_number or 0,
         )
 
     async def _search_job_applicants(self, job_id: str, limit: int, token: str, skills: List[Any] = None, location: str = "") -> List[Dict[str, Any]]:
@@ -650,6 +657,9 @@ class JobDivaService:
         boolean_string: str = "",
         recent_days: Optional[int] = None,
         require_resume: bool = True,
+        countries: Optional[List[str]] = None,
+        states: Optional[List[str]] = None,
+        page_number: int = 0,
     ) -> List[Dict[str, Any]]:
         """
         Search JobDiva Talent Search using the generated Boolean string.
@@ -694,15 +704,24 @@ class JobDivaService:
 
         url = f"{self.api_url}/apiv2/jobdiva/TalentSearch"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        skills_value = translated_search_value or raw_search_value
+        countries_str = ",".join([c for c in (countries or []) if c]).strip()
+        states_str = ",".join([s for s in (states or []) if s]).strip()
         payload = {
-            "searchValue": translated_search_value or raw_search_value,
-            "maxReturned": limit,
-            "startFrom": 0,
+            "talentSearchDef": {
+                "skills": skills_value,
+                "countries": countries_str,
+                "states": states_str,
+                "pageNumber": int(page_number or 0),
+                "pageSize": limit,
+            }
         }
 
         logger.debug(
-            f"JobDiva Talent Search — raw: {raw_search_value!r} | "
-            f"translated: {translated_search_value!r} | recent_days={recent_days}"
+            f"JobDiva Talent Search — skills: {skills_value!r} | "
+            f"countries={countries_str!r} states={states_str!r} "
+            f"pageNumber={page_number} pageSize={limit} | "
+            f"raw: {raw_search_value!r}"
         )
 
         dropped_no_resume = 0
@@ -861,6 +880,41 @@ class JobDivaService:
                         "phone": get_field(c, ["phone", "phoneNumber", "PHONE"]) or "",
                     })
 
+                # Two-step enrichment: TalentSearch returns thin records;
+                # CandidatesDetail fills in address1, linkedinUrl, and any
+                # email/phone/resume fields TalentSearch left empty. Merging
+                # both jd_results AND profile_only_results so a detail-
+                # supplied resume can rescue an otherwise-filtered candidate.
+                merge_targets = jd_results + profile_only_results
+                ids_to_enrich = [r["candidate_id"] for r in merge_targets if r.get("candidate_id")]
+                if ids_to_enrich:
+                    detail_t0 = time.time()
+                    detail_map = await self._fetch_candidate_details_batch(token, ids_to_enrich)
+                    detail_ms = int((time.time() - detail_t0) * 1000)
+                    rescued = 0
+                    fields_from_detail = {"email": 0, "phone": 0, "address1": 0, "linkedin": 0, "resume": 0}
+                    for record in merge_targets:
+                        detail = detail_map.get(str(record.get("candidate_id") or ""))
+                        if not detail:
+                            continue
+                        self._merge_detail_into_candidate(record, detail, fields_from_detail)
+                        if record.get("resume_missing") and (record.get("resume_text") or record.get("resume_id")):
+                            record.pop("resume_missing", None)
+                            rescued += 1
+                    logger.debug(
+                        f"CandidatesDetail enrichment: {len(detail_map)}/{len(ids_to_enrich)} matched "
+                        f"in {detail_ms}ms, rescued={rescued}, "
+                        f"fields_from_detail={fields_from_detail}"
+                    )
+
+                # Promote rescued profile-only entries into the main result set.
+                if require_resume:
+                    promoted = [r for r in profile_only_results if not r.get("resume_missing")]
+                    if promoted:
+                        jd_results.extend(promoted)
+                        profile_only_results = [r for r in profile_only_results if r.get("resume_missing")]
+                        dropped_no_resume = max(0, dropped_no_resume - len(promoted))
+
                 if dropped_no_resume:
                     logger.info(
                         f"JobDiva Talent Search: dropped {dropped_no_resume} "
@@ -883,6 +937,74 @@ class JobDivaService:
             logger.error(f"Talent Search Error: {e}")
 
         return jd_results
+
+    def _merge_detail_into_candidate(
+        self,
+        candidate: Dict[str, Any],
+        detail: Dict[str, Any],
+        counters: Dict[str, int],
+    ) -> None:
+        """Merge CandidatesDetail fields into an existing TalentSearch record.
+
+        Detail values win when the existing field is empty/missing. Adds
+        `address1` and `linkedin_url` (which TalentSearch doesn't return).
+        Updates `counters` so the caller can log how much detail actually
+        contributed.
+        """
+        def take(detail_keys: List[str]) -> str:
+            value = get_field(detail, detail_keys)
+            return str(value).strip() if value else ""
+
+        if not candidate.get("email"):
+            v = take(["email", "EMAIL", "emailAddress", "EMAILADDRESS"])
+            if v:
+                candidate["email"] = v
+                counters["email"] = counters.get("email", 0) + 1
+
+        if not candidate.get("phone"):
+            v = take(["phone", "PHONE", "phoneNumber", "PHONENUMBER", "mobilePhone", "MOBILEPHONE"])
+            if v:
+                candidate["phone"] = v
+                counters["phone"] = counters.get("phone", 0) + 1
+
+        addr = take(["address1", "ADDRESS1", "address", "ADDRESS"])
+        if addr:
+            candidate["address1"] = addr
+            counters["address1"] = counters.get("address1", 0) + 1
+
+        linkedin = take(["linkedinUrl", "LINKEDINURL", "linkedin", "LINKEDIN", "linkedIn", "LINKEDIN_URL"])
+        if linkedin:
+            candidate["linkedin_url"] = linkedin
+            counters["linkedin"] = counters.get("linkedin", 0) + 1
+
+        # Resume fallback: if TalentSearch left resume_text empty but detail
+        # has it (or has a resumeId we hadn't seen), populate.
+        if not (candidate.get("resume_text") or "").strip():
+            detail_resume = self._extract_resume_text(detail)
+            if detail_resume:
+                candidate["resume_text"] = detail_resume
+                if not candidate.get("abstract"):
+                    candidate["abstract"] = detail_resume[:240].replace("\n", " ").strip()
+                counters["resume"] = counters.get("resume", 0) + 1
+        if not candidate.get("resume_id"):
+            rid = take(["resumeId", "RESUMEID", "resume_id"])
+            if rid:
+                candidate["resume_id"] = rid
+
+        # City/state can be more accurate in detail (TalentSearch sometimes
+        # returns work-location vs candidate-location).
+        if not candidate.get("city"):
+            v = take(["city", "CITY", "locationCity", "LOCATIONCITY"])
+            if v:
+                candidate["city"] = v
+        if not candidate.get("state"):
+            v = take(["state", "STATE", "locationState", "LOCATIONSTATE"])
+            if v:
+                candidate["state"] = v
+        if (candidate.get("city") or candidate.get("state")) and not candidate.get("location"):
+            candidate["location"] = ", ".join(
+                [p for p in [candidate.get("city", ""), candidate.get("state", "")] if p]
+            ).strip()
 
     def _build_talent_boolean(self, skills: List[Any], location: str) -> str:
         terms = []
@@ -1138,6 +1260,65 @@ class JobDivaService:
         
         # Return empty string if no resume found - no fallback generation
         return ""
+
+    async def _fetch_candidate_details_batch(
+        self,
+        token: str,
+        candidate_ids: List[str],
+        chunk_size: int = 50,
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Batch-fetch CandidatesDetail records and return them keyed by ID.
+
+        Used by `_search_talent_pool` to enrich Talent Search results with
+        fields the search payload doesn't reliably populate (address1,
+        linkedinUrl, full email/phone). Chunks are issued concurrently.
+        """
+        ids = [str(cid).strip() for cid in (candidate_ids or []) if cid and str(cid).strip()]
+        if not ids:
+            return {}
+
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        endpoint = f"{self.api_url}/apiv2/bi/CandidatesDetail"
+        chunks = [ids[i:i + chunk_size] for i in range(0, len(ids), chunk_size)]
+
+        async def _fetch_chunk(chunk: List[str]) -> List[Dict[str, Any]]:
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.get(
+                        endpoint,
+                        params={"candidateIds": chunk},
+                        headers=headers,
+                    )
+                if response.status_code != 200:
+                    logger.warning(
+                        f"CandidatesDetail batch failed: {response.status_code} - "
+                        f"{response.text[:200]}"
+                    )
+                    return []
+                data = response.json()
+                if isinstance(data, dict):
+                    payload = data.get("data") or []
+                else:
+                    payload = data or []
+                if isinstance(payload, dict):
+                    payload = [payload]
+                return list(payload)
+            except Exception as e:
+                logger.warning(f"CandidatesDetail batch error: {e}")
+                return []
+
+        results: Dict[str, Dict[str, Any]] = {}
+        chunked = await asyncio.gather(*[_fetch_chunk(chunk) for chunk in chunks])
+        for batch in chunked:
+            for record in batch:
+                if not isinstance(record, dict):
+                    continue
+                cid = get_field(record, ["candidateId", "CANDIDATEID", "id", "ID"])
+                if cid is None:
+                    continue
+                results[str(cid)] = record
+        return results
 
     async def get_candidate_details(self, candidate_id: str) -> Optional[Dict[str, Any]]:
         """Get detailed candidate information using /apiv2/bi/CandidatesDetail endpoint."""
