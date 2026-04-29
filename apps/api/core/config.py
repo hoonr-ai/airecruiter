@@ -76,6 +76,12 @@ INSTANCE_CONNECTION_NAME = CLOUDSQL_CONNECTION_NAME
 JOBDIVA_AI_JD_UDF_ID = int(get_env_with_default("JOBDIVA_AI_JD_UDF_ID", "230"))
 JOBDIVA_JOB_NOTES_UDF_ID = int(get_env_with_default("JOBDIVA_JOB_NOTES_UDF_ID", "231"))
 
+# ---- PAIR Recruiter ----
+# The JobDiva recruiter ID used when creating candidate notes on behalf of PAIR.
+# Set JOBDIVA_PAIR_RECRUITER_ID in .env to the numeric ID of the "PAIR" / "R. AI" user
+# in your JobDiva account. Defaults to 0 which lets JobDiva infer the API user.
+JOBDIVA_PAIR_RECRUITER_ID = int(get_env_with_default("JOBDIVA_PAIR_RECRUITER_ID", "0"))
+
 # ---- Encryption ----
 ENCRYPTION_KEY = get_env_or_fail("ENCRYPTION_KEY")
 ENCRYPTION_SALT = os.getenv("ENCRYPTION_SALT")

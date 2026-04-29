@@ -16,7 +16,7 @@ from services.sourced_candidates_storage import sourced_candidates_storage
 from services.unified_candidate_search import SearchCriteria, unified_search_service
 from models import (
     CandidateSearchRequest, CandidateMessageRequest, CandidatesSaveRequest,
-    CandidateAnalysisRequest, CandidateAnalysisResponse,
+    CandidateAnalysisRequest, CandidateAnalysisResponse, CandidateFeedbackRequest,
 )
 from routers._helpers import get_db_connection
 
@@ -228,9 +228,14 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
         elif request.location:
             location = request.location
 
+        effective_limit = int(request.limit or request.page_size or 100)
+        require_resume = True if request.require_resume is None else bool(request.require_resume)
+
         # Resolve per-location radius if provided (fallback 25 miles).
         within_miles = 25
-        if request.locations:
+        if request.within_miles is not None and int(request.within_miles) > 0:
+            within_miles = int(request.within_miles)
+        elif request.locations:
             radius_match = str(request.locations[0].radius or "")
             digits = "".join(ch for ch in radius_match if ch.isdigit())
             if digits:
@@ -272,10 +277,12 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             location=location,
             within_miles=within_miles,
             companies=companies,
-            page_size=request.limit or 100,
+            page_size=effective_limit,
             sources=request.sources or ["JobDiva"],
             open_to_work=request.open_to_work,
-            boolean_string=request.boolean_string or ""
+            boolean_string=request.boolean_string or "",
+            recent_days=request.recent_days,
+            require_resume=require_resume,
         )
 
         # Execute unified search as a stream. Persist each candidate to
@@ -331,9 +338,11 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             candidates = await jobdiva_service.search_candidates(
                 skills=[],
                 location=request.location or "",
-                limit=request.limit or 100,
+                limit=effective_limit,
                 job_id=None,
                 boolean_string=request.boolean_string or "",
+                recent_days=request.recent_days,
+                require_resume=require_resume,
             ) if token else []
             for candidate in candidates:
                 candidate["source"] = "JobDiva-TalentSearch"
@@ -361,11 +370,14 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                     keywords=request.keywords or [],
                     resume_match_filters=fallback_resume_match_filters,
                     location=fallback_location,
+                    within_miles=within_miles,
                     companies=request.companies or [],
-                    page_size=request.limit or 100,
+                    page_size=effective_limit,
                     sources=request.sources or ["JobDiva"],
                     open_to_work=request.open_to_work,
                     boolean_string=request.boolean_string or "",
+                    recent_days=request.recent_days,
+                    require_resume=require_resume,
                 )
 
                 for candidate in candidates:
@@ -385,7 +397,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                 logger.warning(f"Fallback scoring setup failed, returning unscored: {score_setup_err}")
 
             return {
-                "candidates": candidates[:request.limit or 100],
+                "candidates": candidates[:effective_limit],
                 "total": len(candidates),
                 "job_applicants": 0,
                 "talent_pool": len(candidates),
@@ -668,8 +680,9 @@ async def get_job_candidates(job_id_or_ref: str):
                     LIMIT 1
                 """, (job_id_or_ref, job_id_or_ref))
                 result = cur.fetchone()
+                resolved_jobdiva_id = job_id_or_ref
+                resolved_numeric_id = job_id_or_ref
                 if result:
-                    # Prefer the alphanumeric jobdiva_id; fall back to job_id if jobdiva_id is NULL
                     resolved_jobdiva_id = result[0] or result[1]
                     resolved_numeric_job_id = result[1] or result[0]
         finally:
@@ -711,9 +724,11 @@ async def get_job_candidates(job_id_or_ref: str):
                     FROM sourced_candidates sc
                     LEFT JOIN latest_audit la
                         ON la.candidate_id = sc.candidate_id
+
                     WHERE sc.jobdiva_id = %s
                     ORDER BY sc.created_at DESC;
                 """, (str(resolved_jobdiva_id), str(resolved_numeric_job_id), resolved_jobdiva_id,))
+
                 candidates = cur.fetchall()
         finally:
             conn.close()
@@ -736,6 +751,12 @@ async def get_job_candidates(job_id_or_ref: str):
                     cand["engage_interview_id"] = data_blob.get("engage_interview_id")
                 if data_blob.get("engage_score") is not None:
                     cand["engage_score"] = data_blob.get("engage_score")
+                if data_blob.get("engage_candidate_score") is not None:
+                    cand["engage_candidate_score"] = data_blob.get("engage_candidate_score")
+                if data_blob.get("engage_total_score") is not None:
+                    cand["engage_total_score"] = data_blob.get("engage_total_score")
+                if data_blob.get("engage_hard_filter_status"):
+                    cand["engage_hard_filter_status"] = data_blob.get("engage_hard_filter_status")
                 if data_blob.get("engage_completed_at"):
                     cand["engage_completed_at"] = data_blob.get("engage_completed_at")
 
@@ -750,6 +771,9 @@ async def get_job_candidates(job_id_or_ref: str):
                 cand["engage_interview_id"] = cand.get("audit_interview_id")
                 if isinstance(data_blob, dict):
                     data_blob["engage_interview_id"] = cand.get("audit_interview_id")
+
+            if not cand.get("engage_created_at") and cand.get("audit_created_at"):
+                cand["engage_created_at"] = cand.get("audit_created_at")
 
             if isinstance(data_blob, dict):
                 cand["data"] = data_blob
@@ -1308,6 +1332,171 @@ def _extract_new_zoominfo_contact_fields(payload: Dict[str, Any]) -> Dict[str, s
     }
 
 
+APOLLO_ENRICH_URL = "https://api.apollo.io/api/v1/people/enrich"
+# TODO: Move to env var (e.g., APOLLO_API_KEY) after initial rollout.
+APOLLO_API_KEY = "cB7rogHZj4XRrhnTEqTlXQ"
+
+
+def _extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
+    person = payload.get("person") if isinstance(payload, dict) else {}
+    if not isinstance(person, dict):
+        person = {}
+
+    def _first_non_empty(*values: Any) -> str:
+        for value in values:
+            candidate = str(value or "").strip()
+            if candidate:
+                return candidate
+        return ""
+
+    def _extract_phone_value(item: Any) -> str:
+        if isinstance(item, str):
+            return str(item).strip()
+        if isinstance(item, dict):
+            return _first_non_empty(
+                item.get("sanitized_number"),
+                item.get("raw_number"),
+                item.get("number"),
+                item.get("value"),
+            )
+        return ""
+
+    phone_candidates: List[str] = []
+    seen_phone_candidates = set()
+
+    def _add_phone_candidate(raw_phone: Any):
+        candidate = _normalise_phone(str(raw_phone or "").strip())
+        if not candidate:
+            return
+        if sum(1 for ch in candidate if ch.isdigit()) < 7:
+            return
+        if candidate in seen_phone_candidates:
+            return
+        seen_phone_candidates.add(candidate)
+        phone_candidates.append(candidate)
+
+    work_email = _first_non_empty(person.get("email"), person.get("work_email"))
+
+    personal_email = ""
+    personal_emails = person.get("personal_emails")
+    if isinstance(personal_emails, list):
+        for item in personal_emails:
+            candidate = _first_non_empty(
+                item.get("email") if isinstance(item, dict) else None,
+                item,
+            )
+            if candidate:
+                personal_email = candidate
+                break
+
+    mobile_phone = _first_non_empty(
+        person.get("mobile_phone"),
+        person.get("mobile"),
+        person.get("cell_phone"),
+        person.get("cell"),
+    )
+    work_phone = _first_non_empty(
+        person.get("sanitized_phone"),
+        person.get("work_phone"),
+        person.get("organization_phone"),
+        person.get("direct_phone"),
+        person.get("office_phone"),
+        person.get("home_phone"),
+        person.get("phone"),
+        person.get("phone_number"),
+    )
+
+    _add_phone_candidate(mobile_phone)
+    _add_phone_candidate(work_phone)
+
+    phone_numbers = person.get("phone_numbers")
+    if isinstance(phone_numbers, list):
+        for item in phone_numbers:
+            number = _extract_phone_value(item)
+            if not number:
+                continue
+
+            ptype = str(item.get("type") or "").strip().lower() if isinstance(item, dict) else ""
+            if not mobile_phone and ptype in {"mobile", "cell", "cellphone"}:
+                mobile_phone = number
+            elif not work_phone and ptype in {"work", "office", "direct"}:
+                work_phone = number
+            elif not work_phone:
+                work_phone = number
+            _add_phone_candidate(number)
+
+    person_organization = person.get("organization")
+    if isinstance(person_organization, dict):
+        for key in ("phone", "phone_number", "sanitized_phone", "work_phone", "main_phone", "direct_phone"):
+            _add_phone_candidate(person_organization.get(key))
+
+    payload_organization = payload.get("organization") if isinstance(payload, dict) else None
+    if isinstance(payload_organization, dict):
+        for key in ("phone", "phone_number", "sanitized_phone", "work_phone", "main_phone", "direct_phone"):
+            _add_phone_candidate(payload_organization.get(key))
+
+    if not mobile_phone:
+        mobile_phone = _extract_phone_value(payload.get("mobile_phone"))
+    if not work_phone:
+        work_phone = _extract_phone_value(payload.get("phone"))
+
+    _add_phone_candidate(payload.get("mobile_phone") if isinstance(payload, dict) else "")
+    _add_phone_candidate(payload.get("phone") if isinstance(payload, dict) else "")
+    _add_phone_candidate(payload.get("phone_number") if isinstance(payload, dict) else "")
+
+    if not mobile_phone and phone_candidates:
+        mobile_phone = phone_candidates[0]
+    if not work_phone and len(phone_candidates) > 1:
+        work_phone = phone_candidates[1]
+    elif not work_phone and phone_candidates:
+        work_phone = phone_candidates[0]
+
+    return {
+        "mobilePhone": mobile_phone,
+        "workPhone": work_phone,
+        "workEmail": work_email,
+        "personalEmail": personal_email,
+        "phoneCandidates": phone_candidates,
+    }
+
+
+async def _apollo_enrich_by_linkedin(candidate_id: str, linkedin_url: str) -> Dict[str, Any]:
+    if not APOLLO_API_KEY or APOLLO_API_KEY == "PASTE_APOLLO_API_KEY_HERE":
+        logger.warning("Apollo fallback skipped for %s: API key not configured", candidate_id)
+        return {"ok": False, "message": "Apollo API key not configured"}
+
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-API-Key": APOLLO_API_KEY,
+    }
+    payload = {"linkedin_url": linkedin_url}
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            ares = await client.post(APOLLO_ENRICH_URL, headers=headers, json=payload)
+    except Exception as e:
+        logger.warning("Apollo fallback request failed for %s: %s", candidate_id, e)
+        return {"ok": False, "message": f"Apollo request failed: {str(e)}"}
+
+    if ares.status_code >= 400:
+        logger.warning(
+            "Apollo fallback non-2xx for %s: %s %s",
+            candidate_id,
+            ares.status_code,
+            ares.text[:300],
+        )
+        return {"ok": False, "message": f"Apollo API error ({ares.status_code})"}
+
+    try:
+        apollo_data = ares.json()
+    except Exception:
+        apollo_data = {"raw": ares.text}
+
+    extracted = _extract_apollo_contact_fields(apollo_data)
+    return {"ok": True, "fields": extracted}
+
+
 async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandidateContactRequest):
     """
     Enrich candidate contact details from ZoomInfo using LinkedIn URL.
@@ -1320,9 +1509,6 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         ZOOMINFO_CLIENT_ID,
     )
     zoominfo_new_enrich_url = "https://api.zoominfo.com/gtm/data/v1/contacts/enrich"
-
-    if not ZOOMINFO_BEARER_TOKEN:
-        raise HTTPException(status_code=500, detail="ZOOMINFO_BEARER_TOKEN is not configured")
 
     linkedin_url = (request.linkedin_url or "").strip()
     existing_rows: List[Dict[str, Any]] = []
@@ -1368,6 +1554,21 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             "updated_rows": 0,
         }
 
+    provider_used = "zoominfo"
+    extracted: Dict[str, Any] = {}
+    zres: Optional[httpx.Response] = None
+    zoominfo_data: Dict[str, Any] = {}
+
+    if not ZOOMINFO_BEARER_TOKEN:
+        logger.warning("ZoomInfo token missing for %s, attempting Apollo fallback", candidate_id)
+        apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+        if apollo_result.get("ok"):
+            provider_used = "apollo"
+            extracted = apollo_result.get("fields") or {}
+            logger.info("Apollo fallback succeeded for %s when ZoomInfo token missing", candidate_id)
+        else:
+            raise HTTPException(status_code=500, detail="ZOOMINFO_BEARER_TOKEN is not configured and Apollo fallback failed")
+
     headers = {
         "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
         "Content-Type": "application/json",
@@ -1386,20 +1587,85 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         "outputFields": ["workPhone", "mobilePhone", "workEmail", "personalEmail"],
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            zres = await client.post(ZOOMINFO_ENRICH_URL, headers=headers, json=zoominfo_payload)
-    except Exception as e:
-        logger.error(f"ZoomInfo enrich request failed for {candidate_id}: {e}")
-        raise HTTPException(status_code=502, detail=f"ZoomInfo request failed: {str(e)}")
+    async def _zoominfo_crossfill_from_email_or_phone(seed_email: str, seed_phone: str) -> Dict[str, str]:
+        """If we only have email or phone, query ZoomInfo new API to fetch the missing side."""
+        if not ZOOMINFO_BEARER_TOKEN:
+            return {}
 
-    response_text = zres.text
-    try:
-        zoominfo_data = zres.json()
-    except Exception:
-        zoominfo_data = {"raw": response_text}
+        normalised_email = str(seed_email or "").strip().lower()
+        normalised_phone = _normalise_phone(seed_phone or "")
+        if sum(1 for ch in normalised_phone if ch.isdigit()) < 7:
+            normalised_phone = ""
 
-    if zres.status_code == 401:
+        match_person_input: Dict[str, Any] = {}
+        if normalised_email:
+            match_person_input["emailAddress"] = normalised_email
+        elif normalised_phone:
+            match_person_input["phone"] = normalised_phone
+        else:
+            return {}
+
+        headers = {
+            "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
+            "accept": "application/vnd.api+json",
+            "content-type": "application/vnd.api+json",
+        }
+        payload = {
+            "data": {
+                "type": "ContactEnrich",
+                "attributes": {
+                    "matchPersonInput": [match_person_input],
+                    "outputFields": ["mobilePhone", "phone", "email", "emailAlt"],
+                },
+            }
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                res = await client.post(zoominfo_new_enrich_url, headers=headers, json=payload)
+        except Exception as e:
+            logger.warning("ZoomInfo cross-fill request failed for %s: %s", candidate_id, e)
+            return {}
+
+        if res.status_code >= 400:
+            logger.info(
+                "ZoomInfo cross-fill non-2xx for %s: %s",
+                candidate_id,
+                res.status_code,
+            )
+            return {}
+
+        try:
+            payload_data = res.json()
+        except Exception:
+            return {}
+
+        return _extract_new_zoominfo_contact_fields(payload_data)
+
+    if provider_used == "zoominfo":
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                zres = await client.post(ZOOMINFO_ENRICH_URL, headers=headers, json=zoominfo_payload)
+        except Exception as e:
+            logger.error(f"ZoomInfo enrich request failed for {candidate_id}: {e}")
+            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+            if apollo_result.get("ok"):
+                provider_used = "apollo"
+                extracted = apollo_result.get("fields") or {}
+                logger.info("Apollo fallback succeeded for %s after ZoomInfo request failure", candidate_id)
+            else:
+                raise HTTPException(status_code=502, detail=f"ZoomInfo request failed: {str(e)}")
+
+    if provider_used == "zoominfo" and zres is not None:
+        response_text = zres.text
+        try:
+            zoominfo_data = zres.json()
+        except Exception:
+            zoominfo_data = {"raw": response_text}
+    else:
+        response_text = ""
+
+    if provider_used == "zoominfo" and zres.status_code == 401:
         # Legacy endpoint rejected this token. Fallback to the new OAuth Data API.
         row0 = existing_rows[0] if existing_rows else {}
         row_data = _json_load_safe(row0.get("data"), {}) if isinstance(row0, dict) else {}
@@ -1487,20 +1753,28 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                 "ZoomInfo fallback insufficient inputs for %s; returning no-contact result",
                 candidate_id,
             )
-            return {
-                "status": "success",
-                "candidate_id": candidate_id,
-                "linkedin_url": linkedin_url,
-                "phone_source": "none",
-                "phone": None,
-                "email": None,
-                "workPhone": None,
-                "mobilePhone": None,
-                "workEmail": None,
-                "personalEmail": None,
-                "updated_rows": 0,
-                "message": "ZoomInfo fallback skipped: insufficient match inputs (no reliable person match).",
-            }
+            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+            if apollo_result.get("ok"):
+                provider_used = "apollo"
+                extracted = apollo_result.get("fields") or {}
+                logger.info("Apollo fallback succeeded for %s after ZoomInfo insufficient match inputs", candidate_id)
+            else:
+                return {
+                    "status": "success",
+                    "candidate_id": candidate_id,
+                    "linkedin_url": linkedin_url,
+                    "phone_source": "none",
+                    "phone": None,
+                    "phoneCandidates": [],
+                    "email": None,
+                    "workPhone": None,
+                    "mobilePhone": None,
+                    "workEmail": None,
+                    "personalEmail": None,
+                    "provider": "none",
+                    "updated_rows": 0,
+                    "message": "ZoomInfo fallback skipped: insufficient match inputs (no reliable person match).",
+                }
 
         new_headers = {
             "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
@@ -1517,77 +1791,228 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             }
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                new_res = await client.post(zoominfo_new_enrich_url, headers=new_headers, json=new_payload)
-        except Exception as e:
-            logger.error(f"ZoomInfo new API fallback request failed for {candidate_id}: {e}")
-            raise HTTPException(status_code=502, detail=f"ZoomInfo fallback request failed: {str(e)}")
+        if provider_used == "zoominfo":
+            try:
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    new_res = await client.post(zoominfo_new_enrich_url, headers=new_headers, json=new_payload)
+            except Exception as e:
+                logger.error(f"ZoomInfo new API fallback request failed for {candidate_id}: {e}")
+                apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+                if apollo_result.get("ok"):
+                    provider_used = "apollo"
+                    extracted = apollo_result.get("fields") or {}
+                    logger.info("Apollo fallback succeeded for %s after ZoomInfo new API request failure", candidate_id)
+                else:
+                    raise HTTPException(status_code=502, detail=f"ZoomInfo fallback request failed: {str(e)}")
 
-        if new_res.status_code >= 400:
+        if provider_used == "zoominfo" and new_res.status_code >= 400:
             logger.warning(
                 "ZoomInfo fallback non-2xx for %s: %s %s",
                 candidate_id,
                 new_res.status_code,
                 new_res.text[:300],
             )
-            if 400 <= new_res.status_code < 500:
+            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+            if apollo_result.get("ok"):
+                provider_used = "apollo"
+                extracted = apollo_result.get("fields") or {}
+                logger.info("Apollo fallback succeeded for %s after ZoomInfo non-2xx fallback response", candidate_id)
+            elif 400 <= new_res.status_code < 500:
                 return {
                     "status": "success",
                     "candidate_id": candidate_id,
                     "linkedin_url": linkedin_url,
                     "phone_source": "none",
                     "phone": None,
+                    "phoneCandidates": [],
                     "email": None,
                     "workPhone": None,
                     "mobilePhone": None,
                     "workEmail": None,
                     "personalEmail": None,
+                    "provider": "none",
                     "updated_rows": 0,
                     "message": f"ZoomInfo returned no contact match ({new_res.status_code}).",
                 }
-            raise HTTPException(status_code=502, detail=f"ZoomInfo API error ({new_res.status_code})")
+            else:
+                raise HTTPException(status_code=502, detail=f"ZoomInfo API error ({new_res.status_code})")
 
-        try:
-            new_data = new_res.json()
-        except Exception:
-            new_data = {"raw": new_res.text}
+        if provider_used == "zoominfo":
+            try:
+                new_data = new_res.json()
+            except Exception:
+                new_data = {"raw": new_res.text}
 
-        extracted = _extract_new_zoominfo_contact_fields(new_data)
-    elif zres.status_code >= 400:
+            extracted = _extract_new_zoominfo_contact_fields(new_data)
+    elif provider_used == "zoominfo" and zres.status_code >= 400:
         logger.warning(
             f"ZoomInfo enrich non-2xx for {candidate_id}: {zres.status_code} {response_text[:300]}"
         )
-        if 400 <= zres.status_code < 500:
+        apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+        if apollo_result.get("ok"):
+            provider_used = "apollo"
+            extracted = apollo_result.get("fields") or {}
+            logger.info("Apollo fallback succeeded for %s after ZoomInfo non-2xx response", candidate_id)
+        elif 400 <= zres.status_code < 500:
             return {
                 "status": "success",
                 "candidate_id": candidate_id,
                 "linkedin_url": linkedin_url,
                 "phone_source": "none",
                 "phone": None,
+                "phoneCandidates": [],
                 "email": None,
                 "workPhone": None,
                 "mobilePhone": None,
                 "workEmail": None,
                 "personalEmail": None,
+                "provider": "none",
                 "updated_rows": 0,
                 "message": f"ZoomInfo returned no contact match ({zres.status_code}).",
             }
-        raise HTTPException(status_code=502, detail=f"ZoomInfo API error ({zres.status_code})")
-    else:
+        else:
+            raise HTTPException(status_code=502, detail=f"ZoomInfo API error ({zres.status_code})")
+    elif provider_used == "zoominfo":
         extracted = _extract_enrichment_fields(zoominfo_data)
-    raw_mobile_phone = extracted.get("mobilePhone") or ""
-    raw_work_phone = extracted.get("workPhone") or ""
+
+    # Cross-fill pass: if we have only one side (email OR phone), use it to fetch the other.
+    seed_phone = _normalise_phone((extracted.get("mobilePhone") or extracted.get("workPhone") or ""))
+    if sum(1 for ch in seed_phone if ch.isdigit()) < 7:
+        seed_phone = ""
+    seed_email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip().lower()
+
+    if (seed_email and not seed_phone) or (seed_phone and not seed_email):
+        supplemental = await _zoominfo_crossfill_from_email_or_phone(seed_email, seed_phone)
+        if supplemental:
+            for key in ("mobilePhone", "workPhone", "workEmail", "personalEmail"):
+                if not extracted.get(key) and supplemental.get(key):
+                    extracted[key] = supplemental.get(key)
+
+            existing_candidates = extracted.get("phoneCandidates") if isinstance(extracted.get("phoneCandidates"), list) else []
+            supplemental_candidates = [supplemental.get("mobilePhone"), supplemental.get("workPhone")]
+            merged_candidates: List[str] = []
+            merged_seen = set()
+            for candidate in [*existing_candidates, *supplemental_candidates]:
+                n = _normalise_phone(str(candidate or ""))
+                if not n:
+                    continue
+                if sum(1 for ch in n if ch.isdigit()) < 7:
+                    continue
+                if n in merged_seen:
+                    continue
+                merged_seen.add(n)
+                merged_candidates.append(n)
+            if merged_candidates:
+                extracted["phoneCandidates"] = merged_candidates
+
+            logger.info(
+                "Contact enrich cross-fill succeeded for %s | had_email=%s | had_phone=%s",
+                candidate_id,
+                bool(seed_email),
+                bool(seed_phone),
+            )
+
+    if provider_used == "zoominfo":
+        probe_phone = _normalise_phone((extracted.get("mobilePhone") or extracted.get("workPhone") or ""))
+        probe_email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip().lower()
+        if sum(1 for ch in probe_phone if ch.isdigit()) < 7:
+            probe_phone = ""
+
+        need_apollo_supplement = (not probe_phone) or (not probe_email)
+        if need_apollo_supplement:
+            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+            if apollo_result.get("ok"):
+                apollo_fields = apollo_result.get("fields") or {}
+
+                # Fill only missing sides so ZoomInfo data remains preferred.
+                if not probe_phone:
+                    if not extracted.get("mobilePhone") and apollo_fields.get("mobilePhone"):
+                        extracted["mobilePhone"] = apollo_fields.get("mobilePhone")
+                    if not extracted.get("workPhone") and apollo_fields.get("workPhone"):
+                        extracted["workPhone"] = apollo_fields.get("workPhone")
+
+                if not probe_email:
+                    if not extracted.get("workEmail") and apollo_fields.get("workEmail"):
+                        extracted["workEmail"] = apollo_fields.get("workEmail")
+                    if not extracted.get("personalEmail") and apollo_fields.get("personalEmail"):
+                        extracted["personalEmail"] = apollo_fields.get("personalEmail")
+
+                # Merge phone candidates from both providers.
+                existing_candidates = extracted.get("phoneCandidates") if isinstance(extracted.get("phoneCandidates"), list) else []
+                apollo_candidates = apollo_fields.get("phoneCandidates") if isinstance(apollo_fields.get("phoneCandidates"), list) else []
+                merged_candidates: List[str] = []
+                merged_seen = set()
+                for candidate in [*existing_candidates, *apollo_candidates, apollo_fields.get("mobilePhone"), apollo_fields.get("workPhone")]:
+                    n = _normalise_phone(str(candidate or ""))
+                    if not n:
+                        continue
+                    if sum(1 for ch in n if ch.isdigit()) < 7:
+                        continue
+                    if n in merged_seen:
+                        continue
+                    merged_seen.add(n)
+                    merged_candidates.append(n)
+                if merged_candidates:
+                    extracted["phoneCandidates"] = merged_candidates
+
+                # Re-probe after merge; if ZoomInfo had nothing and Apollo filled,
+                # mark provider as Apollo for accurate telemetry/response.
+                post_probe_phone = _normalise_phone((extracted.get("mobilePhone") or extracted.get("workPhone") or ""))
+                post_probe_email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip().lower()
+                if sum(1 for ch in post_probe_phone if ch.isdigit()) < 7:
+                    post_probe_phone = ""
+                if not probe_phone and not probe_email and (post_probe_phone or post_probe_email):
+                    provider_used = "apollo"
+
+                logger.info(
+                    "Apollo supplement merged for %s | needed_phone=%s | needed_email=%s | has_phone=%s | has_email=%s",
+                    candidate_id,
+                    not bool(probe_phone),
+                    not bool(probe_email),
+                    bool(post_probe_phone),
+                    bool(post_probe_email),
+                )
+
+    raw_mobile_phone = str(extracted.get("mobilePhone") or "").strip()
+    raw_work_phone = str(extracted.get("workPhone") or "").strip()
     raw_work_email = extracted.get("workEmail") or ""
     raw_personal_email = extracted.get("personalEmail") or ""
 
-    phone_source = "none"
-    if raw_mobile_phone:
-        phone_source = "mobilePhone"
-    elif raw_work_phone:
-        phone_source = "workPhone"
+    raw_phone_candidates = extracted.get("phoneCandidates") if isinstance(extracted, dict) else []
+    if not isinstance(raw_phone_candidates, list):
+        raw_phone_candidates = []
 
-    enriched_phone = _normalise_phone(raw_mobile_phone or raw_work_phone or "")
+    normalised_candidates: List[str] = []
+    seen_candidates = set()
+    for candidate in [raw_mobile_phone, raw_work_phone, *raw_phone_candidates]:
+        n = _normalise_phone(str(candidate or ""))
+        if not n:
+            continue
+        if sum(1 for ch in n if ch.isdigit()) < 7:
+            continue
+        if n in seen_candidates:
+            continue
+        seen_candidates.add(n)
+        normalised_candidates.append(n)
+
+    phone_candidates_top2 = normalised_candidates[:2]
+
+    mobile_phone_normalised = _normalise_phone(raw_mobile_phone)
+    work_phone_normalised = _normalise_phone(raw_work_phone)
+    if sum(1 for ch in mobile_phone_normalised if ch.isdigit()) < 7:
+        mobile_phone_normalised = ""
+    if sum(1 for ch in work_phone_normalised if ch.isdigit()) < 7:
+        work_phone_normalised = ""
+
+    phone_source = "none"
+    if mobile_phone_normalised:
+        phone_source = "mobilePhone"
+    elif work_phone_normalised:
+        phone_source = "workPhone"
+    elif phone_candidates_top2:
+        phone_source = "phoneCandidates"
+
+    enriched_phone = _normalise_phone(raw_mobile_phone or raw_work_phone or (phone_candidates_top2[0] if phone_candidates_top2 else ""))
     if sum(1 for ch in enriched_phone if ch.isdigit()) < 7:
         enriched_phone = ""
 
@@ -1598,12 +2023,14 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     ).strip().lower()
 
     logger.info(
-        "ZoomInfo enrich parsed for %s | phone_source=%s | has_mobile=%s | has_work=%s | has_email=%s | mobile=%s | work=%s | email=%s",
+        "Contact enrich parsed for %s | provider=%s | phone_source=%s | has_mobile=%s | has_work=%s | has_email=%s | phone_candidates=%s | mobile=%s | work=%s | email=%s",
         candidate_id,
+        provider_used,
         phone_source,
         bool(raw_mobile_phone),
         bool(raw_work_phone),
         bool(enriched_email),
+        len(phone_candidates_top2),
         _mask_phone_for_log(raw_mobile_phone),
         _mask_phone_for_log(raw_work_phone),
         _mask_email_for_log(enriched_email),
@@ -1621,8 +2048,10 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                         data_blob = _json_load_safe(row.get("data"), {})
                         data_blob["zoominfo_contact_enrichment"] = {
                             "linkedin_url": linkedin_url,
+                            "provider": provider_used,
                             "workPhone": extracted.get("workPhone"),
                             "mobilePhone": extracted.get("mobilePhone"),
+                            "phoneCandidates": phone_candidates_top2,
                             "workEmail": extracted.get("workEmail"),
                             "personalEmail": extracted.get("personalEmail"),
                             "enriched_at": datetime.now(timezone.utc).isoformat(),
@@ -1656,8 +2085,10 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         "status": "success",
         "candidate_id": candidate_id,
         "linkedin_url": linkedin_url,
+        "provider": provider_used,
         "phone_source": phone_source,
         "phone": enriched_phone or None,
+        "phoneCandidates": phone_candidates_top2,
         "email": enriched_email or None,
         "workPhone": raw_work_phone or None,
         "mobilePhone": raw_mobile_phone or None,
@@ -1938,3 +2369,494 @@ async def analyze_candidates(request: CandidateAnalysisRequest):
         structured_jd=request.structured_jd
     )
     return {"results": results, "name": "", "email": "", "skills": [], "experience_years": 0} # Dummy fields to satisfy model if strict
+
+
+# ---------------------------------------------------------------------------
+# Candidate Evaluation Report
+# ---------------------------------------------------------------------------
+@router.get("/candidates/{candidate_id}/evaluation-report")
+async def get_candidate_evaluation_report(
+    candidate_id: str,
+    job_id: Optional[str] = Query(None, description="Job ID or JobDiva ID"),
+):
+    """
+    Aggregate a full Candidate Evaluation Report from multiple data sources:
+      - sourced_candidates      : basic profile, resume, match scores
+      - monitored_jobs          : position details, rubric, screening questions
+      - engage_interview_audit  : interview history, send timestamps
+      - PAIR API                : live evaluation, Q&A, transcriptions, outreach
+    """
+    import os, httpx as _httpx
+    PAIR_BASE = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai")
+
+    try:
+        from psycopg2.extras import RealDictCursor
+
+        conn = get_db_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # 1. sourced_candidates — prefer the row tied to this job
+                if job_id:
+                    cur.execute(
+                        """
+                        SELECT sc.*
+                        FROM sourced_candidates sc
+                        JOIN monitored_jobs mj
+                          ON mj.jobdiva_id = sc.jobdiva_id
+                         OR mj.job_id      = sc.jobdiva_id
+                        WHERE sc.candidate_id = %s
+                          AND (mj.job_id = %s OR mj.jobdiva_id = %s)
+                        ORDER BY sc.updated_at DESC
+                        LIMIT 1
+                        """,
+                        (candidate_id, job_id, job_id),
+                    )
+                    cand_row = cur.fetchone()
+                    if not cand_row:
+                        # Fallback: any row for this candidate
+                        cur.execute(
+                            "SELECT * FROM sourced_candidates WHERE candidate_id = %s ORDER BY updated_at DESC LIMIT 1",
+                            (candidate_id,),
+                        )
+                        cand_row = cur.fetchone()
+                else:
+                    cur.execute(
+                        "SELECT * FROM sourced_candidates WHERE candidate_id = %s ORDER BY updated_at DESC LIMIT 1",
+                        (candidate_id,),
+                    )
+                    cand_row = cur.fetchone()
+
+                if not cand_row:
+                    raise HTTPException(status_code=404, detail=f"Candidate {candidate_id} not found")
+
+                # Parse data blob
+                data_blob = cand_row.get("data") or {}
+                if isinstance(data_blob, str):
+                    try:
+                        data_blob = json.loads(data_blob)
+                    except Exception:
+                        data_blob = {}
+
+                # Resolve effective jobdiva_id for job lookup
+                effective_jobdiva_id = cand_row.get("jobdiva_id") or job_id or ""
+
+                # 2. monitored_jobs
+                job_row = None
+                if effective_jobdiva_id or job_id:
+                    cur.execute(
+                        """
+                        SELECT mj.*,
+                               mj.resume_match_filters,
+                               mj.sourcing_filters,
+                               mj.bot_introduction
+                        FROM monitored_jobs mj
+                        WHERE mj.job_id = %s OR mj.jobdiva_id = %s
+                        LIMIT 1
+                        """,
+                        (effective_jobdiva_id, effective_jobdiva_id),
+                    )
+                    job_row = cur.fetchone()
+                    if not job_row and job_id and job_id != effective_jobdiva_id:
+                        cur.execute(
+                            "SELECT * FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
+                            (job_id, job_id),
+                        )
+                        job_row = cur.fetchone()
+
+                # 3. Fetch structured rubric using service
+                from services.job_rubric_db import JobRubricDB
+                rubric_db = JobRubricDB()
+                rubric = rubric_db.get_full_rubric(effective_jobdiva_id) or {}
+
+                # 4. engage_interview_audit — most recent row for this candidate + job
+                audit_row = None
+                audit_where = ["candidate_id = %s"]
+                audit_params: list = [candidate_id]
+                if effective_jobdiva_id:
+                    audit_where.append("(job_id = %s OR job_id = %s)")
+                    audit_params += [effective_jobdiva_id, job_id or effective_jobdiva_id]
+                cur.execute(
+                    f"""
+                    SELECT * FROM engage_interview_audit
+                    WHERE {' AND '.join(audit_where)}
+                      AND interview_id IS NOT NULL AND interview_id::text != ''
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    tuple(audit_params),
+                )
+                audit_row = cur.fetchone()
+
+                # 4. screening questions
+                screen_questions = []
+                if job_row:
+                    jd_id = job_row.get("jobdiva_id") or effective_jobdiva_id or ""
+                    job_pk = job_row.get("job_id") or ""
+                    cur.execute(
+                        """
+                        SELECT question_text, pass_criteria, is_default, category, order_index
+                        FROM job_screen_questions
+                        WHERE jobdiva_id = %s OR jobdiva_id = %s
+                        ORDER BY order_index
+                        """,
+                        (jd_id, job_pk),
+                    )
+                    screen_questions = [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+
+        # ----------------------------------------------------------------
+        # Parse sourced_candidates fields
+        # ----------------------------------------------------------------
+        def _jl(val, default):
+            if val is None:
+                return default
+            if isinstance(val, type(default)):
+                return val
+            if isinstance(val, str):
+                try:
+                    p = json.loads(val)
+                    return p if isinstance(p, type(default)) else default
+                except Exception:
+                    return default
+            return default
+
+        resume_match_score = float(cand_row.get("resume_match_percentage") or 0)
+        engage_score       = float(data_blob.get("engage_score") or 0)
+        engage_total_score = float(data_blob.get("engage_total_score") or 0)
+        engage_status      = str(data_blob.get("engage_status") or "")
+        hard_filter_status = str(data_blob.get("engage_hard_filter_status") or "")
+        engage_interview_id = str(data_blob.get("engage_interview_id") or (audit_row or {}).get("interview_id") or "")
+        engage_completed_at = data_blob.get("engage_completed_at") or (audit_row or {}).get("updated_at") or None
+        engage_created_at   = (audit_row or {}).get("created_at") or None
+
+        # ----------------------------------------------------------------
+        # Webhook payload fallback (questions & answers)
+        # ----------------------------------------------------------------
+        webhook_payload = data_blob.get("engage_last_response")
+        if isinstance(webhook_payload, str):
+            try:
+                webhook_payload = json.loads(webhook_payload)
+            except:
+                webhook_payload = {}
+
+        # ----------------------------------------------------------------
+        # Build job details block
+        # ----------------------------------------------------------------
+        job_details: dict = {}
+        if job_row:
+            sourcing_filters = _jl(job_row.get("sourcing_filters"), {})
+            resume_match_filters = _jl(job_row.get("resume_match_filters"), [])
+            job_details = {
+                "job_id":            job_row.get("job_id"),
+                "jobdiva_id":        job_row.get("jobdiva_id"),
+                "title":             job_row.get("title") or job_row.get("enhanced_title"),
+                "customer_name":     job_row.get("customer_name"),
+                "city":              job_row.get("city"),
+                "state":             job_row.get("state"),
+                "job_location":      f"{job_row.get('city') or ''}, {job_row.get('state') or ''}".strip(", "),
+                "pay_rate":          job_row.get("pay_rate"),
+                "start_date":        str(job_row.get("start_date") or ""),
+                "posted_date":       str(job_row.get("posted_date") or ""),
+                "openings":          job_row.get("openings"),
+                "max_allowed_submittals": job_row.get("max_allowed_submittals"),
+                "employment_type":   job_row.get("employment_type"),
+                "work_authorization":job_row.get("work_authorization"),
+                "ai_description":    job_row.get("ai_description") or job_row.get("jobdiva_description"),
+                "recruiter_notes":   job_row.get("recruiter_notes"),
+                "bot_introduction":  job_row.get("bot_introduction"),
+                "rubric":            rubric,
+                "sourcing_filters":  sourcing_filters,
+                "resume_match_filters": resume_match_filters,
+                "screen_questions":  screen_questions,
+            }
+
+        # ----------------------------------------------------------------
+        # Fetch PAIR live data if we have an interview_id
+        # ----------------------------------------------------------------
+        pair_data: dict = {}
+        
+        # Pre-populate from webhook payload if present
+        if webhook_payload:
+            wp_data = webhook_payload.get("data", webhook_payload)
+            pair_data = {
+                "interview":      wp_data.get("interview"),
+                "evaluation":     wp_data.get("evaluation") or wp_data,
+                "transcriptions": wp_data.get("transcriptions") or wp_data.get("conversation") or [],
+                "outreach":       wp_data.get("outreach"),
+                "questions_answers": wp_data.get("questions_answers", []),
+            }
+
+        if engage_interview_id:
+            try:
+                async with _httpx.AsyncClient(timeout=20.0) as client:
+                    interview_res, evaluation_res, transcription_res, outreach_res = await asyncio.gather(
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}"),
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/evaluation"),
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/transcriptions"),
+                        client.get(f"{PAIR_BASE}/api/interviews/{engage_interview_id}/outreach-status"),
+                        return_exceptions=True,
+                    )
+
+                def _safe(res):
+                    if isinstance(res, Exception):
+                        return None
+                    try:
+                        if res.status_code == 200:
+                            d = res.json()
+                            return d.get("data", d)
+                        return None
+                    except Exception:
+                        return None
+
+                interview_data    = _safe(interview_res)
+                evaluation_data   = _safe(evaluation_res)
+                transcription_data= _safe(transcription_res)
+                outreach_data     = _safe(outreach_res)
+
+                # Merge live data into pair_data (live data takes precedence)
+                if interview_data: pair_data["interview"] = interview_data
+                if evaluation_data: pair_data["evaluation"] = evaluation_data
+                if transcription_data: 
+                    pair_data["transcriptions"] = transcription_data if isinstance(transcription_data, list) else (transcription_data or [])
+                if outreach_data: pair_data["outreach"] = outreach_data
+
+                # Dynamic mapping of questions to evaluation fields
+                qa_list = pair_data.get("questions_answers") or []
+                eval_map = {}
+                for qa in qa_list:
+                    txt = (qa.get("question_text") or "").lower()
+                    ans = qa.get("answer_text") or ""
+                    if "open to exploring new job" in txt: eval_map["isActivelyLookingForJob"] = ans
+                    elif "current or most recent role" in txt: eval_map["currentRole"] = ans
+                    elif "current location" in txt: eval_map["currentLocation"] = ans
+                    elif "authorized to work in the united states" in txt: eval_map["isAuthorizedToWorkInUS"] = ans
+                    elif "visa sponsorship" in txt: eval_map["requireVisaSponsorship"] = ans
+                    elif "onsite work arrangement" in txt: eval_map["isOpenToRelocation"] = ans
+                    elif "availability to start" in txt: eval_map["isAvailableToStartSoon"] = ans
+                    elif "compensation" in txt: eval_map["expectedPayRate"] = ans
+                
+                # Merge into evaluation object
+                if isinstance(pair_data.get("evaluation"), dict):
+                    pair_data["evaluation"].update(eval_map)
+                else:
+                    pair_data["evaluation"] = eval_map
+
+                # Refresh scores from live PAIR data
+                if isinstance(interview_data, dict):
+                    iv = interview_data.get("interview") or interview_data
+                    if iv.get("overall_score") is not None:
+                        engage_score = float(iv["overall_score"])
+                    if iv.get("hard_filter_overall") or iv.get("hard_filter_status"):
+                        hard_filter_status = str(iv.get("hard_filter_overall") or iv.get("hard_filter_status") or hard_filter_status)
+                    if iv.get("status"):
+                        engage_status = str(iv["status"])
+                    if iv.get("completed_at"):
+                        engage_completed_at = iv["completed_at"]
+            except Exception as pair_err:
+                logger.warning(f"PAIR data fetch failed for interview {engage_interview_id}: {pair_err}")
+
+        # ----------------------------------------------------------------
+        # Compose final report
+        # ----------------------------------------------------------------
+        candidate_info = {
+            "candidate_id":    candidate_id,
+            "name":            cand_row.get("name"),
+            "email":           cand_row.get("email"),
+            "phone":           cand_row.get("phone"),
+            "headline":        cand_row.get("headline"),
+            "location":        cand_row.get("location"),
+            "source":          cand_row.get("source"),
+            "profile_url":     cand_row.get("profile_url"),
+            "image_url":       cand_row.get("image_url"),
+            "availability":    data_blob.get("recent_availability") or data_blob.get("recentAvailability") or data_blob.get("availability_status") or data_blob.get("availability"),
+            "resume_text":     cand_row.get("resume_text") or data_blob.get("resume_text"),
+            "skills":          _jl(data_blob.get("skills"), []),
+            "experience_years":data_blob.get("experience_years"),
+            "company_experience": _jl(data_blob.get("company_experience"), []),
+            "education":       _jl(data_blob.get("education"), []),
+            "certifications":  _jl(data_blob.get("certifications"), []),
+        }
+
+        scores = {
+            "resume_match_score":    resume_match_score,
+            "resume_match_status":   str(data_blob.get("resume_matching_status") or ("done" if resume_match_score > 0 else "pending")),
+            "engage_score":          engage_score,
+            "engage_total_score":    engage_total_score,
+            "engage_status":         engage_status,
+            "hard_filter_status":    hard_filter_status,
+            "engage_interview_id":   engage_interview_id,
+            "engage_completed_at":   str(engage_completed_at) if engage_completed_at else None,
+            "engage_created_at":     str(engage_created_at) if engage_created_at else None,
+            "matched_skills":        _jl(data_blob.get("matched_skills"), []),
+            "missing_skills":        _jl(data_blob.get("missing_skills"), []),
+            "explainability":        _jl(data_blob.get("explainability"), []),
+            "score_details":         _jl(data_blob.get("match_score_details"), {}),
+        }
+
+        return {
+            "status":    "success",
+            "candidate": candidate_info,
+            "scores":    scores,
+            "job":       job_details,
+            "pair":      pair_data,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"evaluation-report failed for {candidate_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+@router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id}/feedback")
+async def save_candidate_feedback(
+    job_id_or_ref: str,
+    candidate_id: str,
+    request: CandidateFeedbackRequest
+):
+    """
+    Saves candidate feedback (Submit/Reject) and creates a JobDiva Note with:
+      - actionDate : timestamp of feedback
+      - action     : PAIR Reject / PAIR Submit action string
+      - recruiterid: PAIR recruiter (JOBDIVA_PAIR_RECRUITER_ID env var)
+      - link2AnOpenJob: numeric JobDiva job ID
+      - note       : "Click Here to view the report."
+    """
+    logger.info(f"📝 Receiving feedback for candidate {candidate_id} on job {job_id_or_ref}: {request.feedback_type}")
+    
+    # 1. Map to JobDiva Action String
+    action_string = ""
+    if request.feedback_type == "Submit":
+        action_string = "PAIR Submit - Externally Submitted"
+    elif request.feedback_type == "Reject":
+        rejection_mapping = {
+            "Skills do not meet requirements": "PAIR Reject - Skills do not meet requirements",
+            "Communication skills": "PAIR Reject - Communication skills",
+            "Domain experience mismatch": "PAIR Reject - Domain experience mismatch",
+            "More qualified candidates identified": "PAIR Reject - More qualified candidates identified",
+            "Overqualified for the role": "PAIR Reject - Overqualified for the role",
+            "Compensation expectations exceed budget": "PAIR Reject - Compensation expectations exceed budget",
+            "Not aligned with employment type (W2 / C2C / 1099)": "PAIR Reject - Not aligned with employment type (W2 / C2C / 1099)",
+            "Work authorization / visa constraints": "PAIR Reject - Work authorization / visa constraints",
+            "Not comfortable with background check / drug test": "PAIR Reject - Not comfortable with background check / drug test",
+            "Not local and not open to relocation": "PAIR Reject - Not local and not open to relocation",
+            "Open to remote only": "PAIR Reject - Open to remote only",
+            "Not available within required timeline": "PAIR Reject - Not available within required timeline",
+            "Accepted another offer": "PAIR Reject - Accepted another offer",
+            "Candidate withdrew interest": "PAIR Reject - Candidate withdrew interest",
+            "Career gap concern": "PAIR Reject - Career gap concern",
+            "Job Hopping (short-term engagements throughout or in the last 5-7 years)": "PAIR Reject - Job Hopping",
+            "Fake candidate — Multiple profiles/resumes; misrepresentation of past experience": "PAIR Reject - Fake candidate",
+            "Already submitted to same client / hiring manager by another vendor": "PAIR Reject - Already submitted",
+            "Previously rejected by client": "PAIR Reject - Previously rejected by client",
+            "Not eligible for rehire": "PAIR Reject - Not eligible for rehire",
+            "Past performance concern (Internal note as per past Pyramid client feedback)": "PAIR Reject - Past performance concern",
+        }
+        action_string = rejection_mapping.get(request.reason, f"PAIR Reject - {request.reason}" if request.reason else "PAIR Reject")
+    
+    # 2. Resolve the real JobDiva candidate_id and numeric job ID from the DB.
+    #    The frontend sends `candidate.id` (the sourced_candidates integer PK) in the URL.
+    #    JobDiva's createCandidateNote requires the real numeric JobDiva candidate ID
+    #    (sourced_candidates.candidate_id) and the numeric job ID (monitored_jobs.jobdiva_id).
+    jd_candidate_id = candidate_id   # fallback: use whatever was passed
+    jd_job_ref = job_id_or_ref       # fallback: use the raw job ref
+    sc_row_id = None                 # sourced_candidates.id (PK) once resolved
+
+    try:
+        _conn = get_db_connection()
+        try:
+            with _conn.cursor() as _cur:
+                # Try treating candidate_id as the integer PK (candidate.id from the frontend)
+                try:
+                    pk_int = int(candidate_id)
+                    _cur.execute(
+                        "SELECT id, candidate_id, jobdiva_id FROM sourced_candidates WHERE id = %s LIMIT 1",
+                        (pk_int,)
+                    )
+                    row = _cur.fetchone()
+                    if row:
+                        sc_row_id      = row[0]
+                        jd_candidate_id = str(row[1])   # real JobDiva numeric candidate ID
+                        jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
+                except (ValueError, TypeError):
+                    # candidate_id is not an integer PK – try matching as a candidate_id string
+                    _cur.execute(
+                        """SELECT id, candidate_id, jobdiva_id
+                             FROM sourced_candidates
+                            WHERE candidate_id = %s
+                              AND (jobdiva_id = %s
+                                   OR jobdiva_id IN (
+                                         SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s
+                                   ))
+                            LIMIT 1""",
+                        (candidate_id, job_id_or_ref, job_id_or_ref)
+                    )
+                    row = _cur.fetchone()
+                    if row:
+                        sc_row_id      = row[0]
+                        jd_candidate_id = str(row[1])
+                        jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
+        finally:
+            _conn.close()
+    except Exception as e:
+        logger.warning(f"⚠️ Could not resolve JobDiva IDs from DB for feedback "
+                       f"(candidate_id={candidate_id}, job={job_id_or_ref}): {e}")
+
+    logger.info(f"📝 Resolved → jd_candidate_id={jd_candidate_id}, jd_job_ref={jd_job_ref}, sc_row_id={sc_row_id}")
+
+    # 3. Push to JobDiva — POST /apiv2/jobdiva/createCandidateNote
+    #    Recruiter = PAIR (configured via JOBDIVA_PAIR_RECRUITER_ID env var)
+    from core import JOBDIVA_PAIR_RECRUITER_ID
+
+    jobdiva_result = await jobdiva_service.create_candidate_note(
+        candidate_id=jd_candidate_id,
+        job_id=jd_job_ref,
+        action=action_string,
+        note_text="Click Here to view the report.",
+        recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
+    )
+
+    if jobdiva_result.get("status") == "error":
+        logger.error(f"❌ JobDiva note creation failed: {jobdiva_result.get('message')}")
+    else:
+        logger.info(f"✅ JobDiva note created — action='{action_string}', "
+                    f"candidate={jd_candidate_id}, job={jd_job_ref}")
+
+    # 4. Persist feedback locally in sourced_candidates.data (JSONB merge)
+    try:
+        _conn2 = get_db_connection()
+        with _conn2.cursor() as _cur2:
+            feedback_payload = json.dumps({
+                "feedback_type": request.feedback_type,
+                "feedback_reason": request.reason,
+                "feedback_synced": jobdiva_result.get("status") == "success",
+                "feedback_at": datetime.now(timezone.utc).isoformat()
+            })
+            if sc_row_id is not None:
+                # Fast path: update exactly the row we resolved
+                _cur2.execute(
+                    "UPDATE sourced_candidates SET data = data || %s::jsonb WHERE id = %s",
+                    (feedback_payload, sc_row_id)
+                )
+            else:
+                # Fallback: match by candidate_id + job ref
+                _cur2.execute(
+                    """UPDATE sourced_candidates
+                          SET data = data || %s::jsonb
+                        WHERE candidate_id = %s
+                          AND (jobdiva_id = %s
+                               OR jobdiva_id IN (
+                                     SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s
+                               ))""",
+                    (feedback_payload, jd_candidate_id, job_id_or_ref, job_id_or_ref)
+                )
+            _conn2.commit()
+        _conn2.close()
+    except Exception as e:
+        logger.error(f"❌ Failed to persist feedback locally: {e}")
+
+    return {
+        "status": "success",
+        "jobdiva_sync": jobdiva_result.get("status"),
+        "action_string": action_string,
+        "jobdiva_candidate_id": jd_candidate_id,
+        "jobdiva_job_ref": jd_job_ref,
+    }

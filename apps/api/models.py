@@ -130,6 +130,10 @@ class CandidateSearchRequest(BaseModel):
     boolean_string: str = ""
     page: int = 1
     limit: int = 100
+    page_size: Optional[int] = None
+    within_miles: Optional[int] = None
+    recent_days: Optional[int] = None
+    require_resume: Optional[bool] = None
 
 class JobFetchRequest(BaseModel):
     job_id: str
@@ -335,3 +339,7 @@ class ManualCandidateRequest(BaseModel):
     email: Optional[str] = ""
     phone: Optional[str] = ""
     resume_text: str
+
+class CandidateFeedbackRequest(BaseModel):
+    feedback_type: str # 'Submit' or 'Reject'
+    reason: Optional[str] = None
