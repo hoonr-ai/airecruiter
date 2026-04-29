@@ -554,12 +554,8 @@ class JobDivaService:
 
     async def _get_all_job_applicants(self, job_id: str, limit: int, token: str) -> List[Dict[str, Any]]:
         """Get all candidates who applied to a specific job using JobDiva v2 API."""
-        # Resolve numeric ID if it's a reference number
-        safe_id = job_id
-        if "-" in job_id:
-            job_info = await self.get_job_by_id(job_id)
-            if job_info:
-                safe_id = str(get_field(job_info, ["id", "jobId"]))
+        resolved = await self._resolve_jobdiva_job_id(job_id)
+        safe_id = str(resolved) if resolved is not None else str(job_id)
 
         logger.debug(f"Getting JobDiva applicants for job_id={job_id}, safe_id={safe_id}")
         
@@ -646,6 +642,209 @@ class JobDivaService:
         except Exception as e:
             logger.error(f"❌ Exception with endpoint {endpoint_url}: {e}")
         
+        return jd_results
+
+    async def _resolve_jobdiva_job_id(self, local_or_ref_id: Optional[str]) -> Optional[int]:
+        """Coerce an internal job_id (numeric or reference like '18-25601') to a JobDiva integer ID."""
+        if not local_or_ref_id:
+            return None
+        s = str(local_or_ref_id).strip()
+        if not s:
+            return None
+        if "-" not in s:
+            try:
+                return int(s)
+            except (TypeError, ValueError):
+                return None
+        try:
+            job_info = await self.get_job_by_id(s)
+        except Exception as e:
+            logger.warning(f"_resolve_jobdiva_job_id: get_job_by_id failed for {s!r}: {e}")
+            return None
+        if not job_info:
+            return None
+        resolved = get_field(job_info, ["id", "jobId", "JOBID", "ID"])
+        try:
+            return int(str(resolved).strip()) if resolved else None
+        except (TypeError, ValueError):
+            return None
+
+    async def search_via_job_agent(
+        self,
+        job_id: Optional[str],
+        resume_count: int = 200,
+        require_resume: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Talent-pool sourcing using JobDiva's JobAgentSearch matcher.
+
+        Returns the matcher's ranked candidates for the given job, normalized
+        to the same shape as `_search_talent_pool`. Caller is expected to
+        apply downstream filtering (state, skills) — JobAgentSearch does not
+        guarantee geo precision for generic-skill jobs.
+
+        Returns [] if the job_id can't be resolved to a JobDiva integer ID;
+        the caller should treat that as "fall back to TalentSearch".
+        """
+        token = await self.authenticate()
+        if not token:
+            return []
+        jdiva_id = await self._resolve_jobdiva_job_id(job_id)
+        if jdiva_id is None:
+            logger.info(
+                f"JobAgentSearch skipped: could not resolve JobDiva jobId from {job_id!r}"
+            )
+            return []
+        return await self._search_with_job_agent(
+            job_id=jdiva_id,
+            resume_count=int(resume_count),
+            token=token,
+            require_resume=require_resume,
+        )
+
+    async def _search_with_job_agent(
+        self,
+        job_id: int,
+        resume_count: int,
+        token: str,
+        require_resume: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Call /apiv2/jobdiva/JobAgentSearch and normalize the response.
+
+        JobAgentSearch is a GET, returns up to `resume_count` candidates ranked
+        by JobDiva's internal matcher for the given job. Field shape differs
+        from TalentSearch: STATE → PROVINCE, no EMAIL — emails fill in via
+        the CandidatesDetail enrichment merge below.
+        """
+        url = f"{self.api_url}/apiv2/jobdiva/JobAgentSearch"
+        params = {"jobId": int(job_id), "resumeCount": int(resume_count)}
+        headers = {"Authorization": f"Bearer {token}"}
+
+        jd_results: List[Dict[str, Any]] = []
+        profile_only_results: List[Dict[str, Any]] = []
+        dropped_no_resume = 0
+
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                response = await client.get(url, params=params, headers=headers)
+            if response.status_code != 200:
+                logger.warning(
+                    f"JobAgentSearch failed: {response.status_code} - {response.text[:200]}"
+                )
+                return []
+            data = response.json()
+            candidates = data.get("data") if isinstance(data, dict) else data
+            candidates = candidates or []
+        except Exception as e:
+            logger.error(f"JobAgentSearch error: {e}")
+            return []
+
+        for c in candidates:
+            candidate_id = str(
+                get_field(c, ["candidateId", "CANDIDATEID", "id", "ID"]) or ""
+            )
+            if not candidate_id:
+                continue
+
+            first_name = get_field(c, ["firstName", "firstname", "FIRSTNAME"]) or "Unknown"
+            last_name = get_field(c, ["lastName", "lastname", "LASTNAME"]) or "Candidate"
+            full_name = f"{first_name} {last_name}".strip()
+
+            # PROVINCE is JobAgentSearch's name for state.
+            city = get_field(c, ["city", "CITY", "locationCity"]) or ""
+            state = (
+                get_field(c, ["state", "STATE", "PROVINCE", "province", "locationState"])
+                or ""
+            )
+            location_str = ", ".join(p for p in [city, state] if p).strip()
+
+            resume_text = self._extract_resume_text(c)
+            resume_id = get_field(c, ["resumeId", "RESUMEID", "resume_id"])
+            has_resume = bool((resume_text or "").strip()) or bool(resume_id)
+
+            abstract = get_field(c, ["ABSTRACT", "abstract", "summary", "SUMMARY"]) or ""
+            if not abstract and resume_text:
+                abstract = resume_text[:240].replace("\n", " ").strip()
+            if abstract and len(abstract) > 240:
+                abstract = abstract[:237].rstrip() + "..."
+
+            record = {
+                "candidate_id": candidate_id,
+                "id": candidate_id,
+                "name": full_name,
+                "first_name": first_name,
+                "last_name": last_name,
+                "firstName": first_name,
+                "lastName": last_name,
+                "email": get_field(c, ["email", "EMAIL"]) or "",
+                "city": city,
+                "state": state,
+                "zipcode": get_field(c, ["zipcode", "ZIPCODE", "zip", "ZIP"]) or "",
+                "location": location_str,
+                "title": get_field(c, ["title", "candidateTitle", "TITLE"]) or "",
+                "source": "JobDiva-JobAgent",
+                "match_score": 75,
+                "skills": self._extract_candidate_skills(c),
+                "experience_years": self._extract_experience_years(c),
+                "resume_text": resume_text,
+                "resume_id": resume_id,
+                "received": get_field(c, ["received", "RECEIVED"]),
+                "available": get_field(c, ["available", "AVAILABLE"]) or "",
+                "availability_status": get_field(c, ["available", "AVAILABLE"]) or "",
+                "abstract": abstract,
+                "lastnote": get_field(c, ["lastNote", "LASTNOTE"]),
+                "phone": get_field(c, ["phone", "PHONE", "phoneNumber"]) or "",
+            }
+
+            if require_resume and not has_resume:
+                dropped_no_resume += 1
+                record["resume_missing"] = True
+                profile_only_results.append(record)
+                continue
+            jd_results.append(record)
+
+        # Same enrichment + rescue flow as _search_talent_pool.
+        merge_targets = jd_results + profile_only_results
+        ids_to_enrich = [r["candidate_id"] for r in merge_targets if r.get("candidate_id")]
+        if ids_to_enrich:
+            detail_t0 = time.time()
+            detail_map = await self._fetch_candidate_details_batch(token, ids_to_enrich)
+            detail_ms = int((time.time() - detail_t0) * 1000)
+            counters = {"email": 0, "phone": 0, "address1": 0, "linkedin": 0, "resume": 0}
+            rescued = 0
+            for record in merge_targets:
+                detail = detail_map.get(str(record.get("candidate_id") or ""))
+                if not detail:
+                    continue
+                self._merge_detail_into_candidate(record, detail, counters)
+                if record.get("resume_missing") and (record.get("resume_text") or record.get("resume_id")):
+                    record.pop("resume_missing", None)
+                    rescued += 1
+            logger.debug(
+                f"JobAgent CandidatesDetail enrichment: "
+                f"{len(detail_map)}/{len(ids_to_enrich)} matched in {detail_ms}ms, "
+                f"rescued={rescued}, fields_from_detail={counters}"
+            )
+
+        if require_resume:
+            promoted = [r for r in profile_only_results if not r.get("resume_missing")]
+            if promoted:
+                jd_results.extend(promoted)
+                profile_only_results = [r for r in profile_only_results if r.get("resume_missing")]
+                dropped_no_resume = max(0, dropped_no_resume - len(promoted))
+
+        if require_resume and not jd_results and profile_only_results:
+            jd_results = profile_only_results[: resume_count]
+            logger.warning(
+                "JobAgentSearch fallback activated: strict require_resume "
+                "yielded 0 results, returning %s profile-only candidate(s)",
+                len(jd_results),
+            )
+
+        logger.info(
+            f"JobDiva search: source=JobAgent jobId={job_id} "
+            f"raw={len(candidates)} returned={len(jd_results)} "
+            f"dropped_no_resume={dropped_no_resume}"
+        )
         return jd_results
 
     async def _search_talent_pool(
