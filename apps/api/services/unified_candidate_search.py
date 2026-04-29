@@ -103,7 +103,12 @@ class UnifiedCandidateSearch:
             "talent_search_count": 0,
             "new_extractions": 0,
             "qualified_applicants": 0,
-            "qualified_talent": 0
+            "qualified_talent": 0,
+            # True iff JobDiva's JobAgent returned "Criteria Not Assigned" for
+            # this job — frontend uses this to render a one-time nudge banner
+            # asking the recruiter to set search agent criteria in JobDiva's
+            # web UI for sharper matching.
+            "jobdiva_criteria_unconfigured": False,
         }
 
         def finalize_candidate(cand):
@@ -235,6 +240,8 @@ class UnifiedCandidateSearch:
                 talent_res = await self._search_jobdiva_talent(criteria)
                 talent_pool = talent_res.get("candidates", [])
                 summary["talent_search_count"] = len(talent_pool)
+                if talent_res.get("jobdiva_criteria_unconfigured"):
+                    summary["jobdiva_criteria_unconfigured"] = True
                 if not talent_pool:
                     self._log_stage("TalentSearch", "No talent-pool candidates returned.")
                     return
@@ -376,22 +383,33 @@ class UnifiedCandidateSearch:
         input. We then apply a client-side state filter to backstop the geo
         precision JobDiva does not give us. TalentSearch remains a fallback
         for ad-hoc searches with no resolvable jobId.
+
+        Surfaces `criteria_unconfigured: True` in the return when JobAgent
+        responded with "Criteria Not Assigned" — frontend uses this to nudge
+        the recruiter to set search criteria in JobDiva's web UI.
         """
         try:
             source_type = "JobDiva-JobAgent"
             candidates: List[Dict[str, Any]] = []
+            criteria_unconfigured = False
 
             if criteria.job_id:
                 resume_count = max(200, (criteria.page_size or 50) * 4)
-                candidates = await self.jobdiva_service.search_via_job_agent(
+                ja_result = await self.jobdiva_service.search_via_job_agent(
                     job_id=criteria.job_id,
                     resume_count=resume_count,
                     require_resume=getattr(criteria, "require_resume", True),
                 )
+                # Back-compat: tolerate either list or dict shape.
+                if isinstance(ja_result, dict):
+                    candidates = ja_result.get("candidates") or []
+                    criteria_unconfigured = bool(ja_result.get("criteria_unconfigured"))
+                else:
+                    candidates = list(ja_result or [])
                 self._log_stage(
                     "TalentSearch",
                     f"JobAgent jobId={criteria.job_id} resume_count={resume_count} "
-                    f"raw={len(candidates)}"
+                    f"raw={len(candidates)} criteria_unconfigured={criteria_unconfigured}"
                 )
 
             if not candidates:
@@ -402,10 +420,15 @@ class UnifiedCandidateSearch:
                     criteria.boolean_string or self._build_boolean_string(criteria),
                     criteria.location,
                 )
+                # Fetch a wider pool than the UI page_size so the state
+                # filter + skill scorer have room to rank — TalentSearch is
+                # the fallback path, candidate quality benefits from a bigger
+                # pre-filter pool.
+                fallback_limit = max(200, (criteria.page_size or 50) * 4)
                 candidates = await self.jobdiva_service.search_candidates(
                     skills=self._jobdiva_search_terms(criteria),
                     location=criteria.location,
-                    limit=criteria.page_size,
+                    limit=fallback_limit,
                     job_id=None,
                     boolean_string=jobdiva_boolean,
                     recent_days=getattr(criteria, "recent_days", None),
@@ -416,17 +439,36 @@ class UnifiedCandidateSearch:
                 )
                 self._log_stage(
                     "TalentSearch",
-                    f"TalentSearch fallback raw={len(candidates)}"
+                    f"TalentSearch fallback fetched={fallback_limit} raw={len(candidates)}"
                 )
 
             before = len(candidates)
             candidates = self._filter_by_state(candidates, criteria)
-            after = len(candidates)
-            if after != before:
+            after_state = len(candidates)
+            if after_state != before:
                 self._log_stage(
                     "TalentSearch",
-                    f"State filter: {before} → {after} (dropped {before - after})"
+                    f"State filter: {before} → {after_state} (dropped {before - after_state})"
                 )
+
+            # On the TalentSearch fallback path the raw pool is JobDiva's
+            # broken fixed set — every search returns the same 1551 candidates
+            # regardless of skills. State filter narrows by geography, but
+            # without skill pre-ranking the LLM downstream sees a mostly
+            # irrelevant set and surfaces weak matches. Pre-rank here so the
+            # LLM gets the most skill-relevant candidates first.
+            if source_type == "JobDiva-TalentSearch":
+                keep_top = max(criteria.page_size or 50, 50)
+                before_rank = len(candidates)
+                candidates = self._rank_candidates_by_skill(
+                    candidates, criteria, keep_top=keep_top
+                )
+                if before_rank != len(candidates):
+                    self._log_stage(
+                        "TalentSearch",
+                        f"Skill rank: {before_rank} → {len(candidates)} "
+                        f"(kept top {keep_top} by skill match)"
+                    )
 
             for c in candidates:
                 c.setdefault("source", source_type)
@@ -435,10 +477,18 @@ class UnifiedCandidateSearch:
                 "TalentSearch",
                 f"Proceeding to LLM extraction for {len(candidates)} candidate(s) from {source_type}"
             )
-            return {"candidates": candidates, "source_type": source_type}
+            return {
+                "candidates": candidates,
+                "source_type": source_type,
+                "jobdiva_criteria_unconfigured": criteria_unconfigured,
+            }
         except Exception as e:
             logger.error(f"JobDiva talent-pool search failed: {e}")
-            return {"candidates": [], "source_type": "JobDiva-JobAgent"}
+            return {
+                "candidates": [],
+                "source_type": "JobDiva-JobAgent",
+                "jobdiva_criteria_unconfigured": False,
+            }
 
     async def _search_jobdiva_applicants(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
@@ -621,6 +671,124 @@ class UnifiedCandidateSearch:
             if cstate in allowed:
                 kept.append(c)
         return kept
+
+    @staticmethod
+    def _candidate_haystack(c: Dict[str, Any]) -> str:
+        """Concatenated lowercase text used for skill keyword matching."""
+        parts = [
+            str(c.get("title") or ""),
+            str(c.get("abstract") or ""),
+            str(c.get("resume_text") or ""),
+            " ".join(str(s) for s in (c.get("skills") or [])),
+        ]
+        return " ".join(p for p in parts if p).lower()
+
+    def _rank_candidates_by_skill(
+        self,
+        candidates: List[Dict[str, Any]],
+        criteria: SearchCriteria,
+        keep_top: int,
+    ) -> List[Dict[str, Any]]:
+        """Pre-rank candidates by skill keyword match against title/abstract/resume.
+
+        Used on the TalentSearch fallback path where JobDiva returns its broken
+        fixed pool — without this, the downstream LLM ranker sees ~280 mostly-
+        irrelevant candidates and surfaces poor matches. Scoring:
+
+        - +3 per `must` skill or title term hit (case-insensitive substring).
+        - +1 per `can` (preferred) hit.
+        - +1 per plain `keywords[]` hit.
+        - -10 per `exclude` term hit (effectively drops the candidate).
+        - Drop candidates whose `must` hit-count is 0 when `must` terms exist.
+
+        Returns at most `keep_top` candidates, sorted by score desc, ties
+        broken by JobDiva's original ordering.
+        """
+        must_terms: List[str] = []
+        can_terms: List[str] = []
+        exclude_terms: List[str] = []
+        for item in (criteria.title_criteria or []) + (criteria.skill_criteria or []):
+            value = str(item.get("value", "")).strip().lower()
+            if not value:
+                continue
+            mt = item.get("match_type", "must")
+            if mt == "exclude":
+                exclude_terms.append(value)
+            elif mt == "can":
+                can_terms.append(value)
+            else:
+                must_terms.append(value)
+        keyword_terms = [str(k).strip().lower() for k in (criteria.keywords or []) if str(k).strip()]
+
+        # If we have no skill signal at all, leave the order alone.
+        if not (must_terms or can_terms or keyword_terms or exclude_terms):
+            return candidates[:keep_top]
+
+        # Match a term against haystack: full-phrase match counts 1.0;
+        # otherwise count significant tokens (len>=4) and award a partial
+        # match scaled to coverage. This matters because users type long
+        # phrases ("Java Full Stack Development") but resumes have shorter
+        # canonical forms ("Java"). Without partial match we would over-drop.
+        def term_score(term: str, hay_text: str) -> float:
+            if not term or not hay_text:
+                return 0.0
+            if term in hay_text:
+                return 1.0
+            tokens = [t for t in term.split() if len(t) >= 4]
+            if not tokens:
+                return 0.0
+            hits = sum(1 for t in tokens if t in hay_text)
+            cov = hits / len(tokens)
+            # Require at least one significant token; reward higher coverage.
+            return cov if cov >= 1.0 / max(1, len(tokens)) else 0.0
+
+        # First pass — strict scoring. Drop candidates that miss every must
+        # term or trigger any exclude term, score the rest.
+        strict: List[tuple] = []
+        soft: List[tuple] = []  # parallel weak-signal pool used only if strict is empty
+        any_haystack = 0
+        for idx, c in enumerate(candidates):
+            hay = self._candidate_haystack(c)
+            if hay:
+                any_haystack += 1
+            must_score = sum(term_score(t, hay) for t in must_terms) if hay else 0
+            must_hits = 1 if must_score > 0 else 0
+            can_score = sum(term_score(t, hay) for t in can_terms) if hay else 0
+            kw_score = sum(term_score(t, hay) for t in keyword_terms) if hay else 0
+            exc_hits = sum(1 for t in exclude_terms if t in hay) if hay else 0
+            soft_score = can_score + kw_score - 10.0 * exc_hits
+            strict_score = 3.0 * must_score + soft_score
+            if exc_hits:
+                continue  # always drop exclude-hits regardless of mode
+            if must_terms:
+                if must_hits > 0 and strict_score > 0:
+                    strict.append((strict_score, idx, c))
+                else:
+                    soft.append((soft_score, idx, c))
+            else:
+                strict.append((strict_score, idx, c))
+
+        # Soft-mode fallback: when haystacks are mostly empty (TalentSearch
+        # often returns thin records) or no strict matches survive, fall back
+        # to "any signal beats nothing" so we don't return 0.
+        sparse = any_haystack < max(3, len(candidates) // 3)
+        if not strict or sparse:
+            if sparse:
+                logger.debug(
+                    "_rank_candidates_by_skill: sparse haystacks "
+                    f"({any_haystack}/{len(candidates)}); using soft mode"
+                )
+            else:
+                logger.debug(
+                    "_rank_candidates_by_skill: no strict matches; using soft mode"
+                )
+            scored = strict + soft
+            # Original-order tiebreak preserves JobDiva's ranking when scores tie.
+            scored.sort(key=lambda t: (-t[0], t[1]))
+            return [c for _, _, c in scored[:keep_top]]
+
+        strict.sort(key=lambda t: (-t[0], t[1]))
+        return [c for _, _, c in strict[:keep_top]]
 
     @staticmethod
     def _strip_location_from_boolean(boolean: str, location: str) -> str:
