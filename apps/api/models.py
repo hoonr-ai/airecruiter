@@ -335,3 +335,7 @@ class ManualCandidateRequest(BaseModel):
     email: Optional[str] = ""
     phone: Optional[str] = ""
     resume_text: str
+
+class CandidateFeedbackRequest(BaseModel):
+    feedback_type: str # 'Submit' or 'Reject'
+    reason: Optional[str] = None
