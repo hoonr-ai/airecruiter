@@ -1810,6 +1810,28 @@ class JobDivaService:
             "source": "JobDiva"
         }
     
+    async def get_candidate_by_id(self, candidate_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a specific candidate by ID from JobDiva."""
+        logger.info(f"Fetching Candidate ID: {candidate_id}")
+        token = await self.authenticate()
+        if not token: return None
+
+        url = f"{self.api_url}/apiv2/jobdiva/getCandidateById"
+        headers = {"Authorization": f"Bearer {token}"}
+        params = {"candidateId": candidate_id}
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, params=params, headers=headers)
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    logger.warning(f"❌ Failed to fetch candidate {candidate_id}: {response.status_code}")
+                    return None
+        except Exception as e:
+            logger.error(f"❌ Exception fetching candidate {candidate_id}: {e}")
+            return None
+
     async def get_job_by_id(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a specific job by ID from JobDiva, including AI UDFs."""
         logger.info(f"Fetching Job ID: {job_id}")
@@ -3158,7 +3180,151 @@ class JobDivaService:
         except Exception as e:
             logger.error(f"❌ Exception creating JobDiva note: {e}")
             return {"status": "error", "message": str(e)}
+
+    async def create_candidate_sticky_note(
+        self, 
+        candidate_id: str, 
+        note_text: str,
+        recruiter_id: int = 0
+    ) -> Dict[str, Any]:
+        """
+        Create a sticky note in JobDiva (apiv2/jobdiva/createCandidateStickyNote).
+        Sticky notes are pinned to the top of the candidate's notes section.
+        """
+        token = await self.authenticate()
+        if not token:
+            return {"status": "error", "message": "Authentication failed"}
+
+        url = f"{self.api_url}/apiv2/jobdiva/createCandidateStickyNote"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+
+        payload = {
+            "candidateid": int(candidate_id),
+            "note": note_text,
+            "recruiterid": recruiter_id
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                logger.info(f"📤 Creating JobDiva Sticky Note for Candidate {candidate_id}")
+                response = await client.post(url, headers=headers, json=payload)
+                
+                if response.status_code in [200, 201]:
+                    logger.info(f"✅ Created JobDiva sticky note for candidate {candidate_id}")
+                    return {"status": "success", "data": response.json() if response.text else {}}
+                else:
+                    logger.warning(f"⚠️ Failed to create sticky note (Status {response.status_code}). JobDiva might not support this endpoint. Falling back to standard note.")
+                    return {"status": "error", "message": response.text, "code": response.status_code}
+        except Exception as e:
+            logger.error(f"❌ Exception creating JobDiva sticky note: {e}")
+            return {"status": "error", "message": str(e)}
+
+    async def update_candidate_qualification(
+        self,
+        candidate_id: str,
+        qualification_name: str = "PAIR Candidates",
+        value: str = "PASS",
+        recruiter_id: int = 0,
+        update_date: Optional[str] = None,
+        qualification_type_id: int = 0
+    ) -> Dict[str, Any]:
+        """
+        Update a candidate qualification in JobDiva (apiv2/jobdiva/updateCandidateQualifications).
+        """
+        token = await self.authenticate()
+        if not token:
+            return {"status": "error", "message": "Authentication failed"}
+
+        url = f"{self.api_url}/apiv2/jobdiva/updateCandidateQualifications"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+
+        # Date format: yyyy-MM-dd'T'HH:mm:ss
+        if not update_date:
+            update_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+        elif "T" not in update_date:
+            try:
+                dt = datetime.fromisoformat(update_date.replace("Z", "+00:00"))
+                update_date = dt.strftime("%Y-%m-%dT%H:%M:%S")
+            except:
+                update_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+        # Based on JobDiva v2 swagger and user requirements:
+        # qualificationValue = "PASS"
+        # qualificationTypeId is the numeric ID for "PAIR Candidates"
+        # If we only have the name, we try to pass it without the ID if ID is 0
+        qual_obj = {
+            "qualification": qualification_name,
+            "qualificationValue": value,
+            "date": update_date,
+            "recruiterid": recruiter_id
+        }
+        if qualification_type_id and qualification_type_id > 0:
+            qual_obj["qualificationTypeId"] = qualification_type_id
+
+        payload = {
+            "candidateid": int(candidate_id),
+            "overwrite": False,  # Prevent clearing existing qualifications
+            "qualifications": [qual_obj]
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                logger.info(f"📤 Updating JobDiva Qualification for Candidate {candidate_id}: {qualification_name}={value}")
+                response = await client.post(url, headers=headers, json=payload)
+                
+                if response.status_code in [200, 201]:
+                    logger.info(f"✅ Updated JobDiva qualification for candidate {candidate_id}")
+                    return {"status": "success", "data": response.json() if response.text else {}}
+                else:
+                    logger.error(f"❌ Failed to update JobDiva qualification: {response.status_code} - {response.text}")
+                    return {"status": "error", "message": response.text, "code": response.status_code}
+        except Exception as e:
+            logger.error(f"❌ Exception updating JobDiva qualification: {e}")
+            return {"status": "error", "message": str(e)}
     
+    async def pin_candidate_note(
+        self,
+        note_id: int,
+        is_pinned: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Pin or Unpin a candidate note (GET /apiv2/jobdiva/pinUnPinCandidateNotes).
+        """
+        token = await self.authenticate()
+        if not token:
+            return {"status": "error", "message": "Authentication failed"}
+
+        url = f"{self.api_url}/apiv2/jobdiva/pinUnPinCandidateNotes"
+        headers = {
+            "Authorization": f"Bearer {token}"
+        }
+        params = {
+            "candidateNoteIds": [note_id],
+            "isPinned": is_pinned
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                logger.info(f"📌 {'Pinning' if is_pinned else 'Unpinning'} JobDiva Note {note_id}")
+                # Swagger shows it as a GET request with array params
+                response = await client.get(url, headers=headers, params=params)
+                
+                if response.status_code in [200, 201]:
+                    logger.info(f"✅ Successfully {'pinned' if is_pinned else 'unpinned'} note {note_id}")
+                    return {"status": "success", "data": response.json() if response.text else {}}
+                else:
+                    logger.error(f"❌ Failed to pin/unpin note: {response.status_code} - {response.text}")
+                    return {"status": "error", "message": response.text, "code": response.status_code}
+        except Exception as e:
+            logger.error(f"❌ Exception pinning JobDiva note: {e}")
+            return {"status": "error", "message": str(e)}
+
     def _standardize_talent_candidate(self, candidate_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Convert JobDiva TalentSearch candidate to standardized format

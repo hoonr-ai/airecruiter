@@ -23,6 +23,14 @@ from datetime import datetime, timezone, timedelta
 from routers._helpers import get_db_connection
 
 from core.email import notify_pair_launched, notify_job_posting, notify_candidate_passed
+from services.jobdiva import jobdiva_service
+from core import (
+    JOBDIVA_PAIR_RECRUITER_ID,
+    JOBDIVA_PAIR_QUALIFICATION_NAME,
+    JOBDIVA_PAIR_QUALIFICATION_ID,
+    JOBDIVA_PASS_ACTION_NAME,
+    JOBDIVA_PASS_QUALIFICATION_VALUE
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +43,18 @@ EXTERNAL_INTERVIEW_API_URL = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pa
 PASS_SCORE_THRESHOLD = float(os.getenv("PASS_SCORE_THRESHOLD", "70"))
 HARD_FILTER_PASS_STATUS = os.getenv("HARD_FILTER_PASS_STATUS", "pass").lower()
 ENGAGE_PASSED_STATUSES = os.getenv("ENGAGE_PASSED_STATUSES", "completed,passed").lower().split(",")
+
+def _parse_json_list(val) -> list:
+    """Safely parse a value that may be a JSON string, list, or empty."""
+    if isinstance(val, list):
+        return val
+    if isinstance(val, str):
+        try:
+            parsed = json.loads(val)
+            return parsed if isinstance(parsed, list) else []
+        except Exception:
+            return [e.strip() for e in val.split(",") if e.strip()]
+    return []
 
 # ---------------------------------------------------------------------------
 # Auto-Migration: Ensure audit table exists
@@ -310,18 +330,6 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
         if not row:
             logger.warning("📧 _send_pair_launch_email: job '%s' not found in monitored_jobs", job_id)
             return
-
-        def _parse_json_list(val) -> list:
-            """Safely parse a value that may be a JSON string, list, or empty."""
-            if isinstance(val, list):
-                return val
-            if isinstance(val, str):
-                try:
-                    parsed = json.loads(val)
-                    return parsed if isinstance(parsed, list) else []
-                except Exception:
-                    return [e.strip() for e in val.split(",") if e.strip()]
-            return []
 
         recruiter_emails: list = _parse_json_list(row.get("recruiter_emails", []))
         job_boards: list       = _parse_json_list(row.get("selected_job_boards", []))
@@ -1015,53 +1023,78 @@ async def _check_and_fire_candidate_passed_notification(
         if not job_id or not candidate_id:
             return
 
-        # 1. Score check
+        evaluation = []
+        # 1. New Pass Criteria (Prioritize Webhook Payload)
         interview_block = detail_payload.get("interview", {})
-        score = interview_block.get("overall_score")
-        if score is None or float(score) <= PASS_SCORE_THRESHOLD:
+        hf_status = interview_block.get("hard_filter_status")
+        cand_score = interview_block.get("candidate_score")
+        
+        meets_criteria = False
+
+        # If we have the new fields, use them directly
+        if hf_status is not None and cand_score is not None:
+            meets_criteria = str(hf_status).lower() == "passed" and float(cand_score) > 7
+            if not meets_criteria:
+                logger.info(f"⏭️ Candidate {candidate_id} did not meet pass criteria (HF: {hf_status}, Score: {cand_score}).")
+                return
+        else:
+            # 2. Legacy Score check (fallback)
+            score = interview_block.get("overall_score")
+            if score is None or float(score) <= PASS_SCORE_THRESHOLD:
+                return
+
+            # 3. Legacy Evaluation fetch (fallback)
+            evaluation = detail_payload.get("evaluation")
+            if not evaluation:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    pair_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/interviews/{interview_id}/evaluation"
+                    res = await client.get(pair_url)
+                    if res.status_code == 200:
+                        ev_payload = res.json()
+                        evaluation = ev_payload.get("data") or ev_payload
+                    else:
+                        logger.warning(f"⚠️ Could not fetch evaluation for {interview_id} (HTTP {res.status_code})")
+                        return
+
+            if not evaluation or not isinstance(evaluation, list):
+                return
+
+            # 4. Check hard filters from database (legacy fallback)
+            conn = _get_db_connection()
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            
+            # Get hard filter questions for this job
+            cur.execute("""
+                SELECT question_text 
+                FROM job_screen_questions 
+                WHERE (jobdiva_id = %s OR jobdiva_id = %s) AND is_hard_filter = TRUE
+            """, (job_id, job_id))
+            hard_filter_rows = cur.fetchall()
+            hard_filter_texts = {r["question_text"].strip().lower() for r in hard_filter_rows}
+
+            # If no hard filters defined, we proceed based on score
+            meets_criteria = True # Score already checked above
+            if hard_filter_texts:
+                # Match evaluation items to hard filters
+                for ev in evaluation:
+                    q_text = str(ev.get("question", "")).strip().lower()
+                    if q_text in hard_filter_texts:
+                        ev_status = str(ev.get("status", "")).lower()
+                        if ev_status != HARD_FILTER_PASS_STATUS:
+                            logger.info(f"⏭️ Candidate {candidate_id} failed hard filter '{q_text}' for job {job_id}. Skipping email.")
+                            cur.close()
+                            conn.close()
+                            return
+            
+            cur.close()
+            conn.close()
+
+        if not meets_criteria:
             return
 
-        # 2. Fetch evaluation if not in payload (usually it's not)
-        evaluation = detail_payload.get("evaluation")
-        if not evaluation:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                pair_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/interviews/{interview_id}/evaluation"
-                res = await client.get(pair_url)
-                if res.status_code == 200:
-                    ev_payload = res.json()
-                    evaluation = ev_payload.get("data") or ev_payload
-                else:
-                    logger.warning(f"⚠️ Could not fetch evaluation for {interview_id} (HTTP {res.status_code})")
-                    return
-
-        if not evaluation or not isinstance(evaluation, list):
-            return
-
-        # 3. Check hard filters from database
+        # 5. Fetch Job & Candidate metadata for email
         conn = _get_db_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        
-        # Get hard filter questions for this job
-        cur.execute("""
-            SELECT question_text 
-            FROM job_screen_questions 
-            WHERE (jobdiva_id = %s OR jobdiva_id = %s) AND is_hard_filter = TRUE
-        """, (job_id, job_id))
-        hard_filter_rows = cur.fetchall()
-        hard_filter_texts = {r["question_text"].strip().lower() for r in hard_filter_rows}
-
-        # If no hard filters defined, we proceed based on score
-        if hard_filter_texts:
-            # Match evaluation items to hard filters
-            for ev in evaluation:
-                q_text = str(ev.get("question", "")).strip().lower()
-                if q_text in hard_filter_texts:
-                    ev_status = str(ev.get("status", "")).lower()
-                    if ev_status != HARD_FILTER_PASS_STATUS:
-                        logger.info(f"⏭️ Candidate {candidate_id} failed hard filter '{q_text}' for job {job_id}. Skipping email.")
-                        cur.close()
-                        conn.close()
-                        return
 
         # 4. Fetch Job & Candidate metadata for email
         cur.execute("""
@@ -1094,11 +1127,16 @@ async def _check_and_fire_candidate_passed_notification(
 
         # 5. Build screening summary (all items in evaluation)
         screening_summary = []
-        for ev in evaluation:
-            screening_summary.append({
-                "field": ev.get("question", "Question"),
-                "value": ev.get("answer", ev.get("status", "—"))
-            })
+        if evaluation:
+            for ev in evaluation:
+                screening_summary.append({
+                    "field": ev.get("question", "Question"),
+                    "value": ev.get("answer", ev.get("status", "—"))
+                })
+        else:
+            # Fallback for new webhook path
+            screening_summary.append({"field": "Hard Filter Status", "value": str(hf_status).capitalize()})
+            screening_summary.append({"field": "Phone Screen Score", "value": f"{cand_score}/10"})
 
         # 6. Prepare attachment (resume text as .txt fallback)
         resume_bytes = None
@@ -1110,9 +1148,47 @@ async def _check_and_fire_candidate_passed_notification(
             safe_name = "".join(c for c in (cand_row["name"] or "Candidate") if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
             resume_filename = f"Resume_{safe_name}_{job_id}.txt"
 
-        # 7. Fire the email
+        # 7. Fire the email & Update JobDiva Qualification
         recruiter_emails = _parse_json_list(job_row.get("recruiter_emails", []))
         
+        # Determine the completion timestamp for the qualification update
+        completion_ts = interview_block.get("completed_at") or interview_block.get("evaluation_completed_at")
+        if not completion_ts:
+            completion_ts = datetime.now(timezone.utc).isoformat()
+
+        # Update JobDiva Qualification: PAIR Candidates = PASS
+        # We fire these asynchronously so they don't block the email or main flow
+        asyncio.create_task(
+            jobdiva_service.update_candidate_qualification(
+                candidate_id=candidate_id,
+                qualification_name=JOBDIVA_PAIR_QUALIFICATION_NAME,
+                value=JOBDIVA_PASS_QUALIFICATION_VALUE,
+                recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
+                update_date=completion_ts,
+                qualification_type_id=JOBDIVA_PAIR_QUALIFICATION_ID
+            )
+        )
+
+        # Create JobDiva Note: PAIR Pass Candidate Report
+        # Note: We use the job title from job_row for the message
+        pair_job_title = job_row.get("title") or "the"
+        note_text = f"Candidate completed Phone Screen for {pair_job_title} position. Click Here to view the report."
+        
+        async def create_and_pin_note():
+            note_res = await jobdiva_service.create_candidate_note(
+                candidate_id=candidate_id,
+                job_id=job_id,
+                action=JOBDIVA_PASS_ACTION_NAME,
+                note_text=note_text,
+                recruiter_id=JOBDIVA_PAIR_RECRUITER_ID
+            )
+            if note_res.get("status") == "success":
+                note_id = note_res.get("data")
+                if note_id:
+                    await jobdiva_service.pin_candidate_note(note_id=note_id, is_pinned=True)
+
+        asyncio.create_task(create_and_pin_note())
+
         success = await asyncio.to_thread(
             notify_candidate_passed,
             candidate_name=cand_row["name"] or "Candidate",
