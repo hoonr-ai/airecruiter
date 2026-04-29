@@ -497,6 +497,8 @@ function NewJobPageContent() {
   // small amber banner above the results list nudging the recruiter to
   // open JobDiva and set criteria once for sharper matches.
   const [jobdivaCriteriaUnconfigured, setJobdivaCriteriaUnconfigured] = useState(false);
+  const [showJobdivaSkillsModal, setShowJobdivaSkillsModal] = useState(false);
+  const [skillsCopied, setSkillsCopied] = useState(false);
   const seenCandidateIdsRef = useRef<Set<string>>(new Set());
   const searchAbortRef = useRef<AbortController | null>(null);
   // Fires handleEnhanceJob() exactly once per session when the user first lands on
@@ -563,6 +565,38 @@ function NewJobPageContent() {
     else if (s === "upload-resume") acc["upload-resume"] = (acc["upload-resume"] || 0) + 1;
     return acc;
   }, {});
+
+  const getJobdivaSkills = () => {
+    const seen = new Set<string>();
+    const ordered: string[] = [];
+
+    const append = (raw: unknown) => {
+      const value = String(raw || "").trim();
+      if (!value) return;
+      const key = value.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      ordered.push(value);
+    };
+
+    // Prefer Step-5 sourced skills (recruiter-edited), excluding explicit "must not have".
+    sourceSkills
+      .filter((skill) => skill.matchType !== "exclude")
+      .forEach((skill) => {
+        append(skill.value);
+        (skill.selectedSimilarSkills || []).forEach(append);
+      });
+
+    // Fallback: if source skills are empty, use rubric skills.
+    if (ordered.length === 0) {
+      (rubricData?.skills || []).forEach((skill: any) => append(skill?.value));
+    }
+
+    return ordered;
+  };
+
+  const jobdivaSkillsToUse = getJobdivaSkills();
+  const jobdivaSkillsCopyText = jobdivaSkillsToUse.join(", ");
 
   const sortedCandidates = [...candidates]
     .filter(matchesSourceFilter)
@@ -5876,6 +5910,19 @@ function NewJobPageContent() {
                           Set search criteria once in JobDiva for sharper, ranked matches on every future search.
                         </p>
                       </div>
+                      {jobdivaSkillsToUse.length > 0 ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowJobdivaSkillsModal(true);
+                            setSkillsCopied(false);
+                          }}
+                          className="text-[11.5px] font-bold text-amber-800 hover:text-amber-900 underline whitespace-nowrap inline-flex items-center gap-1 flex-shrink-0"
+                        >
+                          Show skills
+                          <Clipboard className="w-3 h-3" />
+                        </button>
+                      ) : null}
                       {jobdivaId ? (
                         <a
                           href={`https://www1.jobdiva.com/jobdiva/servlet/jd?uid=${encodeURIComponent(jobdivaId)}`}
@@ -6635,6 +6682,63 @@ function NewJobPageContent() {
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" /></svg>
           )}
           {toast.message}
+        </div>
+      )}
+
+      {showJobdivaSkillsModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-2xl rounded-xl bg-white border border-slate-200 shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+              <div>
+                <h3 className="text-[16px] font-bold text-slate-900">Skills for JobDiva AI matcher</h3>
+                <p className="text-[12px] text-slate-500 mt-0.5">Copy and paste these into JobDiva search criteria.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowJobdivaSkillsModal(false)}
+                className="w-8 h-8 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center"
+                aria-label="Close skills modal"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="px-5 py-4 space-y-3">
+              <div className="text-[12px] text-slate-600">
+                {jobdivaSkillsToUse.length} skill{jobdivaSkillsToUse.length === 1 ? "" : "s"} selected
+              </div>
+              <textarea
+                value={jobdivaSkillsCopyText}
+                readOnly
+                rows={8}
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 text-[13px] text-slate-800 font-medium px-3 py-2 outline-none resize-y"
+              />
+              <div className="flex items-center justify-end gap-2">
+                <Button
+                  variant="outline"
+                  className="h-9 px-3 text-[12.5px] font-bold"
+                  onClick={() => setShowJobdivaSkillsModal(false)}
+                >
+                  Close
+                </Button>
+                <Button
+                  className="h-9 px-3 bg-[#6366f1] hover:bg-[#4f46e5] text-white text-[12.5px] font-bold flex items-center gap-1.5"
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(jobdivaSkillsCopyText);
+                      setSkillsCopied(true);
+                      setTimeout(() => setSkillsCopied(false), 1800);
+                    } catch {
+                      showToast("Copy failed. Please copy manually.", "info");
+                    }
+                  }}
+                >
+                  <Clipboard className="w-3.5 h-3.5" />
+                  {skillsCopied ? "Copied" : "Copy skills"}
+                </Button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
