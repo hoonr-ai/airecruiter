@@ -22,6 +22,9 @@ from core import (
     OPENAI_API_KEY, DATABASE_URL, 
     JOBDIVA_JOB_NOTES_UDF_ID, ALLOWED_ORIGINS
 )
+from core.email import notify_pair_launched, notify_job_posting, notify_pair_inactive
+
+PAIR_INACTIVE_STATUSES = os.getenv("PAIR_INACTIVE_STATUSES", "closed,filled,cancelled,canceled,expired,ignored,declined").lower().split(",")
 
 # Load environment variables (core handles .env, but keeping load_dotenv for compatibility)
 load_dotenv()
@@ -276,6 +279,13 @@ app.add_middleware(
 
 
 @app.middleware("http")
+async def log_requests(request: Request, call_next):
+    print(f"DEBUG: Incoming {request.method} {request.url.path}")
+    response = await call_next(request)
+    print(f"DEBUG: Response {response.status_code} for {request.url.path}")
+    return response
+
+@app.middleware("http")
 async def amplitude_request_tracking(request: Request, call_next):
     """Best-effort API telemetry: request journey + failures."""
     started = time.perf_counter()
@@ -410,6 +420,11 @@ async def poll_all_jobs():
             "title": status.get("title")
         }
         jobdiva_service.monitor_job_locally(job_id, db_data)
+
+        # ── Email #4: PAIR Inactive Notification ─────────────────────────
+        if current_status.lower() in PAIR_INACTIVE_STATUSES and old_status.lower() not in PAIR_INACTIVE_STATUSES:
+            logger.info(f"⏸️ Job {job_id} switched to Inactive ({current_status}). Triggering notification...")
+            asyncio.create_task(_fire_pair_inactive_notification(job_id))
     
     # Save updated data
     jobs_data["last_sync"] = readable_ist_now()
@@ -426,6 +441,47 @@ async def poll_all_jobs():
     return {"polled": len(job_ids), "changes": changes_detected}
 
 
+
+async def _fire_pair_inactive_notification(job_id: str):
+    """
+    Background helper to fetch metadata and fire Email #4.
+    """
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        
+        # Fetch recruiter emails
+        cur.execute("""
+            SELECT recruiter_emails, jobdiva_id 
+            FROM monitored_jobs 
+            WHERE job_id = %s OR jobdiva_id = %s
+            LIMIT 1
+        """, (job_id, job_id))
+        row = cur.fetchone()
+        
+        if row:
+            import json
+            
+            emails_raw = row.get("recruiter_emails", [])
+            if isinstance(emails_raw, str):
+                try:
+                    recruiter_emails = json.loads(emails_raw)
+                except:
+                    recruiter_emails = [emails_raw] if emails_raw else []
+            else:
+                recruiter_emails = emails_raw or []
+
+            if recruiter_emails or True:
+                await asyncio.to_thread(
+                    notify_pair_inactive,
+                    jobdiva_id=row["jobdiva_id"] or job_id,
+                    recruiter_emails=recruiter_emails
+                )
+            
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Failed to fire Inactive notification for {job_id}: {e}")
 
 # =====================================================
 # JOB DRAFTS API ENDPOINTS

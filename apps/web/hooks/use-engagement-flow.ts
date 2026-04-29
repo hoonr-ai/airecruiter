@@ -21,6 +21,8 @@ export type GeneratePayloadResult = {
 export type SendBulkInterviewInput = {
   payload: string;
   realCandidateIds: string[];
+  isInitialLaunch?: boolean;
+  dryRun?: boolean;
 };
 
 export type SendBulkInterviewResult = {
@@ -66,13 +68,19 @@ export function useEngagementFlow() {
     const res = await fetch(`${API_BASE}/api/v1/engagement/engage/send-bulk-interview`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ payload: input.payload, real_candidate_ids: input.realCandidateIds }),
+      body: JSON.stringify({ 
+        payload: input.payload, 
+        real_candidate_ids: input.realCandidateIds,
+        is_initial_launch: input.isInitialLaunch ?? false,
+        dry_run: input.dryRun ?? false
+      }),
     });
-    const data = (await res.json()) as SendBulkInterviewResult;
+    const data = (await res.json()) as any;
     if (!res.ok) {
-      logger.error("engagement.send_bulk.failed", { status: res.status, message: data?.message });
+      const errorMsg = data?.message || (typeof data?.detail === 'string' ? data.detail : "API request failed");
+      logger.error("engagement.send_bulk.failed", { status: res.status, message: errorMsg });
     }
-    return data;
+    return data as SendBulkInterviewResult;
   }
 
   async function latestInterviewById(candidateId: string): Promise<LatestInterviewResult> {
