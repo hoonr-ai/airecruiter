@@ -1344,7 +1344,8 @@ async def get_monitored_job_data(job_id: str):
                 recruiter_notes, recruiter_emails, selected_employment_types,
                 work_authorization, screening_level, current_step, processing_status,
                 job_requirements, ai_enhanced, created_at, updated_at, jobdiva_id,
-                is_archived, archive_reason, archived_at
+                is_archived, archive_reason, archived_at, customer_name, openings,
+                max_allowed_submittals
             FROM monitored_jobs
             WHERE job_id = %s
             UNION ALL
@@ -1352,7 +1353,8 @@ async def get_monitored_job_data(job_id: str):
                 recruiter_notes, recruiter_emails, selected_employment_types,
                 work_authorization, screening_level, current_step, processing_status,
                 job_requirements, ai_enhanced, created_at, updated_at, jobdiva_id,
-                is_archived, archive_reason, archived_at
+                is_archived, archive_reason, archived_at, customer_name, openings,
+                max_allowed_submittals
             FROM monitored_jobs
             WHERE jobdiva_id = %s AND job_id <> %s
             LIMIT 1
@@ -1370,7 +1372,8 @@ async def get_monitored_job_data(job_id: str):
                    "recruiter_notes", "recruiter_emails", "selected_employment_types", 
                    "work_authorization", "screening_level", "current_step", "processing_status",
                    "job_requirements", "ai_enhanced", "created_at", "updated_at", "jobdiva_id",
-                   "is_archived", "archive_reason", "archived_at"]
+                   "is_archived", "archive_reason", "archived_at", "customer_name", "openings",
+                   "max_allowed_submittals"]
         
         data = dict(zip(columns, row))
         
