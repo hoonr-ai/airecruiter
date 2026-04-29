@@ -420,10 +420,15 @@ class UnifiedCandidateSearch:
                     criteria.boolean_string or self._build_boolean_string(criteria),
                     criteria.location,
                 )
+                # Fetch a wider pool than the UI page_size so the state
+                # filter + skill scorer have room to rank — TalentSearch is
+                # the fallback path, candidate quality benefits from a bigger
+                # pre-filter pool.
+                fallback_limit = max(200, (criteria.page_size or 50) * 4)
                 candidates = await self.jobdiva_service.search_candidates(
                     skills=self._jobdiva_search_terms(criteria),
                     location=criteria.location,
-                    limit=criteria.page_size,
+                    limit=fallback_limit,
                     job_id=None,
                     boolean_string=jobdiva_boolean,
                     recent_days=getattr(criteria, "recent_days", None),
@@ -434,7 +439,7 @@ class UnifiedCandidateSearch:
                 )
                 self._log_stage(
                     "TalentSearch",
-                    f"TalentSearch fallback raw={len(candidates)}"
+                    f"TalentSearch fallback fetched={fallback_limit} raw={len(candidates)}"
                 )
 
             before = len(candidates)
