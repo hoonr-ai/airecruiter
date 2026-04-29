@@ -492,6 +492,11 @@ function NewJobPageContent() {
   // rather than a fresh stream. Used to surface a small "Restored from last
   // run" caption so recruiters know results are stale until re-run.
   const [restoredFromCache, setRestoredFromCache] = useState(false);
+  // True when the most recent JobDiva search hit a job whose JobDiva-side
+  // AI matcher (Search Agent) criteria isn't configured. Surfaced as a
+  // small amber banner above the results list nudging the recruiter to
+  // open JobDiva and set criteria once for sharper matches.
+  const [jobdivaCriteriaUnconfigured, setJobdivaCriteriaUnconfigured] = useState(false);
   const seenCandidateIdsRef = useRef<Set<string>>(new Set());
   const searchAbortRef = useRef<AbortController | null>(null);
   // Fires handleEnhanceJob() exactly once per session when the user first lands on
@@ -4063,6 +4068,7 @@ function NewJobPageContent() {
     if (mode === "replace") {
       setCandidates([]);
       setCurrentPage(1);
+      setJobdivaCriteriaUnconfigured(false);
       seenCandidateIdsRef.current = new Set<string>();
     }
     const seenIds = seenCandidateIdsRef.current;
@@ -4091,6 +4097,10 @@ function NewJobPageContent() {
               setSearchStatus(event.data);
             } else if (event.type === "summary") {
               console.log("Search stream complete:", event.data);
+              const summary = event.data?.summary || event.data || {};
+              setJobdivaCriteriaUnconfigured(
+                Boolean(summary?.jobdiva_criteria_unconfigured)
+              );
             } else if (event.type === "error") {
               console.error("Stream error:", event.message);
             }
@@ -5854,6 +5864,30 @@ function NewJobPageContent() {
                     <p className="text-[11.5px] font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1 mt-2 inline-block">
                       Restored from last run · Re-run to refresh
                     </p>
+                  )}
+                  {jobdivaCriteriaUnconfigured && !isSearching && (
+                    <div className="mt-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-md flex items-start gap-2">
+                      <Info className="w-4 h-4 text-amber-600 flex-shrink-0 mt-[1px]" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[12.5px] font-medium text-amber-800 leading-snug">
+                          JobDiva&apos;s AI matcher isn&apos;t configured for this job — falling back to keyword search.
+                        </p>
+                        <p className="text-[11.5px] text-amber-700 leading-snug mt-0.5">
+                          Set search criteria once in JobDiva for sharper, ranked matches on every future search.
+                        </p>
+                      </div>
+                      {jobdivaId ? (
+                        <a
+                          href={`https://www1.jobdiva.com/jobdiva/servlet/jd?uid=${encodeURIComponent(jobdivaId)}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-[11.5px] font-bold text-amber-800 hover:text-amber-900 underline whitespace-nowrap inline-flex items-center gap-1 flex-shrink-0"
+                        >
+                          Open in JobDiva
+                          <ExternalLink className="w-3 h-3" />
+                        </a>
+                      ) : null}
+                    </div>
                   )}
                   {candidates.length > 0 && (
                     <div className="flex items-center gap-1.5 mt-3 flex-wrap">

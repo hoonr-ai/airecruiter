@@ -674,32 +674,46 @@ class JobDivaService:
         job_id: Optional[str],
         resume_count: int = 200,
         require_resume: bool = True,
-    ) -> List[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """Talent-pool sourcing using JobDiva's JobAgentSearch matcher.
 
-        Returns the matcher's ranked candidates for the given job, normalized
-        to the same shape as `_search_talent_pool`. Caller is expected to
-        apply downstream filtering (state, skills) — JobAgentSearch does not
-        guarantee geo precision for generic-skill jobs.
+        NOTE: JobDiva's job-level AI criteria fields (SKILLS, AGENT_SEARCH_TITLE)
+        cannot be set via the public API. Tested updateJob.skills (5 shapes),
+        direct field-name overrides for SKILLS/agentSearchTitle/agentSkills/
+        AGENT_SEARCH_TITLE/searchAgentSkills/etc., createJobNote, description,
+        title, postingtitle, nested agentSearch, userfields — all silently
+        accepted, none persist. Setting criteria requires JobDiva web UI today.
+        Until we capture the real "Save Search Agent" endpoint via browser-trace,
+        this method may return empty + `criteria_unconfigured=True` for
+        otherwise-valid jobs.
 
-        Returns [] if the job_id can't be resolved to a JobDiva integer ID;
-        the caller should treat that as "fall back to TalentSearch".
+        Returns:
+            {
+                "candidates": [...],         # ranked candidates (may be empty)
+                "criteria_unconfigured": bool,  # True iff JobDiva said "Criteria Not Assigned"
+                "resolved_jobdiva_id": int|None, # for logging
+            }
         """
         token = await self.authenticate()
         if not token:
-            return []
+            return {"candidates": [], "criteria_unconfigured": False, "resolved_jobdiva_id": None}
         jdiva_id = await self._resolve_jobdiva_job_id(job_id)
         if jdiva_id is None:
             logger.info(
                 f"JobAgentSearch skipped: could not resolve JobDiva jobId from {job_id!r}"
             )
-            return []
-        return await self._search_with_job_agent(
+            return {"candidates": [], "criteria_unconfigured": False, "resolved_jobdiva_id": None}
+        candidates, criteria_unconfigured = await self._search_with_job_agent(
             job_id=jdiva_id,
             resume_count=int(resume_count),
             token=token,
             require_resume=require_resume,
         )
+        return {
+            "candidates": candidates,
+            "criteria_unconfigured": criteria_unconfigured,
+            "resolved_jobdiva_id": jdiva_id,
+        }
 
     async def _search_with_job_agent(
         self,
@@ -707,13 +721,18 @@ class JobDivaService:
         resume_count: int,
         token: str,
         require_resume: bool = True,
-    ) -> List[Dict[str, Any]]:
+    ) -> tuple:
         """Call /apiv2/jobdiva/JobAgentSearch and normalize the response.
 
-        JobAgentSearch is a GET, returns up to `resume_count` candidates ranked
-        by JobDiva's internal matcher for the given job. Field shape differs
-        from TalentSearch: STATE → PROVINCE, no EMAIL — emails fill in via
-        the CandidatesDetail enrichment merge below.
+        Returns `(candidates_list, criteria_unconfigured_bool)`. The flag is
+        True when JobDiva returns 500 with "Criteria Not Assigned" — that
+        signals the recruiter never configured the AI matcher for this job
+        in JobDiva's web UI. Caller should fall back to TalentSearch and
+        surface the flag to the frontend so a UI nudge can prompt the
+        recruiter to set criteria.
+
+        Field shape differs from TalentSearch: STATE → PROVINCE, no EMAIL —
+        emails fill in via the CandidatesDetail enrichment merge below.
         """
         url = f"{self.api_url}/apiv2/jobdiva/JobAgentSearch"
         params = {"jobId": int(job_id), "resumeCount": int(resume_count)}
@@ -722,21 +741,30 @@ class JobDivaService:
         jd_results: List[Dict[str, Any]] = []
         profile_only_results: List[Dict[str, Any]] = []
         dropped_no_resume = 0
+        criteria_unconfigured = False
 
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
                 response = await client.get(url, params=params, headers=headers)
             if response.status_code != 200:
-                logger.warning(
-                    f"JobAgentSearch failed: {response.status_code} - {response.text[:200]}"
-                )
-                return []
+                body = response.text or ""
+                if response.status_code == 500 and "Criteria Not Assigned" in body:
+                    criteria_unconfigured = True
+                    logger.info(
+                        f"JobAgentSearch jobId={job_id}: criteria not configured "
+                        f"in JobDiva (500 \"Criteria Not Assigned\"); will fall back."
+                    )
+                else:
+                    logger.warning(
+                        f"JobAgentSearch failed: {response.status_code} - {body[:200]}"
+                    )
+                return [], criteria_unconfigured
             data = response.json()
             candidates = data.get("data") if isinstance(data, dict) else data
             candidates = candidates or []
         except Exception as e:
             logger.error(f"JobAgentSearch error: {e}")
-            return []
+            return [], criteria_unconfigured
 
         for c in candidates:
             candidate_id = str(
@@ -845,7 +873,7 @@ class JobDivaService:
             f"raw={len(candidates)} returned={len(jd_results)} "
             f"dropped_no_resume={dropped_no_resume}"
         )
-        return jd_results
+        return jd_results, criteria_unconfigured
 
     async def _search_talent_pool(
         self,
@@ -1106,6 +1134,41 @@ class JobDivaService:
                         f"fields_from_detail={fields_from_detail}"
                     )
 
+                # Second-pass: TalentSearch + CandidatesDetail still leave
+                # `resume_text` empty for most candidates because resume bodies
+                # live in CandidatesResumesDetail / ResumesTextDetail. Without
+                # resume text the downstream skill scorer has nothing to match.
+                # Fetch concurrently for the remaining empty-resume candidates.
+                empty_resume_ids = [
+                    r["candidate_id"] for r in (jd_results + profile_only_results)
+                    if r.get("candidate_id") and not (r.get("resume_text") or "").strip()
+                ]
+                if empty_resume_ids:
+                    resume_t0 = time.time()
+                    resume_map = await self._fetch_resume_text_batch(
+                        token, empty_resume_ids[:200]
+                    )
+                    resume_ms = int((time.time() - resume_t0) * 1000)
+                    filled = 0
+                    for r in (jd_results + profile_only_results):
+                        cid = r.get("candidate_id")
+                        if not cid or (r.get("resume_text") or "").strip():
+                            continue
+                        body = resume_map.get(cid, "")
+                        if body:
+                            r["resume_text"] = body
+                            if not (r.get("abstract") or "").strip():
+                                r["abstract"] = body[:240].replace("\n", " ").strip()
+                            # Resume backfill rescues profile-only candidates
+                            # whose resume body now exists.
+                            if r.get("resume_missing"):
+                                r.pop("resume_missing", None)
+                            filled += 1
+                    logger.debug(
+                        f"Resume body backfill: {filled}/{len(empty_resume_ids)} "
+                        f"populated in {resume_ms}ms"
+                    )
+
                 # Promote rescued profile-only entries into the main result set.
                 if require_resume:
                     promoted = [r for r in profile_only_results if not r.get("resume_missing")]
@@ -1189,6 +1252,15 @@ class JobDivaService:
             rid = take(["resumeId", "RESUMEID", "resume_id"])
             if rid:
                 candidate["resume_id"] = rid
+
+        # CandidatesDetail does not return a current job title, but
+        # PROFESSION_SPECIALTY is the closest proxy and is often populated.
+        # Use it only as a fallback when title is empty so the skill scorer
+        # has something to match against.
+        if not (candidate.get("title") or "").strip():
+            specialty = take(["PROFESSION_SPECIALTY", "professionSpecialty"])
+            if specialty:
+                candidate["title"] = specialty
 
         # City/state can be more accurate in detail (TalentSearch sometimes
         # returns work-location vs candidate-location).
@@ -1518,6 +1590,54 @@ class JobDivaService:
                     continue
                 results[str(cid)] = record
         return results
+
+    async def _fetch_resume_text_batch(
+        self,
+        token: str,
+        candidate_ids: List[str],
+        concurrency: int = 8,
+    ) -> Dict[str, str]:
+        """Concurrently fetch resume text for a list of candidate IDs.
+
+        Used by `_search_talent_pool` to enrich the survivors of the state
+        filter with actual resume content — TalentSearch on its own returns
+        empty `resume_text` for most candidates, which makes the skill scorer
+        useless. Reuses the existing `_get_resume_detail_with_id` chain so we
+        respect resume-selection logic (most-recent preferred) and the
+        ResumesTextDetail / fallback endpoints.
+
+        Returns `{candidate_id: resume_text}` keyed by ID. Failures per
+        candidate produce an empty string entry; failures are logged in
+        aggregate.
+        """
+        ids = [str(cid).strip() for cid in (candidate_ids or []) if cid and str(cid).strip()]
+        if not ids:
+            return {}
+
+        semaphore = asyncio.Semaphore(max(1, concurrency))
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        out: Dict[str, str] = {}
+        failures = 0
+
+        async def _one(cid: str) -> None:
+            nonlocal failures
+            async with semaphore:
+                try:
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        result = await self._get_resume_detail_with_id(cid, client, headers)
+                    out[cid] = (result or {}).get("resume_text", "") or ""
+                except Exception as e:
+                    failures += 1
+                    out[cid] = ""
+                    logger.debug(f"_fetch_resume_text_batch: {cid} failed: {e}")
+
+        await asyncio.gather(*[_one(cid) for cid in ids])
+        if failures:
+            logger.info(
+                f"_fetch_resume_text_batch: fetched {len(ids) - failures}/{len(ids)} "
+                f"resumes ({failures} failed)"
+            )
+        return out
 
     async def get_candidate_details(self, candidate_id: str) -> Optional[Dict[str, Any]]:
         """Get detailed candidate information using /apiv2/bi/CandidatesDetail endpoint."""
