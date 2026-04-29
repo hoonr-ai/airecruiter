@@ -16,7 +16,7 @@ from services.sourced_candidates_storage import sourced_candidates_storage
 from services.unified_candidate_search import SearchCriteria, unified_search_service
 from models import (
     CandidateSearchRequest, CandidateMessageRequest, CandidatesSaveRequest,
-    CandidateAnalysisRequest, CandidateAnalysisResponse,
+    CandidateAnalysisRequest, CandidateAnalysisResponse, CandidateFeedbackRequest,
 )
 from routers._helpers import get_db_connection
 
@@ -2694,3 +2694,157 @@ async def get_candidate_evaluation_report(
     except Exception as e:
         logger.error(f"evaluation-report failed for {candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+@router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id}/feedback")
+async def save_candidate_feedback(
+    job_id_or_ref: str,
+    candidate_id: str,
+    request: CandidateFeedbackRequest
+):
+    """
+    Saves candidate feedback (Submit/Reject) and creates a JobDiva Note with:
+      - actionDate : timestamp of feedback
+      - action     : PAIR Reject / PAIR Submit action string
+      - recruiterid: PAIR recruiter (JOBDIVA_PAIR_RECRUITER_ID env var)
+      - link2AnOpenJob: numeric JobDiva job ID
+      - note       : "Click Here to view the report."
+    """
+    logger.info(f"📝 Receiving feedback for candidate {candidate_id} on job {job_id_or_ref}: {request.feedback_type}")
+    
+    # 1. Map to JobDiva Action String
+    action_string = ""
+    if request.feedback_type == "Submit":
+        action_string = "PAIR Submit - Externally Submitted"
+    elif request.feedback_type == "Reject":
+        rejection_mapping = {
+            "Skills do not meet requirements": "PAIR Reject - Skills do not meet requirements",
+            "Communication skills": "PAIR Reject - Communication skills",
+            "Domain experience mismatch": "PAIR Reject - Domain experience mismatch",
+            "More qualified candidates identified": "PAIR Reject - More qualified candidates identified",
+            "Overqualified for the role": "PAIR Reject - Overqualified for the role",
+            "Compensation expectations exceed budget": "PAIR Reject - Compensation expectations exceed budget",
+            "Not aligned with employment type (W2 / C2C / 1099)": "PAIR Reject - Not aligned with employment type (W2 / C2C / 1099)",
+            "Work authorization / visa constraints": "PAIR Reject - Work authorization / visa constraints",
+            "Not comfortable with background check / drug test": "PAIR Reject - Not comfortable with background check / drug test",
+            "Not local and not open to relocation": "PAIR Reject - Not local and not open to relocation",
+            "Open to remote only": "PAIR Reject - Open to remote only",
+            "Not available within required timeline": "PAIR Reject - Not available within required timeline",
+            "Accepted another offer": "PAIR Reject - Accepted another offer",
+            "Candidate withdrew interest": "PAIR Reject - Candidate withdrew interest",
+            "Career gap concern": "PAIR Reject - Career gap concern",
+            "Job Hopping (short-term engagements throughout or in the last 5-7 years)": "PAIR Reject - Job Hopping",
+            "Fake candidate — Multiple profiles/resumes; misrepresentation of past experience": "PAIR Reject - Fake candidate",
+            "Already submitted to same client / hiring manager by another vendor": "PAIR Reject - Already submitted",
+            "Previously rejected by client": "PAIR Reject - Previously rejected by client",
+            "Not eligible for rehire": "PAIR Reject - Not eligible for rehire",
+            "Past performance concern (Internal note as per past Pyramid client feedback)": "PAIR Reject - Past performance concern",
+        }
+        action_string = rejection_mapping.get(request.reason, f"PAIR Reject - {request.reason}" if request.reason else "PAIR Reject")
+    
+    # 2. Resolve the real JobDiva candidate_id and numeric job ID from the DB.
+    #    The frontend sends `candidate.id` (the sourced_candidates integer PK) in the URL.
+    #    JobDiva's createCandidateNote requires the real numeric JobDiva candidate ID
+    #    (sourced_candidates.candidate_id) and the numeric job ID (monitored_jobs.jobdiva_id).
+    jd_candidate_id = candidate_id   # fallback: use whatever was passed
+    jd_job_ref = job_id_or_ref       # fallback: use the raw job ref
+    sc_row_id = None                 # sourced_candidates.id (PK) once resolved
+
+    try:
+        _conn = get_db_connection()
+        try:
+            with _conn.cursor() as _cur:
+                # Try treating candidate_id as the integer PK (candidate.id from the frontend)
+                try:
+                    pk_int = int(candidate_id)
+                    _cur.execute(
+                        "SELECT id, candidate_id, jobdiva_id FROM sourced_candidates WHERE id = %s LIMIT 1",
+                        (pk_int,)
+                    )
+                    row = _cur.fetchone()
+                    if row:
+                        sc_row_id      = row[0]
+                        jd_candidate_id = str(row[1])   # real JobDiva numeric candidate ID
+                        jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
+                except (ValueError, TypeError):
+                    # candidate_id is not an integer PK – try matching as a candidate_id string
+                    _cur.execute(
+                        """SELECT id, candidate_id, jobdiva_id
+                             FROM sourced_candidates
+                            WHERE candidate_id = %s
+                              AND (jobdiva_id = %s
+                                   OR jobdiva_id IN (
+                                         SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s
+                                   ))
+                            LIMIT 1""",
+                        (candidate_id, job_id_or_ref, job_id_or_ref)
+                    )
+                    row = _cur.fetchone()
+                    if row:
+                        sc_row_id      = row[0]
+                        jd_candidate_id = str(row[1])
+                        jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
+        finally:
+            _conn.close()
+    except Exception as e:
+        logger.warning(f"⚠️ Could not resolve JobDiva IDs from DB for feedback "
+                       f"(candidate_id={candidate_id}, job={job_id_or_ref}): {e}")
+
+    logger.info(f"📝 Resolved → jd_candidate_id={jd_candidate_id}, jd_job_ref={jd_job_ref}, sc_row_id={sc_row_id}")
+
+    # 3. Push to JobDiva — POST /apiv2/jobdiva/createCandidateNote
+    #    Recruiter = PAIR (configured via JOBDIVA_PAIR_RECRUITER_ID env var)
+    from core import JOBDIVA_PAIR_RECRUITER_ID
+
+    jobdiva_result = await jobdiva_service.create_candidate_note(
+        candidate_id=jd_candidate_id,
+        job_id=jd_job_ref,
+        action=action_string,
+        note_text="Click Here to view the report.",
+        recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
+    )
+
+    if jobdiva_result.get("status") == "error":
+        logger.error(f"❌ JobDiva note creation failed: {jobdiva_result.get('message')}")
+    else:
+        logger.info(f"✅ JobDiva note created — action='{action_string}', "
+                    f"candidate={jd_candidate_id}, job={jd_job_ref}")
+
+    # 4. Persist feedback locally in sourced_candidates.data (JSONB merge)
+    try:
+        _conn2 = get_db_connection()
+        with _conn2.cursor() as _cur2:
+            feedback_payload = json.dumps({
+                "feedback_type": request.feedback_type,
+                "feedback_reason": request.reason,
+                "feedback_synced": jobdiva_result.get("status") == "success",
+                "feedback_at": datetime.now(timezone.utc).isoformat()
+            })
+            if sc_row_id is not None:
+                # Fast path: update exactly the row we resolved
+                _cur2.execute(
+                    "UPDATE sourced_candidates SET data = data || %s::jsonb WHERE id = %s",
+                    (feedback_payload, sc_row_id)
+                )
+            else:
+                # Fallback: match by candidate_id + job ref
+                _cur2.execute(
+                    """UPDATE sourced_candidates
+                          SET data = data || %s::jsonb
+                        WHERE candidate_id = %s
+                          AND (jobdiva_id = %s
+                               OR jobdiva_id IN (
+                                     SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s
+                               ))""",
+                    (feedback_payload, jd_candidate_id, job_id_or_ref, job_id_or_ref)
+                )
+            _conn2.commit()
+        _conn2.close()
+    except Exception as e:
+        logger.error(f"❌ Failed to persist feedback locally: {e}")
+
+    return {
+        "status": "success",
+        "jobdiva_sync": jobdiva_result.get("status"),
+        "action_string": action_string,
+        "jobdiva_candidate_id": jd_candidate_id,
+        "jobdiva_job_ref": jd_job_ref,
+    }

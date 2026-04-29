@@ -22,7 +22,9 @@ import {
   User,
   Briefcase,
   Building2,
-  Zap
+  Zap,
+  Check,
+  X
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -110,24 +112,67 @@ export default function CandidateRankingsPage() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
-  const [feedbacks, setFeedbacks] = useState<Record<number, string>>({});
+  const [feedbacks, setFeedbacks] = useState<Record<string, string>>({});
+  const [syncingCandidateId, setSyncingCandidateId] = useState<number | null>(null);
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
   const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState("");
 
-  const handleConfirmSubmit = () => {
+  const handleConfirmSubmit = async () => {
     if (actionCandidateId) {
-      setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
-      setIntegrationModalOpen(null);
-      setActionCandidateId(null);
+      setSyncingCandidateId(actionCandidateId);
+      try {
+        const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates/${actionCandidateId}/feedback`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ feedback_type: 'Submit' })
+        });
+        
+        if (response.ok) {
+          setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
+        } else {
+          console.error('Failed to sync submission with JobDiva');
+          setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
+        }
+      } catch (error) {
+        console.error('Error syncing submission:', error);
+        setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
+      } finally {
+        setSyncingCandidateId(null);
+        setIntegrationModalOpen(null);
+        setActionCandidateId(null);
+      }
     }
   };
 
-  const handleConfirmReject = () => {
+  const handleConfirmReject = async () => {
     if (actionCandidateId && rejectReason) {
-      setFeedbacks(prev => ({ ...prev, [actionCandidateId]: `Reject: ${rejectReason}` }));
-      setIntegrationModalOpen(null);
-      setActionCandidateId(null);
+      setSyncingCandidateId(actionCandidateId);
+      try {
+        const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates/${actionCandidateId}/feedback`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            feedback_type: 'Reject',
+            reason: rejectReason
+          })
+        });
+        
+        if (response.ok) {
+          setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
+        } else {
+          console.error('Failed to sync rejection with JobDiva');
+          setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
+        }
+      } catch (error) {
+        console.error('Error syncing rejection:', error);
+        setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
+      } finally {
+        setSyncingCandidateId(null);
+        setIntegrationModalOpen(null);
+        setActionCandidateId(null);
+        setRejectReason('');
+      }
     }
   };
 
@@ -827,6 +872,15 @@ export default function CandidateRankingsPage() {
       const candRes = await fetch(`${apiBase}/jobs/${jobId}/candidates`);
       const candData = await candRes.json();
       if (candData.status === "success" && Array.isArray(candData.candidates)) {
+        // Initialize feedbacks state from persisted data
+        const initialFeedbacks: Record<string, string> = {};
+        candData.candidates.forEach((c: any) => {
+          if (c.data?.feedback_type) {
+            initialFeedbacks[c.id] = c.data.feedback_type;
+          }
+        });
+        setFeedbacks(initialFeedbacks);
+
         // Deduplicate candidates by their JobDiva candidate ID.
         // We keep the first occurrence since they are sorted by created_at DESC from the backend.
         const seen = new Set();
@@ -1059,19 +1113,6 @@ export default function CandidateRankingsPage() {
               <TableHeader>
                 <TableRow className="bg-slate-50/80 border-b border-slate-200 hover:bg-slate-50/80 h-[42px] transition-colors">
                   <TableHead className="w-[44px] sticky left-0 z-10 bg-white text-center font-bold text-slate-900 text-[11px] uppercase tracking-wider border-r border-[#e2e8f0] py-1 px-1">#</TableHead>
-                  {(() => {
-                    // Helper that turns a column header into a sortable button.
-                    // Shows an active arrow when that column is the current sort.
-                    const SortIcon = ({ field }: { field: SortField }) => {
-                      if (sortField !== field) {
-                        return <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />;
-                      }
-                      return sortDir === "asc"
-                        ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" />
-                        : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />;
-                    };
-                    return null; // just a hoist trick; the component is used inline below
-                  })()}
                   <TableHead className="w-[160px] sticky left-[44px] z-10 bg-white font-bold text-slate-900 text-[9.5px] uppercase tracking-wide border-r border-slate-200 py-0">
                     <button
                       onClick={() => toggleSort("name")}
@@ -1614,7 +1655,13 @@ export default function CandidateRankingsPage() {
                 </div>
                 <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
                   <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
-                  <Button className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold" onClick={handleConfirmSubmit}>Confirm & Submit to JobDiva</Button>
+                  <Button 
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold" 
+                    onClick={handleConfirmSubmit}
+                    disabled={syncingCandidateId === actionCandidateId}
+                  >
+                    {syncingCandidateId === actionCandidateId ? 'Syncing...' : 'Confirm & Submit to JobDiva'}
+                  </Button>
                 </div>
               </>
             ) : (
@@ -1664,7 +1711,14 @@ export default function CandidateRankingsPage() {
                 </div>
                 <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
                   <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
-                  <Button className="bg-rose-600 hover:bg-rose-700 text-white font-bold" onClick={handleConfirmReject} disabled={!rejectReason}>Confirm Reject</Button>
+                  <Button 
+                    variant="destructive" 
+                    onClick={handleConfirmReject} 
+                    disabled={!rejectReason || syncingCandidateId === actionCandidateId}
+                    className="font-bold"
+                  >
+                    {syncingCandidateId === actionCandidateId ? 'Syncing...' : 'Confirm Rejection'}
+                  </Button>
                 </div>
               </>
             )}

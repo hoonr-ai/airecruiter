@@ -3097,6 +3097,67 @@ class JobDivaService:
         except Exception as e:
             logger.error(f"❌ TalentSearch API call failed: {e}")
             return []
+
+    async def create_candidate_note(
+        self, 
+        candidate_id: str, 
+        job_id: str, 
+        action: str, 
+        note_text: str = "Click Here to view the report.",
+        recruiter_id: int = 0
+    ) -> Dict[str, Any]:
+        """
+        Create a candidate note in JobDiva (apiv2/jobdiva/createCandidateNote).
+        Mapping for candidate feedback as per USER requirements.
+        """
+        token = await self.authenticate()
+        if not token:
+            return {"status": "error", "message": "Authentication failed"}
+
+        url = f"{self.api_url}/apiv2/jobdiva/createCandidateNote"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+
+        # Handle job_id resolution (numeric JD ID required)
+        jdiva_job_id = await self._resolve_jobdiva_job_id(job_id)
+        if not jdiva_job_id:
+            logger.warning(f"Could not resolve JobDiva Job ID for {job_id}")
+            # Try to use it directly if it's numeric
+            try:
+                jdiva_job_id = int(job_id)
+            except:
+                pass
+
+        # JobDiva v2 action date format: yyyy-MM-dd'T'HH:mm:ss
+        now = datetime.now(timezone.utc)
+        action_date = now.strftime("%Y-%m-%dT%H:%M:%S")
+
+        payload = {
+            "candidateid": int(candidate_id),
+            "note": note_text,
+            "recruiterid": recruiter_id,  # PAIR recruiter ID — set via JOBDIVA_PAIR_RECRUITER_ID env var
+            "action": action,
+            "actionDate": action_date,
+            "link2AnOpenJob": jdiva_job_id if jdiva_job_id else 0,
+            "setAsAuto": True
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                debug_log(f"Creating JobDiva Note for Candidate {candidate_id}: {action}")
+                response = await client.post(url, headers=headers, json=payload)
+                
+                if response.status_code in [200, 201]:
+                    logger.info(f"✅ Created JobDiva note for candidate {candidate_id}")
+                    return {"status": "success", "data": response.json() if response.text else {}}
+                else:
+                    logger.error(f"❌ Failed to create JobDiva note: {response.status_code} - {response.text}")
+                    return {"status": "error", "message": response.text, "code": response.status_code}
+        except Exception as e:
+            logger.error(f"❌ Exception creating JobDiva note: {e}")
+            return {"status": "error", "message": str(e)}
     
     def _standardize_talent_candidate(self, candidate_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
