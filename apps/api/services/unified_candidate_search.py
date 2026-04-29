@@ -368,38 +368,77 @@ class UnifiedCandidateSearch:
 
         
     async def _search_jobdiva_talent(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        """JobDiva talent-pool sourcing.
+
+        Primary path uses JobAgentSearch (JobDiva's AI matcher) anchored to the
+        job's JobDiva ID — this returns a per-job ranked candidate set, unlike
+        TalentSearch which (live-tested) returns the same fixed pool for any
+        input. We then apply a client-side state filter to backstop the geo
+        precision JobDiva does not give us. TalentSearch remains a fallback
+        for ad-hoc searches with no resolvable jobId.
+        """
         try:
-            countries, states = self._resolve_jobdiva_geo(criteria)
-            # The global boolean string keeps its location term so Exa / other
-            # sources that rely on textual location matching still work. JobDiva
-            # gets country/state via structured talentSearchDef fields, so we
-            # strip the location term out of the boolean before handing it off —
-            # otherwise a quoted city/region in `skills` collapses JobDiva recall.
-            jobdiva_boolean = self._strip_location_from_boolean(
-                criteria.boolean_string or self._build_boolean_string(criteria),
-                criteria.location,
-            )
-            candidates = await self.jobdiva_service.search_candidates(
-                skills=self._jobdiva_search_terms(criteria),
-                location=criteria.location,
-                limit=criteria.page_size,
-                job_id=None,
-                boolean_string=jobdiva_boolean,
-                recent_days=getattr(criteria, "recent_days", None),
-                require_resume=getattr(criteria, "require_resume", True),
-                countries=countries,
-                states=states,
-                page_number=getattr(criteria, "page_number", 0) or 0,
-            )
-            self._log_stage("TalentSearch", f"JobDiva returned {len(candidates)} candidate(s)")
+            source_type = "JobDiva-JobAgent"
+            candidates: List[Dict[str, Any]] = []
+
+            if criteria.job_id:
+                resume_count = max(200, (criteria.page_size or 50) * 4)
+                candidates = await self.jobdiva_service.search_via_job_agent(
+                    job_id=criteria.job_id,
+                    resume_count=resume_count,
+                    require_resume=getattr(criteria, "require_resume", True),
+                )
+                self._log_stage(
+                    "TalentSearch",
+                    f"JobAgent jobId={criteria.job_id} resume_count={resume_count} "
+                    f"raw={len(candidates)}"
+                )
+
+            if not candidates:
+                # Fallback to TalentSearch (the broken-but-stable pool endpoint).
+                source_type = "JobDiva-TalentSearch"
+                countries, states = self._resolve_jobdiva_geo(criteria)
+                jobdiva_boolean = self._strip_location_from_boolean(
+                    criteria.boolean_string or self._build_boolean_string(criteria),
+                    criteria.location,
+                )
+                candidates = await self.jobdiva_service.search_candidates(
+                    skills=self._jobdiva_search_terms(criteria),
+                    location=criteria.location,
+                    limit=criteria.page_size,
+                    job_id=None,
+                    boolean_string=jobdiva_boolean,
+                    recent_days=getattr(criteria, "recent_days", None),
+                    require_resume=getattr(criteria, "require_resume", True),
+                    countries=countries,
+                    states=states,
+                    page_number=getattr(criteria, "page_number", 0) or 0,
+                )
+                self._log_stage(
+                    "TalentSearch",
+                    f"TalentSearch fallback raw={len(candidates)}"
+                )
+
+            before = len(candidates)
+            candidates = self._filter_by_state(candidates, criteria)
+            after = len(candidates)
+            if after != before:
+                self._log_stage(
+                    "TalentSearch",
+                    f"State filter: {before} → {after} (dropped {before - after})"
+                )
+
             for c in candidates:
-                c["source"] = "JobDiva-TalentSearch"
-            # No pre-screening needed - boolean string already filters candidates
-            self._log_stage("TalentSearch", f"Proceeding to LLM extraction for {len(candidates)} candidate(s)")
-            return {"candidates": candidates, "source_type": "JobDiva-TalentSearch"}
+                c.setdefault("source", source_type)
+
+            self._log_stage(
+                "TalentSearch",
+                f"Proceeding to LLM extraction for {len(candidates)} candidate(s) from {source_type}"
+            )
+            return {"candidates": candidates, "source_type": source_type}
         except Exception as e:
-            logger.error(f"JobDiva Talent Search failed: {e}")
-            return {"candidates": [], "source_type": "JobDiva-TalentSearch"}
+            logger.error(f"JobDiva talent-pool search failed: {e}")
+            return {"candidates": [], "source_type": "JobDiva-JobAgent"}
 
     async def _search_jobdiva_applicants(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
@@ -494,6 +533,94 @@ class UnifiedCandidateSearch:
                 break
 
         return countries, states
+
+    # Adjacent-state map for the "within N miles spills across state lines"
+    # case (Charlotte NC ↔ Fort Mill SC, NYC ↔ Jersey City NJ, etc.). Hand-
+    # written, conservative — only the metros recruiters actually ask about.
+    # If a state isn't here, _filter_by_state behaves as strict-state.
+    _ADJACENT_STATES = {
+        "NC": {"SC", "VA", "TN", "GA"},
+        "SC": {"NC", "GA"},
+        "VA": {"NC", "WV", "MD", "DC", "TN", "KY"},
+        "NY": {"NJ", "CT", "PA", "MA", "VT"},
+        "NJ": {"NY", "PA", "DE"},
+        "PA": {"NY", "NJ", "OH", "WV", "MD", "DE"},
+        "CT": {"NY", "MA", "RI"},
+        "MA": {"NY", "CT", "RI", "NH", "VT"},
+        "MD": {"VA", "PA", "DE", "WV", "DC"},
+        "DC": {"MD", "VA"},
+        "DE": {"MD", "PA", "NJ"},
+        "CA": {"NV", "OR", "AZ"},
+        "TX": {"OK", "LA", "AR", "NM"},
+        "WA": {"OR", "ID"},
+        "OR": {"WA", "CA", "ID", "NV"},
+        "IL": {"IN", "WI", "IA", "MO", "KY"},
+        "IN": {"IL", "OH", "KY", "MI"},
+        "OH": {"PA", "WV", "KY", "IN", "MI"},
+        "FL": {"GA", "AL"},
+        "GA": {"FL", "AL", "TN", "NC", "SC"},
+        "AZ": {"CA", "NV", "UT", "NM"},
+        "MI": {"IN", "OH", "WI"},
+        "MN": {"WI", "IA", "ND", "SD"},
+        "WI": {"IL", "IA", "MN", "MI"},
+        "CO": {"WY", "NM", "UT", "KS", "NE", "OK"},
+    }
+
+    # Wider regional clusters when within_miles is large (≥200 mi).
+    _REGIONAL_CLUSTERS = [
+        {"NY", "NJ", "PA", "CT", "MA", "RI"},
+        {"NC", "SC", "VA", "TN", "GA"},
+        {"TX", "OK", "LA", "AR", "NM"},
+        {"CA", "NV", "OR", "AZ", "WA"},
+        {"IL", "IN", "OH", "MI", "WI", "MN", "IA", "KY", "MO"},
+        {"FL", "GA", "AL", "MS", "LA"},
+        {"MD", "DC", "VA", "DE", "PA"},
+    ]
+
+    def _filter_by_state(
+        self,
+        candidates: List[Dict[str, Any]],
+        criteria: SearchCriteria,
+    ) -> List[Dict[str, Any]]:
+        """Drop candidates whose state is clearly outside the searched area.
+
+        Conservative:
+        - Skips entirely when no target state can be resolved.
+        - Keeps candidates whose state is empty / "?" (state will fill in via
+          CandidatesDetail enrichment downstream; dropping them here would
+          reject otherwise-valid hits).
+        - Adjacency table expanded only when within_miles >= 25; the wider
+          regional cluster only when within_miles >= 200.
+        """
+        if not candidates:
+            return candidates
+        countries, states = self._resolve_jobdiva_geo(criteria)
+        if not states:
+            return candidates
+
+        target = {s.upper() for s in states if s}
+        miles = int(getattr(criteria, "within_miles", 25) or 0)
+
+        allowed = set(target)
+        if miles >= 25:
+            for s in target:
+                allowed |= self._ADJACENT_STATES.get(s, set())
+        if miles >= 200:
+            for cluster in self._REGIONAL_CLUSTERS:
+                if cluster & target:
+                    allowed |= cluster
+
+        kept: List[Dict[str, Any]] = []
+        for c in candidates:
+            cstate = (
+                c.get("state") or c.get("STATE") or c.get("PROVINCE") or ""
+            ).strip().upper()
+            if not cstate or cstate == "?":
+                kept.append(c)
+                continue
+            if cstate in allowed:
+                kept.append(c)
+        return kept
 
     @staticmethod
     def _strip_location_from_boolean(boolean: str, location: str) -> str:
