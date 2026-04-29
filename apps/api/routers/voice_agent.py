@@ -1,5 +1,4 @@
 from fastapi import APIRouter, HTTPException
-import logging
 from services.job_rubric_db import JobRubricDB
 from services.jobdiva import jobdiva_service
 import psycopg2
@@ -11,8 +10,6 @@ import asyncio
 import json
 from datetime import datetime, timezone
 
-
-logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Voice Agent Integration"])
 
 @router.get("/jobs/{job_id}")
