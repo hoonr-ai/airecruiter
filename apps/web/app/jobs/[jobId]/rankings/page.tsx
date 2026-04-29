@@ -16,10 +16,13 @@ import {
   ChevronsUpDown,
   Filter,
   Calendar,
-  X,
   MessageSquare,
   Send,
   ExternalLink,
+  User,
+  Briefcase,
+  Building2,
+  Zap
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -107,6 +110,26 @@ export default function CandidateRankingsPage() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [feedbacks, setFeedbacks] = useState<Record<number, string>>({});
+  const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
+  const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
+
+  const handleConfirmSubmit = () => {
+    if (actionCandidateId) {
+      setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
+      setIntegrationModalOpen(null);
+      setActionCandidateId(null);
+    }
+  };
+
+  const handleConfirmReject = () => {
+    if (actionCandidateId && rejectReason) {
+      setFeedbacks(prev => ({ ...prev, [actionCandidateId]: `Reject: ${rejectReason}` }));
+      setIntegrationModalOpen(null);
+      setActionCandidateId(null);
+    }
+  };
 
   // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
   // filter updates the table synchronously (no stale state via setFilteredCandidates).
@@ -1154,6 +1177,13 @@ export default function CandidateRankingsPage() {
                       <div className="w-[10px]" />
                     </div>
                   </TableHead>
+                  <TableHead className="w-[160px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide border-l border-slate-200 py-0">
+                    <div className="flex items-center justify-between w-full h-full px-1">
+                      <div className="w-[10px]" />
+                      <span className="flex-1 text-center leading-tight">FEEDBACK</span>
+                      <div className="w-[10px]" />
+                    </div>
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody className={isRefreshing ? "opacity-60 transition-opacity duration-300 pointer-events-none" : ""}>
@@ -1439,6 +1469,35 @@ export default function CandidateRankingsPage() {
                             </Button>
                           </div>
                         </TableCell>
+
+                        <TableCell className="text-center pr-4 pl-4 border-l border-[#e2e8f0] py-2 align-middle transition-colors group-hover:bg-indigo-50/5">
+                          <div className="flex flex-col items-center gap-1.5">
+                            <select 
+                              className="w-full text-[11px] font-medium text-[#334155] bg-white border border-[#cbd5e1] rounded h-7 px-1 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                              value={feedbacks[candidate.id]?.startsWith("Reject") ? "Reject" : feedbacks[candidate.id] || ""}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                if (val === "Reject") {
+                                  setActionCandidateId(candidate.id);
+                                  setRejectReason("");
+                                  setIntegrationModalOpen('reject');
+                                } else if (val === "Submit") {
+                                  setActionCandidateId(candidate.id);
+                                  setIntegrationModalOpen('submit');
+                                }
+                              }}
+                            >
+                              <option value="" disabled>Select Action...</option>
+                              <option value="Submit">Submit</option>
+                              <option value="Reject">Reject</option>
+                            </select>
+                            {feedbacks[candidate.id] && (
+                              <div className={`text-[9px] font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : 'text-rose-600'}`}>
+                                {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : <><X className="w-3 h-3" /> Rejected</>}
+                              </div>
+                            )}
+                          </div>
+                        </TableCell>
                       </TableRow>
                     );
                   })
@@ -1516,6 +1575,102 @@ export default function CandidateRankingsPage() {
         description="PAIR can only call candidates with a phone number on file. Add it below to continue."
         primaryLabel="Save & Screen"
       />
+
+      {/* Integration Modals */}
+      {integrationModalOpen && actionCandidateId && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
+            {integrationModalOpen === 'submit' ? (
+              <>
+                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                    <ExternalLink className="w-5 h-5 text-indigo-600" /> 
+                    Submit to JobDiva
+                  </h3>
+                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
+                </div>
+                <div className="p-6 space-y-4">
+                  <p className="text-sm text-slate-500">
+                    This action will initiate an <strong className="text-slate-900 font-semibold">external submission in JobDiva</strong> for:
+                  </p>
+                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 space-y-3 text-sm text-slate-700">
+                    <div className="flex items-center gap-2.5">
+                      <User className="w-4 h-4 text-slate-400" />
+                      <p><strong className="text-slate-900">Candidate:</strong> {candidates.find(c => c.id === actionCandidateId)?.name}</p>
+                    </div>
+                    <div className="flex items-center gap-2.5">
+                      <Briefcase className="w-4 h-4 text-slate-400" />
+                      <p><strong className="text-slate-900">Job:</strong> {job?.title} ({job?.jobdiva_id || job?.job_id || jobId})</p>
+                    </div>
+                    <div className="flex items-center gap-2.5">
+                      <Building2 className="w-4 h-4 text-slate-400" />
+                      <p><strong className="text-slate-900">Client:</strong> {job?.customer_name || "—"}</p>
+                    </div>
+                    <div className="flex items-center gap-2.5">
+                      <Zap className="w-4 h-4 text-slate-400" />
+                      <p><strong className="text-slate-900">Action:</strong> Create external submission record in JobDiva</p>
+                    </div>
+                  </div>
+                </div>
+                <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
+                  <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
+                  <Button className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold" onClick={handleConfirmSubmit}>Confirm & Submit to JobDiva</Button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
+                    Reject Candidate
+                  </h3>
+                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
+                </div>
+                <div className="p-6 space-y-4">
+                  <p className="text-sm text-slate-500">
+                    Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidates.find(c => c.id === actionCandidateId)?.name}</strong>.
+                  </p>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
+                    <select 
+                      className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50"
+                      value={rejectReason}
+                      onChange={e => setRejectReason(e.target.value)}
+                    >
+                      <option value="" disabled>Select a reason...</option>
+                      <option value="Skills do not meet requirements">Skills do not meet requirements</option>
+                      <option value="Communication skills">Communication skills</option>
+                      <option value="Domain experience mismatch">Domain experience mismatch</option>
+                      <option value="More qualified candidates identified">More qualified candidates identified</option>
+                      <option value="Overqualified for the role">Overqualified for the role</option>
+                      <option value="Compensation expectations exceed budget">Compensation expectations exceed budget</option>
+                      <option value="Not aligned with employment type (W2 / C2C / 1099)">Not aligned with employment type (W2 / C2C / 1099)</option>
+                      <option value="Work authorization / visa constraints">Work authorization / visa constraints</option>
+                      <option value="Not comfortable with background check / drug test">Not comfortable with background check / drug test</option>
+                      <option value="Not local and not open to relocation">Not local and not open to relocation</option>
+                      <option value="Open to remote only">Open to remote only</option>
+                      <option value="Not available within required timeline">Not available within required timeline</option>
+                      <option value="Accepted another offer">Accepted another offer</option>
+                      <option value="Candidate withdrew interest">Candidate withdrew interest</option>
+                      <option value="Career gap concern">Career gap concern</option>
+                      <option value="Job Hopping (short-term engagements throughout or in the last 5-7 years)">Job Hopping (short-term engagements throughout or in the last 5-7 years)</option>
+                      <option value="Fake candidate — Multiple profiles/resumes; misrepresentation of past experience">Fake candidate — Multiple profiles/resumes; misrepresentation of past experience</option>
+                      <option value="Already submitted to same client / hiring manager by another vendor">Already submitted to same client / hiring manager by another vendor</option>
+                      <option value="Previously rejected by client">Previously rejected by client</option>
+                      <option value="Not eligible for rehire">Not eligible for rehire</option>
+                      <option value="Past performance concern (Internal note as per past Pyramid client feedback)">Past performance concern (Internal note as per past Pyramid client feedback)</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
+                  <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
+                  <Button className="bg-rose-600 hover:bg-rose-700 text-white font-bold" onClick={handleConfirmReject} disabled={!rejectReason}>Confirm Reject</Button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
       {toast && (
         <div className="fixed right-4 top-4 z-[90]">
           <div
