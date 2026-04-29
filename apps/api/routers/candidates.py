@@ -228,9 +228,14 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
         elif request.location:
             location = request.location
 
+        effective_limit = int(request.limit or request.page_size or 100)
+        require_resume = True if request.require_resume is None else bool(request.require_resume)
+
         # Resolve per-location radius if provided (fallback 25 miles).
         within_miles = 25
-        if request.locations:
+        if request.within_miles is not None and int(request.within_miles) > 0:
+            within_miles = int(request.within_miles)
+        elif request.locations:
             radius_match = str(request.locations[0].radius or "")
             digits = "".join(ch for ch in radius_match if ch.isdigit())
             if digits:
@@ -272,10 +277,12 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             location=location,
             within_miles=within_miles,
             companies=companies,
-            page_size=request.limit or 100,
+            page_size=effective_limit,
             sources=request.sources or ["JobDiva"],
             open_to_work=request.open_to_work,
-            boolean_string=request.boolean_string or ""
+            boolean_string=request.boolean_string or "",
+            recent_days=request.recent_days,
+            require_resume=require_resume,
         )
 
         # Execute unified search as a stream. Persist each candidate to
@@ -331,9 +338,11 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             candidates = await jobdiva_service.search_candidates(
                 skills=[],
                 location=request.location or "",
-                limit=request.limit or 100,
+                limit=effective_limit,
                 job_id=None,
                 boolean_string=request.boolean_string or "",
+                recent_days=request.recent_days,
+                require_resume=require_resume,
             ) if token else []
             for candidate in candidates:
                 candidate["source"] = "JobDiva-TalentSearch"
@@ -361,11 +370,14 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                     keywords=request.keywords or [],
                     resume_match_filters=fallback_resume_match_filters,
                     location=fallback_location,
+                    within_miles=within_miles,
                     companies=request.companies or [],
-                    page_size=request.limit or 100,
+                    page_size=effective_limit,
                     sources=request.sources or ["JobDiva"],
                     open_to_work=request.open_to_work,
                     boolean_string=request.boolean_string or "",
+                    recent_days=request.recent_days,
+                    require_resume=require_resume,
                 )
 
                 for candidate in candidates:
@@ -385,7 +397,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                 logger.warning(f"Fallback scoring setup failed, returning unscored: {score_setup_err}")
 
             return {
-                "candidates": candidates[:request.limit or 100],
+                "candidates": candidates[:effective_limit],
                 "total": len(candidates),
                 "job_applicants": 0,
                 "talent_pool": len(candidates),
