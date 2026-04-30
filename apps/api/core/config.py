@@ -187,3 +187,22 @@ SOURCE_TIER_BONUS = {
     ),
     "VettedDB": int(get_env_with_default("SOURCE_TIER_BONUS_VETTED", "2")),
 }
+
+# Embedding-based skill matching (PR-C). Off by default — when enabled,
+# `_fuzzy_term_score` augments its keyword-overlap signal with the cosine
+# similarity between query-term and candidate-skill embeddings, taking
+# whichever is higher. Designed to recover phrasing variants the keyword
+# path misses ("React" vs "ReactJS", "Web Dev" vs "Web Development").
+#
+# Embeddings are pre-warmed per-candidate and per-search via the
+# `services.skill_embeddings` module's in-process LRU cache, so a typical
+# search incurs O(unique_skills) embedding API calls regardless of the
+# number of scoring loops.
+EMBEDDING_SKILL_MATCH = get_env_bool("EMBEDDING_SKILL_MATCH", False)
+EMBEDDING_MATCH_THRESHOLD = float(
+    get_env_with_default("EMBEDDING_MATCH_THRESHOLD", "0.75")
+)
+OPENAI_EMBEDDING_MODEL = get_env_with_default(
+    "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"
+)
+EMBEDDING_CACHE_MAX = int(get_env_with_default("EMBEDDING_CACHE_MAX", "50000"))
