@@ -3277,29 +3277,30 @@ function NewJobPageContent() {
       console.warn("screening-questions/generate failed, using template fallback", e);
     }
 
-    // Fallback path: skill-aware technical prompts so Step 4 is never empty
-    // with generic questions even if the LLM endpoint fails.
+    // Backend is the source-of-truth for role-aware questions. If that call
+    // fails, keep a minimal neutral fallback so Step 4 is never empty, while
+    // avoiding technical-only wording that misfits non-IT roles.
     if (roleSpecific.length === 0 && rubricData?.skills) {
       rubricData.skills.forEach((skill: any) => {
         if (roleSpecific.length >= targetRoleSpecificCount) return;
-        const skillName = skill.value || "this technology";
+        const skillName = skill.value || "this responsibility";
         const promptVariant = roleSpecific.length % 4;
 
         let questionText = "";
         let passCriteria = "";
 
         if (promptVariant === 0) {
-          questionText = `Walk me through the most complex production implementation you built with ${skillName}. What design trade-off did you make and why?`;
-          passCriteria = `Candidate explains a real production use-case for ${skillName}, including one concrete trade-off and outcome.`;
+          questionText = `Tell me about a recent situation where ${skillName} directly influenced the final outcome. What decision mattered most?`;
+          passCriteria = `Candidate provides a concrete ${skillName} example, explains the decision made, and ties it to a measurable outcome.`;
         } else if (promptVariant === 1) {
-          questionText = `Describe a difficult issue you debugged in ${skillName}. How did you isolate root cause, and what preventive guardrail did you add?`;
-          passCriteria = `Candidate describes root-cause analysis steps in ${skillName} and a specific prevention strategy beyond a one-time fix.`;
+          questionText = `Describe a challenging issue related to ${skillName}. How did you identify the cause and prevent it from happening again?`;
+          passCriteria = `Candidate walks through concrete diagnosis steps for ${skillName} and a practical prevention action.`;
         } else if (promptVariant === 2) {
-          questionText = `If you had to improve performance or scalability in a ${skillName}-based system, what metrics would you inspect first and what would you tune?`;
-          passCriteria = `Candidate names relevant performance metrics for ${skillName} and proposes a technically sound tuning approach.`;
+          questionText = `When priorities conflicted around ${skillName}, how did you balance speed, quality, and stakeholder expectations?`;
+          passCriteria = `Candidate explains trade-offs around ${skillName} and shows clear prioritization with stakeholder alignment.`;
         } else {
-          questionText = `In your recent ${skillName} project, how did you ensure code quality and deployment safety (testing, CI/CD, rollback, monitoring)?`;
-          passCriteria = `Candidate links ${skillName} delivery to practical quality controls (tests, pipeline checks, rollback and monitoring).`;
+          questionText = `What does strong execution in ${skillName} look like in your role, and can you share one example?`;
+          passCriteria = `Candidate defines practical execution standards for ${skillName} and supports them with a specific real-world example.`;
         }
 
         roleSpecific.push({
@@ -3319,8 +3320,8 @@ function NewJobPageContent() {
         const idx = roleSpecific.length + 1;
         roleSpecific.push({
           id: idCounter++,
-          question_text: `Share a recent project example where you solved a non-trivial technical problem. What constraints mattered most?`,
-          pass_criteria: `Candidate gives a concrete project example with constraints, decision rationale, and outcome.`,
+          question_text: `Share a recent project example where you solved a non-trivial problem under constraints. What factors shaped your decision?`,
+          pass_criteria: `Candidate gives a concrete situation, explains constraints and decision rationale, and describes the result.`,
           is_default: false,
           category: "role-specific",
           order_index: questions.length + roleSpecific.length,
@@ -3336,8 +3337,8 @@ function NewJobPageContent() {
     while (roleSpecific.length < targetRoleSpecificCount) {
       roleSpecific.push({
         id: idCounter++,
-        question_text: "Share a recent project example where you solved a non-trivial technical problem. What constraints mattered most?",
-        pass_criteria: "Candidate gives a concrete project example with constraints, decision rationale, and outcome.",
+        question_text: "Share a recent project example where you solved a non-trivial problem under constraints. What factors shaped your decision?",
+        pass_criteria: "Candidate gives a concrete situation, explains constraints and decision rationale, and describes the result.",
         is_default: false,
         category: "role-specific",
         order_index: questions.length + roleSpecific.length,
