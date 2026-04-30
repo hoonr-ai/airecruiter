@@ -10,6 +10,9 @@ import asyncio
 import json
 from datetime import datetime, timezone
 
+import logging
+logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["Voice Agent Integration"])
 
 @router.get("/jobs/{job_id}")
@@ -99,6 +102,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 "status": payload.status,
                 "overall_score": payload.total_score,  # Map total_score internally
                 "candidate_score": payload.candidate_score,
+                "hard_filter_status": payload.hard_filter_status,
                 "completed_at": payload.completed_at
             },
             "transcriptions": payload.transcriptions or []
