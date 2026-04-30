@@ -543,13 +543,41 @@ class UnifiedCandidateSearch:
         "IT": "IT", "ITALY": "IT",
     }
 
+    # Country values we treat as "US" when present on the candidate record.
+    _US_COUNTRY_TOKENS = frozenset({
+        "us", "usa", "u.s.", "u.s.a.", "united states",
+        "united states of america", "america",
+    })
+
+    # Substrings that, when present in a candidate's location text, are
+    # confident evidence of a non-US location. Each entry is matched as a
+    # word-boundary substring against a space-padded version of the location
+    # text, so e.g. " india " matches but "indianapolis" does not.
+    _NON_US_LOCATION_TOKENS = frozenset({
+        "india", "united kingdom", "canada", "australia", "germany",
+        "france", "philippines", "pakistan", "china", "ireland", "mexico",
+        "brazil", "spain", "italy", "netherlands", "singapore", "uae",
+        "dubai", "saudi arabia", "japan", "south korea", "vietnam",
+        "indonesia", "malaysia", "thailand", "egypt", "nigeria",
+        "south africa", "russia", "ukraine", "poland", "turkey",
+        "israel", "argentina", "chile", "colombia", "peru", "venezuela",
+        "bangladesh", "sri lanka", "nepal", "kenya", "ghana", "morocco",
+        "switzerland", "sweden", "norway", "denmark", "finland", "belgium",
+        "austria", "portugal", "greece", "hungary", "romania",
+        "bulgaria", "iran", "iraq", "afghanistan", "qatar", "kuwait",
+        "bahrain", "oman", "jordan", "lebanon", "ethiopia", "tanzania",
+        "uganda", "zimbabwe", "new zealand", "taiwan", "hong kong",
+        "u.k.", "england", "scotland",
+    })
+
     def _resolve_jobdiva_geo(self, criteria: SearchCriteria) -> tuple[List[str], List[str]]:
         """
         Produce (countries, states) for JobDiva's talentSearchDef.
 
         Priority: explicit `criteria.countries` / `criteria.states` if set;
         otherwise heuristically split `criteria.location` by comma and pick
-        out a US state code and/or a country.
+        out a US state code and/or a country. Always defaults to ``["US"]``
+        when no country can be resolved — searches are US-only by policy.
         """
         countries = [c.strip() for c in (criteria.countries or []) if c and c.strip()]
         states = [s.strip() for s in (criteria.states or []) if s and s.strip()]
@@ -558,11 +586,12 @@ class UnifiedCandidateSearch:
 
         loc = (criteria.location or "").strip()
         if not loc:
-            return [], []
+            # No location criteria at all → still scope to US-only.
+            return ["US"], []
 
         tokens = [t.strip() for t in loc.split(",") if t.strip()]
         if not tokens:
-            return [], []
+            return ["US"], []
 
         # Walk tokens right-to-left: first match country, then state.
         consumed: set = set()
@@ -582,6 +611,9 @@ class UnifiedCandidateSearch:
                 if not countries:
                     countries.append("US")
                 break
+
+        if not countries:
+            countries.append("US")
 
         return countries, states
 
@@ -633,20 +665,32 @@ class UnifiedCandidateSearch:
         candidates: List[Dict[str, Any]],
         criteria: SearchCriteria,
     ) -> List[Dict[str, Any]]:
-        """Strict location gate using candidate current location + true radius.
+        """Location + US-only gate.
 
-        We intentionally avoid using resume/history text in this stage.
+        US-only is applied unconditionally; only candidates with positive
+        evidence of a non-US location are dropped. The radius/state check
+        runs only when ``criteria.location`` is set, and soft-keeps any
+        candidate whose location can't be resolved.
         """
         if not candidates:
             return candidates
-        if not self._should_enforce_location(criteria):
-            return candidates
+
+        enforce_location = self._should_enforce_location(criteria)
 
         kept: List[Dict[str, Any]] = []
+        non_us_dropped = 0
         filtered = 0
         geocode_failed = 0
 
         for c in candidates:
+            if self._is_likely_non_us(c):
+                non_us_dropped += 1
+                continue
+
+            if not enforce_location:
+                kept.append(c)
+                continue
+
             is_match, reason = self._location_match_verdict(c, criteria)
             if is_match:
                 kept.append(c)
@@ -657,7 +701,9 @@ class UnifiedCandidateSearch:
 
         self._log_stage(
             "LocationGate",
-            f"pre-filter kept {len(kept)}/{len(candidates)} candidates (filtered={filtered}, geocode_failures={geocode_failed})",
+            f"pre-filter kept {len(kept)}/{len(candidates)} candidates"
+            f" (non_us_dropped={non_us_dropped}, filtered={filtered},"
+            f" geocode_failures={geocode_failed})",
         )
         return kept
 
@@ -934,8 +980,16 @@ class UnifiedCandidateSearch:
             return any(term and term in haystack for term in self._dedupe_terms(group))
 
         filtered = []
+        non_us_dropped = 0
         for candidate in candidates:
             haystack = self._candidate_summary_text(candidate)
+
+            # US-only scope: drop only when the candidate's country/location
+            # text is positive evidence of a non-US location. Silent records
+            # are treated as US (kept).
+            if self._is_likely_non_us(candidate):
+                non_us_dropped += 1
+                continue
 
             if any(group_matches(haystack, group) for group in exclude_groups):
                 continue
@@ -969,7 +1023,11 @@ class UnifiedCandidateSearch:
 
             filtered.append(candidate)
 
-        self._log_stage("SummaryScreen", f"{source_type}: kept {len(filtered)} of {len(candidates)} candidate(s)")
+        self._log_stage(
+            "SummaryScreen",
+            f"{source_type}: kept {len(filtered)} of {len(candidates)} candidate(s)"
+            f" (non_us_dropped={non_us_dropped})",
+        )
         return filtered
 
     def _candidate_summary_text(self, candidate: Dict[str, Any]) -> str:
@@ -1024,6 +1082,79 @@ class UnifiedCandidateSearch:
             cleaned.append(loc)
         return cleaned
 
+    def _scope_location_to_us(self, location: Any) -> str:
+        """Append ", United States" to a location string when no country is
+        already named, so downstream services (Exa, Dice, Vetted, Unipile)
+        scope their lookups to the US.
+
+        Returns ``"United States"`` when the input is empty.
+        """
+        text = str(location or "").strip().strip(",")
+        if not text:
+            return "United States"
+
+        upper_tokens = {t.strip().upper() for t in text.split(",")}
+        if upper_tokens & set(self._COUNTRY_ALIASES.keys()):
+            return text
+        return f"{text}, United States"
+
+    def _scope_boolean_to_us(self, boolean_string: Any) -> str:
+        """Ensure the boolean keyword string carries a US-scope hint.
+
+        The downstream Exa free-text query and Unipile's keyword fallback both
+        consume this string verbatim, so the cheapest way to bias them toward
+        US results is to append a literal country phrase when no country is
+        already mentioned.
+        """
+        text = str(boolean_string or "").strip()
+        if not text:
+            return '"United States"'
+
+        upper = text.upper()
+        if any(
+            token in upper
+            for token in (
+                "UNITED STATES",
+                "UNITED STATES OF AMERICA",
+                '"USA"',
+                " USA ",
+                " USA,",
+                "(USA)",
+                "U.S.",
+                "U.S.A.",
+            )
+        ):
+            return text
+        return f'({text}) AND "United States"'
+
+    def _is_likely_non_us(self, candidate: Dict[str, Any]) -> bool:
+        """Return True only when the candidate is clearly outside the US.
+
+        Used to enforce an unconditional US-only scope on every search.
+        Defaults to False (treat as US) when the candidate's country and
+        location text are silent — we want to keep observed candidates
+        unless we have positive evidence they're abroad.
+        """
+        country = str(candidate.get("country") or "").strip().lower()
+        if country and country not in self._US_COUNTRY_TOKENS:
+            return True
+
+        enhanced = candidate.get("enhanced_info") or {}
+        if isinstance(enhanced, dict):
+            enhanced_country = str(enhanced.get("current_country") or "").strip().lower()
+            if enhanced_country and enhanced_country not in self._US_COUNTRY_TOKENS:
+                return True
+
+        locs = self._candidate_structured_locations(candidate)
+        if locs:
+            padded = " " + " | ".join(loc.lower() for loc in locs) + " "
+            for token in self._NON_US_LOCATION_TOKENS:
+                # Match as bounded substring to avoid false positives
+                # (e.g. "india" must not hit "indianapolis").
+                if f" {token} " in padded or f" {token}," in padded:
+                    return True
+        return False
+
     def _location_match_verdict(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Tuple[bool, str]:
         if not criteria.location:
             return True, "no_location_requirement"
@@ -1034,14 +1165,25 @@ class UnifiedCandidateSearch:
 
         candidate_locs = self._candidate_structured_locations(candidate)
         if not candidate_locs:
-            return False, "candidate_location_missing"
+            # Soft-keep: missing structured location is a data-quality
+            # issue, not a reason to drop. Downstream LLM enrichment can
+            # re-screen with the full resume text.
+            return True, "candidate_location_missing_keep"
 
         # If search is state-only, enforce state equality without geocoding.
         if required["state"] and not required["city"]:
+            seen_states: List[str] = []
             for value in candidate_locs:
                 parsed = self._parse_location(value)
-                if parsed.get("state") == required["state"]:
-                    return True, "state_match"
+                state = parsed.get("state")
+                if state:
+                    seen_states.append(state)
+                    if state == required["state"]:
+                        return True, "state_match"
+            if not seen_states:
+                # Candidate has location text but no parseable state →
+                # soft-keep and let enrichment decide.
+                return True, "candidate_state_unknown_keep"
             return False, "state_mismatch"
 
         miles = int(getattr(criteria, "within_miles", 25) or 25)
@@ -1056,7 +1198,9 @@ class UnifiedCandidateSearch:
                 geocode_failure = True
 
         if geocode_failure:
-            return False, "candidate_ungeocodable"
+            # Nominatim is best-effort and rate-limited. A geocode miss is
+            # not evidence the candidate is outside the radius — soft-keep.
+            return True, "geocode_unavailable_keep"
         return False, "outside_radius"
 
     def _should_enforce_location(self, criteria: SearchCriteria) -> bool:
@@ -1438,6 +1582,18 @@ class UnifiedCandidateSearch:
         missing: List[str] = []
         matched: List[str] = []
         excluded: List[str] = []
+
+        # US-only scope is enforced at every stage (see `_filter_candidates`
+        # and `_filter_by_state`). Soft-fail: only drop on positive evidence
+        # of a non-US location.
+        if self._is_likely_non_us(candidate):
+            return {
+                "passes": False,
+                "missing": ["Location: outside US"],
+                "matched": self._dedupe_terms(matched),
+                "excluded": self._dedupe_terms(excluded),
+                "location_failure_reason": "non_us_candidate",
+            }
 
         if self._should_enforce_location(criteria):
             location_ok, reason = self._location_match_verdict(candidate, criteria)
@@ -2262,10 +2418,12 @@ class UnifiedCandidateSearch:
             skills = [{"value": s, "priority": "Must Have"} for s in skill_values]
             candidates = await self.unipile_service.search_candidates(
                 skills=skills,
-                location=criteria.location,
+                location=self._scope_location_to_us(criteria.location),
                 open_to_work=criteria.open_to_work,
                 limit=criteria.page_size,
-                boolean_string=criteria.boolean_string or self._build_boolean_string(criteria)
+                boolean_string=self._scope_boolean_to_us(
+                    criteria.boolean_string or self._build_boolean_string(criteria)
+                ),
             )
 
             return {"candidates": candidates, "source_type": "LinkedIn-Unipile"}
@@ -2331,9 +2489,9 @@ class UnifiedCandidateSearch:
             boolean_string = criteria.boolean_string or self._build_boolean_string(criteria)
             candidates = await self.exa_service.search_dice_candidates(
                 skills=skills_values,
-                location=criteria.location,
+                location=self._scope_location_to_us(criteria.location),
                 limit=min(criteria.page_size, 20),
-                boolean_string=boolean_string,
+                boolean_string=self._scope_boolean_to_us(boolean_string),
             )
             return {"candidates": candidates, "source_type": "Dice"}
         except Exception as e:
@@ -2344,7 +2502,7 @@ class UnifiedCandidateSearch:
         try:
             candidates = await self.vetted_service.search_candidates(
                 skills=criteria.sourcing_skill_values(),
-                location=criteria.location,
+                location=self._scope_location_to_us(criteria.location),
                 limit=criteria.page_size
             )
             return {"candidates": candidates, "source_type": "VettedDB"}
@@ -2358,9 +2516,9 @@ class UnifiedCandidateSearch:
             boolean_string = criteria.boolean_string or self._build_boolean_string(criteria)
             candidates = await self.exa_service.search_candidates(
                 skills=skills_values,
-                location=criteria.location,
+                location=self._scope_location_to_us(criteria.location),
                 limit=min(criteria.page_size, 20),
-                boolean_string=boolean_string,
+                boolean_string=self._scope_boolean_to_us(boolean_string),
             )
             return {"candidates": candidates, "source_type": "LinkedIn-Exa"}
         except Exception as e:
