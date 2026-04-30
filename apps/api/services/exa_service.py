@@ -3,6 +3,7 @@ import re
 from typing import List, Dict, Any
 from core.config import EXA_API_KEY
 from exa_py import Exa
+from services.location import extract_us_location_from_text
 
 logger = logging.getLogger(__name__)
 
@@ -88,15 +89,28 @@ class ExaService:
                     highlights_text = ""
                     if getattr(result, 'highlights', None):
                         highlights_text = "\n".join(result.highlights)
-                    
+
+                    # Exa's people-search response has no structured location
+                    # field, so the previous adapter stamped the request's
+                    # `location` arg onto every result. That made every Exa
+                    # candidate look local even when the actual person was
+                    # elsewhere — and broke the downstream US-only / radius
+                    # gates. Best-effort extract from title + highlights;
+                    # leave blank when nothing confident is found and let
+                    # downstream enrichment fill it in.
+                    extracted_location = extract_us_location_from_text(
+                        f"{title}\n{highlights_text}"
+                    )
+
                     cand = {
                         "id": f"exa_{idx}_{getattr(result, 'id', idx)}",
                         "provider_id": getattr(result, 'id', f"exa_{idx}"),
                         "firstName": first_name,
                         "lastName": last_name,
                         "email": "",
-                        "city": location, # We infer string from query
+                        "city": "",
                         "state": "",
+                        "location": extracted_location,
                         "title": title,
                         "source": "LinkedIn-Exa",
                         "match_score": 0,
