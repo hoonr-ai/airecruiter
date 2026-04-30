@@ -111,6 +111,37 @@ def _clean_location_field(value: Any) -> str:
     
     return val_str
 
+
+def _is_job_agent_criteria_unconfigured(status_code: int, body: str) -> bool:
+    """Detect JobDiva 'criteria not configured' responses robustly.
+
+    JobDiva has returned multiple variants over time (status and wording), e.g.
+    "Criteria Not Assigned", "criteria not configured", JSON error wrappers,
+    and mixed casing. Keep this tolerant so Step-5 pre-check can consistently
+    trigger the recruiter guidance modal.
+    """
+    text = (body or "").lower()
+    if not text:
+        return False
+
+    # Primary known phrase from JobAgentSearch.
+    if "criteria not assigned" in text:
+        return True
+
+    # Tolerate wording variations commonly returned by gateways/wrappers.
+    has_criteria = "criteria" in text
+    has_negative = (
+        "not assigned" in text
+        or "not configured" in text
+        or "not setup" in text
+        or "not set up" in text
+        or "missing" in text
+    )
+    # These are expected for this specific mismatch; keep strict enough to
+    # avoid false positives on unrelated errors.
+    is_error_status = int(status_code or 0) >= 400
+    return bool(is_error_status and has_criteria and has_negative)
+
 def format_job_description(raw_desc: str) -> str:
     """
     Format raw job description with minimal changes - keep exact text, just clean HTML.
@@ -748,11 +779,11 @@ class JobDivaService:
                 response = await client.get(url, params=params, headers=headers)
             if response.status_code != 200:
                 body = response.text or ""
-                if response.status_code == 500 and "Criteria Not Assigned" in body:
+                if _is_job_agent_criteria_unconfigured(response.status_code, body):
                     criteria_unconfigured = True
                     logger.info(
                         f"JobAgentSearch jobId={job_id}: criteria not configured "
-                        f"in JobDiva (500 \"Criteria Not Assigned\"); will fall back."
+                        f"in JobDiva ({response.status_code}); will fall back."
                     )
                 else:
                     logger.warning(
