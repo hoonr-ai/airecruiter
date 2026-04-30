@@ -257,17 +257,34 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         conn.close()
 
         # Build JD section — must match pairbotqa expected structure:
-        # { title, jobdiva_description, pre_screen_questions, job_id, jobdiva_id }
+        # ----- Fetch full rubric for JD enrichment -----
+        from services.job_rubric_db import JobRubricDB
+        rubric_db = JobRubricDB()
+        jobdiva_id_for_rubric = job_row.get("jobdiva_id") if job_row else request.job_id
+        rubric = rubric_db.get_full_rubric(jobdiva_id_for_rubric)
+
+        # Build JD block with structured context and rubric
         if job_row:
             jd = {
                 "job_id": job_row.get("job_id", request.job_id),
                 "jobdiva_id": job_row.get("jobdiva_id", ""),
                 "title": job_row.get("title", ""),
-                "jobdiva_description": (
-                    job_row.get("jobdiva_description") or
-                    job_row.get("ai_description") or ""
-                ),
+                "customer_name": job_row.get("customer_name") or "Unknown",
+                "city": job_row.get("city") or "TBD",
+                "state": job_row.get("state") or "",
+                "location_type": job_row.get("location_type") or "Onsite",
+                "jobdiva_description": job_row.get("jobdiva_description") or "",
+                "ai_description": job_row.get("ai_description") or "",
                 "pre_screen_questions": pre_screen_questions,
+                "context": {
+                    "title": job_row.get("title", ""),
+                    "customer_name": job_row.get("customer_name") or "Unknown",
+                    "city": job_row.get("city") or "TBD",
+                    "state": job_row.get("state") or "",
+                    "location_type": job_row.get("location_type") or "Onsite",
+                    "jobdiva_description": job_row.get("jobdiva_description") or job_row.get("ai_description") or "",
+                },
+                "rubric": rubric if rubric else {}
             }
         else:
             jd = {
@@ -276,12 +293,28 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 "title": "",
                 "jobdiva_description": "",
                 "pre_screen_questions": [],
+                "context": {},
+                "rubric": {}
             }
+
+        # Build resumes list using raw_resume_text
+        final_resumes = []
+        for r in resumes:
+            final_resumes.append({
+                "name": r.get("name"),
+                "email": r.get("email"),
+                "phone": r.get("phone"),
+                "raw_resume_text": r.get("experience", ""), # LiveKit expects raw_resume_text
+                "summary": r.get("summary", ""),
+                "skills": r.get("skills", ""),
+                "education": r.get("education", ""),
+            })
 
         # Assemble final payload matching pairbotqa /api/bulk-interviews schema
         payload = {
-            "resumes": resumes,
+            "resumes": final_resumes,
             "jd": jd,
+            "company_intro": job_row.get("bot_introduction", "") if job_row else "",
             "interview_duration": "20-25"
         }
 
