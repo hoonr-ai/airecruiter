@@ -221,12 +221,12 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
         # `titles`/`skills` fields were removed from CandidateSearchRequest.
         combined_title_criteria = request.title_criteria or []
 
-        # Extract location
+        # Canonicalize location: top-level `location` is authoritative.
         location = ""
-        if request.locations:
-            location = request.locations[0].value
-        elif request.location:
+        if request.location:
             location = request.location
+        elif request.locations:
+            location = request.locations[0].value
 
         effective_limit = int(request.limit or request.page_size or 100)
         require_resume = True if request.require_resume is None else bool(request.require_resume)
@@ -337,7 +337,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             token = await jobdiva_service.authenticate()
             candidates = await jobdiva_service.search_candidates(
                 skills=[],
-                location=request.location or "",
+                location=location,
                 limit=effective_limit,
                 job_id=None,
                 boolean_string=request.boolean_string or "",
@@ -353,10 +353,10 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             # `criteria` was constructed.
             try:
                 fallback_location = ""
-                if request.locations:
-                    fallback_location = request.locations[0].value
-                elif request.location:
+                if request.location:
                     fallback_location = request.location
+                elif request.locations:
+                    fallback_location = request.locations[0].value
 
                 fallback_resume_match_filters = (
                     [f.dict() for f in request.resume_match_filters]
