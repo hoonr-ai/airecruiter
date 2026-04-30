@@ -2,7 +2,8 @@ import os
 from dotenv import load_dotenv
 
 # Load environment variables
-load_dotenv()
+env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+load_dotenv(dotenv_path=env_path, override=True)
 
 def get_env_or_fail(var_name: str) -> str:
     """Retrieve an environment variable or raise an error if not set."""
@@ -76,11 +77,13 @@ INSTANCE_CONNECTION_NAME = CLOUDSQL_CONNECTION_NAME
 JOBDIVA_AI_JD_UDF_ID = int(get_env_with_default("JOBDIVA_AI_JD_UDF_ID", "230"))
 JOBDIVA_JOB_NOTES_UDF_ID = int(get_env_with_default("JOBDIVA_JOB_NOTES_UDF_ID", "231"))
 
-# ---- PAIR Recruiter ----
-# The JobDiva recruiter ID used when creating candidate notes on behalf of PAIR.
-# Set JOBDIVA_PAIR_RECRUITER_ID in .env to the numeric ID of the "PAIR" / "R. AI" user
-# in your JobDiva account. Defaults to 0 which lets JobDiva infer the API user.
+# ---- PAIR Recruiter & Qualifications ----
+# Set these in .env to match your JobDiva account configuration.
 JOBDIVA_PAIR_RECRUITER_ID = int(get_env_with_default("JOBDIVA_PAIR_RECRUITER_ID", "0"))
+JOBDIVA_PAIR_QUALIFICATION_NAME = get_env_with_default("JOBDIVA_PAIR_QUALIFICATION_NAME", "PAIR Candidates")
+JOBDIVA_PAIR_QUALIFICATION_ID = int(get_env_with_default("JOBDIVA_PAIR_QUALIFICATION_ID", "0"))
+JOBDIVA_PASS_ACTION_NAME = get_env_with_default("JOBDIVA_PASS_ACTION_NAME", "PAIR Pass Candidate Report")
+JOBDIVA_PASS_QUALIFICATION_VALUE = get_env_with_default("JOBDIVA_PASS_QUALIFICATION_VALUE", "Pass")
 
 # ---- Encryption ----
 ENCRYPTION_KEY = get_env_or_fail("ENCRYPTION_KEY")
