@@ -3,13 +3,14 @@ import asyncio
 import json
 import re
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pydantic import BaseModel
 
 from services.jobdiva import JobDivaService
 from services.unipile import unipile_service
 from services.vetted import vetted_service
 from services.exa_service import exa_service
+from services.location import normalize_location_string, within_radius
 from core.config import (
     SCORING_REQUIRED_WEIGHT,
     SCORING_PREFERRED_WEIGHT,
@@ -632,44 +633,32 @@ class UnifiedCandidateSearch:
         candidates: List[Dict[str, Any]],
         criteria: SearchCriteria,
     ) -> List[Dict[str, Any]]:
-        """Drop candidates whose state is clearly outside the searched area.
+        """Strict location gate using candidate current location + true radius.
 
-        Conservative:
-        - Skips entirely when no target state can be resolved.
-        - Keeps candidates whose state is empty / "?" (state will fill in via
-          CandidatesDetail enrichment downstream; dropping them here would
-          reject otherwise-valid hits).
-        - Adjacency table expanded only when within_miles >= 25; the wider
-          regional cluster only when within_miles >= 200.
+        We intentionally avoid using resume/history text in this stage.
         """
         if not candidates:
             return candidates
-        countries, states = self._resolve_jobdiva_geo(criteria)
-        if not states:
+        if not self._should_enforce_location(criteria):
             return candidates
 
-        target = {s.upper() for s in states if s}
-        miles = int(getattr(criteria, "within_miles", 25) or 0)
-
-        allowed = set(target)
-        if miles >= 25:
-            for s in target:
-                allowed |= self._ADJACENT_STATES.get(s, set())
-        if miles >= 200:
-            for cluster in self._REGIONAL_CLUSTERS:
-                if cluster & target:
-                    allowed |= cluster
-
         kept: List[Dict[str, Any]] = []
+        filtered = 0
+        geocode_failed = 0
+
         for c in candidates:
-            cstate = (
-                c.get("state") or c.get("STATE") or c.get("PROVINCE") or ""
-            ).strip().upper()
-            if not cstate or cstate == "?":
+            is_match, reason = self._location_match_verdict(c, criteria)
+            if is_match:
                 kept.append(c)
-                continue
-            if cstate in allowed:
-                kept.append(c)
+            else:
+                filtered += 1
+                if reason in {"candidate_ungeocodable", "target_ungeocodable"}:
+                    geocode_failed += 1
+
+        self._log_stage(
+            "LocationGate",
+            f"pre-filter kept {len(kept)}/{len(candidates)} candidates (filtered={filtered}, geocode_failures={geocode_failed})",
+        )
         return kept
 
     @staticmethod
@@ -1015,44 +1004,64 @@ class UnifiedCandidateSearch:
         return bool(str(skills or "").strip())
 
     def _location_matches(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> bool:
+        return self._location_match_verdict(candidate, criteria)[0]
+
+    def _candidate_structured_locations(self, candidate: Dict[str, Any]) -> List[str]:
+        enhanced = candidate.get("enhanced_info") or {}
+        location_values = [
+            enhanced.get("current_location") if isinstance(enhanced, dict) else "",
+            candidate.get("location"),
+            f"{candidate.get('city', '')}, {candidate.get('state', '')}".strip(", "),
+        ]
+        cleaned: List[str] = []
+        seen = set()
+        for value in location_values:
+            loc = normalize_location_string(str(value or ""))
+            key = loc.lower()
+            if not loc or key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(loc)
+        return cleaned
+
+    def _location_match_verdict(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Tuple[bool, str]:
         if not criteria.location:
-            return True
+            return True, "no_location_requirement"
 
         required = self._parse_location(criteria.location)
         if not required["city"] and not required["state"]:
-            return True
+            return True, "empty_location_requirement"
 
-        candidate_location = self._parse_location(
-            candidate.get("location")
-            or f"{candidate.get('city', '')}, {candidate.get('state', '')}".strip(", ")
-        )
-        candidate_text = self._normalize_search_text(
-            " ".join([
-                str(candidate.get("location") or ""),
-                str(candidate.get("city") or ""),
-                str(candidate.get("state") or ""),
-            ])
-        )
+        candidate_locs = self._candidate_structured_locations(candidate)
+        if not candidate_locs:
+            return False, "candidate_location_missing"
 
-        if required["city"] and required["city"] not in candidate_text:
-            return False
-        if required["state"] and required["state"] not in candidate_text:
-            return False
-        if required["state"] and candidate_location["state"] and required["state"] != candidate_location["state"]:
-            return False
+        # If search is state-only, enforce state equality without geocoding.
+        if required["state"] and not required["city"]:
+            for value in candidate_locs:
+                parsed = self._parse_location(value)
+                if parsed.get("state") == required["state"]:
+                    return True, "state_match"
+            return False, "state_mismatch"
 
-        return True
+        miles = int(getattr(criteria, "within_miles", 25) or 25)
+        target = normalize_location_string(criteria.location)
+        geocode_failure = False
+
+        for candidate_loc in candidate_locs:
+            is_within, reason, _distance = within_radius(candidate_loc, target, miles)
+            if is_within:
+                return True, "within_radius"
+            if reason in {"candidate_ungeocodable", "target_ungeocodable"}:
+                geocode_failure = True
+
+        if geocode_failure:
+            return False, "candidate_ungeocodable"
+        return False, "outside_radius"
 
     def _should_enforce_location(self, criteria: SearchCriteria) -> bool:
         normalized_location = self._normalize_term(criteria.location)
-        if not normalized_location:
-            return False
-
-        normalized_boolean = self._normalize_term(criteria.boolean_string)
-        if not normalized_boolean:
-            return True
-
-        return normalized_location in normalized_boolean
+        return bool(normalized_location)
 
     def _parse_location(self, value: Any) -> Dict[str, str]:
         state_aliases = {
@@ -1261,6 +1270,12 @@ class UnifiedCandidateSearch:
                 if normalized == norm_item or normalized in norm_item or norm_item in normalized:
                     return True
 
+        # Critical: location matching must not fall back to generic resume text,
+        # otherwise stale historical locations can satisfy current-location checks.
+        is_location_only = len(collections) == 1 and collections[0] == "locations"
+        if is_location_only:
+            return False
+
         return normalized in profile.get("text", "")
 
     def _fuzzy_term_score(self, profile: Dict[str, Any], term: str, *collections: str) -> float:
@@ -1294,8 +1309,12 @@ class UnifiedCandidateSearch:
                     
         # Check against full text (broad keyword match, lower weight)
         profile_text = profile.get("text", "")
-        text_matches = sum(1 for word in term_words if word in profile_text)
-        text_score = (text_matches / len(term_words)) * 0.35
+        is_location_only = len(collections) == 1 and collections[0] == "locations"
+        if is_location_only:
+            text_score = 0.0
+        else:
+            text_matches = sum(1 for word in term_words if word in profile_text)
+            text_score = (text_matches / len(term_words)) * 0.35
         
         return max(best_overlap_score, text_score)
 
@@ -1420,8 +1439,16 @@ class UnifiedCandidateSearch:
         matched: List[str] = []
         excluded: List[str] = []
 
-        if self._should_enforce_location(criteria) and not self._location_matches(candidate, criteria):
-            missing.append(f"Location: {criteria.location}")
+        if self._should_enforce_location(criteria):
+            location_ok, reason = self._location_match_verdict(candidate, criteria)
+            if not location_ok:
+                return {
+                    "passes": False,
+                    "missing": [f"Location: {criteria.location}"],
+                    "matched": self._dedupe_terms(matched),
+                    "excluded": self._dedupe_terms(excluded),
+                    "location_failure_reason": reason,
+                }
 
         for dimension in self._collect_sourcing_dimensions(criteria):
             collections = dimension["collections"]
@@ -1457,7 +1484,8 @@ class UnifiedCandidateSearch:
                 "passes": True,
                 "missing": self._dedupe_terms(missing),
                 "matched": self._dedupe_terms(matched),
-                "excluded": []
+                "excluded": [],
+                "location_failure_reason": None,
             }
 
         # Otherwise, enforce required groups (Standard strict scoring/filtering)
@@ -1466,6 +1494,7 @@ class UnifiedCandidateSearch:
             "missing": self._dedupe_terms(missing),
             "matched": self._dedupe_terms(matched),
             "excluded": self._dedupe_terms(excluded),
+            "location_failure_reason": None,
         }
 
     def _score_candidate(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Dict[str, Any]:
@@ -1957,7 +1986,15 @@ class UnifiedCandidateSearch:
         self._log_stage("ResumeScreen", f"checking {len(jobdiva_candidates)} JobDiva candidate resume(s) before LLM")
 
         semaphore = asyncio.Semaphore(5)
-        counters = {"screened": 0, "skipped": 0, "no_resume": 0, "failed_filter": 0, "llm_extraction_errors": 0}
+        counters = {
+            "screened": 0,
+            "skipped": 0,
+            "no_resume": 0,
+            "failed_filter": 0,
+            "failed_location": 0,
+            "failed_location_geocode": 0,
+            "llm_extraction_errors": 0,
+        }
 
         async def _process_single(candidate, index):
             async with semaphore:
@@ -2003,15 +2040,21 @@ class UnifiedCandidateSearch:
                     self._log_stage("ResumeScreen", f"running quick filter for candidate_id={candidate_id}")
                     assessment = self._filter_assessment(candidate, criteria, enforce_years=False)
                     if not assessment["passes"]:
+                        location_reason = assessment.get("location_failure_reason")
                         self._log_stage(
                             "ResumeScreen",
-                            "FAILED FILTER candidate_id=%s matched=%s missing=%s excluded=%s" % (
+                            "FAILED FILTER candidate_id=%s matched=%s missing=%s excluded=%s location_reason=%s" % (
                                 candidate_id,
                                 assessment["matched"][:5],
                                 assessment["missing"][:5],
                                 assessment["excluded"][:5],
+                                location_reason,
                             ),
                         )
+                        if location_reason:
+                            if location_reason in {"candidate_ungeocodable", "target_ungeocodable"}:
+                                return {"status": "failed_location_geocode", "candidate": None}
+                            return {"status": "failed_location", "candidate": None}
                         return {"status": "failed_filter", "candidate": None}
 
                     self._log_stage(
@@ -2083,17 +2126,28 @@ class UnifiedCandidateSearch:
             elif status == "failed_filter":
                 counters["failed_filter"] += 1
                 counters["skipped"] += 1
+            elif status == "failed_location":
+                counters["failed_location"] += 1
+                counters["failed_filter"] += 1
+                counters["skipped"] += 1
+            elif status == "failed_location_geocode":
+                counters["failed_location_geocode"] += 1
+                counters["failed_location"] += 1
+                counters["failed_filter"] += 1
+                counters["skipped"] += 1
             elif status == "skipped":
                 counters["skipped"] += 1
 
         self._log_stage(
             "ResumeScreen",
-            "RESULTS: kept %s of %s JobDiva candidate(s); skipped %s total (no_resume=%s, failed_filter=%s, llm_extraction_errors=%s)" % (
+            "RESULTS: kept %s of %s JobDiva candidate(s); skipped %s total (no_resume=%s, failed_filter=%s, failed_location=%s, geocode_failures=%s, llm_extraction_errors=%s)" % (
                 counters["screened"],
                 len(jobdiva_candidates),
                 counters["skipped"],
                 counters["no_resume"],
                 counters["failed_filter"],
+                counters["failed_location"],
+                counters["failed_location_geocode"],
                 counters["llm_extraction_errors"],
             ),
         )

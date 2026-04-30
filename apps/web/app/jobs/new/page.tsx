@@ -499,6 +499,8 @@ function NewJobPageContent() {
   const [jobdivaCriteriaUnconfigured, setJobdivaCriteriaUnconfigured] = useState(false);
   const [showJobdivaSkillsModal, setShowJobdivaSkillsModal] = useState(false);
   const [skillsCopied, setSkillsCopied] = useState(false);
+  const [isCheckingJobdivaCriteria, setIsCheckingJobdivaCriteria] = useState(false);
+  const [hasCheckedJobdivaCriteria, setHasCheckedJobdivaCriteria] = useState(false);
   const seenCandidateIdsRef = useRef<Set<string>>(new Set());
   const searchAbortRef = useRef<AbortController | null>(null);
   // Fires handleEnhanceJob() exactly once per session when the user first lands on
@@ -596,7 +598,10 @@ function NewJobPageContent() {
   };
 
   const jobdivaSkillsToUse = getJobdivaSkills();
-  const jobdivaSkillsCopyText = jobdivaSkillsToUse.join(", ");
+  const jobdivaSkillsCopyText = jobdivaSkillsToUse.map((skill) => `(${skill})`).join(", ");
+  const jobdivaJobEditUrl = (jobdivaId || numericJobId)
+    ? `https://www1.jobdiva.com/employers/myjobs/vieweditjobform.jsp?lstjobs=1&jobid=${encodeURIComponent(jobdivaId || numericJobId)}`
+    : "";
 
   const sortedCandidates = [...candidates]
     .filter(matchesSourceFilter)
@@ -3615,6 +3620,61 @@ function NewJobPageContent() {
     syncStepFiveData();
   }, [currentStep, rubricData, jobData, resumeMatchFilters]);
 
+  useEffect(() => {
+    setHasCheckedJobdivaCriteria(false);
+    setJobdivaCriteriaUnconfigured(false);
+  }, [jobdivaId, numericJobId]);
+
+  useEffect(() => {
+    if (currentStep === 5) return;
+    setHasCheckedJobdivaCriteria(false);
+    setIsCheckingJobdivaCriteria(false);
+  }, [currentStep]);
+
+  useEffect(() => {
+    if (currentStep !== 5) return;
+    if (!searchSources.jobdiva) return;
+    if (hasCheckedJobdivaCriteria) return;
+
+    const jobRef = String(jobdivaId || numericJobId || "").trim();
+    if (!jobRef) return;
+
+    let cancelled = false;
+
+    const checkJobdivaCriteria = async () => {
+      setIsCheckingJobdivaCriteria(true);
+      try {
+        const res = await fetch(`${API_BASE}/candidates/jobdiva/${encodeURIComponent(jobRef)}/criteria-status`);
+        if (!res.ok) throw new Error(`criteria status check failed (${res.status})`);
+
+        const data = await res.json();
+        const unconfigured = Boolean(data?.criteria_unconfigured);
+        if (cancelled) return;
+
+        setJobdivaCriteriaUnconfigured(unconfigured);
+        setHasCheckedJobdivaCriteria(true);
+
+        if (unconfigured) {
+          setShowJobdivaSkillsModal(true);
+          setSkillsCopied(false);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          console.warn("JobDiva criteria pre-check failed", e);
+          setHasCheckedJobdivaCriteria(true);
+        }
+      } finally {
+        if (!cancelled) setIsCheckingJobdivaCriteria(false);
+      }
+    };
+
+    checkJobdivaCriteria();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentStep, searchSources.jobdiva, jobdivaId, numericJobId, hasCheckedJobdivaCriteria]);
+
   const addSourceTitle = (value: string) => {
     const cleanValue = value.trim();
     if (!cleanValue) return;
@@ -4102,7 +4162,6 @@ function NewJobPageContent() {
     if (mode === "replace") {
       setCandidates([]);
       setCurrentPage(1);
-      setJobdivaCriteriaUnconfigured(false);
       seenCandidateIdsRef.current = new Set<string>();
     }
     const seenIds = seenCandidateIdsRef.current;
@@ -5899,42 +5958,11 @@ function NewJobPageContent() {
                       Restored from last run · Re-run to refresh
                     </p>
                   )}
-                  {jobdivaCriteriaUnconfigured && !isSearching && (
-                    <div className="mt-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-md flex items-start gap-2">
-                      <Info className="w-4 h-4 text-amber-600 flex-shrink-0 mt-[1px]" />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-[12.5px] font-medium text-amber-800 leading-snug">
-                          JobDiva&apos;s AI matcher isn&apos;t configured for this job — falling back to keyword search.
-                        </p>
-                        <p className="text-[11.5px] text-amber-700 leading-snug mt-0.5">
-                          Set search criteria once in JobDiva for sharper, ranked matches on every future search.
-                        </p>
-                      </div>
-                      {jobdivaSkillsToUse.length > 0 ? (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setShowJobdivaSkillsModal(true);
-                            setSkillsCopied(false);
-                          }}
-                          className="text-[11.5px] font-bold text-amber-800 hover:text-amber-900 underline whitespace-nowrap inline-flex items-center gap-1 flex-shrink-0"
-                        >
-                          Show skills
-                          <Clipboard className="w-3 h-3" />
-                        </button>
-                      ) : null}
-                      {jobdivaId ? (
-                        <a
-                          href={`https://www1.jobdiva.com/jobdiva/servlet/jd?uid=${encodeURIComponent(jobdivaId)}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-[11.5px] font-bold text-amber-800 hover:text-amber-900 underline whitespace-nowrap inline-flex items-center gap-1 flex-shrink-0"
-                        >
-                          Open in JobDiva
-                          <ExternalLink className="w-3 h-3" />
-                        </a>
-                      ) : null}
-                    </div>
+                  {isCheckingJobdivaCriteria && !isSearching && searchSources.jobdiva && (
+                    <p className="text-[11.5px] font-medium text-slate-600 bg-slate-50 border border-slate-200 rounded-md px-2 py-1 mt-2 inline-flex items-center gap-1.5">
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Checking JobDiva AI matcher criteria...
+                    </p>
                   )}
                   {candidates.length > 0 && (
                     <div className="flex items-center gap-1.5 mt-3 flex-wrap">
@@ -6685,13 +6713,13 @@ function NewJobPageContent() {
         </div>
       )}
 
-      {showJobdivaSkillsModal && (
+      {showJobdivaSkillsModal && jobdivaCriteriaUnconfigured && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
           <div className="w-full max-w-2xl rounded-xl bg-white border border-slate-200 shadow-2xl overflow-hidden">
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
               <div>
-                <h3 className="text-[16px] font-bold text-slate-900">Skills for JobDiva AI matcher</h3>
-                <p className="text-[12px] text-slate-500 mt-0.5">Copy and paste these into JobDiva search criteria.</p>
+                <h3 className="text-[16px] font-bold text-slate-900">JobDiva AI matcher criteria not configured</h3>
+                <p className="text-[12px] text-slate-500 mt-0.5">Add these skills in JobDiva and save the Search Agent criteria for this job.</p>
               </div>
               <button
                 type="button"
@@ -6704,8 +6732,11 @@ function NewJobPageContent() {
             </div>
 
             <div className="px-5 py-4 space-y-3">
+              <div className="text-[12px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                JobDiva&apos;s AI matcher isn&apos;t configured for this job yet. We&apos;ll still search, but quality improves once criteria are saved in JobDiva.
+              </div>
               <div className="text-[12px] text-slate-600">
-                {jobdivaSkillsToUse.length} skill{jobdivaSkillsToUse.length === 1 ? "" : "s"} selected
+                {jobdivaSkillsToUse.length} skill{jobdivaSkillsToUse.length === 1 ? "" : "s"} formatted as requested: <span className="font-semibold">(Skill One), (Skill Two)</span>
               </div>
               <textarea
                 value={jobdivaSkillsCopyText}
@@ -6714,6 +6745,17 @@ function NewJobPageContent() {
                 className="w-full rounded-lg border border-slate-200 bg-slate-50 text-[13px] text-slate-800 font-medium px-3 py-2 outline-none resize-y"
               />
               <div className="flex items-center justify-end gap-2">
+                {jobdivaJobEditUrl ? (
+                  <a
+                    href={jobdivaJobEditUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="h-9 px-3 border border-slate-200 rounded-md inline-flex items-center gap-1.5 text-[12.5px] font-bold text-slate-700 hover:bg-slate-50"
+                  >
+                    Open JobDiva Job
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                ) : null}
                 <Button
                   variant="outline"
                   className="h-9 px-3 text-[12.5px] font-bold"

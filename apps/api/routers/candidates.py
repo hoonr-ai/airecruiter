@@ -221,12 +221,12 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
         # `titles`/`skills` fields were removed from CandidateSearchRequest.
         combined_title_criteria = request.title_criteria or []
 
-        # Extract location
+        # Canonicalize location: top-level `location` is authoritative.
         location = ""
-        if request.locations:
-            location = request.locations[0].value
-        elif request.location:
+        if request.location:
             location = request.location
+        elif request.locations:
+            location = request.locations[0].value
 
         effective_limit = int(request.limit or request.page_size or 100)
         require_resume = True if request.require_resume is None else bool(request.require_resume)
@@ -337,7 +337,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             token = await jobdiva_service.authenticate()
             candidates = await jobdiva_service.search_candidates(
                 skills=[],
-                location=request.location or "",
+                location=location,
                 limit=effective_limit,
                 job_id=None,
                 boolean_string=request.boolean_string or "",
@@ -353,10 +353,10 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             # `criteria` was constructed.
             try:
                 fallback_location = ""
-                if request.locations:
-                    fallback_location = request.locations[0].value
-                elif request.location:
+                if request.location:
                     fallback_location = request.location
+                elif request.locations:
+                    fallback_location = request.locations[0].value
 
                 fallback_resume_match_filters = (
                     [f.dict() for f in request.resume_match_filters]
@@ -407,6 +407,32 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
         except Exception as fallback_error:
             logger.error(f"❌ Fallback search also failed: {fallback_error}")
             raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
+
+
+@router.get("/candidates/jobdiva/{job_id}/criteria-status")
+async def get_jobdiva_criteria_status(job_id: str):
+    """Lightweight pre-check for JobDiva AI matcher criteria.
+
+    Used by Step-5 UI to warn recruiters *before* running sourcing if
+    JobDiva's JobAgent criteria are not configured for the given job.
+    """
+    try:
+        result = await jobdiva_service.search_via_job_agent(
+            job_id=job_id,
+            resume_count=1,
+            require_resume=False,
+        )
+
+        return {
+            "status": "success",
+            "job_id": str(job_id),
+            "resolved_jobdiva_id": result.get("resolved_jobdiva_id"),
+            "criteria_unconfigured": bool(result.get("criteria_unconfigured")),
+            "candidate_count_probe": len(result.get("candidates") or []),
+        }
+    except Exception as e:
+        logger.error(f"criteria-status check failed for job {job_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to check JobDiva criteria status")
 
 @router.post("/candidates/search/legacy")
 async def search_jobdiva_candidates_legacy(request: CandidateSearchRequest):
