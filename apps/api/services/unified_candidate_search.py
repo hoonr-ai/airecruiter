@@ -2316,6 +2316,8 @@ class UnifiedCandidateSearch:
             "failed_location": 0,
             "failed_location_geocode": 0,
             "llm_extraction_errors": 0,
+            "pre_llm_skipped_low_score": 0,
+            "pre_llm_skipped_no_required_hit": 0,
         }
 
         async def _process_single(candidate, index):
@@ -2386,6 +2388,42 @@ class UnifiedCandidateSearch:
                             assessment["matched"][:5],
                         ),
                     )
+
+                    # Pre-LLM gate to reduce expensive extraction calls on
+                    # obvious low-fit profiles while protecting borderline
+                    # candidates that already show required-term evidence.
+                    pre_score_result = self._score_candidate(candidate, criteria)
+                    pre_score = float(pre_score_result.get("score") or 0)
+                    pre_score_details = pre_score_result.get("score_details") or {}
+                    has_required_hit = any(
+                        isinstance(dim, dict)
+                        and int(dim.get("required_total") or 0) > 0
+                        and int(dim.get("required_matched") or 0) > 0
+                        for dim in pre_score_details.values()
+                    )
+
+                    skip_reason = None
+                    if pre_score < 25:
+                        skip_reason = "low_score"
+                        counters["pre_llm_skipped_low_score"] += 1
+                    elif pre_score < 40 and not has_required_hit:
+                        skip_reason = "no_required_hit"
+                        counters["pre_llm_skipped_no_required_hit"] += 1
+
+                    if skip_reason:
+                        self._log_stage(
+                            "LLMGate",
+                            "skipping LLM for candidate_id=%s pre_score=%.1f reason=%s required_hit=%s" % (
+                                candidate_id,
+                                pre_score,
+                                skip_reason,
+                                has_required_hit,
+                            ),
+                        )
+                        candidate["enhanced_info"] = candidate.get("enhanced_info") or {}
+                        candidate["enhanced_info_status"] = "skipped_pre_llm_gate"
+                        return {"status": "success", "candidate": candidate}
+
                     self._log_stage("LLM", f"STARTING LLM extraction for candidate_id={candidate_id}, resume_id={candidate.get('resume_id') or 'unknown'}")
                     
                     enhanced = await process_jobdiva_candidate(candidate)
@@ -2471,6 +2509,13 @@ class UnifiedCandidateSearch:
                 counters["failed_location"],
                 counters["failed_location_geocode"],
                 counters["llm_extraction_errors"],
+            ),
+        )
+        self._log_stage(
+            "LLMGate",
+            "pre-LLM skips: low_score=%s no_required_hit=%s" % (
+                counters["pre_llm_skipped_low_score"],
+                counters["pre_llm_skipped_no_required_hit"],
             ),
         )
 

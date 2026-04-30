@@ -4192,9 +4192,15 @@ function NewJobPageContent() {
             } else if (event.type === "summary") {
               console.log("Search stream complete:", event.data);
               const summary = event.data?.summary || event.data || {};
-              setJobdivaCriteriaUnconfigured(
-                Boolean(summary?.jobdiva_criteria_unconfigured)
-              );
+              const unconfigured = Boolean(summary?.jobdiva_criteria_unconfigured);
+              setJobdivaCriteriaUnconfigured(unconfigured);
+              if (unconfigured) {
+                // Pre-check may miss if JobDiva returns a non-standard error
+                // shape. If the actual search summary confirms criteria are
+                // unconfigured, still surface the recruiter guidance modal.
+                setShowJobdivaSkillsModal(true);
+                setSkillsCopied(false);
+              }
             } else if (event.type === "error") {
               console.error("Stream error:", event.message);
             }
