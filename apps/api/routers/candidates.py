@@ -408,6 +408,32 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             logger.error(f"❌ Fallback search also failed: {fallback_error}")
             raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
+
+@router.get("/candidates/jobdiva/{job_id}/criteria-status")
+async def get_jobdiva_criteria_status(job_id: str):
+    """Lightweight pre-check for JobDiva AI matcher criteria.
+
+    Used by Step-5 UI to warn recruiters *before* running sourcing if
+    JobDiva's JobAgent criteria are not configured for the given job.
+    """
+    try:
+        result = await jobdiva_service.search_via_job_agent(
+            job_id=job_id,
+            resume_count=1,
+            require_resume=False,
+        )
+
+        return {
+            "status": "success",
+            "job_id": str(job_id),
+            "resolved_jobdiva_id": result.get("resolved_jobdiva_id"),
+            "criteria_unconfigured": bool(result.get("criteria_unconfigured")),
+            "candidate_count_probe": len(result.get("candidates") or []),
+        }
+    except Exception as e:
+        logger.error(f"criteria-status check failed for job {job_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to check JobDiva criteria status")
+
 @router.post("/candidates/search/legacy")
 async def search_jobdiva_candidates_legacy(request: CandidateSearchRequest):
     """
