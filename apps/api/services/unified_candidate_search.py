@@ -19,10 +19,12 @@ from core.config import (
     SCORING_RECENT_PENALTY,
     SCORING_EXCLUSION_CAP,
     SCORING_EXCLUSION_PER_HIT,
+    SCORING_EXCLUSION_HARD_VETO_THRESHOLD,
     SCORING_UNMATCHED_REQUIRED_FLOOR,
     SCORING_UNMATCHED_PREFERRED_FLOOR,
     SCORING_PARSING_GAP_FLOOR,
     SCORING_COVERAGE_BLEND_THRESHOLD,
+    SOURCE_TIER_BONUS,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,6 +96,12 @@ class UnifiedCandidateSearch:
         self._log_stage("Start", f"job={criteria.job_id} sources={', '.join(criteria.sources or [])}")
         
         seen_ids = set()
+        # Cross-source dedup keys (email, normalised LinkedIn URL,
+        # normalised name+location). The legacy `seen_ids` set keys on
+        # the source's native candidate_id and so misses the same person
+        # showing up in JobDiva-Applicants AND LinkedIn-Exa with
+        # different ids. Both sets are checked in `emit_candidate`.
+        seen_dedup_keys: set = set()
         summary = {
             "total_candidates": 0,
             "job_applicants_count": 0,
@@ -117,7 +125,7 @@ class UnifiedCandidateSearch:
             # Ensure name is title-cased if it exists
             if cand.get("name"):
                 cand["name"] = str(cand["name"]).title()
-            
+
             if criteria.bypass_screening:
                 cand["match_score"] = 0
                 cand["missing_skills"] = []
@@ -127,11 +135,27 @@ class UnifiedCandidateSearch:
                 return cand
 
             score_result = self._score_candidate(cand, criteria)
-            cand["match_score"] = score_result["score"]
+            base_score = score_result["score"]
+            cand["match_score"] = base_score
             cand["missing_skills"] = score_result["missing_skills"]
             cand["matched_skills"] = score_result.get("matched_skills", [])
             cand["explainability"] = score_result["explainability"]
             cand["match_score_details"] = score_result.get("score_details", {})
+
+            # Source-tier bonus: warm leads (recruiter's own applicants,
+            # JobDiva talent pool, curated DBs) outrank cold scrapes when
+            # raw scores are close. Only applied when base_score > 0 so
+            # excluded / hard-vetoed candidates aren't promoted.
+            source = str(cand.get("source") or "")
+            bonus = SOURCE_TIER_BONUS.get(source, 0)
+            if bonus and base_score > 0:
+                boosted = min(100, base_score + bonus)
+                cand["match_score"] = boosted
+                cand["match_score_details"]["source_tier_bonus"] = {
+                    "source": source,
+                    "bonus": bonus,
+                    "base_score": base_score,
+                }
             return cand
 
         # JobDiva is split into two explicit sources:
@@ -165,8 +189,13 @@ class UnifiedCandidateSearch:
             cid = str(cand.get("candidate_id") or cand.get("id"))
             if cid and cid in seen_ids:
                 return
+            cross_keys = self._dedup_keys(cand)
+            if any(k in seen_dedup_keys for k in cross_keys):
+                return
             if cid:
                 seen_ids.add(cid)
+            for k in cross_keys:
+                seen_dedup_keys.add(k)
             if qualified_counter_key and assessment["passes"]:
                 summary[qualified_counter_key] += 1
             summary["total_candidates"] += 1
@@ -1663,6 +1692,11 @@ class UnifiedCandidateSearch:
         missing_required: List[str] = []
         matched_required_skills: List[str] = []
         score_details: Dict[str, Any] = {}
+        # Hard-veto trigger: any excluded group whose match strength meets
+        # SCORING_EXCLUSION_HARD_VETO_THRESHOLD forces score → 0 regardless
+        # of how strong the rest of the candidate looks. The soft penalty
+        # below still applies for borderline matches.
+        hard_veto_hits: List[str] = []
 
         for dimension in dimensions:
             total_weight = float(dimension["weight"])
@@ -1783,6 +1817,22 @@ class UnifiedCandidateSearch:
                     f"{dimension['label']}: conflicting match on {', '.join(excluded_matches[:2])}"
                 )
 
+                # Hard-veto check: if any excluded group scored above the
+                # configured threshold, mark the candidate for forced-zero
+                # after the dimension loop. We probe per-group rather than
+                # relying on `excluded_matches` (which only reports >0.5
+                # hits) because the threshold may be tighter or looser.
+                if SCORING_EXCLUSION_HARD_VETO_THRESHOLD <= 1.0:
+                    for group in excluded_groups:
+                        strength = self._term_group_score(
+                            profile, group, dimension["collections"]
+                        )
+                        if strength >= SCORING_EXCLUSION_HARD_VETO_THRESHOLD:
+                            hard_veto_hits.append(
+                                f"{dimension['label']}: {self._group_label(group)}"
+                            )
+                            break
+
             if required_groups:
                 missing = [
                     self._group_label(group) for group in required_groups
@@ -1820,7 +1870,18 @@ class UnifiedCandidateSearch:
         if weighted_max > 0:
             score = round(max(0.0, min(100.0, (sum(weighted_scores) / weighted_max) * 100)))
 
-        if score >= 85:
+        score_details["hard_veto"] = {
+            "triggered": bool(hard_veto_hits),
+            "reasons": hard_veto_hits[:3],
+        }
+
+        if hard_veto_hits:
+            score = 0
+            explainability.insert(
+                0,
+                f"Hard exclusion: matches recruiter exclusion rule ({hard_veto_hits[0]})",
+            )
+        elif score >= 85:
             explainability.insert(0, "Excellent rubric and sourcing alignment")
         elif score >= 70:
             explainability.insert(0, "Strong overall fit across active filters")
@@ -2524,6 +2585,40 @@ class UnifiedCandidateSearch:
         except Exception as e:
             logger.error(f"Exa search failed: {e}")
             return {"candidates": [], "source_type": "LinkedIn-Exa"}
+
+    def _dedup_keys(self, candidate: Dict[str, Any]) -> List[str]:
+        """Cross-source dedup keys for one candidate.
+
+        Each key is namespaced (`email:`, `linkedin:`, `name_loc:`) so two
+        candidates only collide when *one* of them genuinely overlaps —
+        sharing a normalised LinkedIn URL is sufficient even if names
+        differ slightly, and an email-with-`@` gates the email key
+        against catastrophic empty-string collisions.
+        """
+        keys: List[str] = []
+
+        email = str(candidate.get("email") or "").strip().lower()
+        if email and "@" in email:
+            keys.append(f"email:{email}")
+
+        profile_url = str(candidate.get("profile_url") or "").strip().lower()
+        if profile_url and "linkedin.com" in profile_url:
+            normalized = profile_url.split("?", 1)[0].rstrip("/")
+            keys.append(f"linkedin:{normalized}")
+
+        first = str(candidate.get("firstName") or "").strip().lower()
+        last = str(candidate.get("lastName") or "").strip().lower()
+        full_name = f"{first} {last}".strip()
+        if not full_name:
+            full_name = str(candidate.get("name") or "").strip().lower()
+        location_raw = (
+            str(candidate.get("city") or "").strip().lower()
+            or str(candidate.get("location") or "").strip().lower()
+        )
+        if full_name and location_raw and " " in full_name:
+            keys.append(f"name_loc:{full_name}|{location_raw}")
+
+        return keys
 
     def _deduplicate_candidates(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen = {}
