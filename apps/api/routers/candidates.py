@@ -415,6 +415,14 @@ async def get_jobdiva_criteria_status(job_id: str):
 
     Used by Step-5 UI to warn recruiters *before* running sourcing if
     JobDiva's JobAgent criteria are not configured for the given job.
+
+    The underlying JobDiva flag (`criteria_unconfigured` from
+    `_search_with_job_agent`) only fires when JobDiva returns 500 with the
+    literal string "Criteria Not Assigned". In practice that path triggers
+    rarely — most genuinely unconfigured matchers respond 200 with an
+    empty `data` array. We treat "resolved jobdiva_id present but the
+    matcher returned zero candidates" as the same recruiter-actionable
+    state, so the Step-5 modal actually surfaces.
     """
     try:
         result = await jobdiva_service.search_via_job_agent(
@@ -423,12 +431,30 @@ async def get_jobdiva_criteria_status(job_id: str):
             require_resume=False,
         )
 
+        resolved_jobdiva_id = result.get("resolved_jobdiva_id")
+        candidate_count = len(result.get("candidates") or [])
+        explicit_unconfigured = bool(result.get("criteria_unconfigured"))
+
+        # Heuristic: matcher resolved the job but returned no candidates →
+        # criteria are effectively unconfigured (or so narrow they don't
+        # match anyone). Either way, the recruiter should be nudged.
+        empty_matcher_response = (
+            resolved_jobdiva_id is not None and candidate_count == 0
+        )
+
+        criteria_unconfigured = explicit_unconfigured or empty_matcher_response
+
         return {
             "status": "success",
             "job_id": str(job_id),
-            "resolved_jobdiva_id": result.get("resolved_jobdiva_id"),
-            "criteria_unconfigured": bool(result.get("criteria_unconfigured")),
-            "candidate_count_probe": len(result.get("candidates") or []),
+            "resolved_jobdiva_id": resolved_jobdiva_id,
+            "criteria_unconfigured": criteria_unconfigured,
+            "criteria_unconfigured_reason": (
+                "explicit_jobdiva_flag" if explicit_unconfigured
+                else "empty_matcher_response" if empty_matcher_response
+                else None
+            ),
+            "candidate_count_probe": candidate_count,
         }
     except Exception as e:
         logger.error(f"criteria-status check failed for job {job_id}: {e}", exc_info=True)
