@@ -25,7 +25,10 @@ from core.config import (
     SCORING_PARSING_GAP_FLOOR,
     SCORING_COVERAGE_BLEND_THRESHOLD,
     SOURCE_TIER_BONUS,
+    EMBEDDING_SKILL_MATCH,
+    EMBEDDING_MATCH_THRESHOLD,
 )
+from services import skill_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +97,20 @@ class UnifiedCandidateSearch:
         """
         start_time = time.time()
         self._log_stage("Start", f"job={criteria.job_id} sources={', '.join(criteria.sources or [])}")
-        
+
+        # Pre-warm embeddings for all query-side terms once per search.
+        # No-op when EMBEDDING_SKILL_MATCH is off or OPENAI_API_KEY is
+        # unset. Per-candidate skill embeddings are warmed lazily inside
+        # emit_candidate; this batches the (small) query side once so we
+        # don't pay an embedding round-trip per candidate.
+        if EMBEDDING_SKILL_MATCH:
+            try:
+                query_terms = self._criteria_query_terms(criteria)
+                if query_terms:
+                    await skill_embeddings.warm_terms(query_terms)
+            except Exception as exc:  # never let embedding warm break a search
+                logger.warning(f"query-term embedding warm failed: {exc}")
+
         seen_ids = set()
         # Cross-source dedup keys (email, normalised LinkedIn URL,
         # normalised name+location). The legacy `seen_ids` set keys on
@@ -185,6 +201,20 @@ class UnifiedCandidateSearch:
 
         async def emit_candidate(cand, assessment, qualified_counter_key=None):
             cand["screening_summary"] = build_screening(assessment)
+
+            # Warm candidate-side skill embeddings before scoring so the
+            # sync `_fuzzy_term_score` path can read them from the
+            # in-process cache. Off when EMBEDDING_SKILL_MATCH is unset.
+            if EMBEDDING_SKILL_MATCH:
+                try:
+                    cand_terms = self._candidate_skill_terms(cand)
+                    if cand_terms:
+                        await skill_embeddings.warm_terms(cand_terms)
+                except Exception as exc:
+                    logger.warning(
+                        f"candidate-skill embedding warm failed: {exc}"
+                    )
+
             cand = finalize_candidate(cand)
             cid = str(cand.get("candidate_id") or cand.get("id"))
             if cid and cid in seen_ids:
@@ -1456,18 +1486,18 @@ class UnifiedCandidateSearch:
         normalized_term = self._normalize_term(term)
         if not normalized_term:
             return 0.0
-            
+
         # Check for strict match first (100%)
         if self._contains_term(profile, term, *collections):
             return 1.0
-            
+
         # Keyword-based partial matching
         term_words = [w for w in normalized_term.split() if len(w) > 2] # ignore tiny words
         if not term_words:
             return 0.0
-            
+
         best_overlap_score = 0.0
-        
+
         # Check against structured collections (higher weight)
         for coll in collections:
             for item in profile.get(coll, []):
@@ -1479,7 +1509,7 @@ class UnifiedCandidateSearch:
                 overlap = len(intersection) / len(term_words)
                 if overlap > best_overlap_score:
                     best_overlap_score = overlap
-                    
+
         # Check against full text (broad keyword match, lower weight)
         profile_text = profile.get("text", "")
         is_location_only = len(collections) == 1 and collections[0] == "locations"
@@ -1488,8 +1518,83 @@ class UnifiedCandidateSearch:
         else:
             text_matches = sum(1 for word in term_words if word in profile_text)
             text_score = (text_matches / len(term_words)) * 0.35
-        
-        return max(best_overlap_score, text_score)
+
+        # Embedding-cosine augmentation. When EMBEDDING_SKILL_MATCH is on
+        # and the embeddings have been pre-warmed (in `search_candidates`
+        # for the query side and `emit_candidate` for the candidate side),
+        # take the max of keyword score and cosine similarity. Below the
+        # configured threshold the cosine score is treated as 0 so noisy
+        # near-matches don't promote weak candidates. Locations and other
+        # non-skill collections are excluded — embeddings make sense only
+        # for free-form skill / title text.
+        embedding_score = 0.0
+        if EMBEDDING_SKILL_MATCH and not is_location_only:
+            candidate_terms: List[str] = []
+            for coll in collections:
+                for item in profile.get(coll, []) or []:
+                    candidate_terms.append(str(item))
+            if candidate_terms:
+                cosine = skill_embeddings.best_cosine(term, candidate_terms)
+                if cosine >= EMBEDDING_MATCH_THRESHOLD:
+                    embedding_score = cosine
+
+        return max(best_overlap_score, text_score, embedding_score)
+
+    def _criteria_query_terms(self, criteria: SearchCriteria) -> List[str]:
+        """Flat list of every skill / title / company / keyword term in
+        the criteria, used to pre-warm query-side embeddings once per
+        search."""
+        terms: List[str] = []
+        for source in (
+            criteria.title_criteria,
+            criteria.skill_criteria,
+            criteria.resume_match_filters,
+        ):
+            for item in source or []:
+                if isinstance(item, dict):
+                    val = item.get("value")
+                    if val:
+                        terms.append(str(val))
+        for kw in criteria.keywords or []:
+            if kw:
+                terms.append(str(kw))
+        for company in criteria.companies or []:
+            if company:
+                terms.append(str(company))
+        return terms
+
+    def _candidate_skill_terms(self, candidate: Dict[str, Any]) -> List[str]:
+        """Flat list of skill / title / company / cert / education
+        strings on a candidate, used to warm candidate-side embeddings
+        before scoring."""
+        terms: List[str] = []
+        for key in ("title", "headline", "company", "current_company"):
+            val = candidate.get(key)
+            if val:
+                terms.append(str(val))
+        for key in ("skills", "titles", "companies", "education", "certifications"):
+            val = candidate.get(key) or []
+            if isinstance(val, list):
+                for item in val:
+                    if isinstance(item, dict):
+                        for k in ("skill", "name", "value"):
+                            if item.get(k):
+                                terms.append(str(item[k]))
+                                break
+                    elif item:
+                        terms.append(str(item))
+            elif isinstance(val, str) and val:
+                terms.append(val)
+
+        enhanced = candidate.get("enhanced_info") or {}
+        if isinstance(enhanced, dict):
+            for key in ("key_skills", "skills"):
+                val = enhanced.get(key) or []
+                if isinstance(val, list):
+                    for item in val:
+                        if item:
+                            terms.append(str(item))
+        return terms
 
     def _dedupe_terms(self, terms: List[str]) -> List[str]:
         ordered: List[str] = []
