@@ -160,3 +160,30 @@ SCORING_RECENT_PENALTY = float(get_env_with_default("SCORING_RECENT_PENALTY", "0
 #   penalty = min(total_weight * _CAP, N_hits * max(4.0, total_weight * _PER_HIT))
 SCORING_EXCLUSION_CAP = float(get_env_with_default("SCORING_EXCLUSION_CAP", "0.35"))
 SCORING_EXCLUSION_PER_HIT = float(get_env_with_default("SCORING_EXCLUSION_PER_HIT", "0.15"))
+
+# Exclusion hard-veto. When `_term_group_score` for any excluded group hits
+# at or above this threshold, the candidate's final match_score is forced
+# to 0 — the soft penalty above is not enough on its own (a strong skill
+# match elsewhere can still drag the candidate to 60+ even when they fail
+# a recruiter's "no" rule). Set to 1.01 to disable.
+SCORING_EXCLUSION_HARD_VETO_THRESHOLD = float(
+    get_env_with_default("SCORING_EXCLUSION_HARD_VETO_THRESHOLD", "0.85")
+)
+
+# Additive source-tier bonus applied to match_score in `finalize_candidate`.
+# Warm leads (recruiter's own applicants) and curated pools should rank
+# above cold scrapes when raw scores are close. Bonus is only applied when
+# the base score is non-zero, so excluded/no-fit candidates aren't
+# promoted. Set any tier to 0 to disable that tier's boost.
+SOURCE_TIER_BONUS = {
+    "JobDiva-Applicants": int(
+        get_env_with_default("SOURCE_TIER_BONUS_JOBDIVA_APPLICANTS", "10")
+    ),
+    "JobDiva-TalentSearch": int(
+        get_env_with_default("SOURCE_TIER_BONUS_JOBDIVA_TALENT", "5")
+    ),
+    "JobDiva": int(
+        get_env_with_default("SOURCE_TIER_BONUS_JOBDIVA_TALENT", "5")
+    ),
+    "VettedDB": int(get_env_with_default("SOURCE_TIER_BONUS_VETTED", "2")),
+}
