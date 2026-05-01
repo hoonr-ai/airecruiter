@@ -1256,7 +1256,7 @@ export default function CandidateRankingsPage() {
                         </TableCell>
                         <TableCell className="sticky left-[44px] z-10 bg-white border-r border-[#e2e8f0] w-[160px] py-1 px-1 align-middle text-center">
                           <Link
-                            href={`/jobs/${jobId}/candidates/report?candidateId=${encodeURIComponent(candidate.candidate_id || candidate.id)}`}
+                            href={`/jobs/${jobId}/report?candidateId=${encodeURIComponent(candidate.candidate_id || candidate.id)}`}
                             className="text-[14px] font-bold text-indigo-600 hover:underline text-center w-full block mb-0.5"
                           >
                             {candidate.name}
