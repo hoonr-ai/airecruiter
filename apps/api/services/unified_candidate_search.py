@@ -52,6 +52,10 @@ class SearchCriteria(BaseModel):
     # 5.10: by default JobDiva Talent Search drops profile-only candidates
     # (no resume attached). Set false to opt back in to the full signal.
     require_resume: bool = True
+    # B1: keep candidates flagged "open to relocation" by default; recruiter
+    # can opt out per-search to drop those whose actual city is missing or
+    # outside the radius.
+    include_relocation_candidates: bool = True
 
     def sourcing_skill_values(self) -> List[str]:
         """Flat skill-like strings for sources that only accept a plain list
@@ -1163,8 +1167,15 @@ class UnifiedCandidateSearch:
         if not required["city"] and not required["state"]:
             return True, "empty_location_requirement"
 
+        # B1: opt-out for "open to relocation" candidates whose actual location
+        # is unknown or outside the radius. Default keeps them (soft-keep).
+        relocation_flag = bool(candidate.get("open_to_relocation"))
+        include_relocation = bool(getattr(criteria, "include_relocation_candidates", True))
+
         candidate_locs = self._candidate_structured_locations(candidate)
         if not candidate_locs:
+            if relocation_flag and not include_relocation:
+                return False, "relocation_excluded_by_filter"
             # Soft-keep: missing structured location is a data-quality
             # issue, not a reason to drop. Downstream LLM enrichment can
             # re-screen with the full resume text.
@@ -1186,7 +1197,8 @@ class UnifiedCandidateSearch:
                 return True, "candidate_state_unknown_keep"
             return False, "state_mismatch"
 
-        miles = int(getattr(criteria, "within_miles", 25) or 25)
+        # Hard cap 50 mi everywhere (defense-in-depth — UI also caps).
+        miles = min(50, int(getattr(criteria, "within_miles", 25) or 25))
         target = normalize_location_string(criteria.location)
         geocode_failure = False
 
@@ -1201,6 +1213,8 @@ class UnifiedCandidateSearch:
             # Nominatim is best-effort and rate-limited. A geocode miss is
             # not evidence the candidate is outside the radius — soft-keep.
             return True, "geocode_unavailable_keep"
+        if relocation_flag and not include_relocation:
+            return False, "relocation_excluded_by_filter"
         return False, "outside_radius"
 
     def _should_enforce_location(self, criteria: SearchCriteria) -> bool:

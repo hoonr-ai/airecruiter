@@ -134,6 +134,7 @@ class CandidateSearchRequest(BaseModel):
     within_miles: Optional[int] = None
     recent_days: Optional[int] = None
     require_resume: Optional[bool] = None
+    include_relocation_candidates: Optional[bool] = None
 
 class JobFetchRequest(BaseModel):
     job_id: str
