@@ -221,12 +221,13 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 })
 
         # ----- Fetch job data -----
-        cur.execute("""
-            SELECT * FROM monitored_jobs
-            WHERE job_id = %s OR jobdiva_id = %s
-            LIMIT 1
-        """, (request.job_id, request.job_id))
+        # Try matching by job_id first, then by jobdiva_id
+        cur.execute("SELECT * FROM monitored_jobs WHERE job_id = %s LIMIT 1", (request.job_id,))
         job_row = cur.fetchone()
+        
+        if not job_row:
+            cur.execute("SELECT * FROM monitored_jobs WHERE jobdiva_id = %s LIMIT 1", (request.job_id,))
+            job_row = cur.fetchone()
 
         # ----- Fetch pre-screen questions from job_screen_questions table -----
         # Match by job_id first, then fall back to jobdiva_id if needed
@@ -267,8 +268,8 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         # Build JD block with structured context and rubric
         if job_row:
             jd = {
-                "job_id": job_row.get("job_id", request.job_id),
-                "jobdiva_id": job_row.get("jobdiva_id", ""),
+                "job_id": job_row.get("job_id") or request.job_id,
+                "jobdiva_id": job_row.get("jobdiva_id") or "",
                 "context": {
                     "title": job_row.get("title", ""),
                     "customer_name": job_row.get("customer_name") or "Unknown",
@@ -362,10 +363,10 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
         recruiter_emails: list = _parse_json_list(row.get("recruiter_emails", []))
         job_boards: list       = _parse_json_list(row.get("selected_job_boards", []))
 
-        jobdiva_id    = str(row.get("jobdiva_id") or job_id)
-        job_title     = str(row.get("title") or "")
-        customer_name = str(row.get("customer_name") or "")
-        ai_desc       = str(row.get("ai_description") or "")
+        jobdiva_id    = str(row.get("jobdiva_id") or "")
+        job_title      = row.get("title", "")
+        customer_name  = row.get("customer_name", "Unknown")
+        location       = f"{row.get('city', 'TBD')}, {row.get('state', '')}"
         db_job_id     = str(row.get("job_id") or job_id)
         clean_emails  = [str(e) for e in recruiter_emails if e]
 
