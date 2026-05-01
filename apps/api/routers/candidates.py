@@ -283,6 +283,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             boolean_string=request.boolean_string or "",
             recent_days=request.recent_days,
             require_resume=require_resume,
+            min_experience_years=request.min_experience_years,
         )
 
         # Execute unified search as a stream. Persist each candidate to
@@ -378,6 +379,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                     boolean_string=request.boolean_string or "",
                     recent_days=request.recent_days,
                     require_resume=require_resume,
+                    min_experience_years=request.min_experience_years,
                 )
 
                 for candidate in candidates:
