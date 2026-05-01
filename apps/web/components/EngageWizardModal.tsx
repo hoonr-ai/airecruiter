@@ -138,8 +138,6 @@ function buildPayload(raw: string, state: WizardState): string {
     const p = JSON.parse(raw);
     const resume = (p.resumes || [])[0] || {};
     const existingJd = p.jd || {};
-    const existingCtx = existingJd.context || {};
-
     const updatedResume = {
       ...resume,
       name: state.candidate.name,
@@ -149,36 +147,30 @@ function buildPayload(raw: string, state: WizardState): string {
       summary: state.candidate.summary,
       skills: state.candidate.skills,
       experience: state.candidate.experience,
+      raw_resume_text: state.candidate.experience || resume.raw_resume_text,
       education: state.candidate.education,
     };
 
     const updatedJd = {
-      ...existingJd,
       job_id: state.job.job_id,
       jobdiva_id: state.job.jobdiva_id,
-      // Keep top-level jd fields aligned with backend engagement router.
-      title: state.job.title,
-      customer_name: state.job.customer_name,
-      city: state.job.city,
-      state: state.job.state,
-      location_type: state.job.location_type,
-      jobdiva_description: state.job.description,
-      pre_screen_questions: state.questions.map((q) => ({
-        question_text: q.question_text,
-        pass_criteria: q.pass_criteria,
-        is_default: q.is_default,
-        category: q.category,
-      })),
-      // Also keep legacy nested context in sync for compatibility.
       context: {
-        ...existingCtx,
         title: state.job.title,
         customer_name: state.job.customer_name,
         city: state.job.city,
         state: state.job.state,
         location_type: state.job.location_type,
         jobdiva_description: state.job.description,
+        ai_description: state.job.ai_description,
+        recruiter_notes: state.job.recruiter_notes,
       },
+      rubric: state.rubric,
+      pre_screen_questions: state.questions.map((q) => ({
+        question_text: q.question_text,
+        pass_criteria: q.pass_criteria,
+        is_default: q.is_default,
+        category: q.category,
+      })),
     };
 
     return JSON.stringify(
