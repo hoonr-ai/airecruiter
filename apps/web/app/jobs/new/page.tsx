@@ -598,7 +598,58 @@ function NewJobPageContent() {
   };
 
   const jobdivaSkillsToUse = getJobdivaSkills();
-  const jobdivaSkillsCopyText = jobdivaSkillsToUse.map((skill) => `(${skill})`).join(", ");
+  const toAgentToken = (value: unknown) =>
+    String(value || "")
+      .trim()
+      .replace(/[()]/g, "")
+      .toUpperCase();
+
+  const parseLocationAgentToken = (rawLocation: string) => {
+    const value = String(rawLocation || "").trim();
+    if (!value) return "US";
+
+    const parts = value.split(",").map((p) => p.trim()).filter(Boolean);
+    const tail = parts.length > 0 ? parts[parts.length - 1] : value;
+    const stateMatch = tail.match(/\b([A-Za-z]{2})\b/);
+    if (stateMatch?.[1]) return `${stateMatch[1].toUpperCase()}-US`;
+
+    if (/\b(united states|usa|us)\b/i.test(value)) return "US";
+    return "US";
+  };
+
+  const buildJobdivaAgentString = () => {
+    const groups: string[] = [];
+
+    const nonExcludedSkills = sourceSkills.filter((skill) => skill.matchType !== "exclude");
+    if (nonExcludedSkills.length > 0) {
+      nonExcludedSkills.forEach((skill) => {
+        const terms = [skill.value, ...(skill.selectedSimilarSkills || [])]
+          .map(toAgentToken)
+          .filter(Boolean);
+
+        const uniqueTerms = Array.from(new Set(terms));
+        if (uniqueTerms.length === 0) return;
+
+        groups.push(
+          uniqueTerms.length === 1
+            ? `(${uniqueTerms[0]})`
+            : `(${uniqueTerms.join(" OR ")})`
+        );
+      });
+    } else {
+      jobdivaSkillsToUse.forEach((skill) => {
+        const token = toAgentToken(skill);
+        if (token) groups.push(`(${token})`);
+      });
+    }
+
+    const locationToken = parseLocationAgentToken(sourceLocations[0]?.value || "");
+    if (groups.length === 0) return `IN (${locationToken})`;
+    return `${groups.join(" AND ")}, IN (${locationToken})`;
+  };
+
+  const jobdivaAgentString = buildJobdivaAgentString();
+  const jobdivaSkillsCopyText = jobdivaAgentString;
   const jobdivaJobEditUrl = (jobdivaId || numericJobId)
     ? `https://www1.jobdiva.com/employers/myjobs/vieweditjobform.jsp?lstjobs=1&jobid=${encodeURIComponent(jobdivaId || numericJobId)}`
     : "";
@@ -3622,6 +3673,20 @@ function NewJobPageContent() {
   }, [currentStep, rubricData, jobData, resumeMatchFilters]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (currentStep !== 5) return;
+
+    const jobRef = String(jobdivaId || numericJobId || "draft").trim();
+    const seenKey = `step5:agent-modal-seen:${jobRef}`;
+    const alreadySeen = window.sessionStorage.getItem(seenKey) === "1";
+    if (alreadySeen) return;
+
+    setShowJobdivaSkillsModal(true);
+    setSkillsCopied(false);
+    window.sessionStorage.setItem(seenKey, "1");
+  }, [currentStep, jobdivaId, numericJobId]);
+
+  useEffect(() => {
     setHasCheckedJobdivaCriteria(false);
     setJobdivaCriteriaUnconfigured(false);
   }, [jobdivaId, numericJobId]);
@@ -4209,6 +4274,27 @@ function NewJobPageContent() {
   ): Promise<any[]> => {
     const apiUrl = API_BASE;
     const payload = buildSearchPayload(booleanString, overrides);
+
+    const mapStageToStatus = (stage: string) => {
+      const raw = String(stage || "").toLowerCase();
+      if (raw.includes("jobdiva applicants")) {
+        return "Searching at JobDiva portal (Applicants)...";
+      }
+      if (raw.includes("jobdiva talent")) {
+        return "Searching at JobDiva portal (Talent Search)...";
+      }
+      if (raw.includes("linkedin")) {
+        return "Searching at LinkedIn portal...";
+      }
+      if (raw.includes("exa")) {
+        return "Searching at Exa portal...";
+      }
+      if (raw.includes("dice")) {
+        return "Searching at Dice portal...";
+      }
+      return stage;
+    };
+
     const controller = new AbortController();
     searchAbortRef.current = controller;
     let response: Response;
@@ -4241,6 +4327,7 @@ function NewJobPageContent() {
     const decoder = new TextDecoder();
     let buffer = "";
     let runList: any[] = [];
+    let activePortal = "source portal";
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -4258,9 +4345,23 @@ function NewJobPageContent() {
               if (id) seenIds.add(id);
               runList.push(event.data);
               setCandidates(prev => [...prev, event.data]);
+
+              const foundCount = runList.length;
+              if (foundCount === 1) {
+                setSearchStatus(`Found 1 profile from ${activePortal}. Matching resumes against the rubric...`);
+              } else if (foundCount % 5 === 0) {
+                setSearchStatus(`Found ${foundCount} profiles from ${activePortal}. Matching resumes against the rubric...`);
+              }
             } else if (event.type === "stage") {
-              setSearchStatus(event.data);
+              const rawStage = String(event.data || "");
+              const mapped = mapStageToStatus(rawStage);
+              if (mapped.toLowerCase().includes("portal")) {
+                const portalPart = mapped.replace(/^Searching at\s*/i, "").replace(/\.\.\.$/, "").trim();
+                if (portalPart) activePortal = portalPart;
+              }
+              setSearchStatus(mapped);
             } else if (event.type === "summary") {
+              setSearchStatus(`Found ${runList.length} profiles. Finalizing shortlist and quality scoring...`);
               console.log("Search stream complete:", event.data);
               const summary = event.data?.summary || event.data || {};
               const unconfigured = Boolean(summary?.jobdiva_criteria_unconfigured);
@@ -4371,7 +4472,7 @@ function NewJobPageContent() {
       const attempts: { query: string; label: string }[] = [{ query: initial, label: "Hoonr-Curate generated" }];
       setBooleanAttempts(attempts);
       currentAttempts = attempts;
-      setSearchStatus("Searching candidates...");
+      setSearchStatus("Connecting to source portals...");
 
       const firstRunStartMs = Date.now();
       const firstRun = await runSearchStream(initial, "replace");
@@ -5989,7 +6090,7 @@ function NewJobPageContent() {
                   </h4>
                   <p className={`text-slate-500 text-[13px] font-medium tracking-tight transition-all ${isSearching ? 'animate-pulse text-[#6366f1]' : ''}`}>
                     {hasSearched ? (
-                      isSearching ? `Sourcing candidates... ${candidates.length} found so far` : `${candidates.length} candidates found${sourceFilter !== "all" ? ` · showing ${sortedCandidates.length}` : ""}`
+                      isSearching ? searchStatus : `${candidates.length} candidates found${sourceFilter !== "all" ? ` · showing ${sortedCandidates.length}` : ""}`
                     ) : 'Run a search to find candidates.'}
                   </p>
                   {hasSearched && !isSearching && candidates.length > 0 && qualityScorecard && (
@@ -6783,13 +6884,13 @@ function NewJobPageContent() {
         </div>
       )}
 
-      {showJobdivaSkillsModal && jobdivaCriteriaUnconfigured && (
+      {showJobdivaSkillsModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
           <div className="w-full max-w-2xl rounded-xl bg-white border border-slate-200 shadow-2xl overflow-hidden">
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
               <div>
-                <h3 className="text-[16px] font-bold text-slate-900">JobDiva AI matcher criteria not configured</h3>
-                <p className="text-[12px] text-slate-500 mt-0.5">Add these skills in JobDiva and save the Search Agent criteria for this job.</p>
+                <h3 className="text-[16px] font-bold text-slate-900">JobDiva Search Agent string</h3>
+                <p className="text-[12px] text-slate-500 mt-0.5">Use this Boolean-ready string in JobDiva Search Agent, including location format.</p>
               </div>
               <button
                 type="button"
@@ -6802,11 +6903,13 @@ function NewJobPageContent() {
             </div>
 
             <div className="px-5 py-4 space-y-3">
-              <div className="text-[12px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                JobDiva&apos;s AI matcher isn&apos;t configured for this job yet. We&apos;ll still search, but quality improves once criteria are saved in JobDiva.
+              <div className={`text-[12px] rounded-lg px-3 py-2 border ${jobdivaCriteriaUnconfigured ? "text-amber-800 bg-amber-50 border-amber-200" : "text-indigo-800 bg-indigo-50 border-indigo-200"}`}>
+                {jobdivaCriteriaUnconfigured
+                  ? "JobDiva AI matcher isn’t configured for this job yet. We’ll still search, but quality improves once criteria are saved in JobDiva."
+                  : "Tip: copy this string into JobDiva Search Agent criteria for stronger portal-side matching."}
               </div>
               <div className="text-[12px] text-slate-600">
-                {jobdivaSkillsToUse.length} skill{jobdivaSkillsToUse.length === 1 ? "" : "s"} formatted as requested: <span className="font-semibold">(Skill One), (Skill Two)</span>
+                {jobdivaSkillsToUse.length} skill{jobdivaSkillsToUse.length === 1 ? "" : "s"} formatted in Boolean form with location suffix: <span className="font-semibold">(HADOOP) AND (SPARK OR PYSPARK), IN (NC-US)</span>
               </div>
               <textarea
                 value={jobdivaSkillsCopyText}
@@ -6846,7 +6949,7 @@ function NewJobPageContent() {
                   }}
                 >
                   <Clipboard className="w-3.5 h-3.5" />
-                  {skillsCopied ? "Copied" : "Copy skills"}
+                  {skillsCopied ? "Copied" : "Copy agent string"}
                 </Button>
               </div>
             </div>
