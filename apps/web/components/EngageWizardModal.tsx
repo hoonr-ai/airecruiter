@@ -69,6 +69,8 @@ interface JobFields {
   state: string;
   location_type: string;
   description: string;
+  ai_description: string;
+  recruiter_notes: string;
   interview_duration: string;
 }
 
@@ -119,7 +121,9 @@ function parsePayload(raw: string): WizardState | null {
         state: jd.state || ctx.state || "",
         location_type: jd.location_type || ctx.location_type || "",
         description: jd.jobdiva_description || ctx.jobdiva_description || "",
-        interview_duration: p.interview_duration || "",
+        ai_description: jd.ai_description || ctx.ai_description || "",
+        recruiter_notes: jd.recruiter_notes || ctx.recruiter_notes || "",
+        interview_duration: p.interview_duration || "15-20",
       },
       questions: (jd.pre_screen_questions || []).map((q: any) => ({
         question_text: q.question_text || "",
