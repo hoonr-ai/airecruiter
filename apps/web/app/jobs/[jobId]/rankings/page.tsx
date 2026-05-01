@@ -923,7 +923,7 @@ export default function CandidateRankingsPage() {
         // EXTRA FALLBACK: If job title is still Unknown, borrow from candidates
         setJob(prev => {
           if (!prev || prev.title === `Job ${jobId}`) {
-            const firstCand = synced[0];
+            const firstCand = sorted[0];
             const recoveredTitle = firstCand?.headline || firstCand?.job_title || `Job ${jobId}`;
             return {
               ...(prev || {}),
