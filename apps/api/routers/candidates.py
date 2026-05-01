@@ -845,7 +845,7 @@ class RefreshResumeMatchRequest(BaseModel):
     source: Optional[str] = None
 
 
-@router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id}/refresh-resume-match")
+@router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/refresh-resume-match")
 async def refresh_candidate_resume_match(
     job_id_or_ref: str,
     candidate_id: str,
@@ -2167,7 +2167,7 @@ async def enrich_candidate_contact(candidate_id: str, request: EnrichCandidateCo
     return await _enrich_candidate_contact_impl(candidate_id, request)
 
 
-@router.patch("/candidates/{candidate_id}/phone")
+@router.patch("/candidates/{candidate_id:path}/phone")
 async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhoneRequest):
     normalised = _normalise_phone(request.phone)
     digit_count = sum(1 for ch in normalised if ch.isdigit())
@@ -2308,7 +2308,7 @@ async def fetch_enhanced_candidates(request: Dict[str, str]):
         print(f"❌ Enhanced fetch error: {e}")
         return {"status": "error", "candidates": [], "message": str(e)}
 
-@router.post("/candidates/{candidate_id}/update-resume")
+@router.post("/candidates/{candidate_id:path}/update-resume")
 async def update_candidate_resume(candidate_id: str):
     """Update resume text for an existing candidate using enhanced JobDiva integration."""
     try:
@@ -2331,7 +2331,7 @@ async def update_candidate_resume(candidate_id: str):
         logger.error(f"Error updating resume for candidate {candidate_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/candidates/{candidate_id}/resume")
+@router.get("/candidates/{candidate_id:path}/resume")
 async def get_candidate_resume(candidate_id: str):
     """
     Fetch individual candidate resume by candidate ID from JobDiva.
@@ -2426,7 +2426,7 @@ async def analyze_candidates(request: CandidateAnalysisRequest):
 # ---------------------------------------------------------------------------
 # Candidate Evaluation Report
 # ---------------------------------------------------------------------------
-@router.get("/candidates/{candidate_id}/evaluation-report")
+@router.get("/candidates/{candidate_id:path}/evaluation-report")
 async def get_candidate_evaluation_report(
     candidate_id: str,
     job_id: Optional[str] = Query(None, description="Job ID or JobDiva ID"),
@@ -2758,7 +2758,7 @@ async def get_candidate_evaluation_report(
     except Exception as e:
         logger.error(f"evaluation-report failed for {candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-@router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id}/feedback")
+@router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/feedback")
 async def save_candidate_feedback(
     job_id_or_ref: str,
     candidate_id: str,
