@@ -765,7 +765,7 @@ async def get_job_candidates(job_id_or_ref: str):
                             interview_id,
                             created_at
                         FROM engage_interview_audit
-                        WHERE (job_id = %s OR job_id = %s)
+                        WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                         ORDER BY candidate_id, id DESC
                     )
                     SELECT
@@ -2538,7 +2538,7 @@ async def get_candidate_evaluation_report(
                 audit_where = ["candidate_id = %s"]
                 audit_params: list = [candidate_id]
                 if effective_jobdiva_id:
-                    audit_where.append("(job_id = %s OR job_id = %s)")
+                    audit_where.append("(jobdiva_id = %s OR jobdiva_id = %s)")
                     audit_params += [effective_jobdiva_id, job_id or effective_jobdiva_id]
                 cur.execute(
                     f"""
