@@ -22,7 +22,7 @@ set and the UI decides how to reconcile.
 
 from __future__ import annotations
 
-from typing import List, Dict, Any, Optional, Literal
+from typing import List, Dict, Any, Optional
 import json
 import logging
 import re
@@ -30,43 +30,6 @@ import re
 import openai
 
 logger = logging.getLogger(__name__)
-
-RoleFamily = Literal["it", "non_it", "hybrid"]
-
-_IT_TITLE_KEYWORDS = {
-    "software", "engineer", "developer", "devops", "sre", "site reliability",
-    "data engineer", "data scientist", "machine learning", "ai", "cloud",
-    "architect", "programmer", "full stack", "backend", "frontend", "qa automation",
-    "platform", "security engineer", "database", "etl", "analytics engineer",
-}
-
-_IT_SKILL_KEYWORDS = {
-    "python", "java", "c#", "node", "react", "angular", "aws", "azure", "gcp",
-    "kubernetes", "docker", "terraform", "ci/cd", "jenkins", "github actions",
-    "sql", "databricks", "snowflake", "airflow", "spark", "microservices",
-    "api", "rest", "graphql", "linux", "git", "typescript", "javascript",
-}
-
-_NON_IT_TITLE_KEYWORDS = {
-    "recruiter", "talent", "account manager", "customer service", "operations",
-    "project coordinator", "business operations", "analyst", "financial analyst",
-    "marketing", "sales", "hr", "human resources", "legal", "compliance",
-    "clinical", "nurse", "technician", "assistant", "specialist", "administrator",
-    "supply chain", "procurement", "claims", "benefits", "payroll",
-}
-
-_NON_IT_SKILL_KEYWORDS = {
-    "stakeholder management", "client communication", "documentation", "scheduling",
-    "compliance", "auditing", "reporting", "excel", "power bi", "tableau",
-    "customer support", "negotiation", "recruiting", "sourcing", "interviewing",
-    "case management", "crm", "salesforce", "process improvement", "quality assurance",
-    "training", "presentation", "budgeting", "forecasting", "operations",
-}
-
-_NON_IT_BANNED_TERMS = (
-    "ci/cd", "deployment", "rollback", "production system", "architecture",
-    "microservices", "pipeline checks", "release pipeline",
-)
 
 # Recognized seniority tokens in job titles. Order matters: longer/more
 # specific phrases first so "vp engineering" beats "vp" and "staff
@@ -121,67 +84,269 @@ def _question_count_for_level(level: str) -> int:
     return 5
 
 
-def _normalize_text(text: str) -> str:
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9+/#\-. ]+", " ", (text or "").lower())).strip()
+# Role-family + IT-domain detection. Single `_build_prompt` injects the
+# right shots / artifacts at template time, so non-data IT roles and non-IT
+# roles each get role-shape-appropriate examples instead of being forced
+# through a Databricks-flavored prompt.
+
+_IT_TITLE_KEYWORDS = (
+    "engineer", "developer", "architect", "devops", "sre", "site reliability",
+    "data engineer", "data scientist", "machine learning", "ai engineer",
+    "cloud", "programmer", "full stack", "backend", "frontend", "qa automation",
+    "platform", "security engineer", "database", "etl", "analytics engineer",
+    "ios", "android",
+)
+
+_NON_IT_FAMILY_RULES: List[tuple] = [
+    ("recruiting", (
+        "recruiter", "talent acquisition", "sourcer", "headhunter",
+        "ta partner",
+    )),
+    ("finance", (
+        "accountant", "controller", "fp&a", "treasury", "cfo", "audit",
+        "gaap", "ifrs", "payroll", "bookkeep",
+    )),
+    ("ops", (
+        "operations manager", "coo", "ops lead", "supply chain",
+        "logistics", "procurement", "vendor management", "operations",
+    )),
+    ("sales", (
+        "account executive", "ae ", "bdr", "sdr", "sales development",
+        "sales rep", "salesperson", "sales manager",
+    )),
+    ("hr", (
+        "hrbp", "hr manager", "people partner", "chro", "benefits",
+        "hris", "human resources",
+    )),
+    ("marketing", (
+        "marketing manager", "demand gen", "content marketing", "seo",
+        "brand manager", "growth marketing", "marketing director",
+    )),
+    ("customer_success", (
+        "customer success", "csm", "renewal manager",
+    )),
+]
+
+_IT_DOMAIN_RULES: List[tuple] = [
+    ("data", (
+        "databricks", "snowflake", "spark", "kafka", "airflow", "dbt",
+        "redshift", "bigquery", "etl", "data engineer", "delta",
+        "lakehouse", "data scientist", "analytics engineer",
+    )),
+    ("frontend", (
+        "react", "angular", "vue", "next.js", "next ", "frontend",
+        "front-end", "ui engineer", "web developer", "tailwind",
+    )),
+    ("devops", (
+        "kubernetes", "k8s", "terraform", "helm", "jenkins",
+        "gitlab ci", "github actions", "devops", "sre", "ansible",
+        "ci/cd", "argo",
+    )),
+    ("mobile", (
+        "ios ", "android", "swift ", "kotlin", "react native", "flutter",
+        "mobile engineer",
+    )),
+    ("security", (
+        "security engineer", "appsec", "pen test", "infosec", "soc2",
+        "iam", "vuln", "ciso",
+    )),
+    ("qa", (
+        "qa engineer", "sdet", "test automation", "selenium",
+        "cypress", "playwright", "quality assurance",
+    )),
+    ("backend", (
+        "java", ".net", "c#", "golang", "go ", "node.js", "node ",
+        "ruby", "spring boot", "spring", "microservice", "fastapi",
+        "django", "flask", "backend", "server-side", "api ",
+    )),
+]
 
 
-def _contains_any(text: str, terms: set[str]) -> int:
-    if not text:
-        return 0
-    return sum(1 for term in terms if term in text)
+def _hits_in(haystack: str, terms: tuple) -> int:
+    return sum(1 for t in terms if t in haystack)
 
 
-def detect_role_family(job_title: str, rubric: Dict[str, Any], customer_name: str = "") -> RoleFamily:
+def detect_role_family(
+    job_title: str,
+    industry: str,
+    required_skills: List[Dict[str, Any]],
+) -> str:
+    """Return one of: it | recruiting | finance | ops | sales | hr |
+    marketing | customer_success | generic_non_it.
+
+    Conservative: defaults to `generic_non_it` when nothing matches, so
+    non-IT roles never silently route through the IT prompt path.
     """
-    Lightweight role-family classifier used to shape prompts/fallbacks.
-    Prioritizes strict non-IT wording unless title/skills clearly indicate IT.
-    """
-    title_text = _normalize_text(f"{job_title} {customer_name}")
+    title = (job_title or "").lower()
+    skill_blob = " ".join(
+        (s.get("value") or s.get("name") or "").lower()
+        for s in (required_skills or [])
+    )
+    haystack = f" {title} {industry.lower() if industry else ''} {skill_blob} "
 
-    all_skills: List[Dict[str, Any]] = []
-    for key in ("skills", "hard_skills", "soft_skills"):
-        bucket = rubric.get(key) or []
-        if isinstance(bucket, list):
-            all_skills.extend([s for s in bucket if isinstance(s, dict)])
-    skill_text = _normalize_text(" ".join(str(s.get("value") or s.get("name") or "") for s in all_skills))
+    family_scores: Dict[str, int] = {}
+    for family, terms in _NON_IT_FAMILY_RULES:
+        h = _hits_in(haystack, terms)
+        if h > 0:
+            family_scores[family] = h
+    if family_scores:
+        return max(family_scores.items(), key=lambda kv: kv[1])[0]
 
-    domain_items = rubric.get("domain") or []
-    domain_text = _normalize_text(" ".join(
-        str(d.get("value") if isinstance(d, dict) else d) for d in domain_items
-    ))
-
-    score_it = 0
-    score_non_it = 0
-
-    score_it += _contains_any(title_text, _IT_TITLE_KEYWORDS) * 3
-    score_non_it += _contains_any(title_text, _NON_IT_TITLE_KEYWORDS) * 3
-
-    score_it += _contains_any(skill_text, _IT_SKILL_KEYWORDS) * 2
-    score_non_it += _contains_any(skill_text, _NON_IT_SKILL_KEYWORDS) * 2
-
-    score_it += _contains_any(domain_text, _IT_TITLE_KEYWORDS)
-    score_non_it += _contains_any(domain_text, _NON_IT_TITLE_KEYWORDS)
-
-    if score_it >= score_non_it + 3:
+    it_title_hit = any(t in title for t in _IT_TITLE_KEYWORDS)
+    it_skill_hit = any(_hits_in(haystack, terms) > 0 for _, terms in _IT_DOMAIN_RULES)
+    if it_title_hit or it_skill_hit:
         return "it"
-    if score_non_it >= score_it + 3:
-        return "non_it"
-    if score_it > 0 and score_non_it > 0:
-        return "hybrid"
-
-    # Strict-by-default to prevent technical leakage into non-IT roles.
-    return "non_it"
+    return "generic_non_it"
 
 
-def _fmt_skills(skills: List[Dict[str, Any]]) -> str:
-    if not skills:
-        return "  (none)"
-    lines = []
-    for s in skills:
-        name = s.get("value") or s.get("name") or ""
-        years = s.get("minYears") or s.get("min_years") or 0
-        lines.append(f"  - {name} (min {years} yrs)" if years else f"  - {name}")
-    return "\n".join(lines)
+def detect_it_domain(
+    job_title: str,
+    required_skills: List[Dict[str, Any]],
+    preferred_skills: List[Dict[str, Any]],
+) -> str:
+    """For IT roles: return `data | backend | frontend | devops | mobile |
+    security | qa | generic_it`. Tiebreaker: highest hit count → first
+    listed → generic_it."""
+    title = (job_title or "").lower()
+    skill_blob = " ".join(
+        (s.get("value") or s.get("name") or "").lower()
+        for s in (required_skills or []) + (preferred_skills or [])
+    )
+    haystack = f" {title} {skill_blob} "
+
+    best_domain = "generic_it"
+    best_hits = 0
+    for domain, terms in _IT_DOMAIN_RULES:
+        h = _hits_in(haystack, terms)
+        if h > best_hits:
+            best_hits = h
+            best_domain = domain
+    return best_domain
+
+
+# Domain shot bank — one BAD + one GOOD example per IT domain. Injected
+# into the prompt at template time so the LLM anchors on role-shape vocab
+# instead of the Databricks-only example that broke .NET / React / etc.
+_IT_DOMAIN_SHOTS: Dict[str, str] = {
+    "data": (
+        "BAD:  \"Do you have Databricks experience?\"\n"
+        "     GOOD: \"Walk me through how you organized the bronze/silver/gold layers on your\n"
+        "            most recent Databricks project. What trade-offs drove using Delta Live\n"
+        "            Tables vs raw Structured Streaming for your silver layer?\""
+    ),
+    "backend": (
+        "BAD:  \"Do you have .NET / Java backend experience?\"\n"
+        "     GOOD: \"Describe a real production incident in your backend service caused by an\n"
+        "            async/await deadlock or thread-pool starvation. What signal led you to it,\n"
+        "            and what concrete code change resolved it?\""
+    ),
+    "frontend": (
+        "BAD:  \"Do you have React experience?\"\n"
+        "     GOOD: \"Tell me about a component you migrated off useEffect to useMemo or\n"
+        "            useSyncExternalStore. What bug forced the change, and how did you verify\n"
+        "            the fix didn't regress reconciliation?\""
+    ),
+    "devops": (
+        "BAD:  \"Do you know Kubernetes?\"\n"
+        "     GOOD: \"Walk through how you diagnosed a CrashLoopBackOff in a prod Deployment.\n"
+        "            What kubectl/log signals led you to root cause, and what was the actual fix —\n"
+        "            probe config, image issue, or resource limit?\""
+    ),
+    "mobile": (
+        "BAD:  \"Do you have iOS / Android experience?\"\n"
+        "     GOOD: \"Describe a memory leak you found via Instruments / LeakCanary. What\n"
+        "            retain cycle or lifecycle bug caused it, and what was the structural fix?\""
+    ),
+    "security": (
+        "BAD:  \"Do you have appsec experience?\"\n"
+        "     GOOD: \"Walk through a real OWASP Top-10 finding you triaged. How did you reason\n"
+        "            about severity, and what compensating control did you ship before the\n"
+        "            permanent fix?\""
+    ),
+    "qa": (
+        "BAD:  \"Do you have test automation experience?\"\n"
+        "     GOOD: \"Describe a flaky e2e test you stabilized. What was the root cause class —\n"
+        "            timing, shared state, network mock — and how did you assert it stayed fixed?\""
+    ),
+    "generic_it": (
+        "BAD:  \"Tell me about your engineering experience.\"\n"
+        "     GOOD: \"Walk me through the most recent production change you owned end to end.\n"
+        "            What constraint forced a non-obvious decision, and what was the trade-off?\""
+    ),
+}
+
+# Non-IT family shot bank — same shape, role-shape-appropriate vocab.
+_NON_IT_FAMILY_SHOTS: Dict[str, str] = {
+    "recruiting": (
+        "BAD:  \"Describe your recruiting experience.\"\n"
+        "     GOOD: \"Walk me through the last hard-to-fill role you closed. What sourcing\n"
+        "            channel did you abandon and why, and what changed in your outreach to land\n"
+        "            the hire?\""
+    ),
+    "finance": (
+        "BAD:  \"Tell me about month-end close.\"\n"
+        "     GOOD: \"Describe the most complex variance you investigated last quarter. Which\n"
+        "            GL accounts were involved, what was the root cause, and what control did\n"
+        "            you change to prevent recurrence?\""
+    ),
+    "ops": (
+        "BAD:  \"Tell me about your ops experience.\"\n"
+        "     GOOD: \"Describe a process you redesigned end to end. What was the bottleneck\n"
+        "            metric you targeted, and how did you measure improvement after the change?\""
+    ),
+    "sales": (
+        "BAD:  \"Tell me about your sales experience.\"\n"
+        "     GOOD: \"Walk me through your largest closed deal in the last 12 months. What\n"
+        "            objection nearly killed it, and how did you reframe to close?\""
+    ),
+    "hr": (
+        "BAD:  \"Describe your HR background.\"\n"
+        "     GOOD: \"Describe a real employee-relations case you handled. What policy was in\n"
+        "            tension, and how did you balance the parties involved?\""
+    ),
+    "marketing": (
+        "BAD:  \"Tell me about your marketing experience.\"\n"
+        "     GOOD: \"Describe a campaign you killed. What metric drove the decision, and\n"
+        "            where did you redirect the spend?\""
+    ),
+    "customer_success": (
+        "BAD:  \"Tell me about a tough renewal.\"\n"
+        "     GOOD: \"Walk through a churn save in the last 6 months. What signal warned you,\n"
+        "            what intervention did you run, and did NRR move?\""
+    ),
+    "generic_non_it": (
+        "BAD:  \"Describe your background.\"\n"
+        "     GOOD: \"Walk me through your most measurable win in the last year — the metric,\n"
+        "            your specific contribution, and what almost went wrong along the way.\""
+    ),
+}
+
+# Artifacts/named-concept lists by family/domain. Replaces the hardcoded
+# data-engineering list. Used in rule 4 of the prompt.
+_FAMILY_ARTIFACTS: Dict[str, str] = {
+    "data": "Medallion architecture, Unity Catalog, Autoloader, Delta Live Tables, Z-order, workspace governance",
+    "backend": "connection pooling (HikariCP), retry policies, idempotency keys, structured logging, distributed tracing, p95 latency targets",
+    "frontend": "React reconciliation, Suspense boundaries, hydration, code-splitting, Core Web Vitals (LCP/CLS/INP), SSR vs CSR",
+    "devops": "Helm charts, GitOps flow, blue/green or canary rollouts, SLOs/error budgets, OpenTelemetry, autoscaling policies",
+    "mobile": "view lifecycle, background tasks, push delivery, app-size budgets, offline sync, battery profiling",
+    "security": "OWASP Top-10, threat modeling (STRIDE), SAST/DAST findings, secrets management, IAM least-privilege, incident playbooks",
+    "qa": "test pyramid, contract testing, deterministic seeding, flake quarantine, coverage targets, regression suites",
+    "generic_it": "production incidents, code review patterns, release playbooks, observability dashboards, runbooks",
+    "recruiting": "sourcing channels, ATS pipeline stages, intake calls, hiring-manager scorecards, offer-acceptance funnel",
+    "finance": "GL accounts, accruals, month-end close (MEC), variance analysis, internal controls, SOX compliance",
+    "ops": "process maps, RACI, SLA/OLA, throughput vs cycle time, lean/six sigma artifacts, vendor scorecards",
+    "sales": "stage progression, MEDDIC/MEDDPICC, win/loss analysis, ARR/NRR, pipeline coverage, account plans",
+    "hr": "ER cases, performance calibration, comp bands, engagement surveys, workforce planning, HRIS records",
+    "marketing": "campaign attribution, MQL/SQL handoff, brand guidelines, content calendars, A/B tests, channel ROI",
+    "customer_success": "health scores, QBRs, renewal forecast, expansion playbooks, churn cohorts, onboarding milestones",
+    "generic_non_it": "stakeholder maps, decision logs, OKRs, runbooks, status reports",
+}
+
+
+def _shot_key(family: str, domain: str) -> str:
+    """Pick which shot bank to read from. IT roles use the IT-domain bank;
+    everything else uses the family bank directly."""
+    return domain if family == "it" else family
 
 
 def _build_prompt(
@@ -194,89 +359,67 @@ def _build_prompt(
     preferred_skills: List[Dict[str, Any]],
     total_years: int,
     target_count: int,
-    role_family: RoleFamily,
+    family: str = "it",
+    domain: str = "generic_it",
 ) -> str:
-    common_context = f"""ROLE CONTEXT
+    def _fmt_skills(skills: List[Dict[str, Any]]) -> str:
+        if not skills:
+            return "  (none)"
+        lines = []
+        for s in skills:
+            name = s.get("value") or s.get("name") or ""
+            years = s.get("minYears") or s.get("min_years") or 0
+            lines.append(f"  - {name} (min {years} yrs)" if years else f"  - {name}")
+        return "\n".join(lines)
+
+    is_it = family == "it"
+    shot_key = _shot_key(family, domain)
+    shot_block = (
+        _IT_DOMAIN_SHOTS.get(shot_key)
+        if is_it
+        else _NON_IT_FAMILY_SHOTS.get(shot_key, _NON_IT_FAMILY_SHOTS["generic_non_it"])
+    ) or _IT_DOMAIN_SHOTS["generic_it"]
+    artifacts = _FAMILY_ARTIFACTS.get(shot_key) or _FAMILY_ARTIFACTS["generic_it"]
+
+    intro = (
+        "You are a senior technical recruiter writing screening questions for a live phone screen."
+        if is_it
+        else "You are an experienced recruiter writing screening questions for a live phone screen."
+    )
+    rule3 = (
+        "Mix question types across the set: ~50% technical-depth, ~25% architecture/scenario,\n"
+        "   ~25% behavioral/collaboration. For junior seniority: favor factual + debugging\n"
+        "   questions. For senior/staff/principal: favor architecture, scaling, failure-mode, and\n"
+        "   cross-team decisions."
+    ) if is_it else (
+        "Mix question types across the set: ~50% process/scenario, ~25% stakeholder/communication,\n"
+        "   ~25% behavioral/ownership. For junior seniority: favor concrete-task questions. For\n"
+        "   senior/manager: favor cross-team decisions, prioritization trade-offs, and measurable\n"
+        "   outcomes. AVOID software-delivery jargon (CI/CD, deployment, rollback, architecture,\n"
+        "   production systems, release pipelines) — this is not a technical role."
+    )
+    categories_line = (
+        '"category": "technical-depth" | "architecture" | "behavioral" | "scenario",'
+        if is_it
+        else '"category": "process" | "stakeholder" | "behavioral" | "scenario",'
+    )
+
+    return f"""{intro}
+
+ROLE CONTEXT
   Job title: {job_title}
   Seniority level: {seniority}
   Customer: {customer_name or "N/A"}
   Industry: {industry or "N/A"}
   Target total experience: {total_years}+ years
+  Role family: {family}
+  Role domain: {domain}
 
 RUBRIC — Must-have skills:
 {_fmt_skills(required_skills)}
 
 RUBRIC — Nice-to-have skills:
 {_fmt_skills(preferred_skills)}
-"""
-
-    if role_family == "non_it":
-        return f"""You are an expert recruiter writing screening questions for a non-IT role.
-
-{common_context}
-
-TASK
-Produce exactly {target_count} role-specific screening questions that differentiate candidates
-who have actually delivered business outcomes from those giving generic answers.
-
-STRICT RULES — FOLLOW EVERY ONE:
-1. Use non-IT/business language. Focus on process execution, stakeholder communication,
-     ownership, risk/compliance, prioritization, and measurable outcomes.
-2. Do NOT use software-delivery wording (CI/CD, deployment, rollback, architecture,
-     production systems, release pipelines), unless the role is explicitly IT (it is not).
-3. Avoid generic phrasing like "describe your experience with X".
-4. Each question must have a concrete `pass_criteria` signal a recruiter can verify.
-5. Questions must be answerable in under 90 seconds.
-6. Do not ask years-of-experience questions and do not repeat/paraphrase questions.
-7. Return JSON only.
-
-OUTPUT FORMAT:
-{{
-    "questions": [
-        {{
-            "question_text": "string",
-            "pass_criteria": "string",
-            "category": "process" | "scenario" | "behavioral" | "stakeholder",
-            "related_skill": "string"
-        }}
-    ]
-}}
-"""
-
-    if role_family == "hybrid":
-        return f"""You are an expert recruiter writing screening questions for a hybrid business+technical role.
-
-{common_context}
-
-TASK
-Produce exactly {target_count} role-specific screening questions that probe practical depth.
-
-STRICT RULES — FOLLOW EVERY ONE:
-1. Blend business execution and technical depth based on the listed rubric skills.
-2. Keep technical wording only where the skill explicitly demands it; do not force software
-     delivery terms into every question.
-3. Avoid generic wording like "describe your experience with X".
-4. Each question must include concrete `pass_criteria`.
-5. Questions must be answerable in under 90 seconds.
-6. Do not ask years-of-experience questions and do not repeat/paraphrase questions.
-7. Return JSON only.
-
-OUTPUT FORMAT:
-{{
-    "questions": [
-        {{
-            "question_text": "string",
-            "pass_criteria": "string",
-            "category": "technical-depth" | "scenario" | "behavioral" | "stakeholder",
-            "related_skill": "string"
-        }}
-    ]
-}}
-"""
-
-    return f"""You are a senior technical recruiter writing screening questions for a live phone screen.
-
-{common_context}
 
 TASK
 Produce exactly {target_count} role-specific screening questions that would
@@ -288,22 +431,15 @@ STRICT RULES — FOLLOW EVERY ONE:
    you are replacing. Always probe a specific sub-capability, decision, trade-off, or
    failure mode.
 2. For each skill in must-haves, write a question that assumes the candidate has used it
-   in production and asks something concrete about HOW they used it.
-     BAD:  "Do you have Databricks experience?"
-     BAD:  "How many years of Databricks do you have?"
-     GOOD: "Walk me through how you organized the bronze/silver/gold layers on your most
-            recent Databricks project. What trade-offs drove using Delta Live Tables vs
-            raw Structured Streaming for your silver layer?"
-3. Mix question types across the set: ~50% technical-depth, ~25% architecture/scenario,
-   ~25% behavioral/collaboration. For junior seniority: favor factual + debugging
-   questions. For senior/staff/principal: favor architecture, scaling, failure-mode, and
-   cross-team decisions.
-4. Reference specific named concepts, tools, or artifacts where sensible (e.g. Medallion
-   architecture, Unity Catalog, Autoloader, Delta Live Tables, Z-order, workspace
-   governance). Do not be generic.
+   in real work and asks something concrete about HOW they used it. Domain example for
+   THIS role ({domain if is_it else family}):
+     {shot_block}
+3. {rule3}
+4. Reference specific named concepts, tools, or artifacts where sensible — for THIS
+   domain that means: {artifacts}. Do not be generic, and do not pull in concepts from
+   unrelated domains.
 5. Each question must include a `pass_criteria` — a one-sentence CONCRETE signal the
-    recruiter should listen for in the answer (e.g. "mentions bronze/silver/gold layering
-    AND can explain a real consistency trade-off"). Never ask for years or use wording like
+    recruiter should listen for in the answer. Never ask for years or use wording like
     "N+ years", "X years of experience", "minimum years", or similar duration thresholds.
 6. Questions must be answerable in under 90 seconds each during a phone screen.
 7. Do not repeat or paraphrase the same question.
@@ -315,7 +451,7 @@ OUTPUT FORMAT — return a STRICT JSON object like this:
     {{
       "question_text": "string",
       "pass_criteria": "string",
-      "category": "technical-depth" | "architecture" | "behavioral" | "scenario",
+      {categories_line}
       "related_skill": "string"
     }},
     ...
@@ -324,24 +460,6 @@ OUTPUT FORMAT — return a STRICT JSON object like this:
 
 No markdown, no preamble, no trailing commentary. JSON only.
 """
-
-
-def _system_message_for_role_family(role_family: RoleFamily) -> str:
-    if role_family == "non_it":
-        return (
-            "You write sharp, role-relevant screening questions for non-IT roles. "
-            "You avoid software-delivery jargon (CI/CD, deployment, rollback, architecture). "
-            "You always return strict JSON."
-        )
-    if role_family == "hybrid":
-        return (
-            "You write practical screening questions for hybrid roles, balancing business and "
-            "technical depth only where explicitly relevant. You always return strict JSON."
-        )
-    return (
-        "You write sharp, specific screening questions that separate real practitioners from "
-        "surface-level candidates. You avoid generic phrasing. You always return strict JSON."
-    )
 
 
 def _sanitize_questions(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -377,134 +495,6 @@ def _sanitize_questions(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "order_index": idx,
         })
     return cleaned
-
-
-def _dedupe_questions(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Remove duplicate/near-duplicate question_text values while preserving order."""
-    deduped: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-    for q in raw or []:
-        text = str((q or {}).get("question_text") or "").strip()
-        if not text:
-            continue
-        fp = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", "", text.lower())).strip()
-        if not fp or fp in seen:
-            continue
-        seen.add(fp)
-        deduped.append(q)
-    return deduped
-
-
-def _build_role_aware_fallback_question(
-    *,
-    role_family: RoleFamily,
-    level: str,
-    name: str,
-    variant: int,
-) -> Dict[str, str]:
-    safe_name = name or "core responsibilities"
-    level_norm = (level or "").strip().lower()
-
-    if role_family == "non_it":
-        if level_norm in ("intensive", "deep", "extensive", "high"):
-            options = [
-                (
-                    f"Tell me about a high-stakes situation where {safe_name} directly impacted business outcomes. "
-                    "How did you prioritize actions and align stakeholders?",
-                    f"Candidate explains a concrete {safe_name} scenario with clear prioritization, stakeholder alignment, and measurable outcome.",
-                    "scenario",
-                ),
-                (
-                    f"Describe a time {safe_name} created execution risk. How did you detect the risk early and prevent downstream impact?",
-                    f"Candidate shows proactive risk detection and a specific prevention action tied to {safe_name}.",
-                    "process",
-                ),
-            ]
-        elif level_norm in ("light", "low", "basic", "quick"):
-            options = [
-                (
-                    f"Share one recent example where you used {safe_name} to deliver a concrete result.",
-                    f"Candidate provides a specific {safe_name} example with ownership and clear result.",
-                    "behavioral",
-                ),
-                (
-                    f"What does strong execution in {safe_name} look like in your current role?",
-                    f"Candidate articulates practical execution standards for {safe_name} with a real example.",
-                    "process",
-                ),
-            ]
-        else:
-            options = [
-                (
-                    f"Walk me through a recent situation where {safe_name} required balancing speed, quality, and stakeholder expectations.",
-                    f"Candidate describes trade-offs in {safe_name} and explains rationale behind the chosen approach.",
-                    "stakeholder",
-                ),
-                (
-                    f"Describe a challenging decision you made involving {safe_name}. What options did you evaluate and why?",
-                    f"Candidate compares options for {safe_name} and gives a clear decision framework.",
-                    "scenario",
-                ),
-            ]
-    else:
-        if level_norm in ("intensive", "deep", "extensive", "high"):
-            options = [
-                (
-                    f"In a production context using {safe_name}, describe a difficult failure mode and how you prevented recurrence.",
-                    f"Candidate details a real {safe_name} incident, diagnosis path, and prevention mechanism.",
-                    "architecture",
-                ),
-                (
-                    f"Walk me through a complex decision involving {safe_name}. What trade-offs did you evaluate and what outcome did you get?",
-                    f"Candidate explains concrete trade-offs for {safe_name} with measurable impact.",
-                    "technical-depth",
-                ),
-            ]
-        elif level_norm in ("light", "low", "basic", "quick"):
-            options = [
-                (
-                    f"What is one concrete task you completed recently using {safe_name}, and what result did it drive?",
-                    f"Candidate gives a specific {safe_name} example with clear ownership and outcome.",
-                    "technical-depth",
-                ),
-                (
-                    f"Share a recent example where {safe_name} helped you resolve a practical problem.",
-                    f"Candidate describes a real {safe_name} problem-resolution example with outcome.",
-                    "scenario",
-                ),
-            ]
-        else:
-            options = [
-                (
-                    f"Walk me through a meaningful implementation using {safe_name}: what constraints did you face and what decision mattered most?",
-                    f"Candidate explains a concrete {safe_name} implementation with constraints, rationale, and outcome.",
-                    "scenario",
-                ),
-                (
-                    f"Describe a challenging issue involving {safe_name}. How did you isolate root cause and validate the fix?",
-                    f"Candidate demonstrates structured debugging or investigation steps for {safe_name} and validation approach.",
-                    "technical-depth",
-                ),
-            ]
-
-    q, c, cat = options[variant % len(options)]
-    angle = [
-        "prioritization approach",
-        "stakeholder alignment",
-        "risk handling",
-        "decision criteria",
-        "execution quality",
-        "trade-off rationale",
-        "measurable outcomes",
-    ][variant % 7]
-    q = f"{q} Please focus on your {angle}."
-    if role_family == "non_it":
-        q_lower = q.lower()
-        if any(term in q_lower for term in _NON_IT_BANNED_TERMS):
-            q = f"Tell me about a recent situation where {safe_name} influenced a business result."
-            c = f"Candidate provides a concrete {safe_name} example with clear actions and measurable impact."
-            cat = "process"
-    return {"question_text": q, "pass_criteria": c, "category": cat, "related_skill": safe_name}
 
 
 async def generate_screening_questions(
@@ -549,13 +539,17 @@ async def generate_screening_questions(
     required_skills = [s for s in all_skills if _is_required(s)]
     preferred_skills = [s for s in all_skills if not _is_required(s)]
 
-    role_family = detect_role_family(job_title, rubric or {}, customer_name)
-
     industry_items = rubric.get("domain") or []
     industry = ""
     if industry_items and isinstance(industry_items, list):
         first = industry_items[0]
         industry = first.get("value") if isinstance(first, dict) else str(first)
+
+    # B2/B3: classify the role so the prompt + fallback emit role-shape-
+    # appropriate questions instead of forcing every role through the
+    # legacy Databricks-flavored template.
+    family = detect_role_family(job_title, industry, required_skills)
+    domain = detect_it_domain(job_title, required_skills, preferred_skills) if family == "it" else "generic_it"
 
     # --- Front-matter questions (always included, deterministic) ---------
     questions: List[Dict[str, Any]] = []
@@ -629,7 +623,20 @@ async def generate_screening_questions(
         preferred_skills=preferred_skills,
         total_years=total_years,
         target_count=target_count,
-        role_family=role_family,
+        family=family,
+        domain=domain,
+    )
+
+    is_it_role = family == "it"
+    system_message = (
+        "You write sharp, specific screening questions that separate real practitioners "
+        "from surface-level candidates. You avoid generic 'describe your experience' phrasing. "
+        "You always return strict JSON."
+    ) if is_it_role else (
+        "You write sharp, role-relevant screening questions for non-technical roles. "
+        "You avoid software-delivery jargon (CI/CD, deployment, rollback, architecture, "
+        "production systems, release pipelines) and ground questions in stakeholder, "
+        "process, and outcome language. You always return strict JSON."
     )
 
     role_specific: List[Dict[str, Any]] = []
@@ -637,10 +644,7 @@ async def generate_screening_questions(
         completion = await openai_client.chat.completions.create(
             model=model or "gpt-4o-mini",
             messages=[
-                {
-                    "role": "system",
-                    "content": _system_message_for_role_family(role_family),
-                },
+                {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.5,
@@ -648,11 +652,11 @@ async def generate_screening_questions(
             timeout=45,
         )
         raw = json.loads(completion.choices[0].message.content or "{}")
-        role_specific = _dedupe_questions(_sanitize_questions(raw.get("questions", [])))
+        role_specific = _sanitize_questions(raw.get("questions", []))
     except Exception as exc:
         logger.error(f"❌ screening_question_generator LLM failed: {exc}")
-        # Fall back to deterministic per-skill templates — level-aware and
-        # explicitly free of years-of-experience phrasing.
+        # Fall back to deterministic per-skill templates — level-aware,
+        # family-aware, and explicitly free of years-of-experience phrasing.
         fallback: List[Dict[str, Any]] = []
         focus_skills = required_skills or preferred_skills
         if not focus_skills:
@@ -661,54 +665,102 @@ async def generate_screening_questions(
         level = (screening_level or "").strip().lower()
         for idx in range(target_count):
             skill = focus_skills[idx % len(focus_skills)]
-            name = str(skill.get("value") or skill.get("name") or "core responsibilities")
-            prompt_obj = _build_role_aware_fallback_question(
-                role_family=role_family,
-                level=level,
-                name=name,
-                variant=idx,
+            name = skill.get("value") or skill.get("name") or (
+                "this technology" if is_it_role else "this area"
             )
+            if is_it_role:
+                if level in ("intensive", "deep", "extensive", "high"):
+                    q_text = (
+                        f"In a production system using {name}, describe a failure mode you encountered, "
+                        "how you diagnosed root cause, and what design change prevented recurrence."
+                    )
+                    criteria = (
+                        f"Candidate details a real {name} incident with diagnosis steps, trade-offs, "
+                        "and a concrete prevention mechanism."
+                    )
+                    category = "architecture"
+                elif level in ("light", "low", "basic", "quick"):
+                    q_text = (
+                        f"What's one concrete task you handled with {name} recently, and what result did it drive?"
+                    )
+                    criteria = (
+                        f"Candidate gives a specific {name} example with clear ownership and measurable impact."
+                    )
+                    category = "technical-depth"
+                else:
+                    q_text = (
+                        f"Walk me through a meaningful implementation using {name}: what constraints did you face, "
+                        "what decision did you make, and why?"
+                    )
+                    criteria = (
+                        f"Candidate explains a concrete {name} implementation with constraints, rationale, and outcomes."
+                    )
+                    category = "scenario"
+            else:
+                # Non-IT family fallback — stakeholder/process/outcome wording,
+                # no production/architecture jargon.
+                if level in ("intensive", "deep", "extensive", "high"):
+                    q_text = (
+                        f"Describe a real situation where {name} drove a measurable outcome. "
+                        "What was the decision, who were the stakeholders, and what trade-off did you make?"
+                    )
+                    criteria = (
+                        f"Candidate names specific stakeholders, a concrete decision, and a measurable result tied to {name}."
+                    )
+                    category = "scenario"
+                elif level in ("light", "low", "basic", "quick"):
+                    q_text = (
+                        f"What's one recent task involving {name} where you owned the outcome? "
+                        "What changed because of your work?"
+                    )
+                    criteria = (
+                        f"Candidate gives a specific {name} example with clear ownership and a concrete change in outcome."
+                    )
+                    category = "process"
+                else:
+                    q_text = (
+                        f"Walk me through a recent piece of work involving {name}: who did you coordinate with, "
+                        "what trade-off did you make, and what was the result?"
+                    )
+                    criteria = (
+                        f"Candidate explains a concrete {name} situation with stakeholders, a trade-off, and a measurable outcome."
+                    )
+                    category = "stakeholder"
+
             fallback.append({
-                "question_text": prompt_obj["question_text"],
-                "pass_criteria": prompt_obj["pass_criteria"],
-                "category": prompt_obj["category"],
-                "related_skill": prompt_obj["related_skill"],
+                "question_text": q_text,
+                "pass_criteria": criteria,
+                "category": category,
+                "related_skill": name,
                 "is_default": False,
                 "is_hard_filter": False,
                 "order_index": idx,
             })
-        role_specific = _dedupe_questions(fallback)
+        role_specific = fallback
 
     # Enforce exact role-specific count regardless of model output variance.
-    role_specific = _dedupe_questions(role_specific)
     if len(role_specific) > target_count:
         role_specific = role_specific[:target_count]
     elif len(role_specific) < target_count:
         focus_skills = required_skills or preferred_skills
         if not focus_skills:
             focus_skills = [{"value": "core role responsibilities"}]
-        safety = 0
-        while len(role_specific) < target_count and safety < target_count * 4:
-            idx = len(role_specific)
+        for idx in range(len(role_specific), target_count):
             skill = focus_skills[idx % len(focus_skills)]
-            name = str(skill.get("value") or skill.get("name") or "core responsibilities")
-            prompt_obj = _build_role_aware_fallback_question(
-                role_family=role_family,
-                level=screening_level,
-                name=name,
-                variant=idx + safety,
-            )
+            name = skill.get("value") or skill.get("name") or "this area"
             role_specific.append({
-                "question_text": prompt_obj["question_text"],
-                "pass_criteria": prompt_obj["pass_criteria"],
-                "category": prompt_obj["category"],
-                "related_skill": prompt_obj["related_skill"],
+                "question_text": (
+                    f"Describe a real example where you used {name} to solve a non-trivial problem under constraints."
+                ),
+                "pass_criteria": (
+                    "Candidate provides a specific situation, concrete decisions, and clear outcomes."
+                ),
+                "category": "scenario",
+                "related_skill": name,
                 "is_default": False,
                 "is_hard_filter": False,
                 "order_index": idx,
             })
-            role_specific = _dedupe_questions(role_specific)
-            safety += 1
 
     # Re-index role-specific entries to sit after the front-matter.
     base_index = len(questions)
