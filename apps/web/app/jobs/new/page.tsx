@@ -476,6 +476,11 @@ function NewJobPageContent() {
   const [sourceLocationRadius, setSourceLocationRadius] = useState("Within 25 mi");
   const [sourceCompanyInput, setSourceCompanyInput] = useState("");
   const [sourceKeywordInput, setSourceKeywordInput] = useState("");
+  // PR-B: top-level minimum years of experience floor for sourcing.
+  // null = no floor; an integer 0..40 enforces a hard minimum that the
+  // backend applies pre-LLM (cheap regex over headline / resume snippet)
+  // and post-LLM (parsed years_of_experience).
+  const [minExperienceYears, setMinExperienceYears] = useState<number | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [isEnrichingContacts, setIsEnrichingContacts] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
@@ -4126,6 +4131,13 @@ function NewJobPageContent() {
       // jobdiva_service.search_candidates. `recent_days: 0` means Any.
       recent_days: recentDaysFilter > 0 ? recentDaysFilter : null,
       require_resume: !includeNoResume,
+      // PR-B: top-level YOE floor. `undefined` means no constraint;
+      // backend applies as both pre-LLM regex gate and post-LLM hard
+      // filter against the parsed years_of_experience.
+      min_experience_years:
+        typeof minExperienceYears === "number" && minExperienceYears > 0
+          ? minExperienceYears
+          : undefined,
       page: 1,
       page_size: 100
     };
@@ -5154,6 +5166,31 @@ function NewJobPageContent() {
                       <option value={180}>Last 180 days</option>
                       <option value={0}>Any</option>
                     </select>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Min YOE:</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={40}
+                      step={1}
+                      value={minExperienceYears ?? ""}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        if (raw === "") {
+                          setMinExperienceYears(null);
+                          return;
+                        }
+                        const parsed = parseInt(raw, 10);
+                        const clamped = Number.isFinite(parsed)
+                          ? Math.max(0, Math.min(40, parsed))
+                          : null;
+                        setMinExperienceYears(clamped);
+                      }}
+                      placeholder="any"
+                      className="w-20 h-8 px-2 text-[12px] font-medium text-slate-700 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30"
+                      title="Drops candidates whose resume confidently shows fewer years of experience. Leave blank for no floor."
+                    />
                   </div>
                   <label className="flex items-center gap-2 cursor-pointer">
                     <Checkbox

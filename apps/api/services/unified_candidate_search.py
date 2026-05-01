@@ -57,6 +57,10 @@ class SearchCriteria(BaseModel):
     # 5.10: by default JobDiva Talent Search drops profile-only candidates
     # (no resume attached). Set false to opt back in to the full signal.
     require_resume: bool = True
+    # PR-B: top-level minimum years of experience floor. Enforced
+    # pre-LLM (cheap regex) and post-LLM (parsed YOE). Soft-keep when
+    # YOE is unparseable.
+    min_experience_years: Optional[int] = None
 
     def sourcing_skill_values(self) -> List[str]:
         """Flat skill-like strings for sources that only accept a plain list
@@ -345,6 +349,12 @@ class UnifiedCandidateSearch:
                                         cand.update(self._extract_linkedin_profile_data(full_profile))
                                 except Exception as e:
                                     logger.warning(f"Failed to fetch full profile for LinkedIn candidate {provider_id}: {e}")
+
+                        # PR-B: cheap pre-LLM YOE gate for external sources too.
+                        # Drops candidates whose headline / abstract / resume
+                        # snippet shows fewer years than the configured floor.
+                        if self._candidate_below_min_years_pre_llm(cand, criteria):
+                            return {"status": "failed_filter"}
 
                         assessment = self._filter_assessment(cand, criteria, enforce_years=False)
                         if not assessment["passes"]:
@@ -1729,6 +1739,25 @@ class UnifiedCandidateSearch:
                 "location_failure_reason": "non_us_candidate",
             }
 
+        # PR-B: top-level minimum-years-of-experience floor.
+        # `years_of_experience > 0` matters: candidates whose YOE is
+        # unparseable (`0`) are kept and re-checked downstream once the
+        # enriched profile has real data — same soft-keep philosophy as
+        # the location gate. Pre-LLM heuristic enforcement happens in
+        # `_enrich_filtered_jobdiva_candidates` / `_process_external_single`
+        # so most failing candidates never reach this point.
+        min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
+        if min_years > 0:
+            years = float(profile.get("years_of_experience") or 0)
+            if 0 < years < min_years:
+                return {
+                    "passes": False,
+                    "missing": [f"YOE: needs {min_years}+ years (resume shows {int(years)})"],
+                    "matched": self._dedupe_terms(matched),
+                    "excluded": self._dedupe_terms(excluded),
+                    "min_years_failure": True,
+                }
+
         if self._should_enforce_location(criteria):
             location_ok, reason = self._location_match_verdict(candidate, criteria)
             if not location_ok:
@@ -2009,8 +2038,69 @@ class UnifiedCandidateSearch:
     def _candidate_satisfies_required_filters(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> bool:
         return self._filter_assessment(candidate, criteria, enforce_years=True)["passes"]
 
+    # PR-B: cheap regex used by the pre-LLM YOE gate. Looks for forms
+    # like "8+ years", "5 years of experience", "10 yrs". Returns the
+    # first integer match, or 0 when nothing parses (caller treats 0 as
+    # "unknown → keep" to avoid penalising candidates with non-standard
+    # phrasing).
+    _YEARS_REGEX = re.compile(
+        r"\b(\d{1,2})\s*\+?\s*(?:years?|yrs?)\b", re.IGNORECASE
+    )
+
+    def _heuristic_years_from_text(self, text: str) -> int:
+        if not text:
+            return 0
+        # Cap input — only the first chunk is searched. Most resumes /
+        # headlines / abstracts surface the years number near the top.
+        sample = str(text)[:1500]
+        best = 0
+        for match in self._YEARS_REGEX.finditer(sample):
+            try:
+                value = int(match.group(1))
+            except ValueError:
+                continue
+            if 0 < value <= 50 and value > best:
+                best = value
+        return best
+
+    def _candidate_below_min_years_pre_llm(
+        self,
+        candidate: Dict[str, Any],
+        criteria: SearchCriteria,
+    ) -> bool:
+        """Cheap regex check before LLM enrichment runs.
+
+        True only when the candidate's headline / abstract / resume_text
+        head contains a parseable years number AND that number is below
+        `criteria.min_experience_years`. Returns False when no number is
+        found (deferred to the post-LLM gate via `_filter_assessment`).
+        """
+        min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
+        if min_years <= 0:
+            return False
+        haystack = " ".join([
+            str(candidate.get("headline") or ""),
+            str(candidate.get("title") or ""),
+            str(candidate.get("abstract") or ""),
+            str(candidate.get("resume_text") or "")[:1500],
+        ])
+        years = self._heuristic_years_from_text(haystack)
+        return 0 < years < min_years
+
     def _collect_sourcing_dimensions(self, criteria: SearchCriteria) -> List[Dict[str, Any]]:
-        """Collect match dimensions for PRE-SCREENING using ONLY Page 5 sourcing filters."""
+        """Collect match dimensions for PRE-SCREENING.
+
+        Uses Page-5 sourcing filters PLUS the non-overlapping subset of
+        Page-4 `resume_match_filters` (Certifications and Education).
+        Lifting cert/edu into pre-screen lets us drop candidates that
+        will fail the rubric anyway *before* paying for LLM enrichment;
+        the audit estimated 30-50% of enrichment cost on cert-heavy
+        roles was wasted on candidates that would later get filtered.
+
+        Skill / title / company / domain / location filters are NOT
+        lifted — they overlap with the existing pre-screen dimensions
+        and would double-count.
+        """
         dimensions = {
             "titles": {
                 "label": "Titles",
@@ -2048,6 +2138,25 @@ class UnifiedCandidateSearch:
                 "label": "Keywords",
                 "weight": 5.0,
                 "collections": ["skills", "titles", "companies", "locations"],
+                "required": [],
+                "preferred": [],
+                "excluded": [],
+            },
+            # PR-B: pre-screen rubric dimensions lifted from Step-4
+            # `resume_match_filters` so cert/edu requirements gate the
+            # LLM enrichment instead of being applied only after.
+            "certifications": {
+                "label": "Certifications",
+                "weight": 8.0,
+                "collections": ["certifications", "skills"],
+                "required": [],
+                "preferred": [],
+                "excluded": [],
+            },
+            "education": {
+                "label": "Education",
+                "weight": 6.0,
+                "collections": ["education"],
                 "required": [],
                 "preferred": [],
                 "excluded": [],
@@ -2122,8 +2231,37 @@ class UnifiedCandidateSearch:
         if self._should_enforce_location(criteria):
             add_terms("location", "must", [criteria.location])
 
-        # DO NOT include resume_match_filters here - only for scoring!
-        
+        # PR-B: lift Certifications + Education filters from the Step-4
+        # rubric into pre-screen. Other categories (skill / title /
+        # company / domain / location) overlap with the dimensions
+        # already populated above and would double-count, so they're
+        # left to the post-enrichment scorer.
+        for filter_item in criteria.resume_match_filters or []:
+            if not filter_item.get("active", True):
+                continue
+
+            category = str(filter_item.get("category", "")).lower()
+            if not ("cert" in category or "license" in category or "edu" in category):
+                continue
+
+            term = self._resume_filter_term(filter_item)
+            if not term:
+                continue
+
+            raw_value = str(filter_item.get("value", "")).strip().lower()
+            target_match_type = (
+                "can"
+                if "preferred" in category or raw_value.startswith("can ")
+                else "must"
+            )
+            target_bucket = "education" if "edu" in category else "certifications"
+            add_terms(
+                target_bucket,
+                target_match_type,
+                [term],
+                label=term,
+            )
+
         return list(dimensions.values())
 
     def _collect_scoring_dimensions(self, criteria: SearchCriteria) -> List[Dict[str, Any]]:
@@ -2318,6 +2456,7 @@ class UnifiedCandidateSearch:
             "llm_extraction_errors": 0,
             "pre_llm_skipped_low_score": 0,
             "pre_llm_skipped_no_required_hit": 0,
+            "pre_llm_skipped_min_years": 0,
         }
 
         async def _process_single(candidate, index):
@@ -2352,6 +2491,21 @@ class UnifiedCandidateSearch:
                     if not candidate.get("resume_text"):
                         self._log_stage("ResumeScreen", f"skipped candidate_id={candidate_id}; no resume text available")
                         return {"status": "no_resume", "candidate": None}
+
+                    # PR-B: cheap pre-LLM YOE gate. Drops candidates whose
+                    # resume text confidently shows fewer years than the
+                    # configured floor, before paying for LLM enrichment.
+                    # Soft-keep if no number is parseable.
+                    if self._candidate_below_min_years_pre_llm(candidate, criteria):
+                        counters["pre_llm_skipped_min_years"] += 1
+                        self._log_stage(
+                            "LLMGate",
+                            "skipping LLM for candidate_id=%s reason=below_min_years_pre_llm threshold=%s" % (
+                                candidate_id,
+                                int(criteria.min_experience_years or 0),
+                            ),
+                        )
+                        return {"status": "failed_filter", "candidate": None}
 
                     if criteria.bypass_screening:
                         self._log_stage("ResumeScreen", f"Bypassing LLM extraction for candidate_id={candidate_id} (auto-sync mode)")
@@ -2513,9 +2667,10 @@ class UnifiedCandidateSearch:
         )
         self._log_stage(
             "LLMGate",
-            "pre-LLM skips: low_score=%s no_required_hit=%s" % (
+            "pre-LLM skips: low_score=%s no_required_hit=%s min_years=%s" % (
                 counters["pre_llm_skipped_low_score"],
                 counters["pre_llm_skipped_no_required_hit"],
+                counters["pre_llm_skipped_min_years"],
             ),
         )
 
