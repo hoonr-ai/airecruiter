@@ -221,13 +221,15 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 })
 
         # ----- Fetch job data -----
-        # Try matching by job_id first, then by jobdiva_id
-        cur.execute("SELECT * FROM monitored_jobs WHERE job_id = %s LIMIT 1", (request.job_id,))
+        # Some jobs have duplicate rows where job_id matches jobdiva_id.
+        # We prioritize the row with a numeric job_id and the latest creation date.
+        cur.execute("""
+            SELECT * FROM monitored_jobs 
+            WHERE job_id = %s OR jobdiva_id = %s
+            ORDER BY (job_id ~ '^[0-9]+$') DESC, created_at DESC 
+            LIMIT 1
+        """, (request.job_id, request.job_id))
         job_row = cur.fetchone()
-        
-        if not job_row:
-            cur.execute("SELECT * FROM monitored_jobs WHERE jobdiva_id = %s LIMIT 1", (request.job_id,))
-            job_row = cur.fetchone()
 
         # ----- Fetch pre-screen questions from job_screen_questions table -----
         # Match by job_id first, then fall back to jobdiva_id if needed
@@ -341,17 +343,16 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
     try:
         conn = _get_db_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(
-            """
+        cur.execute("""
             SELECT job_id, jobdiva_id, title, customer_name,
-                   recruiter_emails, ai_description, recruiter_notes,
-                   selected_job_boards
+                   city, state, location_type, bot_introduction,
+                   jobdiva_description, ai_description, recruiter_notes,
+                   selected_job_boards, recruiter_emails
             FROM monitored_jobs
             WHERE job_id = %s OR jobdiva_id = %s
+            ORDER BY (job_id ~ '^[0-9]+$') DESC, created_at DESC
             LIMIT 1
-            """,
-            (job_id, job_id),
-        )
+        """, (job_id, job_id))
         row = cur.fetchone()
         cur.close()
         conn.close()
@@ -916,6 +917,7 @@ async def _check_and_fire_candidate_passed_notification(
             SELECT title, city, state, pay_rate, recruiter_emails, jobdiva_id
             FROM monitored_jobs
             WHERE job_id = %s OR jobdiva_id = %s
+            ORDER BY (job_id ~ '^[0-9]+$') DESC, created_at DESC
             LIMIT 1
         """, (job_id, job_id))
         job_row = cur.fetchone()
