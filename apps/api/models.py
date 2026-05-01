@@ -135,6 +135,7 @@ class CandidateSearchRequest(BaseModel):
     recent_days: Optional[int] = None
     require_resume: Optional[bool] = None
     include_relocation_candidates: Optional[bool] = None
+    min_experience_years: Optional[int] = None
 
 class JobFetchRequest(BaseModel):
     job_id: str

@@ -476,6 +476,11 @@ function NewJobPageContent() {
   const [sourceLocationRadius, setSourceLocationRadius] = useState("Within 25 mi");
   const [sourceCompanyInput, setSourceCompanyInput] = useState("");
   const [sourceKeywordInput, setSourceKeywordInput] = useState("");
+  // PR-B: top-level minimum years of experience floor for sourcing.
+  // null = no floor; an integer 0..40 enforces a hard minimum that the
+  // backend applies pre-LLM (cheap regex over headline / resume snippet)
+  // and post-LLM (parsed years_of_experience).
+  const [minExperienceYears, setMinExperienceYears] = useState<number | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [isEnrichingContacts, setIsEnrichingContacts] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
@@ -598,7 +603,58 @@ function NewJobPageContent() {
   };
 
   const jobdivaSkillsToUse = getJobdivaSkills();
-  const jobdivaSkillsCopyText = jobdivaSkillsToUse.map((skill) => `(${skill})`).join(", ");
+  const toAgentToken = (value: unknown) =>
+    String(value || "")
+      .trim()
+      .replace(/[()]/g, "")
+      .toUpperCase();
+
+  const parseLocationAgentToken = (rawLocation: string) => {
+    const value = String(rawLocation || "").trim();
+    if (!value) return "US";
+
+    const parts = value.split(",").map((p) => p.trim()).filter(Boolean);
+    const tail = parts.length > 0 ? parts[parts.length - 1] : value;
+    const stateMatch = tail.match(/\b([A-Za-z]{2})\b/);
+    if (stateMatch?.[1]) return `${stateMatch[1].toUpperCase()}-US`;
+
+    if (/\b(united states|usa|us)\b/i.test(value)) return "US";
+    return "US";
+  };
+
+  const buildJobdivaAgentString = () => {
+    const groups: string[] = [];
+
+    const nonExcludedSkills = sourceSkills.filter((skill) => skill.matchType !== "exclude");
+    if (nonExcludedSkills.length > 0) {
+      nonExcludedSkills.forEach((skill) => {
+        const terms = [skill.value, ...(skill.selectedSimilarSkills || [])]
+          .map(toAgentToken)
+          .filter(Boolean);
+
+        const uniqueTerms = Array.from(new Set(terms));
+        if (uniqueTerms.length === 0) return;
+
+        groups.push(
+          uniqueTerms.length === 1
+            ? `(${uniqueTerms[0]})`
+            : `(${uniqueTerms.join(" OR ")})`
+        );
+      });
+    } else {
+      jobdivaSkillsToUse.forEach((skill) => {
+        const token = toAgentToken(skill);
+        if (token) groups.push(`(${token})`);
+      });
+    }
+
+    const locationToken = parseLocationAgentToken(sourceLocations[0]?.value || "");
+    if (groups.length === 0) return `IN (${locationToken})`;
+    return `${groups.join(" AND ")}, IN (${locationToken})`;
+  };
+
+  const jobdivaAgentString = buildJobdivaAgentString();
+  const jobdivaSkillsCopyText = jobdivaAgentString;
   const jobdivaJobEditUrl = (jobdivaId || numericJobId)
     ? `https://www1.jobdiva.com/employers/myjobs/vieweditjobform.jsp?lstjobs=1&jobid=${encodeURIComponent(jobdivaId || numericJobId)}`
     : "";
@@ -3277,29 +3333,30 @@ function NewJobPageContent() {
       console.warn("screening-questions/generate failed, using template fallback", e);
     }
 
-    // Fallback path: skill-aware technical prompts so Step 4 is never empty
-    // with generic questions even if the LLM endpoint fails.
+    // Backend is the source-of-truth for role-aware questions. If that call
+    // fails, keep a minimal neutral fallback so Step 4 is never empty, while
+    // avoiding technical-only wording that misfits non-IT roles.
     if (roleSpecific.length === 0 && rubricData?.skills) {
       rubricData.skills.forEach((skill: any) => {
         if (roleSpecific.length >= targetRoleSpecificCount) return;
-        const skillName = skill.value || "this technology";
+        const skillName = skill.value || "this responsibility";
         const promptVariant = roleSpecific.length % 4;
 
         let questionText = "";
         let passCriteria = "";
 
         if (promptVariant === 0) {
-          questionText = `Walk me through the most complex production implementation you built with ${skillName}. What design trade-off did you make and why?`;
-          passCriteria = `Candidate explains a real production use-case for ${skillName}, including one concrete trade-off and outcome.`;
+          questionText = `Tell me about a recent situation where ${skillName} directly influenced the final outcome. What decision mattered most?`;
+          passCriteria = `Candidate provides a concrete ${skillName} example, explains the decision made, and ties it to a measurable outcome.`;
         } else if (promptVariant === 1) {
-          questionText = `Describe a difficult issue you debugged in ${skillName}. How did you isolate root cause, and what preventive guardrail did you add?`;
-          passCriteria = `Candidate describes root-cause analysis steps in ${skillName} and a specific prevention strategy beyond a one-time fix.`;
+          questionText = `Describe a challenging issue related to ${skillName}. How did you identify the cause and prevent it from happening again?`;
+          passCriteria = `Candidate walks through concrete diagnosis steps for ${skillName} and a practical prevention action.`;
         } else if (promptVariant === 2) {
-          questionText = `If you had to improve performance or scalability in a ${skillName}-based system, what metrics would you inspect first and what would you tune?`;
-          passCriteria = `Candidate names relevant performance metrics for ${skillName} and proposes a technically sound tuning approach.`;
+          questionText = `When priorities conflicted around ${skillName}, how did you balance speed, quality, and stakeholder expectations?`;
+          passCriteria = `Candidate explains trade-offs around ${skillName} and shows clear prioritization with stakeholder alignment.`;
         } else {
-          questionText = `In your recent ${skillName} project, how did you ensure code quality and deployment safety (testing, CI/CD, rollback, monitoring)?`;
-          passCriteria = `Candidate links ${skillName} delivery to practical quality controls (tests, pipeline checks, rollback and monitoring).`;
+          questionText = `What does strong execution in ${skillName} look like in your role, and can you share one example?`;
+          passCriteria = `Candidate defines practical execution standards for ${skillName} and supports them with a specific real-world example.`;
         }
 
         roleSpecific.push({
@@ -3319,8 +3376,8 @@ function NewJobPageContent() {
         const idx = roleSpecific.length + 1;
         roleSpecific.push({
           id: idCounter++,
-          question_text: `Share a recent project example where you solved a non-trivial technical problem. What constraints mattered most?`,
-          pass_criteria: `Candidate gives a concrete project example with constraints, decision rationale, and outcome.`,
+          question_text: `Share a recent project example where you solved a non-trivial problem under constraints. What factors shaped your decision?`,
+          pass_criteria: `Candidate gives a concrete situation, explains constraints and decision rationale, and describes the result.`,
           is_default: false,
           category: "role-specific",
           order_index: questions.length + roleSpecific.length,
@@ -3336,8 +3393,8 @@ function NewJobPageContent() {
     while (roleSpecific.length < targetRoleSpecificCount) {
       roleSpecific.push({
         id: idCounter++,
-        question_text: "Share a recent project example where you solved a non-trivial technical problem. What constraints mattered most?",
-        pass_criteria: "Candidate gives a concrete project example with constraints, decision rationale, and outcome.",
+        question_text: "Share a recent project example where you solved a non-trivial problem under constraints. What factors shaped your decision?",
+        pass_criteria: "Candidate gives a concrete situation, explains constraints and decision rationale, and describes the result.",
         is_default: false,
         category: "role-specific",
         order_index: questions.length + roleSpecific.length,
@@ -3621,6 +3678,20 @@ function NewJobPageContent() {
   }, [currentStep, rubricData, jobData, resumeMatchFilters]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (currentStep !== 5) return;
+
+    const jobRef = String(jobdivaId || numericJobId || "draft").trim();
+    const seenKey = `step5:agent-modal-seen:${jobRef}`;
+    const alreadySeen = window.sessionStorage.getItem(seenKey) === "1";
+    if (alreadySeen) return;
+
+    setShowJobdivaSkillsModal(true);
+    setSkillsCopied(false);
+    window.sessionStorage.setItem(seenKey, "1");
+  }, [currentStep, jobdivaId, numericJobId]);
+
+  useEffect(() => {
     setHasCheckedJobdivaCriteria(false);
     setJobdivaCriteriaUnconfigured(false);
   }, [jobdivaId, numericJobId]);
@@ -3890,20 +3961,13 @@ function NewJobPageContent() {
     return () => window.clearTimeout(timeoutId);
   }, [sourceTitles, sourceSkills, sourceLocations, sourceCompanies, sourceKeywords, resumeMatchFilters, jobTitle, booleanUserEdited]);
 
-  // Iterative relaxation: drop years/skills/companies BEFORE widening radius.
-  // Hard cap 50 mi everywhere — radius only widens at T3 (last retry), and
-  // never above 50. Order: T1 zero years/recent + demote half skill MUSTs;
-  // T2 demote ALL MUSTs + clear companies + deactivate Exclude filters;
-  // T3 = T2 + widen radius up to min(50, base*2) iff base < 50.
   const relaxStructuralOverrides = (
     tier: number,
-    baseWithinMiles: number,
     currentFilters: typeof resumeMatchFilters,
     currentTitles: typeof sourceTitles,
     currentSkills: typeof sourceSkills,
     currentCompanies: typeof sourceCompanies
   ): {
-    withinMilesOverride?: number;
     resumeMatchFiltersOverride?: typeof resumeMatchFilters;
     titleCriteriaOverride?: typeof sourceTitles;
     skillCriteriaOverride?: typeof sourceSkills;
@@ -3913,7 +3977,6 @@ function NewJobPageContent() {
     const zeroedSkills = currentSkills.map(s => ({ ...s, years: 0, recent: false }));
 
     if (tier === 1) {
-      // Demote half the MUST skills to CAN, zero years/recent on titles+skills.
       const skillsRelaxed = (() => {
         const mustIdxs = zeroedSkills
           .map((s, i) => (s.matchType === "must" ? i : -1))
@@ -3930,7 +3993,6 @@ function NewJobPageContent() {
       };
     }
 
-    // T2 + T3 share: all MUSTs → CAN, clear companies, deactivate Exclude filters.
     const titlesAllCan = zeroedTitles.map(t =>
       t.matchType === "must" ? { ...t, matchType: "can" as const } : t
     );
@@ -3941,23 +4003,11 @@ function NewJobPageContent() {
       (f.category || "").toLowerCase().includes("exclude") ? { ...f, active: false } : f
     );
 
-    if (tier === 2) {
-      return {
-        titleCriteriaOverride: titlesAllCan,
-        skillCriteriaOverride: skillsAllCan,
-        companiesOverride: [],
-        resumeMatchFiltersOverride: filtersDeactivated,
-      };
-    }
-
-    // tier >= 3 (last retry): widen radius up to min(50, max(base, base*2)).
-    const widened = Math.min(50, Math.max(baseWithinMiles, baseWithinMiles * 2));
     return {
       titleCriteriaOverride: titlesAllCan,
       skillCriteriaOverride: skillsAllCan,
       companiesOverride: [],
       resumeMatchFiltersOverride: filtersDeactivated,
-      ...(widened > baseWithinMiles ? { withinMilesOverride: widened } : {}),
     };
   };
 
@@ -3965,14 +4015,26 @@ function NewJobPageContent() {
     const original = String(input || "").replace(/\s+/g, " ").trim();
     let query = original;
     let label = "";
+
+    const isLocationClause = (part: string) => {
+      const p = String(part || "").toLowerCase();
+      return p.includes("within") && p.includes("mi");
+    };
+
+    const splitByAnd = (value: string) =>
+      value.split(/\s+AND\s+/i).map(v => v.trim()).filter(Boolean);
+
     if (tier === 1) {
-      // Drop year clauses + `AND recent`; keep radius unchanged.
       query = query.replace(/\s+AND\s+"\d+\+\s*years?"/gi, "");
       query = query.replace(/\s+OVER\s+\d+\s+YRS\b/gi, "");
-      query = query.replace(/\s+AND\s+recent/gi, "");
-      label = "Dropped year + recent thresholds · kept radius";
+      const parts = splitByAnd(query);
+      const locationParts = parts.filter(isLocationClause);
+      const nonLocation = parts.filter(p => !isLocationClause(p));
+      if (nonLocation.length > 1) {
+        query = `(${nonLocation.join(" OR ")})${locationParts.length ? ` AND ${locationParts.join(" AND ")}` : ""}`;
+      }
+      label = "Relaxed must clauses by intelligence · kept location radius";
     } else if (tier === 2) {
-      // AND→OR inside parens; strip all years/recent; keep radius unchanged.
       query = query.replace(/\(([^()]+?)\)/g, (_m, inner) => {
         const parts = String(inner).split(/\s+AND\s+/i).map((p: string) => p.trim()).filter(Boolean);
         return parts.length > 1 ? `(${parts.join(" OR ")})` : `(${inner})`;
@@ -3980,27 +4042,15 @@ function NewJobPageContent() {
       query = query.replace(/\s+AND\s+recent/gi, "");
       query = query.replace(/\s+OVER\s+\d+\s+YRS\b/gi, "");
       query = query.replace(/\s+AND\s+"\d+\+\s*years?"/gi, "");
-      label = "Required clauses OR-joined · kept radius";
+      label = "Further relaxed required clauses · kept location radius";
     } else {
-      // Last retry: strip NOT(...), reduce to role+location, widen radius up
-      // to min(50, max(base, base*2)). Never above 50.
       query = query.replace(/\s+NOT\s+\([^)]*\)/gi, "");
-      let widenedTo: number | null = null;
-      query = query.replace(/within\s+(\d+)\s+mi/gi, (_m, n) => {
-        const cur = Number(n);
-        const next = Math.min(50, Math.max(cur, cur * 2));
-        widenedTo = next;
-        return `within ${next} mi`;
-      });
       const andParts = query.split(/\s+AND\s+/i).map(p => p.trim()).filter(Boolean);
       const locationPart = andParts.find(p => /within\s+\d+\s+mi/i.test(p));
       const rolePart = andParts.find(p => !/within\s+\d+\s+mi/i.test(p) && !/"\d+\+\s*years?"/i.test(p));
       const keep = [rolePart, locationPart].filter(Boolean) as string[];
       query = keep.length ? keep.join(" AND ") : andParts[0] || query;
-      label =
-        widenedTo !== null
-          ? `Last retry: role + location only · widened radius up to ${widenedTo} mi`
-          : "Last retry: kept role + location only";
+      label = "Broadest recovery mode (role + location only)";
     }
 
     query = query.replace(/\s+/g, " ").trim();
@@ -4115,23 +4165,23 @@ function NewJobPageContent() {
   const buildSearchPayload = (
     booleanString: string,
     overrides?: {
-      withinMilesOverride?: number;
       resumeMatchFiltersOverride?: typeof resumeMatchFilters;
       titleCriteriaOverride?: typeof sourceTitles;
       skillCriteriaOverride?: typeof sourceSkills;
       companiesOverride?: typeof sourceCompanies;
     }
   ) => {
-    const sourceTitlesEffective = overrides?.titleCriteriaOverride ?? sourceTitles;
-    const sourceSkillsEffective = overrides?.skillCriteriaOverride ?? sourceSkills;
-    const titleCriteria = sourceTitlesEffective.map(t => ({
+    const effectiveTitles = overrides?.titleCriteriaOverride ?? sourceTitles;
+    const effectiveSkills = overrides?.skillCriteriaOverride ?? sourceSkills;
+
+    const titleCriteria = effectiveTitles.map(t => ({
       value: t.value || "Title",
       match_type: t.matchType || "must",
       years: t.years || 0,
       recent: t.recent || false,
       similar_terms: t.selectedSimilarTitles || []
     }));
-    const skillCriteria = sourceSkillsEffective.map(s => ({
+    const skillCriteria = effectiveSkills.map(s => ({
       value: s.value || "Skill",
       match_type: s.matchType || "must",
       years: s.years || 0,
@@ -4155,8 +4205,7 @@ function NewJobPageContent() {
     const parsedRadius = primaryLocation?.radius?.match(/(\d+)/)?.[1]
       ? Number(primaryLocation.radius.match(/(\d+)/)?.[1])
       : 25;
-    // Hard cap 50 mi everywhere, regardless of saved/legacy values.
-    const withinMiles = Math.min(50, overrides?.withinMilesOverride ?? parsedRadius);
+    const withinMiles = Math.min(50, parsedRadius);
     const activeResumeFilters = (overrides?.resumeMatchFiltersOverride ?? resumeMatchFilters)
       .filter(f => f.active)
       .map(f => ({
@@ -4192,6 +4241,13 @@ function NewJobPageContent() {
       // jobdiva_service.search_candidates. `recent_days: 0` means Any.
       recent_days: recentDaysFilter > 0 ? recentDaysFilter : null,
       require_resume: !includeNoResume,
+      // PR-B: top-level YOE floor. `undefined` means no constraint;
+      // backend applies as both pre-LLM regex gate and post-LLM hard
+      // filter against the parsed years_of_experience.
+      min_experience_years:
+        typeof minExperienceYears === "number" && minExperienceYears > 0
+          ? minExperienceYears
+          : undefined,
       page: 1,
       page_size: 100
     };
@@ -4201,7 +4257,6 @@ function NewJobPageContent() {
     booleanString: string,
     mode: "replace" | "append",
     overrides?: {
-      withinMilesOverride?: number;
       resumeMatchFiltersOverride?: typeof resumeMatchFilters;
       titleCriteriaOverride?: typeof sourceTitles;
       skillCriteriaOverride?: typeof sourceSkills;
@@ -4210,6 +4265,27 @@ function NewJobPageContent() {
   ): Promise<any[]> => {
     const apiUrl = API_BASE;
     const payload = buildSearchPayload(booleanString, overrides);
+
+    const mapStageToStatus = (stage: string) => {
+      const raw = String(stage || "").toLowerCase();
+      if (raw.includes("jobdiva applicants")) {
+        return "Searching at JobDiva portal (Applicants)...";
+      }
+      if (raw.includes("jobdiva talent")) {
+        return "Searching at JobDiva portal (Talent Search)...";
+      }
+      if (raw.includes("linkedin")) {
+        return "Searching at LinkedIn portal...";
+      }
+      if (raw.includes("exa")) {
+        return "Searching at Exa portal...";
+      }
+      if (raw.includes("dice")) {
+        return "Searching at Dice portal...";
+      }
+      return stage;
+    };
+
     const controller = new AbortController();
     searchAbortRef.current = controller;
     let response: Response;
@@ -4242,6 +4318,7 @@ function NewJobPageContent() {
     const decoder = new TextDecoder();
     let buffer = "";
     let runList: any[] = [];
+    let activePortal = "source portal";
     try {
       while (true) {
         const { done, value } = await reader.read();
@@ -4259,14 +4336,34 @@ function NewJobPageContent() {
               if (id) seenIds.add(id);
               runList.push(event.data);
               setCandidates(prev => [...prev, event.data]);
+
+              const foundCount = runList.length;
+              if (foundCount === 1) {
+                setSearchStatus(`Found 1 profile from ${activePortal}. Matching resumes against the rubric...`);
+              } else if (foundCount % 5 === 0) {
+                setSearchStatus(`Found ${foundCount} profiles from ${activePortal}. Matching resumes against the rubric...`);
+              }
             } else if (event.type === "stage") {
-              setSearchStatus(event.data);
+              const rawStage = String(event.data || "");
+              const mapped = mapStageToStatus(rawStage);
+              if (mapped.toLowerCase().includes("portal")) {
+                const portalPart = mapped.replace(/^Searching at\s*/i, "").replace(/\.\.\.$/, "").trim();
+                if (portalPart) activePortal = portalPart;
+              }
+              setSearchStatus(mapped);
             } else if (event.type === "summary") {
+              setSearchStatus(`Found ${runList.length} profiles. Finalizing shortlist and quality scoring...`);
               console.log("Search stream complete:", event.data);
               const summary = event.data?.summary || event.data || {};
-              setJobdivaCriteriaUnconfigured(
-                Boolean(summary?.jobdiva_criteria_unconfigured)
-              );
+              const unconfigured = Boolean(summary?.jobdiva_criteria_unconfigured);
+              setJobdivaCriteriaUnconfigured(unconfigured);
+              if (unconfigured) {
+                // Pre-check may miss if JobDiva returns a non-standard error
+                // shape. If the actual search summary confirms criteria are
+                // unconfigured, still surface the recruiter guidance modal.
+                setShowJobdivaSkillsModal(true);
+                setSkillsCopied(false);
+              }
             } else if (event.type === "error") {
               console.error("Stream error:", event.message);
             }
@@ -4366,7 +4463,7 @@ function NewJobPageContent() {
       const attempts: { query: string; label: string }[] = [{ query: initial, label: "Hoonr-Curate generated" }];
       setBooleanAttempts(attempts);
       currentAttempts = attempts;
-      setSearchStatus("Searching candidates...");
+      setSearchStatus("Connecting to source portals...");
 
       const firstRunStartMs = Date.now();
       const firstRun = await runSearchStream(initial, "replace");
@@ -4384,10 +4481,6 @@ function NewJobPageContent() {
         },
       ];
 
-      const baseWithinMiles = (() => {
-        const m = sourceLocations[0]?.radius?.match(/(\d+)/)?.[1];
-        return m ? Number(m) : 25;
-      })();
       while (currentAttempts.length < MAX_BOOLEAN_ATTEMPTS) {
         if (searchAbortRef.current?.signal.aborted) break;
         const qualified = countQualified(accumulated);
@@ -4397,7 +4490,6 @@ function NewJobPageContent() {
         if (relaxed.query === currentAttempts[currentAttempts.length - 1].query) break;
         const structuralOverrides = relaxStructuralOverrides(
           tier,
-          baseWithinMiles,
           resumeMatchFilters,
           sourceTitles,
           sourceSkills,
@@ -4475,13 +4567,8 @@ function NewJobPageContent() {
       attempt: nextAttempts.length,
     });
     try {
-      const baseWithinMiles = (() => {
-        const m = sourceLocations[0]?.radius?.match(/(\d+)/)?.[1];
-        return m ? Number(m) : 25;
-      })();
       const structuralOverrides = relaxStructuralOverrides(
         tier,
-        baseWithinMiles,
         resumeMatchFilters,
         sourceTitles,
         sourceSkills,
@@ -5234,6 +5321,31 @@ function NewJobPageContent() {
                       <option value={180}>Last 180 days</option>
                       <option value={0}>Any</option>
                     </select>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Min YOE:</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={40}
+                      step={1}
+                      value={minExperienceYears ?? ""}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        if (raw === "") {
+                          setMinExperienceYears(null);
+                          return;
+                        }
+                        const parsed = parseInt(raw, 10);
+                        const clamped = Number.isFinite(parsed)
+                          ? Math.max(0, Math.min(40, parsed))
+                          : null;
+                        setMinExperienceYears(clamped);
+                      }}
+                      placeholder="any"
+                      className="w-20 h-8 px-2 text-[12px] font-medium text-slate-700 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30"
+                      title="Drops candidates whose resume confidently shows fewer years of experience. Leave blank for no floor."
+                    />
                   </div>
                   <label className="flex items-center gap-2 cursor-pointer">
                     <Checkbox
@@ -6006,7 +6118,7 @@ function NewJobPageContent() {
                   </h4>
                   <p className={`text-slate-500 text-[13px] font-medium tracking-tight transition-all ${isSearching ? 'animate-pulse text-[#6366f1]' : ''}`}>
                     {hasSearched ? (
-                      isSearching ? `Sourcing candidates... ${candidates.length} found so far` : `${candidates.length} candidates found${sourceFilter !== "all" ? ` · showing ${sortedCandidates.length}` : ""}`
+                      isSearching ? searchStatus : `${candidates.length} candidates found${sourceFilter !== "all" ? ` · showing ${sortedCandidates.length}` : ""}`
                     ) : 'Run a search to find candidates.'}
                   </p>
                   {hasSearched && !isSearching && candidates.length > 0 && qualityScorecard && (
@@ -6800,13 +6912,13 @@ function NewJobPageContent() {
         </div>
       )}
 
-      {showJobdivaSkillsModal && jobdivaCriteriaUnconfigured && (
+      {showJobdivaSkillsModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
           <div className="w-full max-w-2xl rounded-xl bg-white border border-slate-200 shadow-2xl overflow-hidden">
             <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
               <div>
-                <h3 className="text-[16px] font-bold text-slate-900">JobDiva AI matcher criteria not configured</h3>
-                <p className="text-[12px] text-slate-500 mt-0.5">Add these skills in JobDiva and save the Search Agent criteria for this job.</p>
+                <h3 className="text-[16px] font-bold text-slate-900">JobDiva Search Agent string</h3>
+                <p className="text-[12px] text-slate-500 mt-0.5">Use this Boolean-ready string in JobDiva Search Agent, including location format.</p>
               </div>
               <button
                 type="button"
@@ -6819,11 +6931,13 @@ function NewJobPageContent() {
             </div>
 
             <div className="px-5 py-4 space-y-3">
-              <div className="text-[12px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                JobDiva&apos;s AI matcher isn&apos;t configured for this job yet. We&apos;ll still search, but quality improves once criteria are saved in JobDiva.
+              <div className={`text-[12px] rounded-lg px-3 py-2 border ${jobdivaCriteriaUnconfigured ? "text-amber-800 bg-amber-50 border-amber-200" : "text-indigo-800 bg-indigo-50 border-indigo-200"}`}>
+                {jobdivaCriteriaUnconfigured
+                  ? "JobDiva AI matcher isn’t configured for this job yet. We’ll still search, but quality improves once criteria are saved in JobDiva."
+                  : "Tip: copy this string into JobDiva Search Agent criteria for stronger portal-side matching."}
               </div>
               <div className="text-[12px] text-slate-600">
-                {jobdivaSkillsToUse.length} skill{jobdivaSkillsToUse.length === 1 ? "" : "s"} formatted as requested: <span className="font-semibold">(Skill One), (Skill Two)</span>
+                {jobdivaSkillsToUse.length} skill{jobdivaSkillsToUse.length === 1 ? "" : "s"} formatted in Boolean form with location suffix: <span className="font-semibold">(HADOOP) AND (SPARK OR PYSPARK), IN (NC-US)</span>
               </div>
               <textarea
                 value={jobdivaSkillsCopyText}
@@ -6863,7 +6977,7 @@ function NewJobPageContent() {
                   }}
                 >
                   <Clipboard className="w-3.5 h-3.5" />
-                  {skillsCopied ? "Copied" : "Copy skills"}
+                  {skillsCopied ? "Copied" : "Copy agent string"}
                 </Button>
               </div>
             </div>
