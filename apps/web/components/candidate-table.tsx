@@ -37,6 +37,7 @@ interface Candidate {
     state: string;
     source?: string;
     open_to_work?: boolean;
+    open_to_relocation?: boolean;
     profile_url?: string;
 }
 
@@ -314,7 +315,16 @@ function CandidateRow({
                     )}
                 </div>
             </TableCell>
-            <TableCell>{candidate.city}, {candidate.state}</TableCell>
+            <TableCell>
+                <div className="flex flex-col gap-1 items-start">
+                    <span>{candidate.city}, {candidate.state}</span>
+                    {candidate.open_to_relocation && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 font-medium">
+                            Open to Relocation
+                        </span>
+                    )}
+                </div>
+            </TableCell>
             <TableCell className="text-right">
                 <div className="flex justify-end gap-2">
                     <Button

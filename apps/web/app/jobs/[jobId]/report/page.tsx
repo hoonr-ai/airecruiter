@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   ArrowLeft,
   Download,
@@ -66,7 +66,9 @@ interface EvaluationReport {
 }
 
 export default function CandidateEvaluationReportPage() {
-  const { jobId, candidateId } = useParams();
+  const { jobId } = useParams();
+  const searchParams = useSearchParams();
+  const candidateId = searchParams.get("candidateId");
   const router = useRouter();
   const [data, setData] = useState<EvaluationReport | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -76,7 +78,7 @@ export default function CandidateEvaluationReportPage() {
     async function fetchReport() {
       try {
         setIsLoading(true);
-        const res = await fetch(`${API_BASE}/candidates/${candidateId}/evaluation-report?job_id=${jobId}`);
+        const res = await fetch(`${API_BASE}/candidates/${encodeURIComponent(candidateId as string)}/evaluation-report?job_id=${jobId}`);
         if (!res.ok) throw new Error("Failed to fetch evaluation report");
         const json = await res.json();
         setData(json);
@@ -192,9 +194,7 @@ export default function CandidateEvaluationReportPage() {
           </div>
           <div className="space-y-3">
             <h4 className="text-[12px] font-bold text-slate-900 uppercase">Job Summary:</h4>
-            <div className="text-[13px] text-slate-600 leading-relaxed bg-slate-50 p-6 rounded-lg border border-slate-100 whitespace-pre-wrap">
-              {job.ai_description}
-            </div>
+              <AIPostingJobDescription text={job.ai_description} />
           </div>
         </div>
       </div>
@@ -242,9 +242,9 @@ export default function CandidateEvaluationReportPage() {
             <div className="border border-slate-200 rounded-lg overflow-hidden">
               <table className="w-full text-sm">
                 <tbody className="divide-y divide-slate-100">
-                  {pair.evaluation && Object.entries(pair.evaluation).filter(([k, v]) => typeof v === 'string' || typeof v === 'number').length > 0 ? (
+                  {pair.evaluation && Object.entries(pair.evaluation).filter(([k, v]) => (typeof v === 'string' || typeof v === 'number') && !['candidate_id', 'interview_id'].includes(k)).length > 0 ? (
                     Object.entries(pair.evaluation)
-                      .filter(([k, v]) => typeof v === 'string' || typeof v === 'number')
+                      .filter(([k, v]) => (typeof v === 'string' || typeof v === 'number') && !['candidate_id', 'interview_id'].includes(k))
                       .map(([field, value]: [string, any], i) => (
                         <tr key={i} className="group hover:bg-slate-50/50 transition-colors">
                           <td className="py-3 px-4 text-slate-500 font-medium w-1/2">{field}</td>
@@ -356,4 +356,63 @@ function StatusPill({ status, color }: { status: string; color: "emerald" | "ros
       {status}
     </span>
   );
+}
+
+function AIPostingJobDescription({ text }: { text: string }) {
+  const renderInline = (content: string) => {
+    const parts = content.split(/(\[.*?\]\(.*?\)+|\*\*.*?\*\*|\*(?!\*).*?\*(?!\*))/g);
+    return parts.map((part, i) => {
+      if (part.startsWith('[') && part.includes('](') && part.endsWith(')')) {
+        const match = part.match(/\[(.*?)\]\((.*?)\)/);
+        if (match) {
+          return (
+            <a key={i} href={match[2]} target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">
+              {match[1]}
+            </a>
+          );
+        }
+      } else if (part.startsWith('**') && part.endsWith('**')) {
+        return <strong key={i} className="font-bold text-slate-900">{part.slice(2, -2)}</strong>;
+      } else if (part.startsWith('*') && part.endsWith('*')) {
+        return <em key={i} className="italic text-slate-800">{part.slice(1, -1)}</em>;
+      }
+      return <span key={i}>{part}</span>;
+    });
+  };
+
+  const formatLines = (rawText: string) => {
+    if (!rawText) return null;
+    return rawText.split('\n').map((line, index) => {
+      const trimmedLine = line.trim();
+      if (!trimmedLine) return <div key={index} className="h-2" />;
+
+      const isHeader = /^\*\*[A-Z\s]+\*\*$/.test(trimmedLine) || /^[A-Z\s]{3,25}$/.test(trimmedLine);
+      if (isHeader) {
+        const title = trimmedLine.replace(/\*\*/g, '').trim();
+        return (
+          <div key={index} className="text-[14px] font-bold text-slate-900 mt-5 mb-2 first:mt-0 uppercase tracking-tight">
+            {title}
+          </div>
+        );
+      }
+
+      if (trimmedLine.startsWith('•') || trimmedLine.startsWith('-')) {
+        const content = trimmedLine.replace(/^[•-]\s*/, '').trim();
+        return (
+          <div key={index} className="flex gap-2.5 ml-1 my-1.5 items-start">
+            <span className="text-slate-400 mt-1">•</span>
+            <div className="flex-1">{renderInline(content)}</div>
+          </div>
+        );
+      }
+
+      return (
+        <div key={index} className="mb-2 text-slate-600 leading-relaxed">
+          {renderInline(trimmedLine)}
+        </div>
+      );
+    });
+  };
+
+  return <div className="text-[13px] font-medium leading-relaxed bg-slate-50 p-6 rounded-lg border border-slate-100">{formatLines(text)}</div>;
 }
