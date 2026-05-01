@@ -260,39 +260,35 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         rubric_db = JobRubricDB()
         jobdiva_id_for_rubric = job_row.get("jobdiva_id") if job_row else request.job_id
         rubric = rubric_db.get_full_rubric(jobdiva_id_for_rubric)
+        if rubric:
+            rubric.pop("screen_questions", None)
+            rubric.pop("soft_skills", None)
 
         # Build JD block with structured context and rubric
         if job_row:
             jd = {
                 "job_id": job_row.get("job_id", request.job_id),
                 "jobdiva_id": job_row.get("jobdiva_id", ""),
-                "title": job_row.get("title", ""),
-                "customer_name": job_row.get("customer_name") or "Unknown",
-                "city": job_row.get("city") or "TBD",
-                "state": job_row.get("state") or "",
-                "location_type": job_row.get("location_type") or "Onsite",
-                "jobdiva_description": job_row.get("jobdiva_description") or "",
-                "ai_description": job_row.get("ai_description") or "",
-                "pre_screen_questions": pre_screen_questions,
                 "context": {
                     "title": job_row.get("title", ""),
                     "customer_name": job_row.get("customer_name") or "Unknown",
                     "city": job_row.get("city") or "TBD",
                     "state": job_row.get("state") or "",
                     "location_type": job_row.get("location_type") or "Onsite",
-                    "jobdiva_description": job_row.get("jobdiva_description") or job_row.get("ai_description") or "",
+                    "jobdiva_description": job_row.get("jobdiva_description") or "",
+                    "ai_description": job_row.get("ai_description") or "",
+                    "recruiter_notes": job_row.get("recruiter_notes") or "",
                 },
-                "rubric": rubric if rubric else {}
+                "rubric": rubric if rubric else {},
+                "pre_screen_questions": pre_screen_questions,
             }
         else:
             jd = {
                 "job_id": request.job_id,
                 "jobdiva_id": "",
-                "title": "",
-                "jobdiva_description": "",
-                "pre_screen_questions": [],
                 "context": {},
-                "rubric": {}
+                "rubric": {},
+                "pre_screen_questions": []
             }
 
         # Build resumes list using raw_resume_text
@@ -303,6 +299,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 "email": r.get("email"),
                 "phone": r.get("phone"),
                 "raw_resume_text": r.get("experience", ""), # LiveKit expects raw_resume_text
+                "experience": r.get("experience", ""),      # Frontend expects experience for auto-population
                 "summary": r.get("summary", ""),
                 "skills": r.get("skills", ""),
                 "education": r.get("education", ""),
