@@ -78,6 +78,7 @@ interface WizardState {
   candidate: CandidateFields;
   job: JobFields;
   questions: Question[];
+  rubric: any;
 }
 
 interface EngageWizardModalProps {
@@ -129,8 +130,9 @@ function parsePayload(raw: string): WizardState | null {
         question_text: q.question_text || "",
         pass_criteria: q.pass_criteria || "",
         category: q.category || "default",
-        is_default: q.is_default ?? true,
+        is_default: q.is_default !== undefined ? q.is_default : true,
       })),
+      rubric: jd.rubric || {},
     };
   } catch {
     return null;
