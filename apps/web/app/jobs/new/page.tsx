@@ -3961,75 +3961,53 @@ function NewJobPageContent() {
     return () => window.clearTimeout(timeoutId);
   }, [sourceTitles, sourceSkills, sourceLocations, sourceCompanies, sourceKeywords, resumeMatchFilters, jobTitle, booleanUserEdited]);
 
-  // Lenient retries should not widen location radius. Instead, progressively
-  // relax MUST constraints based on criterion importance inferred from rubric
-  // origin + years requirement. This keeps locality stable while recovering
-  // candidates by loosening lower-signal skill/title constraints first.
   const relaxStructuralOverrides = (
     tier: number,
     currentFilters: typeof resumeMatchFilters,
     currentTitles: typeof sourceTitles,
     currentSkills: typeof sourceSkills,
+    currentCompanies: typeof sourceCompanies
   ): {
+    resumeMatchFiltersOverride?: typeof resumeMatchFilters;
     titleCriteriaOverride?: typeof sourceTitles;
     skillCriteriaOverride?: typeof sourceSkills;
-    resumeMatchFiltersOverride?: typeof resumeMatchFilters;
+    companiesOverride?: typeof sourceCompanies;
   } => {
-    const rank = (item: { matchType: string; years?: number; fromRubric?: boolean }) => {
-      const mustScore = item.matchType === "must" ? 100 : 0;
-      const rubricScore = item.fromRubric ? 20 : 0;
-      const yearsScore = Math.min(30, Number(item.years || 0));
-      return mustScore + rubricScore + yearsScore;
-    };
-
-    const demoteLowerPriorityMust = <T extends { matchType: string; years?: number; fromRubric?: boolean }>(
-      items: T[],
-      keepStrictMustCount: number,
-    ): T[] => {
-      const mustItems = items
-        .map((item, idx) => ({ item, idx, score: rank(item) }))
-        .filter(x => x.item.matchType === "must")
-        .sort((a, b) => b.score - a.score);
-
-      if (mustItems.length <= keepStrictMustCount) return items;
-
-      const keep = new Set(mustItems.slice(0, keepStrictMustCount).map(x => x.idx));
-      return items.map((item, idx) => {
-        if (item.matchType !== "must") return item;
-        if (keep.has(idx)) return item;
-        return { ...item, matchType: "can" };
-      });
-    };
+    const zeroedTitles = currentTitles.map(t => ({ ...t, years: 0, recent: false }));
+    const zeroedSkills = currentSkills.map(s => ({ ...s, years: 0, recent: false }));
 
     if (tier === 1) {
-      // Keep one strongest MUST skill; relax remaining MUST skills to CAN.
+      const skillsRelaxed = (() => {
+        const mustIdxs = zeroedSkills
+          .map((s, i) => (s.matchType === "must" ? i : -1))
+          .filter(i => i >= 0);
+        const demoteCount = Math.ceil(mustIdxs.length / 2);
+        const demoteSet = new Set(mustIdxs.slice(0, demoteCount));
+        return zeroedSkills.map((s, i) =>
+          demoteSet.has(i) ? { ...s, matchType: "can" as const } : s
+        );
+      })();
       return {
-        skillCriteriaOverride: demoteLowerPriorityMust(currentSkills, 1),
+        titleCriteriaOverride: zeroedTitles,
+        skillCriteriaOverride: skillsRelaxed,
       };
     }
 
-    if (tier === 2) {
-      // Keep only top MUST title and top MUST skill strict.
-      return {
-        titleCriteriaOverride: demoteLowerPriorityMust(currentTitles, 1),
-        skillCriteriaOverride: demoteLowerPriorityMust(currentSkills, 1),
-      };
-    }
+    const titlesAllCan = zeroedTitles.map(t =>
+      t.matchType === "must" ? { ...t, matchType: "can" as const } : t
+    );
+    const skillsAllCan = zeroedSkills.map(s =>
+      s.matchType === "must" ? { ...s, matchType: "can" as const } : s
+    );
+    const filtersDeactivated = currentFilters.map(f =>
+      (f.category || "").toLowerCase().includes("exclude") ? { ...f, active: false } : f
+    );
 
-    // tier >= 3: keep locality, relax all MUSTs to CAN and deactivate
-    // Exclude-category resume filters so recoverable candidates can surface.
     return {
-      titleCriteriaOverride: currentTitles.map(t =>
-        t.matchType === "must" ? { ...t, matchType: "can" } : t
-      ),
-      skillCriteriaOverride: currentSkills.map(s =>
-        s.matchType === "must" ? { ...s, matchType: "can" } : s
-      ),
-      resumeMatchFiltersOverride: currentFilters.map(f =>
-        (f.category || "").toLowerCase().includes("exclude")
-          ? { ...f, active: false }
-          : f
-      ),
+      titleCriteriaOverride: titlesAllCan,
+      skillCriteriaOverride: skillsAllCan,
+      companiesOverride: [],
+      resumeMatchFiltersOverride: filtersDeactivated,
     };
   };
 
@@ -4048,7 +4026,6 @@ function NewJobPageContent() {
 
     if (tier === 1) {
       query = query.replace(/\s+AND\s+"\d+\+\s*years?"/gi, "");
-      // JobDiva dialect uses: "TERM" OVER N YRS
       query = query.replace(/\s+OVER\s+\d+\s+YRS\b/gi, "");
       const parts = splitByAnd(query);
       const locationParts = parts.filter(isLocationClause);
@@ -4063,8 +4040,8 @@ function NewJobPageContent() {
         return parts.length > 1 ? `(${parts.join(" OR ")})` : `(${inner})`;
       });
       query = query.replace(/\s+AND\s+recent/gi, "");
-      // If JobDiva year clauses remain outside parentheses, drop them.
       query = query.replace(/\s+OVER\s+\d+\s+YRS\b/gi, "");
+      query = query.replace(/\s+AND\s+"\d+\+\s*years?"/gi, "");
       label = "Further relaxed required clauses · kept location radius";
     } else {
       query = query.replace(/\s+NOT\s+\([^)]*\)/gi, "");
@@ -4188,9 +4165,10 @@ function NewJobPageContent() {
   const buildSearchPayload = (
     booleanString: string,
     overrides?: {
+      resumeMatchFiltersOverride?: typeof resumeMatchFilters;
       titleCriteriaOverride?: typeof sourceTitles;
       skillCriteriaOverride?: typeof sourceSkills;
-      resumeMatchFiltersOverride?: typeof resumeMatchFilters;
+      companiesOverride?: typeof sourceCompanies;
     }
   ) => {
     const effectiveTitles = overrides?.titleCriteriaOverride ?? sourceTitles;
@@ -4227,7 +4205,7 @@ function NewJobPageContent() {
     const parsedRadius = primaryLocation?.radius?.match(/(\d+)/)?.[1]
       ? Number(primaryLocation.radius.match(/(\d+)/)?.[1])
       : 25;
-    const withinMiles = parsedRadius;
+    const withinMiles = Math.min(50, parsedRadius);
     const activeResumeFilters = (overrides?.resumeMatchFiltersOverride ?? resumeMatchFilters)
       .filter(f => f.active)
       .map(f => ({
@@ -4253,7 +4231,7 @@ function NewJobPageContent() {
       title_criteria: titleCriteria,
       skill_criteria: skillCriteria,
       keywords: sourceKeywords,
-      companies: sourceCompanies,
+      companies: overrides?.companiesOverride ?? sourceCompanies,
       resume_match_filters: activeResumeFilters,
       location: primaryLocation?.value || "",
       within_miles: withinMiles,
@@ -4279,9 +4257,10 @@ function NewJobPageContent() {
     booleanString: string,
     mode: "replace" | "append",
     overrides?: {
+      resumeMatchFiltersOverride?: typeof resumeMatchFilters;
       titleCriteriaOverride?: typeof sourceTitles;
       skillCriteriaOverride?: typeof sourceSkills;
-      resumeMatchFiltersOverride?: typeof resumeMatchFilters;
+      companiesOverride?: typeof sourceCompanies;
     }
   ): Promise<any[]> => {
     const apiUrl = API_BASE;
@@ -4509,7 +4488,13 @@ function NewJobPageContent() {
         const tier = currentAttempts.length; // 1, 2, 3 as attempts grow
         const relaxed = relaxBooleanString(currentAttempts[currentAttempts.length - 1].query, tier);
         if (relaxed.query === currentAttempts[currentAttempts.length - 1].query) break;
-        const structuralOverrides = relaxStructuralOverrides(tier, resumeMatchFilters, sourceTitles, sourceSkills);
+        const structuralOverrides = relaxStructuralOverrides(
+          tier,
+          resumeMatchFilters,
+          sourceTitles,
+          sourceSkills,
+          sourceCompanies
+        );
         currentAttempts = [...currentAttempts, { query: relaxed.query, label: relaxed.label }];
         setBooleanAttempts(currentAttempts);
         setGeneratedBoolean(relaxed.query);
@@ -4582,7 +4567,13 @@ function NewJobPageContent() {
       attempt: nextAttempts.length,
     });
     try {
-      const structuralOverrides = relaxStructuralOverrides(tier, resumeMatchFilters, sourceTitles, sourceSkills);
+      const structuralOverrides = relaxStructuralOverrides(
+        tier,
+        resumeMatchFilters,
+        sourceTitles,
+        sourceSkills,
+        sourceCompanies
+      );
       setSearchStatus(`Extending search with more lenient boolean (attempt ${nextAttempts.length}/${MAX_BOOLEAN_ATTEMPTS})...`);
       runResults = await runSearchStream(relaxed.query, "append", structuralOverrides);
     } finally {
@@ -5795,7 +5786,7 @@ function NewJobPageContent() {
                         </div>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
-                        {["Within 10 mi", "Within 25 mi", "Within 50 mi", "Within 100 mi", "Exact location"].map(radius => (
+                        {["Within 10 mi", "Within 25 mi", "Within 50 mi", "Exact location"].map(radius => (
                           <DropdownMenuItem
                             key={radius}
                             className={`rounded-lg py-2 cursor-pointer font-bold text-[13px] ${sourceLocationRadius === radius ? "bg-slate-50 flex items-center justify-between" : ""}`}

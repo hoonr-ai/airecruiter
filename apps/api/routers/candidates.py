@@ -240,6 +240,13 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             digits = "".join(ch for ch in radius_match if ch.isdigit())
             if digits:
                 within_miles = int(digits)
+        # Hard cap 50 mi everywhere — clamp + log if a caller exceeds it.
+        if within_miles > 50:
+            logger.warning(
+                "within_miles=%s exceeds 50mi cap; clamping to 50",
+                within_miles,
+            )
+            within_miles = 50
 
         companies = request.companies or []
 
@@ -283,6 +290,10 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             boolean_string=request.boolean_string or "",
             recent_days=request.recent_days,
             require_resume=require_resume,
+            include_relocation_candidates=(
+                True if request.include_relocation_candidates is None
+                else bool(request.include_relocation_candidates)
+            ),
             min_experience_years=request.min_experience_years,
         )
 

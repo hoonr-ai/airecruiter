@@ -134,11 +134,7 @@ class CandidateSearchRequest(BaseModel):
     within_miles: Optional[int] = None
     recent_days: Optional[int] = None
     require_resume: Optional[bool] = None
-    # Top-level minimum years of experience. Enforced both pre-LLM (cheap
-    # regex over headline + abstract + resume_text head) and post-LLM
-    # (against the parsed `enhanced_info.years_of_experience`). Candidates
-    # whose YOE is unparseable are kept — soft-keep mirrors the location
-    # gate philosophy.
+    include_relocation_candidates: Optional[bool] = None
     min_experience_years: Optional[int] = None
 
 class JobFetchRequest(BaseModel):
