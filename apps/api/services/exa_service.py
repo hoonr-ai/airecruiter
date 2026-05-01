@@ -3,6 +3,7 @@ import re
 from typing import List, Dict, Any, Tuple
 from core.config import EXA_API_KEY
 from exa_py import Exa
+from services.location import extract_us_location_from_text
 
 logger = logging.getLogger(__name__)
 
@@ -144,18 +145,23 @@ class ExaService:
                     highlights_text = ""
                     if getattr(result, 'highlights', None):
                         highlights_text = "\n".join(result.highlights)
-                    
+
                     extracted_city, extracted_state = _extract_city_from_highlights(highlights_text)
+                    extracted_location = extract_us_location_from_text(
+                        f"{title}\n{highlights_text}"
+                    )
+                    if not extracted_location and (extracted_city or extracted_state):
+                        extracted_location = ", ".join(p for p in [extracted_city, extracted_state] if p)
+
                     cand = {
                         "id": f"exa_{idx}_{getattr(result, 'id', idx)}",
                         "provider_id": getattr(result, 'id', f"exa_{idx}"),
                         "firstName": first_name,
                         "lastName": last_name,
                         "email": "",
-                        # Empty when unknown — never substitute the query string
-                        # (causes false-positive radius matches downstream).
                         "city": extracted_city,
                         "state": extracted_state,
+                        "location": extracted_location,
                         "title": title,
                         "source": "LinkedIn-Exa",
                         "match_score": 0,
@@ -219,6 +225,11 @@ class ExaService:
                     if getattr(result, "highlights", None):
                         highlights_text = "\n".join(result.highlights)
                     extracted_city, extracted_state = _extract_city_from_highlights(highlights_text)
+                    extracted_location = extract_us_location_from_text(
+                        f"{title}\n{highlights_text}"
+                    )
+                    if not extracted_location and (extracted_city or extracted_state):
+                        extracted_location = ", ".join(p for p in [extracted_city, extracted_state] if p)
                     results.append({
                         "id": f"dice_{idx}_{getattr(result, 'id', idx)}",
                         "provider_id": getattr(result, "id", f"dice_{idx}"),
@@ -227,6 +238,7 @@ class ExaService:
                         "email": "",
                         "city": extracted_city,
                         "state": extracted_state,
+                        "location": extracted_location,
                         "title": title,
                         "source": "Dice",
                         "match_score": 0,
