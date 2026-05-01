@@ -73,7 +73,7 @@ def _ensure_audit_table():
             CREATE TABLE IF NOT EXISTS engage_interview_audit (
                 id SERIAL PRIMARY KEY,
                 candidate_id VARCHAR(255) NOT NULL,
-                job_id VARCHAR(255),
+                jobdiva_id VARCHAR(255),
                 interview_id VARCHAR(255),
                 candidate_name VARCHAR(255),
                 candidate_email VARCHAR(255),
@@ -86,7 +86,7 @@ def _ensure_audit_table():
         """)
         # Patch columns that may be missing if table was created before schema updates
         missing_columns = [
-            ("job_id",         "VARCHAR(255)"),
+            ("jobdiva_id",      "VARCHAR(255)"),
             ("interview_id",   "VARCHAR(255)"),
             ("candidate_name", "VARCHAR(255)"),
             ("candidate_email","VARCHAR(255)"),
@@ -110,7 +110,7 @@ def _ensure_audit_table():
         """)
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_engage_audit_job_candidate_id_desc
-            ON engage_interview_audit(job_id, candidate_id, id DESC);
+            ON engage_interview_audit(jobdiva_id, candidate_id, id DESC);
         """)
         conn.commit()
         cur.close()
@@ -545,7 +545,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
 
                 cur.execute("""
                     INSERT INTO engage_interview_audit
-                        (candidate_id, job_id, interview_id, candidate_name, candidate_email, payload, response, status)
+                        (candidate_id, jobdiva_id, interview_id, candidate_name, candidate_email, payload, response, status)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     candidate_id,
@@ -578,10 +578,10 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
         else:
             # Still log the failed attempt
             for candidate_id in request.real_candidate_ids:
-                job_id = payload_obj.get("jd", {}).get("job_id", "")
+                job_id = payload_obj.get("jd", {}).get("jobdiva_id") or payload_obj.get("jd", {}).get("job_id", "")
                 cur.execute("""
                     INSERT INTO engage_interview_audit
-                        (candidate_id, job_id, payload, response, status)
+                        (candidate_id, jobdiva_id, payload, response, status)
                     VALUES (%s, %s, %s, %s, %s)
                 """, (
                     candidate_id,
@@ -647,7 +647,7 @@ async def get_latest_interview(candidate_id: str):
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         cur.execute("""
-            SELECT interview_id, candidate_name, candidate_email, job_id, status, created_at
+            SELECT interview_id, candidate_name, candidate_email, jobdiva_id, status, created_at
             FROM engage_interview_audit
             WHERE candidate_id = %s AND interview_id IS NOT NULL AND interview_id::text != ''
             ORDER BY id DESC

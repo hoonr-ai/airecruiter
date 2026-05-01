@@ -117,7 +117,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 # 0. Lookup the real candidate_id and job_id from our audit logs using interview_id
                 # This ensures we don't need LiveKit to send candidate_id or jobdiva_id
                 cur.execute(
-                    "SELECT candidate_id, job_id FROM engage_interview_audit WHERE interview_id = %s LIMIT 1",
+                    "SELECT candidate_id, jobdiva_id FROM engage_interview_audit WHERE interview_id = %s LIMIT 1",
                     (str(payload.interview_id),)
                 )
                 audit_row = cur.fetchone()
