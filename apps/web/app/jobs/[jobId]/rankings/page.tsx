@@ -1256,7 +1256,7 @@ export default function CandidateRankingsPage() {
                         </TableCell>
                         <TableCell className="sticky left-[44px] z-10 bg-white border-r border-[#e2e8f0] w-[160px] py-1 px-1 align-middle text-center">
                           <Link
-                            href={`/jobs/${jobId}/candidates/${candidate.candidate_id || candidate.id}/report`}
+                            href={`/jobs/${jobId}/candidates/report?candidateId=${encodeURIComponent(candidate.candidate_id || candidate.id)}`}
                             className="text-[14px] font-bold text-indigo-600 hover:underline text-center w-full block mb-0.5"
                           >
                             {candidate.name}
@@ -1350,13 +1350,11 @@ export default function CandidateRankingsPage() {
                           <div className="flex items-center justify-center gap-1.5 w-full text-center">
 
                             {screeningScore > 0 ? (
-                              <Link
-                                href={`/jobs/${jobId}/candidates/${candidate.candidate_id || candidate.id}/report`}
-                                className="font-bold text-slate-700 hover:text-indigo-600 transition-colors"
-                                title="View detailed report"
+                              <span
+                                className="font-bold text-slate-700"
                               >
                                 {screeningScore}
-                              </Link>
+                              </span>
                             ) : (
                               <span className="font-normal opacity-40 italic text-slate-400">Pending</span>
                             )}
@@ -1433,22 +1431,20 @@ export default function CandidateRankingsPage() {
                             const tScore = candidate.engage_total_score || candidate.engage_score;
                             if (cScore !== undefined && tScore !== undefined) {
                               return (
-                                <Link 
-                                  href={`/jobs/${jobId}/candidates/${candidate.candidate_id || candidate.id}/report`}
-                                  className="text-center w-full font-bold text-slate-900 bg-slate-50/50 px-2 py-1 rounded border border-slate-100 inline-block mx-auto hover:border-indigo-300 hover:text-indigo-600 transition-colors"
+                                <span 
+                                  className="text-center w-full font-bold text-slate-900 bg-slate-50/50 px-2 py-1 rounded border border-slate-100 inline-block mx-auto"
                                 >
                                   {cScore}<span className="text-slate-400 font-normal mx-0.5">/</span>{tScore}
-                                </Link>
+                                </span>
                               );
                             }
                             if (tScore) {
                               return (
-                                <Link 
-                                  href={`/jobs/${jobId}/candidates/${candidate.candidate_id || candidate.id}/report`}
-                                  className="text-center w-full font-bold text-slate-900 hover:text-indigo-600 transition-colors"
+                                <span 
+                                  className="text-center w-full font-bold text-slate-900"
                                 >
                                   {tScore}
-                                </Link>
+                                </span>
                               );
                             }
                             return <span className="font-normal opacity-40 italic">Waiting</span>;
@@ -1461,12 +1457,11 @@ export default function CandidateRankingsPage() {
 
                         <TableCell className="text-center font-bold text-indigo-700 text-[13px] align-middle py-2 bg-indigo-50/10 group-hover:bg-indigo-50/30 transition-colors">
                           {totalScore ? (
-                            <Link 
-                              href={`/jobs/${jobId}/candidates/${candidate.candidate_id || candidate.id}/report`}
-                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-100 shadow-sm hover:bg-indigo-100 hover:border-indigo-200 transition-all"
+                            <span 
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-100 shadow-sm"
                             >
                               {totalScore}
-                            </Link>
+                            </span>
                           ) : (
                             <span className="font-normal opacity-30 italic">—</span>
                           )}
