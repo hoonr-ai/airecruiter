@@ -179,13 +179,16 @@ function buildPayload(raw: string, state: WizardState): string {
       })),
     };
 
+    // Destructure to explicitly drop bot_introduction — only company_intro should be sent
+    const { bot_introduction: _drop, ...rest } = p;
     return JSON.stringify(
       {
-        ...p,
+        ...rest,
         phone_number: state.candidate.phone,
         resumes: [updatedResume],
         jd: updatedJd,
         interview_duration: state.job.interview_duration,
+        company_intro: p.company_intro || "",
       },
       null,
       2
