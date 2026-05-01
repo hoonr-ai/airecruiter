@@ -72,6 +72,33 @@ interface JobDetails {
   max_allowed_submittals?: number;
 }
 
+// B5: applied-filters panel — surfaces context set on Step 3 (criteria) and
+// Step 5 (sourcing_filters) on the rankings page so recruiters can see what
+// constraints produced this list.
+type SourcingTitleEntry = {
+  value?: string;
+  matchType?: string;
+  match_type?: string;
+  years?: number;
+  recent?: boolean;
+};
+type SourcingSkillEntry = SourcingTitleEntry;
+type SourcingLocationEntry = { value?: string; radius?: string };
+interface AppliedFilters {
+  titles?: SourcingTitleEntry[];
+  skills?: SourcingSkillEntry[];
+  locations?: SourcingLocationEntry[];
+  companies?: string[];
+  keywords?: string[];
+}
+interface AppliedCriterion {
+  id?: string;
+  name: string;
+  priority_score?: number;
+  is_required?: boolean;
+  category?: string;
+}
+
 interface Candidate {
   id: number;
   jobdiva_id?: string;
@@ -112,6 +139,9 @@ export default function CandidateRankingsPage() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [appliedFilters, setAppliedFilters] = useState<AppliedFilters | null>(null);
+  const [criteriaList, setCriteriaList] = useState<AppliedCriterion[]>([]);
+  const [appliedFiltersOpen, setAppliedFiltersOpen] = useState(false);
   const [feedbacks, setFeedbacks] = useState<Record<string, string>>({});
   const [syncingCandidateId, setSyncingCandidateId] = useState<number | null>(null);
   const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
@@ -866,6 +896,34 @@ export default function CandidateRankingsPage() {
           openings: data.openings,
           max_allowed_submittals: data.max_allowed_submittals
         });
+        // B5: surface step-5 sourcing filters on this page.
+        const sf = data.sourcing_filters || {};
+        if (sf && typeof sf === "object" && Object.keys(sf).length > 0) {
+          setAppliedFilters({
+            titles: Array.isArray(sf.titles) ? sf.titles : [],
+            skills: Array.isArray(sf.skills) ? sf.skills : [],
+            locations: Array.isArray(sf.locations) ? sf.locations : [],
+            companies: Array.isArray(sf.companies) ? sf.companies : [],
+            keywords: Array.isArray(sf.keywords) ? sf.keywords : [],
+          });
+        } else {
+          setAppliedFilters(null);
+        }
+      }
+
+      // B5: parallel fetch step-3 criteria so the applied-filters panel can
+      // render priority + required/preferred chips next to sourcing filters.
+      try {
+        const critRes = await fetch(`${apiBase}/api/jobs/${jobId}/criteria`);
+        if (critRes.ok) {
+          const critData = await critRes.json();
+          if (Array.isArray(critData?.criteria)) {
+            setCriteriaList(critData.criteria);
+          }
+        }
+      } catch (e) {
+        // Non-fatal: panel just hides the criteria column when unavailable.
+        console.warn("Failed to fetch job criteria:", e);
       }
 
       // Fetch candidates
@@ -1029,6 +1087,162 @@ export default function CandidateRankingsPage() {
           </Button>
         </div>
       </div>
+
+      {/* B5: applied filters panel — criteria from Step 3 + sourcing filters
+          from Step 5. Read-only, collapsed by default. */}
+      {(appliedFilters || criteriaList.length > 0) && (
+        <div className="mb-4 bg-white border border-slate-200 rounded-[8px] shadow-sm">
+          <button
+            type="button"
+            onClick={() => setAppliedFiltersOpen(v => !v)}
+            className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-slate-50 rounded-[8px] transition-colors"
+          >
+            <div className="flex items-center gap-2">
+              <Filter className="w-4 h-4 text-slate-400" />
+              <span className="text-[13px] font-semibold text-slate-700">
+                Filters applied at sourcing
+              </span>
+              <span className="text-[11px] text-slate-400">
+                {criteriaList.length > 0 && `${criteriaList.length} criteria`}
+                {appliedFilters && criteriaList.length > 0 && " · "}
+                {appliedFilters && (() => {
+                  const counts: string[] = [];
+                  if (appliedFilters.titles?.length) counts.push(`${appliedFilters.titles.length} titles`);
+                  if (appliedFilters.skills?.length) counts.push(`${appliedFilters.skills.length} skills`);
+                  if (appliedFilters.locations?.length) counts.push(`${appliedFilters.locations.length} locations`);
+                  if (appliedFilters.companies?.length) counts.push(`${appliedFilters.companies.length} companies`);
+                  return counts.join(" · ");
+                })()}
+              </span>
+            </div>
+            {appliedFiltersOpen ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
+          </button>
+
+          {appliedFiltersOpen && (
+            <div className="border-t border-slate-100 p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Column 1 — criteria from Step 3 */}
+              <div>
+                <h4 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2">
+                  Criteria (Step 3)
+                </h4>
+                {criteriaList.length === 0 ? (
+                  <div className="text-[12px] text-slate-400 italic">
+                    No criteria recorded for this job.
+                  </div>
+                ) : (
+                  <ul className="space-y-1.5">
+                    {criteriaList.map((c, i) => (
+                      <li key={c.id || i} className="flex items-start gap-2 text-[12px]">
+                        <span className="flex-shrink-0 inline-flex items-center justify-center w-7 h-5 rounded bg-slate-100 text-slate-700 font-bold text-[10px]">
+                          {(c.priority_score ?? 0)}/10
+                        </span>
+                        <span className="flex-1 text-slate-700">{c.name}</span>
+                        <span className={`flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium ${c.is_required ? "bg-indigo-50 text-indigo-700 border border-indigo-200" : "bg-slate-50 text-slate-600 border border-slate-200"}`}>
+                          {c.is_required ? "Required" : "Preferred"}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              {/* Column 2 — sourcing filters from Step 5 */}
+              <div>
+                <h4 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2">
+                  Sourcing filters (Step 5)
+                </h4>
+                {!appliedFilters || (
+                  !appliedFilters.titles?.length &&
+                  !appliedFilters.skills?.length &&
+                  !appliedFilters.locations?.length &&
+                  !appliedFilters.companies?.length &&
+                  !appliedFilters.keywords?.length
+                ) ? (
+                  <div className="text-[12px] text-slate-400 italic">
+                    No structured filters captured for this run.
+                  </div>
+                ) : (
+                  <div className="space-y-2 text-[12px]">
+                    {appliedFilters.titles && appliedFilters.titles.length > 0 && (
+                      <div>
+                        <div className="text-[10px] font-semibold text-slate-500 uppercase mb-1">Titles</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {appliedFilters.titles.map((t, i) => {
+                            const mt = t.matchType || t.match_type || "must";
+                            return (
+                              <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-50 border border-slate-200 text-slate-700">
+                                <span className="font-medium">{t.value}</span>
+                                <span className={`text-[10px] ${mt === "must" ? "text-indigo-600" : "text-slate-400"}`}>{mt}</span>
+                                {t.years && t.years > 0 ? <span className="text-[10px] text-slate-500">≥{t.years}y</span> : null}
+                                {t.recent ? <span className="text-[10px] text-emerald-600">recent</span> : null}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                    {appliedFilters.skills && appliedFilters.skills.length > 0 && (
+                      <div>
+                        <div className="text-[10px] font-semibold text-slate-500 uppercase mb-1">Skills</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {appliedFilters.skills.map((s, i) => {
+                            const mt = s.matchType || s.match_type || "must";
+                            return (
+                              <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-50 border border-slate-200 text-slate-700">
+                                <span className="font-medium">{s.value}</span>
+                                <span className={`text-[10px] ${mt === "must" ? "text-indigo-600" : "text-slate-400"}`}>{mt}</span>
+                                {s.years && s.years > 0 ? <span className="text-[10px] text-slate-500">≥{s.years}y</span> : null}
+                                {s.recent ? <span className="text-[10px] text-emerald-600">recent</span> : null}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                    {appliedFilters.locations && appliedFilters.locations.length > 0 && (
+                      <div>
+                        <div className="text-[10px] font-semibold text-slate-500 uppercase mb-1">Locations</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {appliedFilters.locations.map((l, i) => (
+                            <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-50 border border-slate-200 text-slate-700">
+                              <span className="font-medium">{l.value}</span>
+                              {l.radius ? <span className="text-[10px] text-slate-500">{l.radius}</span> : null}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {appliedFilters.companies && appliedFilters.companies.length > 0 && (
+                      <div>
+                        <div className="text-[10px] font-semibold text-slate-500 uppercase mb-1">Companies</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {appliedFilters.companies.map((c, i) => (
+                            <span key={i} className="px-2 py-0.5 rounded bg-slate-50 border border-slate-200 text-slate-700 font-medium">
+                              {c}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {appliedFilters.keywords && appliedFilters.keywords.length > 0 && (
+                      <div>
+                        <div className="text-[10px] font-semibold text-slate-500 uppercase mb-1">Keywords</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {appliedFilters.keywords.map((k, i) => (
+                            <span key={i} className="px-2 py-0.5 rounded bg-slate-50 border border-slate-200 text-slate-700">
+                              {k}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Table Interface */}
       <div className="space-y-4">
@@ -1311,6 +1525,11 @@ export default function CandidateRankingsPage() {
                           <span className={`text-[11px] block text-center mt-0.5 ${availabilityPillClasses(deriveAvailability(candidate))}`}>
                             <Calendar className="w-3.5 h-3.5 inline mr-1 opacity-70" /> Available: {deriveAvailability(candidate) || <span className="font-normal opacity-50">—</span>}
                           </span>
+                          {candidate.data?.open_to_relocation && (
+                            <span className="text-[10px] inline-block mt-0.5 px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 font-medium">
+                              Open to Relocation
+                            </span>
+                          )}
                         </TableCell>
 
                         <TableCell className="text-center align-middle py-1">
