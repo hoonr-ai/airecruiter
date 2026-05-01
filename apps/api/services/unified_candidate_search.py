@@ -19,11 +19,16 @@ from core.config import (
     SCORING_RECENT_PENALTY,
     SCORING_EXCLUSION_CAP,
     SCORING_EXCLUSION_PER_HIT,
+    SCORING_EXCLUSION_HARD_VETO_THRESHOLD,
     SCORING_UNMATCHED_REQUIRED_FLOOR,
     SCORING_UNMATCHED_PREFERRED_FLOOR,
     SCORING_PARSING_GAP_FLOOR,
     SCORING_COVERAGE_BLEND_THRESHOLD,
+    SOURCE_TIER_BONUS,
+    EMBEDDING_SKILL_MATCH,
+    EMBEDDING_MATCH_THRESHOLD,
 )
+from services import skill_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +57,8 @@ class SearchCriteria(BaseModel):
     # 5.10: by default JobDiva Talent Search drops profile-only candidates
     # (no resume attached). Set false to opt back in to the full signal.
     require_resume: bool = True
+    include_relocation_candidates: bool = True
+    min_experience_years: Optional[int] = None
 
     def sourcing_skill_values(self) -> List[str]:
         """Flat skill-like strings for sources that only accept a plain list
@@ -92,8 +99,27 @@ class UnifiedCandidateSearch:
         """
         start_time = time.time()
         self._log_stage("Start", f"job={criteria.job_id} sources={', '.join(criteria.sources or [])}")
-        
+
+        # Pre-warm embeddings for all query-side terms once per search.
+        # No-op when EMBEDDING_SKILL_MATCH is off or OPENAI_API_KEY is
+        # unset. Per-candidate skill embeddings are warmed lazily inside
+        # emit_candidate; this batches the (small) query side once so we
+        # don't pay an embedding round-trip per candidate.
+        if EMBEDDING_SKILL_MATCH:
+            try:
+                query_terms = self._criteria_query_terms(criteria)
+                if query_terms:
+                    await skill_embeddings.warm_terms(query_terms)
+            except Exception as exc:  # never let embedding warm break a search
+                logger.warning(f"query-term embedding warm failed: {exc}")
+
         seen_ids = set()
+        # Cross-source dedup keys (email, normalised LinkedIn URL,
+        # normalised name+location). The legacy `seen_ids` set keys on
+        # the source's native candidate_id and so misses the same person
+        # showing up in JobDiva-Applicants AND LinkedIn-Exa with
+        # different ids. Both sets are checked in `emit_candidate`.
+        seen_dedup_keys: set = set()
         summary = {
             "total_candidates": 0,
             "job_applicants_count": 0,
@@ -117,7 +143,7 @@ class UnifiedCandidateSearch:
             # Ensure name is title-cased if it exists
             if cand.get("name"):
                 cand["name"] = str(cand["name"]).title()
-            
+
             if criteria.bypass_screening:
                 cand["match_score"] = 0
                 cand["missing_skills"] = []
@@ -127,11 +153,27 @@ class UnifiedCandidateSearch:
                 return cand
 
             score_result = self._score_candidate(cand, criteria)
-            cand["match_score"] = score_result["score"]
+            base_score = score_result["score"]
+            cand["match_score"] = base_score
             cand["missing_skills"] = score_result["missing_skills"]
             cand["matched_skills"] = score_result.get("matched_skills", [])
             cand["explainability"] = score_result["explainability"]
             cand["match_score_details"] = score_result.get("score_details", {})
+
+            # Source-tier bonus: warm leads (recruiter's own applicants,
+            # JobDiva talent pool, curated DBs) outrank cold scrapes when
+            # raw scores are close. Only applied when base_score > 0 so
+            # excluded / hard-vetoed candidates aren't promoted.
+            source = str(cand.get("source") or "")
+            bonus = SOURCE_TIER_BONUS.get(source, 0)
+            if bonus and base_score > 0:
+                boosted = min(100, base_score + bonus)
+                cand["match_score"] = boosted
+                cand["match_score_details"]["source_tier_bonus"] = {
+                    "source": source,
+                    "bonus": bonus,
+                    "base_score": base_score,
+                }
             return cand
 
         # JobDiva is split into two explicit sources:
@@ -161,12 +203,31 @@ class UnifiedCandidateSearch:
 
         async def emit_candidate(cand, assessment, qualified_counter_key=None):
             cand["screening_summary"] = build_screening(assessment)
+
+            # Warm candidate-side skill embeddings before scoring so the
+            # sync `_fuzzy_term_score` path can read them from the
+            # in-process cache. Off when EMBEDDING_SKILL_MATCH is unset.
+            if EMBEDDING_SKILL_MATCH:
+                try:
+                    cand_terms = self._candidate_skill_terms(cand)
+                    if cand_terms:
+                        await skill_embeddings.warm_terms(cand_terms)
+                except Exception as exc:
+                    logger.warning(
+                        f"candidate-skill embedding warm failed: {exc}"
+                    )
+
             cand = finalize_candidate(cand)
             cid = str(cand.get("candidate_id") or cand.get("id"))
             if cid and cid in seen_ids:
                 return
+            cross_keys = self._dedup_keys(cand)
+            if any(k in seen_dedup_keys for k in cross_keys):
+                return
             if cid:
                 seen_ids.add(cid)
+            for k in cross_keys:
+                seen_dedup_keys.add(k)
             if qualified_counter_key and assessment["passes"]:
                 summary[qualified_counter_key] += 1
             summary["total_candidates"] += 1
@@ -286,6 +347,12 @@ class UnifiedCandidateSearch:
                                         cand.update(self._extract_linkedin_profile_data(full_profile))
                                 except Exception as e:
                                     logger.warning(f"Failed to fetch full profile for LinkedIn candidate {provider_id}: {e}")
+
+                        # PR-B: cheap pre-LLM YOE gate for external sources too.
+                        # Drops candidates whose headline / abstract / resume
+                        # snippet shows fewer years than the configured floor.
+                        if self._candidate_below_min_years_pre_llm(cand, criteria):
+                            return {"status": "failed_filter"}
 
                         assessment = self._filter_assessment(cand, criteria, enforce_years=False)
                         if not assessment["passes"]:
@@ -1163,8 +1230,15 @@ class UnifiedCandidateSearch:
         if not required["city"] and not required["state"]:
             return True, "empty_location_requirement"
 
+        # B1: opt-out for "open to relocation" candidates whose actual location
+        # is unknown or outside the radius. Default keeps them (soft-keep).
+        relocation_flag = bool(candidate.get("open_to_relocation"))
+        include_relocation = bool(getattr(criteria, "include_relocation_candidates", True))
+
         candidate_locs = self._candidate_structured_locations(candidate)
         if not candidate_locs:
+            if relocation_flag and not include_relocation:
+                return False, "relocation_excluded_by_filter"
             # Soft-keep: missing structured location is a data-quality
             # issue, not a reason to drop. Downstream LLM enrichment can
             # re-screen with the full resume text.
@@ -1186,7 +1260,8 @@ class UnifiedCandidateSearch:
                 return True, "candidate_state_unknown_keep"
             return False, "state_mismatch"
 
-        miles = int(getattr(criteria, "within_miles", 25) or 25)
+        # Hard cap 50 mi everywhere (defense-in-depth — UI also caps).
+        miles = min(50, int(getattr(criteria, "within_miles", 25) or 25))
         target = normalize_location_string(criteria.location)
         geocode_failure = False
 
@@ -1201,6 +1276,8 @@ class UnifiedCandidateSearch:
             # Nominatim is best-effort and rate-limited. A geocode miss is
             # not evidence the candidate is outside the radius — soft-keep.
             return True, "geocode_unavailable_keep"
+        if relocation_flag and not include_relocation:
+            return False, "relocation_excluded_by_filter"
         return False, "outside_radius"
 
     def _should_enforce_location(self, criteria: SearchCriteria) -> bool:
@@ -1427,18 +1504,18 @@ class UnifiedCandidateSearch:
         normalized_term = self._normalize_term(term)
         if not normalized_term:
             return 0.0
-            
+
         # Check for strict match first (100%)
         if self._contains_term(profile, term, *collections):
             return 1.0
-            
+
         # Keyword-based partial matching
         term_words = [w for w in normalized_term.split() if len(w) > 2] # ignore tiny words
         if not term_words:
             return 0.0
-            
+
         best_overlap_score = 0.0
-        
+
         # Check against structured collections (higher weight)
         for coll in collections:
             for item in profile.get(coll, []):
@@ -1450,7 +1527,7 @@ class UnifiedCandidateSearch:
                 overlap = len(intersection) / len(term_words)
                 if overlap > best_overlap_score:
                     best_overlap_score = overlap
-                    
+
         # Check against full text (broad keyword match, lower weight)
         profile_text = profile.get("text", "")
         is_location_only = len(collections) == 1 and collections[0] == "locations"
@@ -1459,8 +1536,83 @@ class UnifiedCandidateSearch:
         else:
             text_matches = sum(1 for word in term_words if word in profile_text)
             text_score = (text_matches / len(term_words)) * 0.35
-        
-        return max(best_overlap_score, text_score)
+
+        # Embedding-cosine augmentation. When EMBEDDING_SKILL_MATCH is on
+        # and the embeddings have been pre-warmed (in `search_candidates`
+        # for the query side and `emit_candidate` for the candidate side),
+        # take the max of keyword score and cosine similarity. Below the
+        # configured threshold the cosine score is treated as 0 so noisy
+        # near-matches don't promote weak candidates. Locations and other
+        # non-skill collections are excluded — embeddings make sense only
+        # for free-form skill / title text.
+        embedding_score = 0.0
+        if EMBEDDING_SKILL_MATCH and not is_location_only:
+            candidate_terms: List[str] = []
+            for coll in collections:
+                for item in profile.get(coll, []) or []:
+                    candidate_terms.append(str(item))
+            if candidate_terms:
+                cosine = skill_embeddings.best_cosine(term, candidate_terms)
+                if cosine >= EMBEDDING_MATCH_THRESHOLD:
+                    embedding_score = cosine
+
+        return max(best_overlap_score, text_score, embedding_score)
+
+    def _criteria_query_terms(self, criteria: SearchCriteria) -> List[str]:
+        """Flat list of every skill / title / company / keyword term in
+        the criteria, used to pre-warm query-side embeddings once per
+        search."""
+        terms: List[str] = []
+        for source in (
+            criteria.title_criteria,
+            criteria.skill_criteria,
+            criteria.resume_match_filters,
+        ):
+            for item in source or []:
+                if isinstance(item, dict):
+                    val = item.get("value")
+                    if val:
+                        terms.append(str(val))
+        for kw in criteria.keywords or []:
+            if kw:
+                terms.append(str(kw))
+        for company in criteria.companies or []:
+            if company:
+                terms.append(str(company))
+        return terms
+
+    def _candidate_skill_terms(self, candidate: Dict[str, Any]) -> List[str]:
+        """Flat list of skill / title / company / cert / education
+        strings on a candidate, used to warm candidate-side embeddings
+        before scoring."""
+        terms: List[str] = []
+        for key in ("title", "headline", "company", "current_company"):
+            val = candidate.get(key)
+            if val:
+                terms.append(str(val))
+        for key in ("skills", "titles", "companies", "education", "certifications"):
+            val = candidate.get(key) or []
+            if isinstance(val, list):
+                for item in val:
+                    if isinstance(item, dict):
+                        for k in ("skill", "name", "value"):
+                            if item.get(k):
+                                terms.append(str(item[k]))
+                                break
+                    elif item:
+                        terms.append(str(item))
+            elif isinstance(val, str) and val:
+                terms.append(val)
+
+        enhanced = candidate.get("enhanced_info") or {}
+        if isinstance(enhanced, dict):
+            for key in ("key_skills", "skills"):
+                val = enhanced.get(key) or []
+                if isinstance(val, list):
+                    for item in val:
+                        if item:
+                            terms.append(str(item))
+        return terms
 
     def _dedupe_terms(self, terms: List[str]) -> List[str]:
         ordered: List[str] = []
@@ -1595,6 +1747,25 @@ class UnifiedCandidateSearch:
                 "location_failure_reason": "non_us_candidate",
             }
 
+        # PR-B: top-level minimum-years-of-experience floor.
+        # `years_of_experience > 0` matters: candidates whose YOE is
+        # unparseable (`0`) are kept and re-checked downstream once the
+        # enriched profile has real data — same soft-keep philosophy as
+        # the location gate. Pre-LLM heuristic enforcement happens in
+        # `_enrich_filtered_jobdiva_candidates` / `_process_external_single`
+        # so most failing candidates never reach this point.
+        min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
+        if min_years > 0:
+            years = float(profile.get("years_of_experience") or 0)
+            if 0 < years < min_years:
+                return {
+                    "passes": False,
+                    "missing": [f"YOE: needs {min_years}+ years (resume shows {int(years)})"],
+                    "matched": self._dedupe_terms(matched),
+                    "excluded": self._dedupe_terms(excluded),
+                    "min_years_failure": True,
+                }
+
         if self._should_enforce_location(criteria):
             location_ok, reason = self._location_match_verdict(candidate, criteria)
             if not location_ok:
@@ -1663,6 +1834,11 @@ class UnifiedCandidateSearch:
         missing_required: List[str] = []
         matched_required_skills: List[str] = []
         score_details: Dict[str, Any] = {}
+        # Hard-veto trigger: any excluded group whose match strength meets
+        # SCORING_EXCLUSION_HARD_VETO_THRESHOLD forces score → 0 regardless
+        # of how strong the rest of the candidate looks. The soft penalty
+        # below still applies for borderline matches.
+        hard_veto_hits: List[str] = []
 
         for dimension in dimensions:
             total_weight = float(dimension["weight"])
@@ -1783,6 +1959,22 @@ class UnifiedCandidateSearch:
                     f"{dimension['label']}: conflicting match on {', '.join(excluded_matches[:2])}"
                 )
 
+                # Hard-veto check: if any excluded group scored above the
+                # configured threshold, mark the candidate for forced-zero
+                # after the dimension loop. We probe per-group rather than
+                # relying on `excluded_matches` (which only reports >0.5
+                # hits) because the threshold may be tighter or looser.
+                if SCORING_EXCLUSION_HARD_VETO_THRESHOLD <= 1.0:
+                    for group in excluded_groups:
+                        strength = self._term_group_score(
+                            profile, group, dimension["collections"]
+                        )
+                        if strength >= SCORING_EXCLUSION_HARD_VETO_THRESHOLD:
+                            hard_veto_hits.append(
+                                f"{dimension['label']}: {self._group_label(group)}"
+                            )
+                            break
+
             if required_groups:
                 missing = [
                     self._group_label(group) for group in required_groups
@@ -1820,7 +2012,18 @@ class UnifiedCandidateSearch:
         if weighted_max > 0:
             score = round(max(0.0, min(100.0, (sum(weighted_scores) / weighted_max) * 100)))
 
-        if score >= 85:
+        score_details["hard_veto"] = {
+            "triggered": bool(hard_veto_hits),
+            "reasons": hard_veto_hits[:3],
+        }
+
+        if hard_veto_hits:
+            score = 0
+            explainability.insert(
+                0,
+                f"Hard exclusion: matches recruiter exclusion rule ({hard_veto_hits[0]})",
+            )
+        elif score >= 85:
             explainability.insert(0, "Excellent rubric and sourcing alignment")
         elif score >= 70:
             explainability.insert(0, "Strong overall fit across active filters")
@@ -1843,8 +2046,69 @@ class UnifiedCandidateSearch:
     def _candidate_satisfies_required_filters(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> bool:
         return self._filter_assessment(candidate, criteria, enforce_years=True)["passes"]
 
+    # PR-B: cheap regex used by the pre-LLM YOE gate. Looks for forms
+    # like "8+ years", "5 years of experience", "10 yrs". Returns the
+    # first integer match, or 0 when nothing parses (caller treats 0 as
+    # "unknown → keep" to avoid penalising candidates with non-standard
+    # phrasing).
+    _YEARS_REGEX = re.compile(
+        r"\b(\d{1,2})\s*\+?\s*(?:years?|yrs?)\b", re.IGNORECASE
+    )
+
+    def _heuristic_years_from_text(self, text: str) -> int:
+        if not text:
+            return 0
+        # Cap input — only the first chunk is searched. Most resumes /
+        # headlines / abstracts surface the years number near the top.
+        sample = str(text)[:1500]
+        best = 0
+        for match in self._YEARS_REGEX.finditer(sample):
+            try:
+                value = int(match.group(1))
+            except ValueError:
+                continue
+            if 0 < value <= 50 and value > best:
+                best = value
+        return best
+
+    def _candidate_below_min_years_pre_llm(
+        self,
+        candidate: Dict[str, Any],
+        criteria: SearchCriteria,
+    ) -> bool:
+        """Cheap regex check before LLM enrichment runs.
+
+        True only when the candidate's headline / abstract / resume_text
+        head contains a parseable years number AND that number is below
+        `criteria.min_experience_years`. Returns False when no number is
+        found (deferred to the post-LLM gate via `_filter_assessment`).
+        """
+        min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
+        if min_years <= 0:
+            return False
+        haystack = " ".join([
+            str(candidate.get("headline") or ""),
+            str(candidate.get("title") or ""),
+            str(candidate.get("abstract") or ""),
+            str(candidate.get("resume_text") or "")[:1500],
+        ])
+        years = self._heuristic_years_from_text(haystack)
+        return 0 < years < min_years
+
     def _collect_sourcing_dimensions(self, criteria: SearchCriteria) -> List[Dict[str, Any]]:
-        """Collect match dimensions for PRE-SCREENING using ONLY Page 5 sourcing filters."""
+        """Collect match dimensions for PRE-SCREENING.
+
+        Uses Page-5 sourcing filters PLUS the non-overlapping subset of
+        Page-4 `resume_match_filters` (Certifications and Education).
+        Lifting cert/edu into pre-screen lets us drop candidates that
+        will fail the rubric anyway *before* paying for LLM enrichment;
+        the audit estimated 30-50% of enrichment cost on cert-heavy
+        roles was wasted on candidates that would later get filtered.
+
+        Skill / title / company / domain / location filters are NOT
+        lifted — they overlap with the existing pre-screen dimensions
+        and would double-count.
+        """
         dimensions = {
             "titles": {
                 "label": "Titles",
@@ -1882,6 +2146,25 @@ class UnifiedCandidateSearch:
                 "label": "Keywords",
                 "weight": 5.0,
                 "collections": ["skills", "titles", "companies", "locations"],
+                "required": [],
+                "preferred": [],
+                "excluded": [],
+            },
+            # PR-B: pre-screen rubric dimensions lifted from Step-4
+            # `resume_match_filters` so cert/edu requirements gate the
+            # LLM enrichment instead of being applied only after.
+            "certifications": {
+                "label": "Certifications",
+                "weight": 8.0,
+                "collections": ["certifications", "skills"],
+                "required": [],
+                "preferred": [],
+                "excluded": [],
+            },
+            "education": {
+                "label": "Education",
+                "weight": 6.0,
+                "collections": ["education"],
                 "required": [],
                 "preferred": [],
                 "excluded": [],
@@ -1956,8 +2239,37 @@ class UnifiedCandidateSearch:
         if self._should_enforce_location(criteria):
             add_terms("location", "must", [criteria.location])
 
-        # DO NOT include resume_match_filters here - only for scoring!
-        
+        # PR-B: lift Certifications + Education filters from the Step-4
+        # rubric into pre-screen. Other categories (skill / title /
+        # company / domain / location) overlap with the dimensions
+        # already populated above and would double-count, so they're
+        # left to the post-enrichment scorer.
+        for filter_item in criteria.resume_match_filters or []:
+            if not filter_item.get("active", True):
+                continue
+
+            category = str(filter_item.get("category", "")).lower()
+            if not ("cert" in category or "license" in category or "edu" in category):
+                continue
+
+            term = self._resume_filter_term(filter_item)
+            if not term:
+                continue
+
+            raw_value = str(filter_item.get("value", "")).strip().lower()
+            target_match_type = (
+                "can"
+                if "preferred" in category or raw_value.startswith("can ")
+                else "must"
+            )
+            target_bucket = "education" if "edu" in category else "certifications"
+            add_terms(
+                target_bucket,
+                target_match_type,
+                [term],
+                label=term,
+            )
+
         return list(dimensions.values())
 
     def _collect_scoring_dimensions(self, criteria: SearchCriteria) -> List[Dict[str, Any]]:
@@ -2150,6 +2462,9 @@ class UnifiedCandidateSearch:
             "failed_location": 0,
             "failed_location_geocode": 0,
             "llm_extraction_errors": 0,
+            "pre_llm_skipped_low_score": 0,
+            "pre_llm_skipped_no_required_hit": 0,
+            "pre_llm_skipped_min_years": 0,
         }
 
         async def _process_single(candidate, index):
@@ -2184,6 +2499,21 @@ class UnifiedCandidateSearch:
                     if not candidate.get("resume_text"):
                         self._log_stage("ResumeScreen", f"skipped candidate_id={candidate_id}; no resume text available")
                         return {"status": "no_resume", "candidate": None}
+
+                    # PR-B: cheap pre-LLM YOE gate. Drops candidates whose
+                    # resume text confidently shows fewer years than the
+                    # configured floor, before paying for LLM enrichment.
+                    # Soft-keep if no number is parseable.
+                    if self._candidate_below_min_years_pre_llm(candidate, criteria):
+                        counters["pre_llm_skipped_min_years"] += 1
+                        self._log_stage(
+                            "LLMGate",
+                            "skipping LLM for candidate_id=%s reason=below_min_years_pre_llm threshold=%s" % (
+                                candidate_id,
+                                int(criteria.min_experience_years or 0),
+                            ),
+                        )
+                        return {"status": "failed_filter", "candidate": None}
 
                     if criteria.bypass_screening:
                         self._log_stage("ResumeScreen", f"Bypassing LLM extraction for candidate_id={candidate_id} (auto-sync mode)")
@@ -2220,6 +2550,42 @@ class UnifiedCandidateSearch:
                             assessment["matched"][:5],
                         ),
                     )
+
+                    # Pre-LLM gate to reduce expensive extraction calls on
+                    # obvious low-fit profiles while protecting borderline
+                    # candidates that already show required-term evidence.
+                    pre_score_result = self._score_candidate(candidate, criteria)
+                    pre_score = float(pre_score_result.get("score") or 0)
+                    pre_score_details = pre_score_result.get("score_details") or {}
+                    has_required_hit = any(
+                        isinstance(dim, dict)
+                        and int(dim.get("required_total") or 0) > 0
+                        and int(dim.get("required_matched") or 0) > 0
+                        for dim in pre_score_details.values()
+                    )
+
+                    skip_reason = None
+                    if pre_score < 25:
+                        skip_reason = "low_score"
+                        counters["pre_llm_skipped_low_score"] += 1
+                    elif pre_score < 40 and not has_required_hit:
+                        skip_reason = "no_required_hit"
+                        counters["pre_llm_skipped_no_required_hit"] += 1
+
+                    if skip_reason:
+                        self._log_stage(
+                            "LLMGate",
+                            "skipping LLM for candidate_id=%s pre_score=%.1f reason=%s required_hit=%s" % (
+                                candidate_id,
+                                pre_score,
+                                skip_reason,
+                                has_required_hit,
+                            ),
+                        )
+                        candidate["enhanced_info"] = candidate.get("enhanced_info") or {}
+                        candidate["enhanced_info_status"] = "skipped_pre_llm_gate"
+                        return {"status": "success", "candidate": candidate}
+
                     self._log_stage("LLM", f"STARTING LLM extraction for candidate_id={candidate_id}, resume_id={candidate.get('resume_id') or 'unknown'}")
                     
                     enhanced = await process_jobdiva_candidate(candidate)
@@ -2305,6 +2671,14 @@ class UnifiedCandidateSearch:
                 counters["failed_location"],
                 counters["failed_location_geocode"],
                 counters["llm_extraction_errors"],
+            ),
+        )
+        self._log_stage(
+            "LLMGate",
+            "pre-LLM skips: low_score=%s no_required_hit=%s min_years=%s" % (
+                counters["pre_llm_skipped_low_score"],
+                counters["pre_llm_skipped_no_required_hit"],
+                counters["pre_llm_skipped_min_years"],
             ),
         )
 
@@ -2524,6 +2898,40 @@ class UnifiedCandidateSearch:
         except Exception as e:
             logger.error(f"Exa search failed: {e}")
             return {"candidates": [], "source_type": "LinkedIn-Exa"}
+
+    def _dedup_keys(self, candidate: Dict[str, Any]) -> List[str]:
+        """Cross-source dedup keys for one candidate.
+
+        Each key is namespaced (`email:`, `linkedin:`, `name_loc:`) so two
+        candidates only collide when *one* of them genuinely overlaps —
+        sharing a normalised LinkedIn URL is sufficient even if names
+        differ slightly, and an email-with-`@` gates the email key
+        against catastrophic empty-string collisions.
+        """
+        keys: List[str] = []
+
+        email = str(candidate.get("email") or "").strip().lower()
+        if email and "@" in email:
+            keys.append(f"email:{email}")
+
+        profile_url = str(candidate.get("profile_url") or "").strip().lower()
+        if profile_url and "linkedin.com" in profile_url:
+            normalized = profile_url.split("?", 1)[0].rstrip("/")
+            keys.append(f"linkedin:{normalized}")
+
+        first = str(candidate.get("firstName") or "").strip().lower()
+        last = str(candidate.get("lastName") or "").strip().lower()
+        full_name = f"{first} {last}".strip()
+        if not full_name:
+            full_name = str(candidate.get("name") or "").strip().lower()
+        location_raw = (
+            str(candidate.get("city") or "").strip().lower()
+            or str(candidate.get("location") or "").strip().lower()
+        )
+        if full_name and location_raw and " " in full_name:
+            keys.append(f"name_loc:{full_name}|{location_raw}")
+
+        return keys
 
     def _deduplicate_candidates(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen = {}

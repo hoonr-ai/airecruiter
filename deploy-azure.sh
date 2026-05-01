@@ -318,18 +318,18 @@ else
 fi
 
 # Update API environment with correct domain for CORS
-if [ -f "$API_DIR/.env" ]; then
-    echo -e "${BLUE}🔧 Updating API environment configuration...${NC}"
-    # Update ALLOWED_ORIGINS to include the new domain
-    if grep -q "ALLOWED_ORIGINS=" "$API_DIR/.env"; then
-        sed -i "s#ALLOWED_ORIGINS=.*#ALLOWED_ORIGINS=*,https://$DOMAIN_NAME,http://$DOMAIN_NAME#" "$API_DIR/.env"
-    else
-        echo "ALLOWED_ORIGINS=*,https://$DOMAIN_NAME,http://$DOMAIN_NAME" >> "$API_DIR/.env"
-    fi
-    print_status "API CORS configuration updated"
-else
-    print_warning "API .env file not found, CORS configuration skipped"
-fi
+# if [ -f "$API_DIR/.env" ]; then
+#     echo -e "${BLUE}🔧 Updating API environment configuration...${NC}"
+#     # Update ALLOWED_ORIGINS to include the new domain
+#     if grep -q "ALLOWED_ORIGINS=" "$API_DIR/.env"; then
+#         sed -i "s#ALLOWED_ORIGINS=.*#ALLOWED_ORIGINS=*,https://$DOMAIN_NAME,http://$DOMAIN_NAME#" "$API_DIR/.env"
+#     else
+#         echo "ALLOWED_ORIGINS=*,https://$DOMAIN_NAME,http://$DOMAIN_NAME" >> "$API_DIR/.env"
+#     fi
+#     print_status "API CORS configuration updated"
+# else
+#     print_warning "API .env file not found, CORS configuration skipped"
+# fi
 
 echo -e "${GREEN}🎉 Azure deployment completed successfully!${NC}"
 echo -e "${YELLOW}📋 Deployment Summary:${NC}"

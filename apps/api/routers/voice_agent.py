@@ -81,9 +81,9 @@ async def get_voice_job_context(job_id: str):
 
 class VoiceAgentInterviewWebhook(BaseModel):
     interview_id: str
-    jobdiva_id: str
-    candidate_id: str
     status: str
+    jobdiva_id: Optional[str] = None
+    candidate_id: Optional[str] = None
     hard_filter_status: Optional[str] = None
     total_score: Optional[float] = None
     candidate_score: Optional[float] = None
@@ -109,26 +109,22 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
         }
 
         target_job_id = payload.jobdiva_id
+        target_candidate_id = payload.candidate_id
         
         # Update DB - similar to sync_interview_details
         with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
             with conn.cursor() as cur:
                 # 0. Lookup the real candidate_id and job_id from our audit logs using interview_id
-                # This handles the case where LiveKit sends back its own interview_id as candidate_id
+                # This ensures we don't need LiveKit to send candidate_id or jobdiva_id
                 cur.execute(
                     "SELECT candidate_id, job_id FROM engage_interview_audit WHERE interview_id = %s LIMIT 1",
                     (str(payload.interview_id),)
                 )
                 audit_row = cur.fetchone()
                 
-                target_candidate_id = payload.candidate_id
-                target_job_id = payload.jobdiva_id
-                
                 if audit_row:
                     target_candidate_id = audit_row[0]
-                    # Only override jobdiva_id if it's missing from payload
-                    if not target_job_id or target_job_id == "unknown":
-                        target_job_id = audit_row[1]
+                    target_job_id = audit_row[1]
                     logger.info(f"Webhook: Matched interview {payload.interview_id} to candidate {target_candidate_id} for job {target_job_id}")
                 else:
                     logger.warning(f"Webhook: No audit log found for interview {payload.interview_id}")
@@ -201,21 +197,22 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
             ENGAGE_PASSED_STATUSES = ["passed", "completed", "hired"]
             
         if check_status in [s.lower() for s in ENGAGE_PASSED_STATUSES] and payload.total_score is not None:
-            try:
-                from routers.engagement import _check_and_fire_candidate_passed_notification
-                # interview_id should be parsed to int if it's digit
-                int_id = int(payload.interview_id) if str(payload.interview_id).isdigit() else payload.interview_id
-                asyncio.create_task(
-                    _check_and_fire_candidate_passed_notification(
-                        interview_id=int_id,
-                        detail_payload=detail_payload,
-                        job_id=target_job_id,
-                        candidate_id=payload.candidate_id,
+            if target_job_id and target_candidate_id:
+                try:
+                    from routers.engagement import _check_and_fire_candidate_passed_notification
+                    # interview_id should be parsed to int if it's digit
+                    int_id = int(payload.interview_id) if str(payload.interview_id).isdigit() else payload.interview_id
+                    asyncio.create_task(
+                        _check_and_fire_candidate_passed_notification(
+                            interview_id=int_id,
+                            detail_payload=detail_payload,
+                            job_id=target_job_id,
+                            candidate_id=target_candidate_id,
+                        )
                     )
-                )
-            except (ImportError, AttributeError):
-                import logging
-                logging.getLogger(__name__).warning("Candidate passed but _check_and_fire_candidate_passed_notification is not available in engagement.py. Skipping email.")
+                except (ImportError, AttributeError):
+                    import logging
+                    logging.getLogger(__name__).warning("Candidate passed but _check_and_fire_candidate_passed_notification is not available in engagement.py. Skipping email.")
             
         return {"success": True, "message": "Interview results processed successfully"}
 

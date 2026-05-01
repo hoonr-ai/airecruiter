@@ -240,6 +240,13 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             digits = "".join(ch for ch in radius_match if ch.isdigit())
             if digits:
                 within_miles = int(digits)
+        # Hard cap 50 mi everywhere — clamp + log if a caller exceeds it.
+        if within_miles > 50:
+            logger.warning(
+                "within_miles=%s exceeds 50mi cap; clamping to 50",
+                within_miles,
+            )
+            within_miles = 50
 
         companies = request.companies or []
 
@@ -283,6 +290,11 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             boolean_string=request.boolean_string or "",
             recent_days=request.recent_days,
             require_resume=require_resume,
+            include_relocation_candidates=(
+                True if request.include_relocation_candidates is None
+                else bool(request.include_relocation_candidates)
+            ),
+            min_experience_years=request.min_experience_years,
         )
 
         # Execute unified search as a stream. Persist each candidate to
@@ -378,6 +390,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                     boolean_string=request.boolean_string or "",
                     recent_days=request.recent_days,
                     require_resume=require_resume,
+                    min_experience_years=request.min_experience_years,
                 )
 
                 for candidate in candidates:
@@ -415,6 +428,14 @@ async def get_jobdiva_criteria_status(job_id: str):
 
     Used by Step-5 UI to warn recruiters *before* running sourcing if
     JobDiva's JobAgent criteria are not configured for the given job.
+
+    The underlying JobDiva flag (`criteria_unconfigured` from
+    `_search_with_job_agent`) only fires when JobDiva returns 500 with the
+    literal string "Criteria Not Assigned". In practice that path triggers
+    rarely — most genuinely unconfigured matchers respond 200 with an
+    empty `data` array. We treat "resolved jobdiva_id present but the
+    matcher returned zero candidates" as the same recruiter-actionable
+    state, so the Step-5 modal actually surfaces.
     """
     try:
         result = await jobdiva_service.search_via_job_agent(
@@ -423,12 +444,30 @@ async def get_jobdiva_criteria_status(job_id: str):
             require_resume=False,
         )
 
+        resolved_jobdiva_id = result.get("resolved_jobdiva_id")
+        candidate_count = len(result.get("candidates") or [])
+        explicit_unconfigured = bool(result.get("criteria_unconfigured"))
+
+        # Heuristic: matcher resolved the job but returned no candidates →
+        # criteria are effectively unconfigured (or so narrow they don't
+        # match anyone). Either way, the recruiter should be nudged.
+        empty_matcher_response = (
+            resolved_jobdiva_id is not None and candidate_count == 0
+        )
+
+        criteria_unconfigured = explicit_unconfigured or empty_matcher_response
+
         return {
             "status": "success",
             "job_id": str(job_id),
-            "resolved_jobdiva_id": result.get("resolved_jobdiva_id"),
-            "criteria_unconfigured": bool(result.get("criteria_unconfigured")),
-            "candidate_count_probe": len(result.get("candidates") or []),
+            "resolved_jobdiva_id": resolved_jobdiva_id,
+            "criteria_unconfigured": criteria_unconfigured,
+            "criteria_unconfigured_reason": (
+                "explicit_jobdiva_flag" if explicit_unconfigured
+                else "empty_matcher_response" if empty_matcher_response
+                else None
+            ),
+            "candidate_count_probe": candidate_count,
         }
     except Exception as e:
         logger.error(f"criteria-status check failed for job {job_id}: {e}", exc_info=True)
@@ -819,7 +858,7 @@ class RefreshResumeMatchRequest(BaseModel):
     source: Optional[str] = None
 
 
-@router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id}/refresh-resume-match")
+@router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/refresh-resume-match")
 async def refresh_candidate_resume_match(
     job_id_or_ref: str,
     candidate_id: str,
@@ -2141,7 +2180,7 @@ async def enrich_candidate_contact(candidate_id: str, request: EnrichCandidateCo
     return await _enrich_candidate_contact_impl(candidate_id, request)
 
 
-@router.patch("/candidates/{candidate_id}/phone")
+@router.patch("/candidates/{candidate_id:path}/phone")
 async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhoneRequest):
     normalised = _normalise_phone(request.phone)
     digit_count = sum(1 for ch in normalised if ch.isdigit())
@@ -2282,7 +2321,7 @@ async def fetch_enhanced_candidates(request: Dict[str, str]):
         print(f"❌ Enhanced fetch error: {e}")
         return {"status": "error", "candidates": [], "message": str(e)}
 
-@router.post("/candidates/{candidate_id}/update-resume")
+@router.post("/candidates/{candidate_id:path}/update-resume")
 async def update_candidate_resume(candidate_id: str):
     """Update resume text for an existing candidate using enhanced JobDiva integration."""
     try:
@@ -2305,7 +2344,7 @@ async def update_candidate_resume(candidate_id: str):
         logger.error(f"Error updating resume for candidate {candidate_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/candidates/{candidate_id}/resume")
+@router.get("/candidates/{candidate_id:path}/resume")
 async def get_candidate_resume(candidate_id: str):
     """
     Fetch individual candidate resume by candidate ID from JobDiva.
@@ -2400,7 +2439,7 @@ async def analyze_candidates(request: CandidateAnalysisRequest):
 # ---------------------------------------------------------------------------
 # Candidate Evaluation Report
 # ---------------------------------------------------------------------------
-@router.get("/candidates/{candidate_id}/evaluation-report")
+@router.get("/candidates/{candidate_id:path}/evaluation-report")
 async def get_candidate_evaluation_report(
     candidate_id: str,
     job_id: Optional[str] = Query(None, description="Job ID or JobDiva ID"),
@@ -2732,7 +2771,7 @@ async def get_candidate_evaluation_report(
     except Exception as e:
         logger.error(f"evaluation-report failed for {candidate_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-@router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id}/feedback")
+@router.post("/jobs/{job_id_or_ref}/candidates/{candidate_id:path}/feedback")
 async def save_candidate_feedback(
     job_id_or_ref: str,
     candidate_id: str,
