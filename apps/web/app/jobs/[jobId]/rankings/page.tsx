@@ -157,7 +157,7 @@ export default function CandidateRankingsPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ feedback_type: 'Submit' })
         });
-        
+
         if (response.ok) {
           setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
         } else {
@@ -182,12 +182,12 @@ export default function CandidateRankingsPage() {
         const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates/${actionCandidateId}/feedback`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
+          body: JSON.stringify({
             feedback_type: 'Reject',
             reason: rejectReason
           })
         });
-        
+
         if (response.ok) {
           setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
         } else {
@@ -311,68 +311,7 @@ export default function CandidateRankingsPage() {
     return { label, color: "#64748b" };
   };
 
-  const syncInterviewDetails = async (rows: Candidate[]): Promise<Candidate[]> => {
-    const interviewIds = Array.from(
-      new Set(
-        rows
-          .map((c) => deriveInterviewId(c))
-          .filter((id): id is string => Boolean(id))
-          .map((id) => Number.parseInt(id, 10))
-          .filter((n) => Number.isFinite(n) && n > 0)
-      )
-    );
 
-    if (!interviewIds.length) return rows;
-
-    try {
-      const res = await fetch(`${API_BASE}/api/v1/engagement/interviews/details-sync`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ interview_ids: interviewIds }),
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok || !Array.isArray(payload?.results)) {
-        return rows;
-      }
-
-      const detailByInterviewId = new Map<string, Record<string, unknown>>();
-      for (const item of payload.results) {
-        const iid = String(item?.interview_id || "").trim();
-        if (!iid || !item?.success) continue;
-        detailByInterviewId.set(iid, item as Record<string, unknown>);
-      }
-
-      return rows.map((c) => {
-        const iid = deriveInterviewId(c);
-        if (!iid) return c;
-
-        const detail = detailByInterviewId.get(String(Number.parseInt(iid, 10)) || iid) || detailByInterviewId.get(iid);
-        if (!detail) return c;
-
-        const interview = (detail.detail as Record<string, unknown> | undefined)?.interview as Record<string, unknown> | undefined;
-        const nextStatus = String(interview?.status || detail.status || c.engage_status || "").trim();
-        const scoreRaw = interview?.overall_score ?? detail.overall_score;
-        const score = Number(scoreRaw);
-        const completedAt = interview?.completed_at || detail.completed_at || c.data?.engage_completed_at || null;
-
-        return {
-          ...c,
-          engage_status: nextStatus || c.engage_status,
-          engage_score: Number.isFinite(score) ? score : c.engage_score,
-          data: {
-            ...(c.data || {}),
-            engage_interview_id: iid,
-            ...(nextStatus ? { engage_status: nextStatus } : {}),
-            ...(Number.isFinite(score) ? { engage_score: score } : {}),
-            ...(completedAt ? { engage_completed_at: completedAt } : {}),
-          },
-        };
-      });
-    } catch (error) {
-      console.warn("Failed to sync interview details", error);
-      return rows;
-    }
-  };
 
   const availabilityPillClasses = (raw: string | null): string => {
     if (!raw) return "text-slate-500";
@@ -979,8 +918,7 @@ export default function CandidateRankingsPage() {
           const totalB = (b.match_score || b.resume_match_percentage || 0);
           return totalB - totalA;
         });
-        const synced = await syncInterviewDetails(sorted as Candidate[]);
-        setCandidates(synced);
+        setCandidates(sorted as Candidate[]);
 
         // EXTRA FALLBACK: If job title is still Unknown, borrow from candidates
         setJob(prev => {
@@ -1369,7 +1307,7 @@ export default function CandidateRankingsPage() {
                       </div>
                     </button>
                   </TableHead>
-                   <TableHead className="w-[120px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                  <TableHead className="w-[120px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
                     <div className="flex items-center justify-between w-full h-full px-1">
                       <div className="w-[10px]" />
                       <span className="flex-1 text-center leading-tight">SCREEN STATUS</span>
@@ -1585,40 +1523,40 @@ export default function CandidateRankingsPage() {
                             const rawStatus = String(candidate.engage_status || candidate.data?.engage_status || "").trim().toLowerCase();
                             // If in outreach phase, show the timeline
                             if (rawStatus === "initiated" || rawStatus === "sent" || rawStatus === "sms sent") {
-                                return (
-                                  <div className="flex flex-col items-center gap-1 py-1">
-                                    <div className="flex items-center gap-1 mb-1">
-                                      <div className="w-1.5 h-1.5 rounded-full bg-yellow-500 animate-pulse" />
-                                      <span className="text-[10px] font-bold text-yellow-600 tracking-wide">Initiated</span>
-                                    </div>
-                                    {(candidate.engage_created_at || candidate.data?.engage_created_at) && (
-                                      <div className="flex flex-col items-center gap-0.5 px-2 py-1 rounded-lg bg-slate-50 border border-slate-100">
-                                        <div className="text-[10px] text-emerald-600 flex items-center gap-1 font-semibold" title="Outreach initiated">
-                                          <Mail className="w-2.5 h-2.5" /> {formatDate(candidate.engage_created_at || candidate.data?.engage_created_at)}
-                                        </div>
-                                        {(() => {
-                                          const baseTime = candidate.engage_created_at || candidate.data?.engage_created_at;
-                                          const phoneTime = new Date(new Date(baseTime).getTime() + 30 * 60000);
-                                          const isActive = new Date() > phoneTime;
-                                          return (
-                                            <div
-                                              className={`text-[10px] flex items-center gap-1 font-semibold ${isActive ? 'text-blue-600' : 'text-slate-400'}`}
-                                              title={isActive ? "Follow-up triggered" : "Scheduled follow-up"}
-                                            >
-                                              <Phone className="w-2.5 h-2.5" /> {formatDate(phoneTime.toISOString())}
-                                            </div>
-                                          );
-                                        })()}
-                                      </div>
-                                    )}
+                              return (
+                                <div className="flex flex-col items-center gap-1 py-1">
+                                  <div className="flex items-center gap-1 mb-1">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-yellow-500 animate-pulse" />
+                                    <span className="text-[10px] font-bold text-yellow-600 tracking-wide">Initiated</span>
                                   </div>
-                                );
+                                  {(candidate.engage_created_at || candidate.data?.engage_created_at) && (
+                                    <div className="flex flex-col items-center gap-0.5 px-2 py-1 rounded-lg bg-slate-50 border border-slate-100">
+                                      <div className="text-[10px] text-emerald-600 flex items-center gap-1 font-semibold" title="Outreach initiated">
+                                        <Mail className="w-2.5 h-2.5" /> {formatDate(candidate.engage_created_at || candidate.data?.engage_created_at)}
+                                      </div>
+                                      {(() => {
+                                        const baseTime = candidate.engage_created_at || candidate.data?.engage_created_at;
+                                        const phoneTime = new Date(new Date(baseTime).getTime() + 30 * 60000);
+                                        const isActive = new Date() > phoneTime;
+                                        return (
+                                          <div
+                                            className={`text-[10px] flex items-center gap-1 font-semibold ${isActive ? 'text-blue-600' : 'text-slate-400'}`}
+                                            title={isActive ? "Follow-up triggered" : "Scheduled follow-up"}
+                                          >
+                                            <Phone className="w-2.5 h-2.5" /> {formatDate(phoneTime.toISOString())}
+                                          </div>
+                                        );
+                                      })()}
+                                    </div>
+                                  )}
+                                </div>
+                              );
                             }
                             const { label, color } = normalizeInterviewStatus(candidate);
                             return (
                               <div className="flex justify-center items-center w-full">
-                                <span 
-                                  className="px-2.5 py-0.5 rounded-full text-[10px] font-bold border" 
+                                <span
+                                  className="px-2.5 py-0.5 rounded-full text-[10px] font-bold border"
                                   style={{ backgroundColor: `${color}08`, color, borderColor: `${color}30` }}
                                 >
                                   {label}
@@ -1633,8 +1571,8 @@ export default function CandidateRankingsPage() {
                             const { label, color } = normalizeHardFilterStatus(candidate);
                             return (
                               <div className="flex justify-center items-center w-full">
-                                <span 
-                                  className="px-2.5 py-0.5 rounded-full text-[10px] font-bold border" 
+                                <span
+                                  className="px-2.5 py-0.5 rounded-full text-[10px] font-bold border"
                                   style={{ backgroundColor: `${color}08`, color, borderColor: `${color}30` }}
                                 >
                                   {label}
@@ -1650,7 +1588,7 @@ export default function CandidateRankingsPage() {
                             const tScore = candidate.engage_total_score || candidate.engage_score;
                             if (cScore !== undefined && tScore !== undefined) {
                               return (
-                                <span 
+                                <span
                                   className="text-center w-full font-bold text-slate-900 bg-slate-50/50 px-2 py-1 rounded border border-slate-100 inline-block mx-auto"
                                 >
                                   {cScore}<span className="text-slate-400 font-normal mx-0.5">/</span>{tScore}
@@ -1659,7 +1597,7 @@ export default function CandidateRankingsPage() {
                             }
                             if (tScore) {
                               return (
-                                <span 
+                                <span
                                   className="text-center w-full font-bold text-slate-900"
                                 >
                                   {tScore}
@@ -1676,7 +1614,7 @@ export default function CandidateRankingsPage() {
 
                         <TableCell className="text-center font-bold text-indigo-700 text-[13px] align-middle py-2 bg-indigo-50/10 group-hover:bg-indigo-50/30 transition-colors">
                           {totalScore ? (
-                            <span 
+                            <span
                               className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-100 shadow-sm"
                             >
                               {totalScore}
@@ -1727,7 +1665,7 @@ export default function CandidateRankingsPage() {
 
                         <TableCell className="text-center pr-4 pl-4 border-l border-[#e2e8f0] py-2 align-middle transition-colors group-hover:bg-indigo-50/5">
                           <div className="flex flex-col items-center gap-1.5">
-                            <select 
+                            <select
                               className="w-full text-[11px] font-medium text-[#334155] bg-white border border-[#cbd5e1] rounded h-7 px-1 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                               value={feedbacks[candidate.id]?.startsWith("Reject") ? "Reject" : feedbacks[candidate.id] || ""}
                               onChange={(e) => {
@@ -1839,7 +1777,7 @@ export default function CandidateRankingsPage() {
               <>
                 <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
                   <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
-                    <ExternalLink className="w-5 h-5 text-indigo-600" /> 
+                    <ExternalLink className="w-5 h-5 text-indigo-600" />
                     Submit to JobDiva
                   </h3>
                   <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
@@ -1869,8 +1807,8 @@ export default function CandidateRankingsPage() {
                 </div>
                 <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
                   <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
-                  <Button 
-                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold" 
+                  <Button
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold"
                     onClick={handleConfirmSubmit}
                     disabled={syncingCandidateId === actionCandidateId}
                   >
@@ -1893,7 +1831,7 @@ export default function CandidateRankingsPage() {
                   </p>
                   <div className="space-y-2">
                     <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
-                    <select 
+                    <select
                       className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50"
                       value={rejectReason}
                       onChange={e => setRejectReason(e.target.value)}
@@ -1925,9 +1863,9 @@ export default function CandidateRankingsPage() {
                 </div>
                 <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
                   <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
-                  <Button 
-                    variant="destructive" 
-                    onClick={handleConfirmReject} 
+                  <Button
+                    variant="destructive"
+                    onClick={handleConfirmReject}
                     disabled={!rejectReason || syncingCandidateId === actionCandidateId}
                     className="font-bold"
                   >
@@ -1943,10 +1881,10 @@ export default function CandidateRankingsPage() {
         <div className="fixed right-4 top-4 z-[90]">
           <div
             className={`rounded-lg border px-3 py-2 text-[12px] font-semibold shadow-md transition-all ${toast.type === "success"
-                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                : toast.type === "error"
-                  ? "border-rose-200 bg-rose-50 text-rose-700"
-                  : "border-slate-200 bg-white text-slate-700"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+              : toast.type === "error"
+                ? "border-rose-200 bg-rose-50 text-rose-700"
+                : "border-slate-200 bg-white text-slate-700"
               }`}
           >
             {toast.message}
