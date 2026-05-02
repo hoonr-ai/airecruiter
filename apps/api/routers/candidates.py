@@ -1272,6 +1272,7 @@ async def save_candidates(request: CandidatesSaveRequest):
 class UpdateCandidatePhoneRequest(BaseModel):
     phone: str
     jobdiva_id: Optional[str] = None
+    candidate_id: Optional[str] = None
 
 
 class EnrichCandidateContactRequest(BaseModel):
@@ -2182,16 +2183,18 @@ async def enrich_candidate_contact(candidate_id: str, request: EnrichCandidateCo
 
 @router.patch("/candidates/{candidate_id:path}/phone")
 async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhoneRequest):
+    actual_candidate_id = request.candidate_id or candidate_id
+    
+    import urllib.parse
+    actual_candidate_id = urllib.parse.unquote(actual_candidate_id)
+    
     normalised = _normalise_phone(request.phone)
     digit_count = sum(1 for ch in normalised if ch.isdigit())
     if digit_count < 7:
         raise HTTPException(status_code=400, detail="Phone number must contain at least 7 digits")
 
-    import urllib.parse
-    candidate_id = urllib.parse.unquote(candidate_id)
-    
     try:
-        logger.info(f"update_candidate_phone called with candidate_id='{candidate_id}', request.jobdiva_id='{request.jobdiva_id}', phone='{normalised}'")
+        logger.info(f"update_candidate_phone called with candidate_id='{actual_candidate_id}', request.jobdiva_id='{request.jobdiva_id}', phone='{normalised}'")
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
@@ -2202,7 +2205,7 @@ async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhon
                         SET phone = %s, updated_at = CURRENT_TIMESTAMP
                         WHERE candidate_id = %s AND jobdiva_id = %s
                         """,
-                        (normalised, candidate_id, request.jobdiva_id),
+                        (normalised, actual_candidate_id, request.jobdiva_id),
                     )
                 else:
                     cur.execute(
@@ -2211,7 +2214,7 @@ async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhon
                         SET phone = %s, updated_at = CURRENT_TIMESTAMP
                         WHERE candidate_id = %s
                         """,
-                        (normalised, candidate_id),
+                        (normalised, actual_candidate_id),
                     )
                 updated = cur.rowcount
             conn.commit()
