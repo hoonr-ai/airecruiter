@@ -1763,12 +1763,14 @@ export default function CandidateRankingsPage() {
           
           if (picked && picked !== cand.phone) {
             try {
+              // Passing candidate_id in the body bypasses strict URL path decoders on QA
               await fetch(`${API_BASE}/candidates/${encodeURIComponent(cid)}/phone`, {
                 method: "PATCH",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ 
                   phone: picked,
-                  jobdiva_id: cand.jobdiva_id || String(jobId || "") 
+                  jobdiva_id: cand.jobdiva_id || String(jobId || ""),
+                  candidate_id: cid
                 }),
               });
             } catch (err) {
