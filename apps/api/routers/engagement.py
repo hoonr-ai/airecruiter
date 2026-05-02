@@ -266,6 +266,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         if rubric:
             rubric.pop("screen_questions", None)
             rubric.pop("soft_skills", None)
+            rubric.pop("bot_introduction", None)
 
         # Build JD block with structured context and rubric
         if job_row:
@@ -312,7 +313,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         payload = {
             "resumes": final_resumes,
             "jd": jd,
-            "company_intro": job_row.get("bot_introduction", "") if job_row else "",
+            "company_intro": (job_row.get("bot_introduction") or "") if job_row else "",
             "interview_duration": "20-25"
         }
 

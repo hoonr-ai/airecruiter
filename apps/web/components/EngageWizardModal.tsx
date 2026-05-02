@@ -147,7 +147,6 @@ function buildPayload(raw: string, state: WizardState): string {
     const updatedResume = {
       ...resume,
       name: state.candidate.name,
-      candidate_name: state.candidate.name,
       email: state.candidate.email,
       phone: state.candidate.phone,
       summary: state.candidate.summary,
@@ -184,7 +183,6 @@ function buildPayload(raw: string, state: WizardState): string {
     return JSON.stringify(
       {
         ...rest,
-        phone_number: state.candidate.phone,
         resumes: [updatedResume],
         jd: updatedJd,
         interview_duration: state.job.interview_duration,
