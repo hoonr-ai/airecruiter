@@ -2187,7 +2187,11 @@ async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhon
     if digit_count < 7:
         raise HTTPException(status_code=400, detail="Phone number must contain at least 7 digits")
 
+    import urllib.parse
+    candidate_id = urllib.parse.unquote(candidate_id)
+    
     try:
+        logger.info(f"update_candidate_phone called with candidate_id='{candidate_id}', request.jobdiva_id='{request.jobdiva_id}', phone='{normalised}'")
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
