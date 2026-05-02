@@ -298,9 +298,16 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         # Build resumes list using raw_resume_text
         final_resumes = []
         for r in resumes:
+            candidate_name = r.get("name") or "Unknown"
+            candidate_email = r.get("email") or ""
+            # LiveKit DB has chk_interviews_email_format — empty string fails the constraint.
+            # If email is missing, generate a safe placeholder so the interview can still be created.
+            if not candidate_email:
+                safe_name = candidate_name.lower().replace(" ", ".").replace(",", "")
+                candidate_email = f"{safe_name}@noemail.pair.ai"
             final_resumes.append({
-                "name": r.get("name"),
-                "email": r.get("email"),
+                "name": candidate_name,
+                "email": candidate_email,
                 "phone": r.get("phone"),
                 "raw_resume_text": r.get("experience", ""), # LiveKit expects raw_resume_text
                 "experience": r.get("experience", ""),      # Frontend expects experience for auto-population
