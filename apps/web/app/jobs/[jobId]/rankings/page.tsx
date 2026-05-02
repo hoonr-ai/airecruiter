@@ -1760,6 +1760,22 @@ export default function CandidateRankingsPage() {
           if (!cand) return;
           const cid = String(cand.candidate_id || cand.id);
           const picked = phones[cid] || cand.phone || "";
+          
+          if (picked && picked !== cand.phone) {
+            try {
+              await fetch(`/api/candidates/${encodeURIComponent(cid)}/phone`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ 
+                  phone: picked,
+                  jobdiva_id: cand.jobdiva_id || String(jobId || "") 
+                }),
+              });
+            } catch (err) {
+              console.error("Failed to save phone number:", err);
+            }
+          }
+
           const next = { ...cand, phone: picked };
           setCandidates(prev => prev.map(c => String(c.candidate_id || c.id) === cid ? next : c));
           await runScreen(next);
