@@ -1763,7 +1763,7 @@ export default function CandidateRankingsPage() {
           
           if (picked && picked !== cand.phone) {
             try {
-              await fetch(`/api/candidates/${encodeURIComponent(cid)}/phone`, {
+              await fetch(`${API_BASE}/candidates/${encodeURIComponent(cid)}/phone`, {
                 method: "PATCH",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ 
