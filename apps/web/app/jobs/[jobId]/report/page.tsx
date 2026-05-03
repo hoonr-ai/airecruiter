@@ -78,7 +78,7 @@ export default function CandidateEvaluationReportPage() {
     async function fetchReport() {
       try {
         setIsLoading(true);
-        const res = await fetch(`${API_BASE}/candidates/${encodeURIComponent(candidateId as string)}/evaluation-report?job_id=${jobId}`);
+        const res = await fetch(`${API_BASE}/candidates/evaluation-report?candidate_id=${encodeURIComponent(candidateId as string)}&job_id=${jobId}`);
         if (!res.ok) throw new Error("Failed to fetch evaluation report");
         const json = await res.json();
         setData(json);
