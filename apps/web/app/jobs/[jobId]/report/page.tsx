@@ -52,6 +52,7 @@ interface EvaluationReport {
     engage_score: number | null;
     engage_status: string;
     hard_filter_status: string;
+    total_fit_score: number;
   };
   job: {
     job_id: string;
