@@ -2603,10 +2603,38 @@ async def get_candidate_evaluation_report(
             return default
 
         resume_match_score = float(cand_row.get("resume_match_percentage") or 0)
-        engage_score       = float(data_blob.get("engage_score") or 0)
+        
+        # Prioritize candidate_score from audit_row response (webhook source)
+        engage_score = data_blob.get("engage_score")
+        if engage_score is not None:
+            engage_score = float(engage_score)
+            
+        if audit_row and audit_row.get("response"):
+            resp = audit_row["response"]
+            if isinstance(resp, str):
+                try: resp = json.loads(resp)
+                except: resp = {}
+            if isinstance(resp, dict):
+                aud_score = resp.get("candidate_score") or resp.get("total_score")
+                if aud_score is not None:
+                    engage_score = float(aud_score)
+
         engage_total_score = float(data_blob.get("engage_total_score") or 0)
         engage_status      = str(data_blob.get("engage_status") or "")
+        if audit_row and audit_row.get("status"):
+            engage_status = str(audit_row["status"])
+            
         hard_filter_status = str(data_blob.get("engage_hard_filter_status") or "")
+        if audit_row and audit_row.get("response"):
+            resp = audit_row["response"]
+            if isinstance(resp, str):
+                try: resp = json.loads(resp)
+                except: resp = {}
+            if isinstance(resp, dict):
+                # Check for hard filter status in the webhook response
+                aud_hf = resp.get("hard_filter_status")
+                if aud_hf:
+                    hard_filter_status = str(aud_hf)
         engage_interview_id = str(data_blob.get("engage_interview_id") or (audit_row or {}).get("interview_id") or "")
         engage_completed_at = data_blob.get("engage_completed_at") or (audit_row or {}).get("updated_at") or None
         engage_created_at   = (audit_row or {}).get("created_at") or None
@@ -2726,7 +2754,9 @@ async def get_candidate_evaluation_report(
                 # Refresh scores from live PAIR data
                 if isinstance(interview_data, dict):
                     iv = interview_data.get("interview") or interview_data
-                    if iv.get("overall_score") is not None:
+                    if iv.get("candidate_score") is not None:
+                        engage_score = float(iv["candidate_score"])
+                    elif iv.get("overall_score") is not None:
                         engage_score = float(iv["overall_score"])
                     if iv.get("hard_filter_overall") or iv.get("hard_filter_status"):
                         hard_filter_status = str(iv.get("hard_filter_overall") or iv.get("hard_filter_status") or hard_filter_status)
@@ -2736,6 +2766,22 @@ async def get_candidate_evaluation_report(
                         engage_completed_at = iv["completed_at"]
             except Exception as pair_err:
                 logger.warning(f"PAIR data fetch failed for interview {engage_interview_id}: {pair_err}")
+
+        # Inject audit data if available
+        if audit_row:
+            if not pair_data: pair_data = {}
+            if audit_row.get("payload"):
+                try:
+                    pld = audit_row["payload"]
+                    if isinstance(pld, str): pld = json.loads(pld)
+                    pair_data["audit_payload"] = pld
+                except: pass
+            if audit_row.get("response"):
+                try:
+                    resp = audit_row["response"]
+                    if isinstance(resp, str): resp = json.loads(resp)
+                    pair_data["audit_response"] = resp
+                except: pass
 
         # ----------------------------------------------------------------
         # Compose final report
@@ -2757,15 +2803,35 @@ async def get_candidate_evaluation_report(
             "company_experience": _jl(data_blob.get("company_experience"), []),
             "education":       _jl(data_blob.get("education"), []),
             "certifications":  _jl(data_blob.get("certifications"), []),
+            "feedback_type":   data_blob.get("feedback_type"),
+            "feedback_reason": data_blob.get("feedback_reason"),
+            "feedback_at":     data_blob.get("feedback_at"),
         }
+
+        # Normalize engage_score to a 100-point scale if total_score is available
+        display_engage_score = None
+        if engage_score is not None:
+            if engage_total_score and engage_total_score > 0:
+                # Calculate percentage: (score / total) * 100
+                display_engage_score = round((engage_score / engage_total_score) * 100, 1)
+            else:
+                display_engage_score = engage_score
+
+        # Calculate Total Fit Score: Average of only COMPLETED stages
+        completed_scores = [s for s in [resume_match_score, display_engage_score] if s is not None]
+        if completed_scores:
+            total_fit_score = sum(completed_scores) / len(completed_scores)
+        else:
+            total_fit_score = 0
 
         scores = {
             "resume_match_score":    resume_match_score,
             "resume_match_status":   str(data_blob.get("resume_matching_status") or ("done" if resume_match_score > 0 else "pending")),
-            "engage_score":          engage_score,
-            "engage_total_score":    engage_total_score,
+            "engage_score":          display_engage_score,
+            "engage_total_score":    100 if engage_total_score else None,
             "engage_status":         engage_status,
             "hard_filter_status":    hard_filter_status,
+            "total_fit_score":       round(total_fit_score, 1),
             "engage_interview_id":   engage_interview_id,
             "engage_completed_at":   str(engage_completed_at) if engage_completed_at else None,
             "engage_created_at":     str(engage_created_at) if engage_created_at else None,
