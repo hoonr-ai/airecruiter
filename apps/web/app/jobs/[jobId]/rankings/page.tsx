@@ -717,10 +717,8 @@ export default function CandidateRankingsPage() {
           return c;
         }));
 
-        setTimeout(() => {
-          setIsScreenModalOpen(false);
-          fetchData();
-        }, 1200);
+        // Refresh data in background while modal shows success
+        fetchData();
       } else {
         setScreenError(data.message || "Screen API returned an error");
       }
