@@ -233,10 +233,10 @@ function StepIndicator({ current }: { current: number }) {
                 {/* Circle */}
                 <div
                   className={`w-9 h-9 shrink-0 rounded-full flex items-center justify-center border-2 transition-all duration-200 z-10 ${isActive
-                      ? "bg-indigo-600 border-indigo-600 text-white shadow-md shadow-indigo-200"
-                      : isDone
-                        ? "bg-indigo-100 border-indigo-300 text-indigo-600"
-                        : "bg-slate-50 border-slate-200 text-slate-400"
+                    ? "bg-indigo-600 border-indigo-600 text-white shadow-md shadow-indigo-200"
+                    : isDone
+                      ? "bg-indigo-100 border-indigo-300 text-indigo-600"
+                      : "bg-slate-50 border-slate-200 text-slate-400"
                     }`}
                 >
                   <Icon className="w-4 h-4" />
@@ -249,10 +249,10 @@ function StepIndicator({ current }: { current: number }) {
               {/* Label */}
               <span
                 className={`text-[11px] font-medium whitespace-nowrap mt-1 ${isActive
-                    ? "text-indigo-700"
-                    : isDone
-                      ? "text-indigo-500"
-                      : "text-slate-400"
+                  ? "text-indigo-700"
+                  : isDone
+                    ? "text-indigo-500"
+                    : "text-slate-400"
                   }`}
               >
                 {step.label}
@@ -460,8 +460,8 @@ function Step3Questions({
               <button
                 onClick={() => update(idx, { is_default: !q.is_default })}
                 className={`text-[11px] px-2.5 py-1 rounded-full border font-medium transition-colors ${q.is_default
-                    ? "bg-indigo-100 text-indigo-700 border-indigo-200"
-                    : "bg-slate-100 text-slate-500 border-slate-200"
+                  ? "bg-indigo-100 text-indigo-700 border-indigo-200"
+                  : "bg-slate-100 text-slate-500 border-slate-200"
                   }`}
               >
                 {q.is_default ? "Default ✓" : "Not Default"}
@@ -608,11 +608,11 @@ function Step4Review({
           </span>
         </div>
         {questions.length > 0 ? (
-          <div className="space-y-1.5 max-h-[120px] overflow-y-auto pr-1">
+          <div className="space-y-2 max-h-[320px] overflow-y-auto pr-1">
             {questions.map((q, idx) => (
               <div key={idx} className="flex items-start gap-2">
                 <span className="text-[11px] font-bold text-slate-400 mt-0.5 shrink-0 w-4 text-right">{idx + 1}.</span>
-                <p className="text-[12px] text-slate-600 leading-relaxed line-clamp-1">{q.question_text}</p>
+                <p className="text-[12px] text-slate-600 leading-relaxed">{q.question_text}</p>
               </div>
             ))}
           </div>
