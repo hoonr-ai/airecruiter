@@ -652,7 +652,7 @@ export function EngageWizardModal({
 
   // Parse payload when modal opens
   useEffect(() => {
-    if (open && initialPayload) {
+    if (open) {
       const parsed = parsePayload(initialPayload);
       setWizardState(parsed);
       setStep(1);
@@ -660,7 +660,8 @@ export function EngageWizardModal({
       setShowSuccess(false);
       setSuccessInterviewId(null);
     }
-  }, [open, initialPayload]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]); // Only run when modal opens, not when initialPayload updates while open
 
   // Rebuild JSON whenever wizard state changes
   useEffect(() => {
