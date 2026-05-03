@@ -26,11 +26,9 @@ import {
   FileJson,
   ChevronRight,
   ChevronLeft,
-  ChevronDown,
   Plus,
   Trash2,
   X,
-  Copy,
   Check,
   Send,
   Loader2,
@@ -38,7 +36,6 @@ import {
   Phone,
   MapPin,
   Clock,
-  Code2,
 } from "lucide-react";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -624,42 +621,6 @@ function Step4Review({
         )}
       </div>
 
-      {/* ── Raw JSON (collapsible) ── */}
-      <div className="border border-slate-200 rounded-xl overflow-hidden">
-        <div
-          onClick={() => setShowJson(!showJson)}
-          className="w-full flex items-center justify-between px-4 py-2.5 bg-slate-50 hover:bg-slate-100 transition-colors text-left cursor-pointer"
-          role="button"
-        >
-          <div className="flex items-center gap-2">
-            <Code2 className="w-3.5 h-3.5 text-slate-400" />
-            <span className="text-[12px] font-medium text-slate-600">Raw JSON Payload</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); handleCopy(); }} className="gap-1.5 text-slate-400 h-6 text-[11px] px-2 hover:text-slate-700">
-              {copied ? (
-                <><Check className="w-3 h-3 text-emerald-500" /> Copied</>
-              ) : (
-                <><Copy className="w-3 h-3" /> Copy</>
-              )}
-            </Button>
-            <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform duration-200 ${showJson ? "rotate-180" : ""}`} />
-          </div>
-        </div>
-        {showJson && (
-          <div className="relative">
-            <div className="absolute top-0 left-0 right-0 h-7 bg-slate-800 flex items-center px-3 gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-red-400" />
-              <span className="w-2 h-2 rounded-full bg-amber-400" />
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              <span className="text-[10px] text-slate-500 ml-2 font-mono">payload.json</span>
-            </div>
-            <pre className="text-[11px] font-mono bg-slate-900 text-slate-300 overflow-auto max-h-[200px] p-4 pt-10 leading-relaxed whitespace-pre-wrap">
-              {json}
-            </pre>
-          </div>
-        )}
-      </div>
 
       {error && (
         <div className="text-[13px] text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-start gap-2">
