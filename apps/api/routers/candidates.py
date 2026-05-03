@@ -2446,11 +2446,21 @@ async def analyze_candidates(request: CandidateAnalysisRequest):
 # ---------------------------------------------------------------------------
 # Candidate Evaluation Report
 # ---------------------------------------------------------------------------
+@router.get("/candidates/evaluation-report")
 @router.get("/candidates/{candidate_id:path}/evaluation-report")
 async def get_candidate_evaluation_report(
-    candidate_id: str,
+    candidate_id: Optional[str] = None,
     job_id: Optional[str] = Query(None, description="Job ID or JobDiva ID"),
+    # Allow candidate_id to be passed as a query param to bypass URL encoding issues on QA/Prod
+    q_candidate_id: Optional[str] = Query(None, alias="candidate_id"),
 ):
+    """
+    Aggregate a full Candidate Evaluation Report from multiple data sources.
+    Supports candidate_id in the path OR as a query parameter for Exa IDs.
+    """
+    candidate_id = q_candidate_id or candidate_id
+    if not candidate_id:
+        raise HTTPException(status_code=400, detail="candidate_id is required")
     """
     Aggregate a full Candidate Evaluation Report from multiple data sources:
       - sourced_candidates      : basic profile, resume, match scores
