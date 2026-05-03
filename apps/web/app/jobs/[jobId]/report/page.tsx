@@ -71,6 +71,8 @@ interface EvaluationReport {
     evaluation: any;
     transcriptions: any[];
     questions_answers: any[];
+    audit_payload?: any;
+    audit_response?: any;
   };
 }
 
