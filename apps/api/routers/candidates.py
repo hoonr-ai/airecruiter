@@ -2820,6 +2820,10 @@ async def get_candidate_evaluation_report(
         display_engage_score = None
         if engage_score is not None:
             if engage_total_score and engage_total_score > 0:
+                # DEBUG: Log values to a file
+                with open("score_debug.log", "a") as f:
+                    f.write(f"CAND: {candidate_id} | RAW: {engage_score} / {engage_total_score} | STATUS: {engage_status}\n")
+                
                 # Calculate percentage: (score / total) * 100
                 display_engage_score = round((engage_score / engage_total_score) * 100, 1)
             else:
@@ -2843,7 +2847,7 @@ async def get_candidate_evaluation_report(
             "resume_match_status":   str(data_blob.get("resume_matching_status") or ("done" if resume_match_score > 0 else "pending")),
             "engage_score":          display_engage_score,
             "engage_total_score":    100 if engage_total_score else None,
-            "engage_status":         engage_status,
+            "engage_status":         "passed" if engage_status.lower() in ["passed", "completed", "hired"] else ("failed" if engage_status.lower() in ["failed", "rejected"] else ("in_progress" if engage_status.lower() == "in_progress" else "pending")),
             "hard_filter_status":    hard_filter_status,
             "total_fit_score":       round(total_fit_score, 1),
             "engage_interview_id":   engage_interview_id,
