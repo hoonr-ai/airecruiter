@@ -2615,11 +2615,19 @@ async def get_candidate_evaluation_report(
                 try: resp = json.loads(resp)
                 except: resp = {}
             if isinstance(resp, dict):
-                aud_score = resp.get("candidate_score") or resp.get("total_score")
+                # Try candidate_score first, then overall_score (legacy)
+                aud_score = resp.get("candidate_score") or resp.get("overall_score")
                 if aud_score is not None:
                     engage_score = float(aud_score)
+                
+                # Extract total_score for normalization
+                aud_total = resp.get("total_score")
+                if aud_total is not None:
+                    engage_total_score = float(aud_total)
 
-        engage_total_score = float(data_blob.get("engage_total_score") or 0)
+        # Fallback to data_blob for engage_total_score if not found in audit_row
+        if engage_total_score == 0:
+            engage_total_score = float(data_blob.get("engage_total_score") or 0)
         engage_status      = str(data_blob.get("engage_status") or "")
         if audit_row and audit_row.get("status"):
             engage_status = str(audit_row["status"])
@@ -2818,9 +2826,15 @@ async def get_candidate_evaluation_report(
                 display_engage_score = engage_score
 
         # Calculate Total Fit Score: Average of only COMPLETED stages
-        completed_scores = [s for s in [resume_match_score, display_engage_score] if s is not None]
-        if completed_scores:
-            total_fit_score = sum(completed_scores) / len(completed_scores)
+        # Exclude Engage score if it's still in progress or initiated
+        is_engage_done = engage_status.lower() in ["completed", "failed", "passed", "rejected"]
+        
+        scores_to_average = [resume_match_score]
+        if is_engage_done and display_engage_score is not None:
+            scores_to_average.append(display_engage_score)
+            
+        if scores_to_average:
+            total_fit_score = sum(scores_to_average) / len(scores_to_average)
         else:
             total_fit_score = 0
 

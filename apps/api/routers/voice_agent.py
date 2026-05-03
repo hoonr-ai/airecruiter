@@ -100,7 +100,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
         detail_payload = {
             "interview": {
                 "status": payload.status,
-                "overall_score": payload.total_score,  # Map total_score internally
+                "overall_score": payload.candidate_score,  # Map candidate_score internally
                 "candidate_score": payload.candidate_score,
                 "hard_filter_status": payload.hard_filter_status,
                 "completed_at": payload.completed_at
@@ -151,9 +151,9 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     "engage_last_response": detail_payload,
                 }
                 if payload.total_score is not None:
-                    candidate_blob["engage_score"] = payload.total_score
                     candidate_blob["engage_total_score"] = payload.total_score
                 if payload.candidate_score is not None:
+                    candidate_blob["engage_score"] = payload.candidate_score
                     candidate_blob["engage_candidate_score"] = payload.candidate_score
                 if payload.completed_at:
                     candidate_blob["engage_completed_at"] = payload.completed_at
