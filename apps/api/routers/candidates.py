@@ -2850,7 +2850,7 @@ async def get_candidate_evaluation_report(
             "engage_score":          display_engage_score,
             "engage_total_score":    100 if engage_total_score else None,
             "engage_status":         "passed" if engage_status.lower() in ["passed", "completed", "hired"] else ("failed" if engage_status.lower() in ["failed", "rejected"] else ("in_progress" if engage_status.lower() == "in_progress" else "pending")),
-            "hard_filter_status":    hard_filter_status,
+            "hard_filter_status":    None if engage_status.lower() == "in_progress" else hard_filter_status,
             "total_fit_score":       round(total_fit_score, 1),
             "engage_interview_id":   engage_interview_id,
             "engage_completed_at":   str(engage_completed_at) if engage_completed_at else None,
