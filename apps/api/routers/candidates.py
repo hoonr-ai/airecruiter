@@ -2608,6 +2608,8 @@ async def get_candidate_evaluation_report(
         engage_score = data_blob.get("engage_score")
         if engage_score is not None:
             engage_score = float(engage_score)
+        
+        engage_total_score = 0
             
         if audit_row and audit_row.get("response"):
             resp = audit_row["response"]
