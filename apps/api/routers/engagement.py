@@ -858,6 +858,7 @@ async def _check_and_fire_candidate_passed_notification(
         # If we have the new fields, use them directly
         # Scores are normalized to 100-point scale — threshold is >70
         if hf_status is not None and cand_score is not None:
+            score = cand_score
             engage_passes = str(hf_status).lower() == "passed" and float(cand_score) > 70
 
             # Also check resume match score from DB (must be >70%)
@@ -1024,8 +1025,10 @@ async def _check_and_fire_candidate_passed_notification(
 
         # Create JobDiva Note: PAIR Pass Candidate Report
         # Note: We use the job title from job_row for the message
+        from core.email import APP_BASE_URL
         pair_job_title = job_row.get("title") or "the"
-        note_text = f"Candidate completed Phone Screen for {pair_job_title} position. Click Here to view the report."
+        report_link = f"{APP_BASE_URL}/jobs/{job_id}/report?candidateId={candidate_id}"
+        note_text = f"Candidate completed Phone Screen for {pair_job_title} position. <a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report."
         
         async def create_and_pin_note():
             note_res = await jobdiva_service.create_candidate_note(
