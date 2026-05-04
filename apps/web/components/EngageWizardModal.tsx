@@ -26,11 +26,9 @@ import {
   FileJson,
   ChevronRight,
   ChevronLeft,
-  ChevronDown,
   Plus,
   Trash2,
   X,
-  Copy,
   Check,
   Send,
   Loader2,
@@ -38,7 +36,6 @@ import {
   Phone,
   MapPin,
   Clock,
-  Code2,
 } from "lucide-react";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -69,6 +66,8 @@ interface JobFields {
   state: string;
   location_type: string;
   description: string;
+  ai_description: string;
+  recruiter_notes: string;
   interview_duration: string;
 }
 
@@ -76,6 +75,7 @@ interface WizardState {
   candidate: CandidateFields;
   job: JobFields;
   questions: Question[];
+  rubric: any;
 }
 
 interface EngageWizardModalProps {
@@ -119,14 +119,17 @@ function parsePayload(raw: string): WizardState | null {
         state: jd.state || ctx.state || "",
         location_type: jd.location_type || ctx.location_type || "",
         description: jd.jobdiva_description || ctx.jobdiva_description || "",
-        interview_duration: p.interview_duration || "",
+        ai_description: jd.ai_description || ctx.ai_description || "",
+        recruiter_notes: jd.recruiter_notes || ctx.recruiter_notes || "",
+        interview_duration: p.interview_duration || "15-20",
       },
       questions: (jd.pre_screen_questions || []).map((q: any) => ({
         question_text: q.question_text || "",
         pass_criteria: q.pass_criteria || "",
         category: q.category || "default",
-        is_default: q.is_default ?? true,
+        is_default: q.is_default !== undefined ? q.is_default : true,
       })),
+      rubric: jd.rubric || {},
     };
   } catch {
     return null;
@@ -138,56 +141,49 @@ function buildPayload(raw: string, state: WizardState): string {
     const p = JSON.parse(raw);
     const resume = (p.resumes || [])[0] || {};
     const existingJd = p.jd || {};
-    const existingCtx = existingJd.context || {};
-
     const updatedResume = {
       ...resume,
       name: state.candidate.name,
-      candidate_name: state.candidate.name,
       email: state.candidate.email,
       phone: state.candidate.phone,
       summary: state.candidate.summary,
       skills: state.candidate.skills,
       experience: state.candidate.experience,
+      raw_resume_text: state.candidate.experience || resume.raw_resume_text,
       education: state.candidate.education,
     };
 
     const updatedJd = {
-      ...existingJd,
       job_id: state.job.job_id,
       jobdiva_id: state.job.jobdiva_id,
-      // Keep top-level jd fields aligned with backend engagement router.
-      title: state.job.title,
-      customer_name: state.job.customer_name,
-      city: state.job.city,
-      state: state.job.state,
-      location_type: state.job.location_type,
-      jobdiva_description: state.job.description,
-      pre_screen_questions: state.questions.map((q) => ({
-        question_text: q.question_text,
-        pass_criteria: q.pass_criteria,
-        is_default: q.is_default,
-        category: q.category,
-      })),
-      // Also keep legacy nested context in sync for compatibility.
       context: {
-        ...existingCtx,
         title: state.job.title,
         customer_name: state.job.customer_name,
         city: state.job.city,
         state: state.job.state,
         location_type: state.job.location_type,
         jobdiva_description: state.job.description,
+        ai_description: state.job.ai_description,
+        recruiter_notes: state.job.recruiter_notes,
       },
+      rubric: state.rubric,
+      pre_screen_questions: state.questions.map((q) => ({
+        question_text: q.question_text,
+        pass_criteria: q.pass_criteria,
+        is_default: q.is_default,
+        category: q.category,
+      })),
     };
 
+    // Destructure to explicitly drop bot_introduction — only company_intro should be sent
+    const { bot_introduction: _drop, ...rest } = p;
     return JSON.stringify(
       {
-        ...p,
-        phone_number: state.candidate.phone,
+        ...rest,
         resumes: [updatedResume],
         jd: updatedJd,
         interview_duration: state.job.interview_duration,
+        company_intro: p.company_intro || "",
       },
       null,
       2
@@ -237,10 +233,10 @@ function StepIndicator({ current }: { current: number }) {
                 {/* Circle */}
                 <div
                   className={`w-9 h-9 shrink-0 rounded-full flex items-center justify-center border-2 transition-all duration-200 z-10 ${isActive
-                      ? "bg-indigo-600 border-indigo-600 text-white shadow-md shadow-indigo-200"
-                      : isDone
-                        ? "bg-indigo-100 border-indigo-300 text-indigo-600"
-                        : "bg-slate-50 border-slate-200 text-slate-400"
+                    ? "bg-indigo-600 border-indigo-600 text-white shadow-md shadow-indigo-200"
+                    : isDone
+                      ? "bg-indigo-100 border-indigo-300 text-indigo-600"
+                      : "bg-slate-50 border-slate-200 text-slate-400"
                     }`}
                 >
                   <Icon className="w-4 h-4" />
@@ -253,10 +249,10 @@ function StepIndicator({ current }: { current: number }) {
               {/* Label */}
               <span
                 className={`text-[11px] font-medium whitespace-nowrap mt-1 ${isActive
-                    ? "text-indigo-700"
-                    : isDone
-                      ? "text-indigo-500"
-                      : "text-slate-400"
+                  ? "text-indigo-700"
+                  : isDone
+                    ? "text-indigo-500"
+                    : "text-slate-400"
                   }`}
               >
                 {step.label}
@@ -464,8 +460,8 @@ function Step3Questions({
               <button
                 onClick={() => update(idx, { is_default: !q.is_default })}
                 className={`text-[11px] px-2.5 py-1 rounded-full border font-medium transition-colors ${q.is_default
-                    ? "bg-indigo-100 text-indigo-700 border-indigo-200"
-                    : "bg-slate-100 text-slate-500 border-slate-200"
+                  ? "bg-indigo-100 text-indigo-700 border-indigo-200"
+                  : "bg-slate-100 text-slate-500 border-slate-200"
                   }`}
               >
                 {q.is_default ? "Default ✓" : "Not Default"}
@@ -612,11 +608,11 @@ function Step4Review({
           </span>
         </div>
         {questions.length > 0 ? (
-          <div className="space-y-1.5 max-h-[120px] overflow-y-auto pr-1">
+          <div className="space-y-2 max-h-[320px] overflow-y-auto pr-1">
             {questions.map((q, idx) => (
               <div key={idx} className="flex items-start gap-2">
                 <span className="text-[11px] font-bold text-slate-400 mt-0.5 shrink-0 w-4 text-right">{idx + 1}.</span>
-                <p className="text-[12px] text-slate-600 leading-relaxed line-clamp-1">{q.question_text}</p>
+                <p className="text-[12px] text-slate-600 leading-relaxed">{q.question_text}</p>
               </div>
             ))}
           </div>
@@ -625,42 +621,6 @@ function Step4Review({
         )}
       </div>
 
-      {/* ── Raw JSON (collapsible) ── */}
-      <div className="border border-slate-200 rounded-xl overflow-hidden">
-        <div
-          onClick={() => setShowJson(!showJson)}
-          className="w-full flex items-center justify-between px-4 py-2.5 bg-slate-50 hover:bg-slate-100 transition-colors text-left cursor-pointer"
-          role="button"
-        >
-          <div className="flex items-center gap-2">
-            <Code2 className="w-3.5 h-3.5 text-slate-400" />
-            <span className="text-[12px] font-medium text-slate-600">Raw JSON Payload</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onClick={(e) => { e.stopPropagation(); handleCopy(); }} className="gap-1.5 text-slate-400 h-6 text-[11px] px-2 hover:text-slate-700">
-              {copied ? (
-                <><Check className="w-3 h-3 text-emerald-500" /> Copied</>
-              ) : (
-                <><Copy className="w-3 h-3" /> Copy</>
-              )}
-            </Button>
-            <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform duration-200 ${showJson ? "rotate-180" : ""}`} />
-          </div>
-        </div>
-        {showJson && (
-          <div className="relative">
-            <div className="absolute top-0 left-0 right-0 h-7 bg-slate-800 flex items-center px-3 gap-1.5">
-              <span className="w-2 h-2 rounded-full bg-red-400" />
-              <span className="w-2 h-2 rounded-full bg-amber-400" />
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              <span className="text-[10px] text-slate-500 ml-2 font-mono">payload.json</span>
-            </div>
-            <pre className="text-[11px] font-mono bg-slate-900 text-slate-300 overflow-auto max-h-[200px] p-4 pt-10 leading-relaxed whitespace-pre-wrap">
-              {json}
-            </pre>
-          </div>
-        )}
-      </div>
 
       {error && (
         <div className="text-[13px] text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2 flex items-start gap-2">
@@ -692,7 +652,7 @@ export function EngageWizardModal({
 
   // Parse payload when modal opens
   useEffect(() => {
-    if (open && initialPayload) {
+    if (open) {
       const parsed = parsePayload(initialPayload);
       setWizardState(parsed);
       setStep(1);
@@ -700,7 +660,8 @@ export function EngageWizardModal({
       setShowSuccess(false);
       setSuccessInterviewId(null);
     }
-  }, [open, initialPayload]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]); // Only run when modal opens, not when initialPayload updates while open
 
   // Rebuild JSON whenever wizard state changes
   useEffect(() => {
