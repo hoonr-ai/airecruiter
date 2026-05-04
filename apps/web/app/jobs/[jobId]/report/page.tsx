@@ -207,8 +207,9 @@ export default function CandidateEvaluationReportPage() {
     if (s === "completed") return "Completed";
     if (s === "passed") return "Pass";
     if (s === "failed") return "Fail";
+    if (s === "in_progress" || s === "in progress") return "In Progress";
     if (s === "pending" || s === "initiated") return "Pending";
-    return status.charAt(0).toUpperCase() + status.slice(1);
+    return status;
   };
 
   if (isLoading) {

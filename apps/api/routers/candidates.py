@@ -840,6 +840,44 @@ async def get_job_candidates(job_id_or_ref: str):
             if not cand.get("engage_created_at") and cand.get("audit_created_at"):
                 cand["engage_created_at"] = cand.get("audit_created_at")
 
+            # read-side normalization for consistency across views
+            norm_engage_score = None
+            raw_score = cand.get("engage_score") or cand.get("engage_candidate_score")
+            raw_total = cand.get("engage_total_score")
+            
+            if raw_score is not None and raw_total and raw_total > 0:
+                norm_engage_score = round((float(raw_score) / float(raw_total)) * 100, 1)
+                cand["engage_score"] = norm_engage_score
+                cand["engage_total_score"] = 100
+            elif raw_score is not None:
+                cand["engage_score"] = raw_score
+
+            # Format engage_status
+            cur_status = cand.get("engage_status") or "pending"
+            status_display = "Pending"
+            s = cur_status.lower()
+            if s in ["passed", "completed", "hired", "pass"]:
+                status_display = "Pass"
+            elif s in ["failed", "rejected", "fail"]:
+                status_display = "Fail"
+            elif s in ["in_progress", "in progress"]:
+                status_display = "In Progress"
+            
+            cand["engage_status"] = status_display
+
+            # Calculate total_fit_score for rank list
+            r_score = cand.get("match_score") or 0
+            is_done = s in ["passed", "completed", "hired", "pass", "failed", "rejected", "fail"]
+            
+            if is_done and cand.get("engage_score") is not None:
+                cand["total_fit_score"] = round((float(r_score) + float(cand["engage_score"])) / 2, 1)
+            else:
+                cand["total_fit_score"] = round(float(r_score), 1)
+
+            # Suppress hard filter for in progress
+            if status_display == "In Progress":
+                cand["engage_hard_filter_status"] = None
+
             if isinstance(data_blob, dict):
                 cand["data"] = data_blob
 
@@ -2833,9 +2871,12 @@ async def get_candidate_evaluation_report(
 
         # Calculate Total Fit Score: Average of only COMPLETED stages
         # Exclude Engage score if it's still in progress or initiated
-        is_engage_done = engage_status.lower() in ["completed", "failed", "passed", "rejected"]
+        is_engage_done = (engage_status or "").lower() in ["completed", "failed", "passed", "rejected", "pass", "fail"]
         
-        scores_to_average = [resume_match_score]
+        scores_to_average = []
+        if resume_match_score is not None:
+            scores_to_average.append(resume_match_score)
+            
         if is_engage_done and display_engage_score is not None:
             scores_to_average.append(display_engage_score)
             
@@ -2844,13 +2885,24 @@ async def get_candidate_evaluation_report(
         else:
             total_fit_score = 0
 
+        # Status label formatting
+        status_display = "Pending"
+        if engage_status:
+            s = engage_status.lower()
+            if s in ["passed", "completed", "hired", "pass"]:
+                status_display = "Pass"
+            elif s in ["failed", "rejected", "fail"]:
+                status_display = "Fail"
+            elif s in ["in_progress", "in progress"]:
+                status_display = "In Progress"
+
         scores = {
             "resume_match_score":    resume_match_score,
             "resume_match_status":   str(data_blob.get("resume_matching_status") or ("done" if resume_match_score > 0 else "pending")),
             "engage_score":          display_engage_score,
             "engage_total_score":    100 if engage_total_score else None,
-            "engage_status":         "passed" if engage_status.lower() in ["passed", "completed", "hired"] else ("failed" if engage_status.lower() in ["failed", "rejected"] else ("in_progress" if engage_status.lower() == "in_progress" else "pending")),
-            "hard_filter_status":    None if engage_status.lower() == "in_progress" else hard_filter_status,
+            "engage_status":         status_display,
+            "hard_filter_status":    None if status_display == "In Progress" else hard_filter_status,
             "total_fit_score":       round(total_fit_score, 1),
             "engage_interview_id":   engage_interview_id,
             "engage_completed_at":   str(engage_completed_at) if engage_completed_at else None,
