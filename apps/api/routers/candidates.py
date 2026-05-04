@@ -865,14 +865,15 @@ async def get_job_candidates(job_id_or_ref: str):
             
             cand["engage_status"] = status_display
 
-            # Calculate total_fit_score for rank list
+            # Calculate total_fit_score — average only completed stages (matches Report page logic)
             r_score = cand.get("match_score") or 0
-            is_done = s in ["passed", "completed", "hired", "pass", "failed", "rejected", "fail"]
-            
-            if is_done and cand.get("engage_score") is not None:
-                cand["total_fit_score"] = round((float(r_score) + float(cand["engage_score"])) / 2, 1)
-            else:
-                cand["total_fit_score"] = round(float(r_score), 1)
+            is_engage_done = s in ["passed", "completed", "hired", "pass", "failed", "rejected", "fail"]
+
+            scores_to_avg = [float(r_score)]
+            if is_engage_done and cand.get("engage_score") is not None:
+                scores_to_avg.append(float(cand["engage_score"]))
+
+            cand["total_fit_score"] = round(sum(scores_to_avg) / len(scores_to_avg), 1)
 
             # Suppress hard filter for in progress
             if status_display == "In Progress":
