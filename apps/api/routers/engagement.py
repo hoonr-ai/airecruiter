@@ -404,9 +404,109 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
         logger.warning("📧 _send_pair_launch_email failed silently: %s", exc, exc_info=True)
 
 
-# ---------------------------------------------------------------------------
-# 2. POST /engage/send-bulk-interview
-# ---------------------------------------------------------------------------
+async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_internal: str):
+    """
+    Ensures a candidate exists in JobDiva as an applicant for the specified job.
+    """
+    try:
+        from routers._helpers import get_db_connection
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        # Resolve both numeric and alphanumeric IDs for the job
+        numeric_job_id = None
+        ref_job_id = None
+        
+        if str(job_id_internal).isdigit():
+            numeric_job_id = str(job_id_internal)
+            cur.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s LIMIT 1", (numeric_job_id,))
+            row_j = cur.fetchone()
+            if row_j:
+                ref_job_id = row_j["jobdiva_id"]
+        else:
+            ref_job_id = job_id_internal
+            cur.execute("SELECT job_id FROM monitored_jobs WHERE jobdiva_id = %s LIMIT 1", (ref_job_id,))
+            row_j = cur.fetchone()
+            if row_j:
+                numeric_job_id = row_j["job_id"]
+        
+        logger.info(f"🔍 [Provisioning] Checking JobDiva for Job {ref_job_id} ({numeric_job_id})")
+
+        # 1. Fetch candidate record from our DB
+        cur.execute("""
+            SELECT name, email, phone, resume_text, data, jobdiva_id, source
+            FROM sourced_candidates
+            WHERE candidate_id = %s 
+              AND (jobdiva_id = %s OR jobdiva_id = %s OR jobdiva_id = %s OR jobdiva_id = %s OR jobdiva_id = 'unknown')
+            LIMIT 1
+        """, (candidate_id_internal, job_id_internal, numeric_job_id, ref_job_id, "unknown"))
+        row = cur.fetchone()
+        
+        if not row:
+            logger.warning(f"⚠️ [Provisioning] Candidate {candidate_id_internal} not found in sourced_candidates. Cannot provision.")
+            cur.close()
+            conn.close()
+            return None
+            
+        cand_data = row.get("data") or {}
+        if isinstance(cand_data, str):
+            cand_data = json.loads(cand_data)
+
+        email = row.get("email")
+        existing_jd_id = cand_data.get("jobdiva_candidate_id")
+        if not existing_jd_id and str(candidate_id_internal).isdigit():
+            existing_jd_id = int(candidate_id_internal)
+
+        # 2. Check JobDiva Applicants Detail (LIVE)
+        if numeric_job_id:
+            logger.info(f"🔍 [Provisioning] Fetching live applicants for Job {numeric_job_id} from JobDiva...")
+            applicants = await jobdiva_service.get_job_applicants_detail(int(numeric_job_id))
+            
+            for app in applicants:
+                app_cid = app.get("candidateId") or app.get("CANDIDATEID")
+                app_email = str(app.get("EMAIL") or app.get("email") or "").lower()
+                
+                if (existing_jd_id and app_cid and int(app_cid) == int(existing_jd_id)) or (email and app_email == email.lower()):
+                    logger.info(f"✅ [Provisioning] Match found! Candidate {candidate_id_internal} is already an applicant (JobDiva ID: {app_cid})")
+                    if not cand_data.get("jobdiva_candidate_id"):
+                        cand_data["jobdiva_candidate_id"] = app_cid
+                        cur.execute("UPDATE sourced_candidates SET data = %s WHERE candidate_id = %s", 
+                                    (json.dumps(cand_data), candidate_id_internal))
+                        conn.commit()
+                    cur.close()
+                    conn.close()
+                    return app_cid
+            
+            logger.info(f"❓ [Provisioning] Candidate {candidate_id_internal} not found in JobDiva applicants list.")
+
+        # 3. Direct Provisioning via CreateJobApplicationWithResume
+        # This endpoint can create the candidate and apply them in one step.
+        candidate_name = row.get("name") or "Candidate"
+        safe_name = candidate_name.replace(" ", "_")
+        success = await jobdiva_service.create_job_application_with_resume(
+            candidate_id=existing_jd_id,
+            job_id=numeric_job_id or job_id_internal,
+            resume_text=row.get("resume_text") or f"Name: {candidate_name}\nEmail: {email}\nPhone: {row.get('phone')}\n(Sourced via PAIR)",
+            filename=f"{safe_name}_Resume.txt"
+        )
+        
+        if success:
+            logger.info(f"🎉 [Provisioning] Success! Candidate {candidate_id_internal} application initiated in JobDiva.")
+            if existing_jd_id:
+                cand_data["jobdiva_candidate_id"] = existing_jd_id
+                cur.execute("UPDATE sourced_candidates SET data = %s WHERE candidate_id = %s", 
+                            (json.dumps(cand_data), candidate_id_internal))
+                conn.commit()
+        
+        cur.close()
+        conn.close()
+        return existing_jd_id
+
+    except Exception as e:
+        logger.error(f"❌ [Provisioning] Error for {candidate_id_internal}: {e}", exc_info=True)
+        return None
+
+
 @router.post("/engage/send-bulk-interview")
 async def send_bulk_interview(request: SendBulkInterviewRequest):
     """
@@ -418,8 +518,8 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
         try:
             payload_obj = json.loads(request.payload)
             jd_block = payload_obj.get("jd", {})
-            job_id = jd_block.get("job_id") or jd_block.get("jobdiva_id") or "unknown"
-            print(f"DEBUG: send_bulk_interview called for job {job_id}")
+            job_id_from_payload = jd_block.get("job_id") or jd_block.get("jobdiva_id") or "unknown"
+            print(f"DEBUG: send_bulk_interview called for job {job_id_from_payload}")
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid JSON format in payload")
 
@@ -449,8 +549,16 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                     headers={"Content-Type": "application/json"}
                 )
 
-            response_data = response.json()
-            is_success = response.status_code == 200
+            response_data = {}
+            try:
+                if response.content:
+                    response_data = response.json()
+                else:
+                    response_data = {"message": "Success (Empty response)"}
+            except Exception:
+                response_data = {"message": f"Raw: {response.text[:100]}"}
+
+            is_success = response.status_code in [200, 201]
             logger.info(f"📥 PAIR API response status: {response.status_code}")
 
         # Save audit log for each candidate
@@ -503,7 +611,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                     interview_id_value,
                     candidate_id,
                     str(job_id_value or ""),
-                    str(payload_obj.get("jd", {}).get("jobdiva_id", "") or ""),
+                    str(job_id_from_payload or ""),
                 ),
             )
 
@@ -529,7 +637,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                         json.dumps(response_fragment),
                         candidate_id,
                         str(job_id_value or ""),
-                        str(payload_obj.get("jd", {}).get("jobdiva_id", "") or ""),
+                        str(job_id_from_payload or ""),
                     ),
                 )
 
@@ -541,6 +649,16 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             if not isinstance(data_list, list):
                 data_list = [response_data] if response_data else []
 
+            # ── TRIGGER PROVISIONING (JobDiva Application) ─────────────
+            # ONLY trigger if the interview was successfully sent
+            provision_tasks = []
+            for cand_id in request.real_candidate_ids:
+                provision_tasks.append(
+                    _provision_candidate_to_jobdiva(cand_id, job_id_from_payload)
+                )
+            # Fire them off in the background
+            asyncio.gather(*provision_tasks)
+
             for idx, candidate_id in enumerate(request.real_candidate_ids):
                 interview_info = data_list[idx] if idx < len(data_list) else {}
 
@@ -549,7 +667,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 candidate_email = interview_info.get("candidate_email", "")
 
                 # Extract job_id from payload (prefer reference jobdiva_id for UI consistency)
-                job_id = payload_obj.get("jd", {}).get("jobdiva_id") or payload_obj.get("jd", {}).get("job_id", "")
+                job_id_resolved = payload_obj.get("jd", {}).get("jobdiva_id") or payload_obj.get("jd", {}).get("job_id", "")
 
                 cur.execute("""
                     INSERT INTO engage_interview_audit
@@ -557,7 +675,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     candidate_id,
-                    job_id,
+                    job_id_resolved,
                     interview_id,
                     candidate_name,
                     candidate_email,
@@ -569,7 +687,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 _write_candidate_engage_status(
                     candidate_id=candidate_id,
                     status_value="sent",
-                    job_id_value=job_id,
+                    job_id_value=job_id_resolved,
                     interview_id_value=interview_id,
                     response_fragment=interview_info,
                 )
@@ -586,14 +704,14 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
         else:
             # Still log the failed attempt
             for candidate_id in request.real_candidate_ids:
-                job_id = payload_obj.get("jd", {}).get("jobdiva_id") or payload_obj.get("jd", {}).get("job_id", "")
+                job_id_resolved = payload_obj.get("jd", {}).get("jobdiva_id") or payload_obj.get("jd", {}).get("job_id", "")
                 cur.execute("""
                     INSERT INTO engage_interview_audit
                         (candidate_id, jobdiva_id, payload, response, status)
                     VALUES (%s, %s, %s, %s, %s)
                 """, (
                     candidate_id,
-                    job_id,
+                    job_id_resolved,
                     json.dumps(payload_obj),
                     json.dumps(response_data),
                     "failed"
@@ -602,7 +720,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 _write_candidate_engage_status(
                     candidate_id=candidate_id,
                     status_value="failed",
-                    job_id_value=job_id,
+                    job_id_value=job_id_resolved,
                     interview_id_value="",
                     response_fragment=response_data if isinstance(response_data, dict) else {"response": response_data},
                 )
@@ -638,12 +756,11 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
         raise
     except Exception as e:
         logger.error(f"❌ send-bulk-interview failed: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ---------------------------------------------------------------------------
-# 3. GET /latest-interview/by-id/{candidate_id}
-# ---------------------------------------------------------------------------
+        return {
+            "success": False,
+            "message": f"Server error: {str(e)}",
+            "data": []
+        }
 @router.get("/latest-interview/by-id/{candidate_id}")
 async def get_latest_interview(candidate_id: str):
     """
