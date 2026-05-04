@@ -856,13 +856,41 @@ async def _check_and_fire_candidate_passed_notification(
         meets_criteria = False
 
         # If we have the new fields, use them directly
+        # Scores are normalized to 100-point scale — threshold is >70
         if hf_status is not None and cand_score is not None:
-            meets_criteria = str(hf_status).lower() == "passed" and float(cand_score) > 7
+            engage_passes = str(hf_status).lower() == "passed" and float(cand_score) > 70
+
+            # Also check resume match score from DB (must be >70%)
+            resume_match_score = 0.0
+            try:
+                conn_r = _get_db_connection()
+                cur_r = conn_r.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cur_r.execute("""
+                    SELECT data FROM sourced_candidates
+                    WHERE candidate_id = %s AND (jobdiva_id = %s OR jobdiva_id = %s)
+                    LIMIT 1
+                """, (candidate_id, job_id, job_id))
+                row_r = cur_r.fetchone()
+                cur_r.close()
+                conn_r.close()
+                if row_r:
+                    blob = row_r.get("data") or {}
+                    if isinstance(blob, str):
+                        import json as _json
+                        blob = _json.loads(blob)
+                    resume_match_score = float(blob.get("match_score") or blob.get("resume_match_score") or 0)
+            except Exception as _re:
+                logger.warning(f"⚠️ Could not fetch resume match score for {candidate_id}: {_re}")
+
+            meets_criteria = engage_passes and resume_match_score > 70
             if not meets_criteria:
-                logger.info(f"⏭️ Candidate {candidate_id} did not meet pass criteria (HF: {hf_status}, Score: {cand_score}).")
+                logger.info(
+                    f"⏭️ Candidate {candidate_id} did not meet pass criteria "
+                    f"(HF: {hf_status}, Engage: {cand_score}/100, Resume Match: {resume_match_score}/100)."
+                )
                 return
         else:
-            # 2. Legacy Score check (fallback)
+            # Legacy Score check (fallback) — PASS_SCORE_THRESHOLD is already 70
             score = interview_block.get("overall_score")
             if score is None or float(score) <= PASS_SCORE_THRESHOLD:
                 return
