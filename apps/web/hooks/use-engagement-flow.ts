@@ -22,6 +22,7 @@ export type SendBulkInterviewInput = {
   payload: string;
   realCandidateIds: string[];
   isInitialLaunch?: boolean;
+  dryRun?: boolean;
 };
 
 export type SendBulkInterviewResult = {
@@ -70,7 +71,8 @@ export function useEngagementFlow() {
       body: JSON.stringify({ 
         payload: input.payload, 
         real_candidate_ids: input.realCandidateIds,
-        is_initial_launch: input.isInitialLaunch ?? false
+        is_initial_launch: input.isInitialLaunch ?? false,
+        dry_run: input.dryRun ?? false
       }),
     });
     const data = (await res.json()) as any;

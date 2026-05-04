@@ -1,10 +1,67 @@
 import logging
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 from core.config import EXA_API_KEY
 from exa_py import Exa
+from services.location import extract_us_location_from_text
 
 logger = logging.getLogger(__name__)
+
+
+_RELOCATION_PATTERNS = re.compile(
+    r"\b("
+    r"open\s+to\s+relocat\w+"
+    r"|willing\s+to\s+relocat\w+"
+    r"|will\s+relocate"
+    r"|relocat\w+\s+(?:available|negotiable|possible|preferred)"
+    r"|open\s+to\s+(?:travel|remote|hybrid|relocation)"
+    r"|any\s+location"
+    r"|remote\s+only"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# US state codes; used to validate "City, ST" extractions.
+_US_STATE_CODES = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI",
+    "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN",
+    "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH",
+    "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA",
+    "WV", "WI", "WY", "PR",
+}
+
+_LOCATED_IN_RE = re.compile(
+    r"\b(?:Located|Based|Lives|Living)\s+in\s+([A-Z][a-zA-Z\.\- ]{1,30}),\s*([A-Z]{2})\b"
+)
+_CITY_STATE_RE = re.compile(r"\b([A-Z][a-zA-Z\.\- ]{1,30}),\s*([A-Z]{2})\b")
+
+
+def _detect_relocation(text: str) -> bool:
+    """True when highlights/resume text signals open-to-relocation/remote."""
+    if not text:
+        return False
+    return bool(_RELOCATION_PATTERNS.search(text))
+
+
+def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
+    """Best-effort city/state extraction from Exa highlight text.
+
+    Priority: explicit "Located/Based/Lives in CITY, ST" phrasing. Fallback:
+    first "City, ST" hit in the first ~200 chars where ST is a US code.
+    Returns ("", "") on miss — callers MUST treat empty as "unknown" rather
+    than substituting the query string.
+    """
+    if not text:
+        return "", ""
+    m = _LOCATED_IN_RE.search(text)
+    if m:
+        return m.group(1).strip(), m.group(2).strip().upper()
+    head = text[:200]
+    for cand in _CITY_STATE_RE.finditer(head):
+        st = cand.group(2).strip().upper()
+        if st in _US_STATE_CODES:
+            return cand.group(1).strip(), st
+    return "", ""
 
 
 def _exa_query_from_boolean(boolean_string: str, skills: List[str], location: str, role_hint: str = "") -> str:
@@ -88,21 +145,30 @@ class ExaService:
                     highlights_text = ""
                     if getattr(result, 'highlights', None):
                         highlights_text = "\n".join(result.highlights)
-                    
+
+                    extracted_city, extracted_state = _extract_city_from_highlights(highlights_text)
+                    extracted_location = extract_us_location_from_text(
+                        f"{title}\n{highlights_text}"
+                    )
+                    if not extracted_location and (extracted_city or extracted_state):
+                        extracted_location = ", ".join(p for p in [extracted_city, extracted_state] if p)
+
                     cand = {
                         "id": f"exa_{idx}_{getattr(result, 'id', idx)}",
                         "provider_id": getattr(result, 'id', f"exa_{idx}"),
                         "firstName": first_name,
                         "lastName": last_name,
                         "email": "",
-                        "city": location, # We infer string from query
-                        "state": "",
+                        "city": extracted_city,
+                        "state": extracted_state,
+                        "location": extracted_location,
                         "title": title,
                         "source": "LinkedIn-Exa",
                         "match_score": 0,
                         "profile_url": url,
                         "image_url": "",
                         "open_to_work": False,
+                        "open_to_relocation": _detect_relocation(highlights_text),
                         "resume_text": highlights_text,
                         "recruiter_candidate_id": None
                     }
@@ -158,20 +224,28 @@ class ExaService:
                     highlights_text = ""
                     if getattr(result, "highlights", None):
                         highlights_text = "\n".join(result.highlights)
+                    extracted_city, extracted_state = _extract_city_from_highlights(highlights_text)
+                    extracted_location = extract_us_location_from_text(
+                        f"{title}\n{highlights_text}"
+                    )
+                    if not extracted_location and (extracted_city or extracted_state):
+                        extracted_location = ", ".join(p for p in [extracted_city, extracted_state] if p)
                     results.append({
                         "id": f"dice_{idx}_{getattr(result, 'id', idx)}",
                         "provider_id": getattr(result, "id", f"dice_{idx}"),
                         "firstName": first_name,
                         "lastName": last_name,
                         "email": "",
-                        "city": location,
-                        "state": "",
+                        "city": extracted_city,
+                        "state": extracted_state,
+                        "location": extracted_location,
                         "title": title,
                         "source": "Dice",
                         "match_score": 0,
                         "profile_url": url,
                         "image_url": "",
                         "open_to_work": False,
+                        "open_to_relocation": _detect_relocation(highlights_text),
                         "resume_text": highlights_text,
                         "recruiter_candidate_id": None,
                     })

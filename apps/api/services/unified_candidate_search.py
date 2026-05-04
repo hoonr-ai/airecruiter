@@ -3,13 +3,14 @@ import asyncio
 import json
 import re
 import time
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from pydantic import BaseModel
 
 from services.jobdiva import JobDivaService
 from services.unipile import unipile_service
 from services.vetted import vetted_service
 from services.exa_service import exa_service
+from services.location import normalize_location_string, within_radius
 from core.config import (
     SCORING_REQUIRED_WEIGHT,
     SCORING_PREFERRED_WEIGHT,
@@ -18,11 +19,16 @@ from core.config import (
     SCORING_RECENT_PENALTY,
     SCORING_EXCLUSION_CAP,
     SCORING_EXCLUSION_PER_HIT,
+    SCORING_EXCLUSION_HARD_VETO_THRESHOLD,
     SCORING_UNMATCHED_REQUIRED_FLOOR,
     SCORING_UNMATCHED_PREFERRED_FLOOR,
     SCORING_PARSING_GAP_FLOOR,
     SCORING_COVERAGE_BLEND_THRESHOLD,
+    SOURCE_TIER_BONUS,
+    EMBEDDING_SKILL_MATCH,
+    EMBEDDING_MATCH_THRESHOLD,
 )
+from services import skill_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +40,11 @@ class SearchCriteria(BaseModel):
     resume_match_filters: List[Dict[str, Any]] = []
     location: str = ""
     within_miles: int = 25
+    # Structured geo for JobDiva talentSearchDef. Optional — backend will
+    # derive these from `location` when the frontend doesn't send them.
+    countries: List[str] = []
+    states: List[str] = []
+    page_number: int = 0
     companies: List[str] = []
     page_size: int = 100
     sources: List[str] = ["JobDiva", "LinkedIn", "Exa"]
@@ -46,6 +57,8 @@ class SearchCriteria(BaseModel):
     # 5.10: by default JobDiva Talent Search drops profile-only candidates
     # (no resume attached). Set false to opt back in to the full signal.
     require_resume: bool = True
+    include_relocation_candidates: bool = True
+    min_experience_years: Optional[int] = None
 
     def sourcing_skill_values(self) -> List[str]:
         """Flat skill-like strings for sources that only accept a plain list
@@ -86,8 +99,27 @@ class UnifiedCandidateSearch:
         """
         start_time = time.time()
         self._log_stage("Start", f"job={criteria.job_id} sources={', '.join(criteria.sources or [])}")
-        
+
+        # Pre-warm embeddings for all query-side terms once per search.
+        # No-op when EMBEDDING_SKILL_MATCH is off or OPENAI_API_KEY is
+        # unset. Per-candidate skill embeddings are warmed lazily inside
+        # emit_candidate; this batches the (small) query side once so we
+        # don't pay an embedding round-trip per candidate.
+        if EMBEDDING_SKILL_MATCH:
+            try:
+                query_terms = self._criteria_query_terms(criteria)
+                if query_terms:
+                    await skill_embeddings.warm_terms(query_terms)
+            except Exception as exc:  # never let embedding warm break a search
+                logger.warning(f"query-term embedding warm failed: {exc}")
+
         seen_ids = set()
+        # Cross-source dedup keys (email, normalised LinkedIn URL,
+        # normalised name+location). The legacy `seen_ids` set keys on
+        # the source's native candidate_id and so misses the same person
+        # showing up in JobDiva-Applicants AND LinkedIn-Exa with
+        # different ids. Both sets are checked in `emit_candidate`.
+        seen_dedup_keys: set = set()
         summary = {
             "total_candidates": 0,
             "job_applicants_count": 0,
@@ -98,7 +130,12 @@ class UnifiedCandidateSearch:
             "talent_search_count": 0,
             "new_extractions": 0,
             "qualified_applicants": 0,
-            "qualified_talent": 0
+            "qualified_talent": 0,
+            # True iff JobDiva's JobAgent returned "Criteria Not Assigned" for
+            # this job — frontend uses this to render a one-time nudge banner
+            # asking the recruiter to set search agent criteria in JobDiva's
+            # web UI for sharper matching.
+            "jobdiva_criteria_unconfigured": False,
         }
 
         def finalize_candidate(cand):
@@ -106,7 +143,7 @@ class UnifiedCandidateSearch:
             # Ensure name is title-cased if it exists
             if cand.get("name"):
                 cand["name"] = str(cand["name"]).title()
-            
+
             if criteria.bypass_screening:
                 cand["match_score"] = 0
                 cand["missing_skills"] = []
@@ -116,11 +153,27 @@ class UnifiedCandidateSearch:
                 return cand
 
             score_result = self._score_candidate(cand, criteria)
-            cand["match_score"] = score_result["score"]
+            base_score = score_result["score"]
+            cand["match_score"] = base_score
             cand["missing_skills"] = score_result["missing_skills"]
             cand["matched_skills"] = score_result.get("matched_skills", [])
             cand["explainability"] = score_result["explainability"]
             cand["match_score_details"] = score_result.get("score_details", {})
+
+            # Source-tier bonus: warm leads (recruiter's own applicants,
+            # JobDiva talent pool, curated DBs) outrank cold scrapes when
+            # raw scores are close. Only applied when base_score > 0 so
+            # excluded / hard-vetoed candidates aren't promoted.
+            source = str(cand.get("source") or "")
+            bonus = SOURCE_TIER_BONUS.get(source, 0)
+            if bonus and base_score > 0:
+                boosted = min(100, base_score + bonus)
+                cand["match_score"] = boosted
+                cand["match_score_details"]["source_tier_bonus"] = {
+                    "source": source,
+                    "bonus": bonus,
+                    "base_score": base_score,
+                }
             return cand
 
         # JobDiva is split into two explicit sources:
@@ -150,12 +203,31 @@ class UnifiedCandidateSearch:
 
         async def emit_candidate(cand, assessment, qualified_counter_key=None):
             cand["screening_summary"] = build_screening(assessment)
+
+            # Warm candidate-side skill embeddings before scoring so the
+            # sync `_fuzzy_term_score` path can read them from the
+            # in-process cache. Off when EMBEDDING_SKILL_MATCH is unset.
+            if EMBEDDING_SKILL_MATCH:
+                try:
+                    cand_terms = self._candidate_skill_terms(cand)
+                    if cand_terms:
+                        await skill_embeddings.warm_terms(cand_terms)
+                except Exception as exc:
+                    logger.warning(
+                        f"candidate-skill embedding warm failed: {exc}"
+                    )
+
             cand = finalize_candidate(cand)
             cid = str(cand.get("candidate_id") or cand.get("id"))
             if cid and cid in seen_ids:
                 return
+            cross_keys = self._dedup_keys(cand)
+            if any(k in seen_dedup_keys for k in cross_keys):
+                return
             if cid:
                 seen_ids.add(cid)
+            for k in cross_keys:
+                seen_dedup_keys.add(k)
             if qualified_counter_key and assessment["passes"]:
                 summary[qualified_counter_key] += 1
             summary["total_candidates"] += 1
@@ -230,6 +302,8 @@ class UnifiedCandidateSearch:
                 talent_res = await self._search_jobdiva_talent(criteria)
                 talent_pool = talent_res.get("candidates", [])
                 summary["talent_search_count"] = len(talent_pool)
+                if talent_res.get("jobdiva_criteria_unconfigured"):
+                    summary["jobdiva_criteria_unconfigured"] = True
                 if not talent_pool:
                     self._log_stage("TalentSearch", "No talent-pool candidates returned.")
                     return
@@ -273,6 +347,12 @@ class UnifiedCandidateSearch:
                                         cand.update(self._extract_linkedin_profile_data(full_profile))
                                 except Exception as e:
                                     logger.warning(f"Failed to fetch full profile for LinkedIn candidate {provider_id}: {e}")
+
+                        # PR-B: cheap pre-LLM YOE gate for external sources too.
+                        # Drops candidates whose headline / abstract / resume
+                        # snippet shows fewer years than the configured floor.
+                        if self._candidate_below_min_years_pre_llm(cand, criteria):
+                            return {"status": "failed_filter"}
 
                         assessment = self._filter_assessment(cand, criteria, enforce_years=False)
                         if not assessment["passes"]:
@@ -363,29 +443,120 @@ class UnifiedCandidateSearch:
 
         
     async def _search_jobdiva_talent(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        """JobDiva talent-pool sourcing.
+
+        Primary path uses JobAgentSearch (JobDiva's AI matcher) anchored to the
+        job's JobDiva ID — this returns a per-job ranked candidate set, unlike
+        TalentSearch which (live-tested) returns the same fixed pool for any
+        input. We then apply a client-side state filter to backstop the geo
+        precision JobDiva does not give us. TalentSearch remains a fallback
+        for ad-hoc searches with no resolvable jobId.
+
+        Surfaces `criteria_unconfigured: True` in the return when JobAgent
+        responded with "Criteria Not Assigned" — frontend uses this to nudge
+        the recruiter to set search criteria in JobDiva's web UI.
+        """
         try:
-            # Pass through the freshness window (5.6) and profile-only filter
-            # (5.10). The JobDiva service handles both — Boolean prepends a
-            # LASTMODIFIED cutoff when recent_days is set, and drops profile-
-            # only candidates when require_resume is true.
-            candidates = await self.jobdiva_service.search_candidates(
-                skills=self._jobdiva_search_terms(criteria),
-                location=criteria.location,
-                limit=criteria.page_size,
-                job_id=None,
-                boolean_string=criteria.boolean_string or self._build_boolean_string(criteria),
-                recent_days=getattr(criteria, "recent_days", None),
-                require_resume=getattr(criteria, "require_resume", True),
-            )
-            self._log_stage("TalentSearch", f"JobDiva returned {len(candidates)} candidate(s)")
+            source_type = "JobDiva-JobAgent"
+            candidates: List[Dict[str, Any]] = []
+            criteria_unconfigured = False
+
+            if criteria.job_id:
+                resume_count = max(200, (criteria.page_size or 50) * 4)
+                ja_result = await self.jobdiva_service.search_via_job_agent(
+                    job_id=criteria.job_id,
+                    resume_count=resume_count,
+                    require_resume=getattr(criteria, "require_resume", True),
+                )
+                # Back-compat: tolerate either list or dict shape.
+                if isinstance(ja_result, dict):
+                    candidates = ja_result.get("candidates") or []
+                    criteria_unconfigured = bool(ja_result.get("criteria_unconfigured"))
+                else:
+                    candidates = list(ja_result or [])
+                self._log_stage(
+                    "TalentSearch",
+                    f"JobAgent jobId={criteria.job_id} resume_count={resume_count} "
+                    f"raw={len(candidates)} criteria_unconfigured={criteria_unconfigured}"
+                )
+
+            if not candidates:
+                # Fallback to TalentSearch (the broken-but-stable pool endpoint).
+                source_type = "JobDiva-TalentSearch"
+                countries, states = self._resolve_jobdiva_geo(criteria)
+                jobdiva_boolean = self._strip_location_from_boolean(
+                    criteria.boolean_string or self._build_boolean_string(criteria),
+                    criteria.location,
+                )
+                # Fetch a wider pool than the UI page_size so the state
+                # filter + skill scorer have room to rank — TalentSearch is
+                # the fallback path, candidate quality benefits from a bigger
+                # pre-filter pool.
+                fallback_limit = max(200, (criteria.page_size or 50) * 4)
+                candidates = await self.jobdiva_service.search_candidates(
+                    skills=self._jobdiva_search_terms(criteria),
+                    location=criteria.location,
+                    limit=fallback_limit,
+                    job_id=None,
+                    boolean_string=jobdiva_boolean,
+                    recent_days=getattr(criteria, "recent_days", None),
+                    require_resume=getattr(criteria, "require_resume", True),
+                    countries=countries,
+                    states=states,
+                    page_number=getattr(criteria, "page_number", 0) or 0,
+                )
+                self._log_stage(
+                    "TalentSearch",
+                    f"TalentSearch fallback fetched={fallback_limit} raw={len(candidates)}"
+                )
+
+            before = len(candidates)
+            candidates = self._filter_by_state(candidates, criteria)
+            after_state = len(candidates)
+            if after_state != before:
+                self._log_stage(
+                    "TalentSearch",
+                    f"State filter: {before} → {after_state} (dropped {before - after_state})"
+                )
+
+            # On the TalentSearch fallback path the raw pool is JobDiva's
+            # broken fixed set — every search returns the same 1551 candidates
+            # regardless of skills. State filter narrows by geography, but
+            # without skill pre-ranking the LLM downstream sees a mostly
+            # irrelevant set and surfaces weak matches. Pre-rank here so the
+            # LLM gets the most skill-relevant candidates first.
+            if source_type == "JobDiva-TalentSearch":
+                keep_top = max(criteria.page_size or 50, 50)
+                before_rank = len(candidates)
+                candidates = self._rank_candidates_by_skill(
+                    candidates, criteria, keep_top=keep_top
+                )
+                if before_rank != len(candidates):
+                    self._log_stage(
+                        "TalentSearch",
+                        f"Skill rank: {before_rank} → {len(candidates)} "
+                        f"(kept top {keep_top} by skill match)"
+                    )
+
             for c in candidates:
-                c["source"] = "JobDiva-TalentSearch"
-            # No pre-screening needed - boolean string already filters candidates
-            self._log_stage("TalentSearch", f"Proceeding to LLM extraction for {len(candidates)} candidate(s)")
-            return {"candidates": candidates, "source_type": "JobDiva-TalentSearch"}
+                c.setdefault("source", source_type)
+
+            self._log_stage(
+                "TalentSearch",
+                f"Proceeding to LLM extraction for {len(candidates)} candidate(s) from {source_type}"
+            )
+            return {
+                "candidates": candidates,
+                "source_type": source_type,
+                "jobdiva_criteria_unconfigured": criteria_unconfigured,
+            }
         except Exception as e:
-            logger.error(f"JobDiva Talent Search failed: {e}")
-            return {"candidates": [], "source_type": "JobDiva-TalentSearch"}
+            logger.error(f"JobDiva talent-pool search failed: {e}")
+            return {
+                "candidates": [],
+                "source_type": "JobDiva-JobAgent",
+                "jobdiva_criteria_unconfigured": False,
+            }
 
     async def _search_jobdiva_applicants(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
@@ -407,6 +578,348 @@ class UnifiedCandidateSearch:
         except Exception as e:
             logger.error(f"JobDiva Applicants search failed: {e}")
             return {"candidates": [], "source_type": "JobDiva-Applicants"}
+
+    # 2-letter US state codes for the location heuristic.
+    _US_STATE_CODES = frozenset({
+        "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA",
+        "HI", "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD",
+        "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ",
+        "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC",
+        "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY",
+        "DC",
+    })
+
+    # Country aliases → JobDiva expects the 2-letter code in talentSearchDef.
+    _COUNTRY_ALIASES = {
+        "US": "US", "USA": "US", "U.S.": "US", "U.S.A.": "US",
+        "UNITED STATES": "US", "UNITED STATES OF AMERICA": "US",
+        "CA": "CA", "CAN": "CA", "CANADA": "CA",
+        "UK": "GB", "U.K.": "GB", "UNITED KINGDOM": "GB", "GREAT BRITAIN": "GB", "GB": "GB",
+        "IN": "IN", "INDIA": "IN",
+        "AU": "AU", "AUS": "AU", "AUSTRALIA": "AU",
+        "DE": "DE", "GERMANY": "DE",
+        "FR": "FR", "FRANCE": "FR",
+        "MX": "MX", "MEXICO": "MX",
+        "BR": "BR", "BRAZIL": "BR",
+        "JP": "JP", "JAPAN": "JP",
+        "CN": "CN", "CHINA": "CN",
+        "SG": "SG", "SINGAPORE": "SG",
+        "IE": "IE", "IRELAND": "IE",
+        "NL": "NL", "NETHERLANDS": "NL",
+        "ES": "ES", "SPAIN": "ES",
+        "IT": "IT", "ITALY": "IT",
+    }
+
+    # Country values we treat as "US" when present on the candidate record.
+    _US_COUNTRY_TOKENS = frozenset({
+        "us", "usa", "u.s.", "u.s.a.", "united states",
+        "united states of america", "america",
+    })
+
+    # Substrings that, when present in a candidate's location text, are
+    # confident evidence of a non-US location. Each entry is matched as a
+    # word-boundary substring against a space-padded version of the location
+    # text, so e.g. " india " matches but "indianapolis" does not.
+    _NON_US_LOCATION_TOKENS = frozenset({
+        "india", "united kingdom", "canada", "australia", "germany",
+        "france", "philippines", "pakistan", "china", "ireland", "mexico",
+        "brazil", "spain", "italy", "netherlands", "singapore", "uae",
+        "dubai", "saudi arabia", "japan", "south korea", "vietnam",
+        "indonesia", "malaysia", "thailand", "egypt", "nigeria",
+        "south africa", "russia", "ukraine", "poland", "turkey",
+        "israel", "argentina", "chile", "colombia", "peru", "venezuela",
+        "bangladesh", "sri lanka", "nepal", "kenya", "ghana", "morocco",
+        "switzerland", "sweden", "norway", "denmark", "finland", "belgium",
+        "austria", "portugal", "greece", "hungary", "romania",
+        "bulgaria", "iran", "iraq", "afghanistan", "qatar", "kuwait",
+        "bahrain", "oman", "jordan", "lebanon", "ethiopia", "tanzania",
+        "uganda", "zimbabwe", "new zealand", "taiwan", "hong kong",
+        "u.k.", "england", "scotland",
+    })
+
+    def _resolve_jobdiva_geo(self, criteria: SearchCriteria) -> tuple[List[str], List[str]]:
+        """
+        Produce (countries, states) for JobDiva's talentSearchDef.
+
+        Priority: explicit `criteria.countries` / `criteria.states` if set;
+        otherwise heuristically split `criteria.location` by comma and pick
+        out a US state code and/or a country. Always defaults to ``["US"]``
+        when no country can be resolved — searches are US-only by policy.
+        """
+        countries = [c.strip() for c in (criteria.countries or []) if c and c.strip()]
+        states = [s.strip() for s in (criteria.states or []) if s and s.strip()]
+        if countries or states:
+            return countries, states
+
+        loc = (criteria.location or "").strip()
+        if not loc:
+            # No location criteria at all → still scope to US-only.
+            return ["US"], []
+
+        tokens = [t.strip() for t in loc.split(",") if t.strip()]
+        if not tokens:
+            return ["US"], []
+
+        # Walk tokens right-to-left: first match country, then state.
+        consumed: set = set()
+        for idx in range(len(tokens) - 1, -1, -1):
+            token_upper = tokens[idx].upper()
+            if token_upper in self._COUNTRY_ALIASES:
+                countries.append(self._COUNTRY_ALIASES[token_upper])
+                consumed.add(idx)
+                break
+
+        for idx in range(len(tokens) - 1, -1, -1):
+            if idx in consumed:
+                continue
+            token_upper = tokens[idx].upper()
+            if len(token_upper) == 2 and token_upper in self._US_STATE_CODES:
+                states.append(token_upper)
+                if not countries:
+                    countries.append("US")
+                break
+
+        if not countries:
+            countries.append("US")
+
+        return countries, states
+
+    # Adjacent-state map for the "within N miles spills across state lines"
+    # case (Charlotte NC ↔ Fort Mill SC, NYC ↔ Jersey City NJ, etc.). Hand-
+    # written, conservative — only the metros recruiters actually ask about.
+    # If a state isn't here, _filter_by_state behaves as strict-state.
+    _ADJACENT_STATES = {
+        "NC": {"SC", "VA", "TN", "GA"},
+        "SC": {"NC", "GA"},
+        "VA": {"NC", "WV", "MD", "DC", "TN", "KY"},
+        "NY": {"NJ", "CT", "PA", "MA", "VT"},
+        "NJ": {"NY", "PA", "DE"},
+        "PA": {"NY", "NJ", "OH", "WV", "MD", "DE"},
+        "CT": {"NY", "MA", "RI"},
+        "MA": {"NY", "CT", "RI", "NH", "VT"},
+        "MD": {"VA", "PA", "DE", "WV", "DC"},
+        "DC": {"MD", "VA"},
+        "DE": {"MD", "PA", "NJ"},
+        "CA": {"NV", "OR", "AZ"},
+        "TX": {"OK", "LA", "AR", "NM"},
+        "WA": {"OR", "ID"},
+        "OR": {"WA", "CA", "ID", "NV"},
+        "IL": {"IN", "WI", "IA", "MO", "KY"},
+        "IN": {"IL", "OH", "KY", "MI"},
+        "OH": {"PA", "WV", "KY", "IN", "MI"},
+        "FL": {"GA", "AL"},
+        "GA": {"FL", "AL", "TN", "NC", "SC"},
+        "AZ": {"CA", "NV", "UT", "NM"},
+        "MI": {"IN", "OH", "WI"},
+        "MN": {"WI", "IA", "ND", "SD"},
+        "WI": {"IL", "IA", "MN", "MI"},
+        "CO": {"WY", "NM", "UT", "KS", "NE", "OK"},
+    }
+
+    # Wider regional clusters when within_miles is large (≥200 mi).
+    _REGIONAL_CLUSTERS = [
+        {"NY", "NJ", "PA", "CT", "MA", "RI"},
+        {"NC", "SC", "VA", "TN", "GA"},
+        {"TX", "OK", "LA", "AR", "NM"},
+        {"CA", "NV", "OR", "AZ", "WA"},
+        {"IL", "IN", "OH", "MI", "WI", "MN", "IA", "KY", "MO"},
+        {"FL", "GA", "AL", "MS", "LA"},
+        {"MD", "DC", "VA", "DE", "PA"},
+    ]
+
+    def _filter_by_state(
+        self,
+        candidates: List[Dict[str, Any]],
+        criteria: SearchCriteria,
+    ) -> List[Dict[str, Any]]:
+        """Location + US-only gate.
+
+        US-only is applied unconditionally; only candidates with positive
+        evidence of a non-US location are dropped. The radius/state check
+        runs only when ``criteria.location`` is set, and soft-keeps any
+        candidate whose location can't be resolved.
+        """
+        if not candidates:
+            return candidates
+
+        enforce_location = self._should_enforce_location(criteria)
+
+        kept: List[Dict[str, Any]] = []
+        non_us_dropped = 0
+        filtered = 0
+        geocode_failed = 0
+
+        for c in candidates:
+            if self._is_likely_non_us(c):
+                non_us_dropped += 1
+                continue
+
+            if not enforce_location:
+                kept.append(c)
+                continue
+
+            is_match, reason = self._location_match_verdict(c, criteria)
+            if is_match:
+                kept.append(c)
+            else:
+                filtered += 1
+                if reason in {"candidate_ungeocodable", "target_ungeocodable"}:
+                    geocode_failed += 1
+
+        self._log_stage(
+            "LocationGate",
+            f"pre-filter kept {len(kept)}/{len(candidates)} candidates"
+            f" (non_us_dropped={non_us_dropped}, filtered={filtered},"
+            f" geocode_failures={geocode_failed})",
+        )
+        return kept
+
+    @staticmethod
+    def _candidate_haystack(c: Dict[str, Any]) -> str:
+        """Concatenated lowercase text used for skill keyword matching."""
+        parts = [
+            str(c.get("title") or ""),
+            str(c.get("abstract") or ""),
+            str(c.get("resume_text") or ""),
+            " ".join(str(s) for s in (c.get("skills") or [])),
+        ]
+        return " ".join(p for p in parts if p).lower()
+
+    def _rank_candidates_by_skill(
+        self,
+        candidates: List[Dict[str, Any]],
+        criteria: SearchCriteria,
+        keep_top: int,
+    ) -> List[Dict[str, Any]]:
+        """Pre-rank candidates by skill keyword match against title/abstract/resume.
+
+        Used on the TalentSearch fallback path where JobDiva returns its broken
+        fixed pool — without this, the downstream LLM ranker sees ~280 mostly-
+        irrelevant candidates and surfaces poor matches. Scoring:
+
+        - +3 per `must` skill or title term hit (case-insensitive substring).
+        - +1 per `can` (preferred) hit.
+        - +1 per plain `keywords[]` hit.
+        - -10 per `exclude` term hit (effectively drops the candidate).
+        - Drop candidates whose `must` hit-count is 0 when `must` terms exist.
+
+        Returns at most `keep_top` candidates, sorted by score desc, ties
+        broken by JobDiva's original ordering.
+        """
+        must_terms: List[str] = []
+        can_terms: List[str] = []
+        exclude_terms: List[str] = []
+        for item in (criteria.title_criteria or []) + (criteria.skill_criteria or []):
+            value = str(item.get("value", "")).strip().lower()
+            if not value:
+                continue
+            mt = item.get("match_type", "must")
+            if mt == "exclude":
+                exclude_terms.append(value)
+            elif mt == "can":
+                can_terms.append(value)
+            else:
+                must_terms.append(value)
+        keyword_terms = [str(k).strip().lower() for k in (criteria.keywords or []) if str(k).strip()]
+
+        # If we have no skill signal at all, leave the order alone.
+        if not (must_terms or can_terms or keyword_terms or exclude_terms):
+            return candidates[:keep_top]
+
+        # Match a term against haystack: full-phrase match counts 1.0;
+        # otherwise count significant tokens (len>=4) and award a partial
+        # match scaled to coverage. This matters because users type long
+        # phrases ("Java Full Stack Development") but resumes have shorter
+        # canonical forms ("Java"). Without partial match we would over-drop.
+        def term_score(term: str, hay_text: str) -> float:
+            if not term or not hay_text:
+                return 0.0
+            if term in hay_text:
+                return 1.0
+            tokens = [t for t in term.split() if len(t) >= 4]
+            if not tokens:
+                return 0.0
+            hits = sum(1 for t in tokens if t in hay_text)
+            cov = hits / len(tokens)
+            # Require at least one significant token; reward higher coverage.
+            return cov if cov >= 1.0 / max(1, len(tokens)) else 0.0
+
+        # First pass — strict scoring. Drop candidates that miss every must
+        # term or trigger any exclude term, score the rest.
+        strict: List[tuple] = []
+        soft: List[tuple] = []  # parallel weak-signal pool used only if strict is empty
+        any_haystack = 0
+        for idx, c in enumerate(candidates):
+            hay = self._candidate_haystack(c)
+            if hay:
+                any_haystack += 1
+            must_score = sum(term_score(t, hay) for t in must_terms) if hay else 0
+            must_hits = 1 if must_score > 0 else 0
+            can_score = sum(term_score(t, hay) for t in can_terms) if hay else 0
+            kw_score = sum(term_score(t, hay) for t in keyword_terms) if hay else 0
+            exc_hits = sum(1 for t in exclude_terms if t in hay) if hay else 0
+            soft_score = can_score + kw_score - 10.0 * exc_hits
+            strict_score = 3.0 * must_score + soft_score
+            if exc_hits:
+                continue  # always drop exclude-hits regardless of mode
+            if must_terms:
+                if must_hits > 0 and strict_score > 0:
+                    strict.append((strict_score, idx, c))
+                else:
+                    soft.append((soft_score, idx, c))
+            else:
+                strict.append((strict_score, idx, c))
+
+        # Soft-mode fallback: when haystacks are mostly empty (TalentSearch
+        # often returns thin records) or no strict matches survive, fall back
+        # to "any signal beats nothing" so we don't return 0.
+        sparse = any_haystack < max(3, len(candidates) // 3)
+        if not strict or sparse:
+            if sparse:
+                logger.debug(
+                    "_rank_candidates_by_skill: sparse haystacks "
+                    f"({any_haystack}/{len(candidates)}); using soft mode"
+                )
+            else:
+                logger.debug(
+                    "_rank_candidates_by_skill: no strict matches; using soft mode"
+                )
+            scored = strict + soft
+            # Original-order tiebreak preserves JobDiva's ranking when scores tie.
+            scored.sort(key=lambda t: (-t[0], t[1]))
+            return [c for _, _, c in scored[:keep_top]]
+
+        strict.sort(key=lambda t: (-t[0], t[1]))
+        return [c for _, _, c in strict[:keep_top]]
+
+    @staticmethod
+    def _strip_location_from_boolean(boolean: str, location: str) -> str:
+        """Remove the auto-appended `"<location>"` term from a boolean string.
+
+        Conservative: only strips an exact quoted match (case-insensitive)
+        with adjacent ` AND ` glue. If the location can't be found cleanly,
+        returns the input unchanged so user-typed booleans aren't mangled.
+        """
+        if not boolean:
+            return boolean
+        loc = (location or "").strip()
+        if not loc:
+            return boolean
+
+        quoted = re.escape(f'"{loc}"')
+        patterns = [
+            rf'\s+AND\s+{quoted}(?=\s|$|\))',  # mid/tail: " AND \"X\""
+            rf'(?<=^){quoted}\s+AND\s+',       # leading: "\"X\" AND "
+            rf'(?<=\()\s*{quoted}\s+AND\s+',   # inside group: "(\"X\" AND ..."
+            rf'\s+AND\s+{quoted}(?=\))',       # before group close
+        ]
+        out = boolean
+        for pat in patterns:
+            new_out = re.sub(pat, lambda m: ' ' if m.group(0).startswith(' AND ') else '', out, flags=re.IGNORECASE)
+            if new_out != out:
+                out = new_out
+                break
+        return re.sub(r'\s+', ' ', out).strip()
 
     def _jobdiva_search_terms(self, criteria: SearchCriteria) -> List[Dict[str, Any]]:
         terms: List[Dict[str, Any]] = []
@@ -534,8 +1047,16 @@ class UnifiedCandidateSearch:
             return any(term and term in haystack for term in self._dedupe_terms(group))
 
         filtered = []
+        non_us_dropped = 0
         for candidate in candidates:
             haystack = self._candidate_summary_text(candidate)
+
+            # US-only scope: drop only when the candidate's country/location
+            # text is positive evidence of a non-US location. Silent records
+            # are treated as US (kept).
+            if self._is_likely_non_us(candidate):
+                non_us_dropped += 1
+                continue
 
             if any(group_matches(haystack, group) for group in exclude_groups):
                 continue
@@ -569,7 +1090,11 @@ class UnifiedCandidateSearch:
 
             filtered.append(candidate)
 
-        self._log_stage("SummaryScreen", f"{source_type}: kept {len(filtered)} of {len(candidates)} candidate(s)")
+        self._log_stage(
+            "SummaryScreen",
+            f"{source_type}: kept {len(filtered)} of {len(candidates)} candidate(s)"
+            f" (non_us_dropped={non_us_dropped})",
+        )
         return filtered
 
     def _candidate_summary_text(self, candidate: Dict[str, Any]) -> str:
@@ -604,44 +1129,160 @@ class UnifiedCandidateSearch:
         return bool(str(skills or "").strip())
 
     def _location_matches(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> bool:
-        if not criteria.location:
+        return self._location_match_verdict(candidate, criteria)[0]
+
+    def _candidate_structured_locations(self, candidate: Dict[str, Any]) -> List[str]:
+        enhanced = candidate.get("enhanced_info") or {}
+        location_values = [
+            enhanced.get("current_location") if isinstance(enhanced, dict) else "",
+            candidate.get("location"),
+            f"{candidate.get('city', '')}, {candidate.get('state', '')}".strip(", "),
+        ]
+        cleaned: List[str] = []
+        seen = set()
+        for value in location_values:
+            loc = normalize_location_string(str(value or ""))
+            key = loc.lower()
+            if not loc or key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(loc)
+        return cleaned
+
+    def _scope_location_to_us(self, location: Any) -> str:
+        """Append ", United States" to a location string when no country is
+        already named, so downstream services (Exa, Dice, Vetted, Unipile)
+        scope their lookups to the US.
+
+        Returns ``"United States"`` when the input is empty.
+        """
+        text = str(location or "").strip().strip(",")
+        if not text:
+            return "United States"
+
+        upper_tokens = {t.strip().upper() for t in text.split(",")}
+        if upper_tokens & set(self._COUNTRY_ALIASES.keys()):
+            return text
+        return f"{text}, United States"
+
+    def _scope_boolean_to_us(self, boolean_string: Any) -> str:
+        """Ensure the boolean keyword string carries a US-scope hint.
+
+        The downstream Exa free-text query and Unipile's keyword fallback both
+        consume this string verbatim, so the cheapest way to bias them toward
+        US results is to append a literal country phrase when no country is
+        already mentioned.
+        """
+        text = str(boolean_string or "").strip()
+        if not text:
+            return '"United States"'
+
+        upper = text.upper()
+        if any(
+            token in upper
+            for token in (
+                "UNITED STATES",
+                "UNITED STATES OF AMERICA",
+                '"USA"',
+                " USA ",
+                " USA,",
+                "(USA)",
+                "U.S.",
+                "U.S.A.",
+            )
+        ):
+            return text
+        return f'({text}) AND "United States"'
+
+    def _is_likely_non_us(self, candidate: Dict[str, Any]) -> bool:
+        """Return True only when the candidate is clearly outside the US.
+
+        Used to enforce an unconditional US-only scope on every search.
+        Defaults to False (treat as US) when the candidate's country and
+        location text are silent — we want to keep observed candidates
+        unless we have positive evidence they're abroad.
+        """
+        country = str(candidate.get("country") or "").strip().lower()
+        if country and country not in self._US_COUNTRY_TOKENS:
             return True
+
+        enhanced = candidate.get("enhanced_info") or {}
+        if isinstance(enhanced, dict):
+            enhanced_country = str(enhanced.get("current_country") or "").strip().lower()
+            if enhanced_country and enhanced_country not in self._US_COUNTRY_TOKENS:
+                return True
+
+        locs = self._candidate_structured_locations(candidate)
+        if locs:
+            padded = " " + " | ".join(loc.lower() for loc in locs) + " "
+            for token in self._NON_US_LOCATION_TOKENS:
+                # Match as bounded substring to avoid false positives
+                # (e.g. "india" must not hit "indianapolis").
+                if f" {token} " in padded or f" {token}," in padded:
+                    return True
+        return False
+
+    def _location_match_verdict(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Tuple[bool, str]:
+        if not criteria.location:
+            return True, "no_location_requirement"
 
         required = self._parse_location(criteria.location)
         if not required["city"] and not required["state"]:
-            return True
+            return True, "empty_location_requirement"
 
-        candidate_location = self._parse_location(
-            candidate.get("location")
-            or f"{candidate.get('city', '')}, {candidate.get('state', '')}".strip(", ")
-        )
-        candidate_text = self._normalize_search_text(
-            " ".join([
-                str(candidate.get("location") or ""),
-                str(candidate.get("city") or ""),
-                str(candidate.get("state") or ""),
-            ])
-        )
+        # B1: opt-out for "open to relocation" candidates whose actual location
+        # is unknown or outside the radius. Default keeps them (soft-keep).
+        relocation_flag = bool(candidate.get("open_to_relocation"))
+        include_relocation = bool(getattr(criteria, "include_relocation_candidates", True))
 
-        if required["city"] and required["city"] not in candidate_text:
-            return False
-        if required["state"] and required["state"] not in candidate_text:
-            return False
-        if required["state"] and candidate_location["state"] and required["state"] != candidate_location["state"]:
-            return False
+        candidate_locs = self._candidate_structured_locations(candidate)
+        if not candidate_locs:
+            if relocation_flag and not include_relocation:
+                return False, "relocation_excluded_by_filter"
+            # Soft-keep: missing structured location is a data-quality
+            # issue, not a reason to drop. Downstream LLM enrichment can
+            # re-screen with the full resume text.
+            return True, "candidate_location_missing_keep"
 
-        return True
+        # If search is state-only, enforce state equality without geocoding.
+        if required["state"] and not required["city"]:
+            seen_states: List[str] = []
+            for value in candidate_locs:
+                parsed = self._parse_location(value)
+                state = parsed.get("state")
+                if state:
+                    seen_states.append(state)
+                    if state == required["state"]:
+                        return True, "state_match"
+            if not seen_states:
+                # Candidate has location text but no parseable state →
+                # soft-keep and let enrichment decide.
+                return True, "candidate_state_unknown_keep"
+            return False, "state_mismatch"
+
+        # Hard cap 50 mi everywhere (defense-in-depth — UI also caps).
+        miles = min(50, int(getattr(criteria, "within_miles", 25) or 25))
+        target = normalize_location_string(criteria.location)
+        geocode_failure = False
+
+        for candidate_loc in candidate_locs:
+            is_within, reason, _distance = within_radius(candidate_loc, target, miles)
+            if is_within:
+                return True, "within_radius"
+            if reason in {"candidate_ungeocodable", "target_ungeocodable"}:
+                geocode_failure = True
+
+        if geocode_failure:
+            # Nominatim is best-effort and rate-limited. A geocode miss is
+            # not evidence the candidate is outside the radius — soft-keep.
+            return True, "geocode_unavailable_keep"
+        if relocation_flag and not include_relocation:
+            return False, "relocation_excluded_by_filter"
+        return False, "outside_radius"
 
     def _should_enforce_location(self, criteria: SearchCriteria) -> bool:
         normalized_location = self._normalize_term(criteria.location)
-        if not normalized_location:
-            return False
-
-        normalized_boolean = self._normalize_term(criteria.boolean_string)
-        if not normalized_boolean:
-            return True
-
-        return normalized_location in normalized_boolean
+        return bool(normalized_location)
 
     def _parse_location(self, value: Any) -> Dict[str, str]:
         state_aliases = {
@@ -850,6 +1491,12 @@ class UnifiedCandidateSearch:
                 if normalized == norm_item or normalized in norm_item or norm_item in normalized:
                     return True
 
+        # Critical: location matching must not fall back to generic resume text,
+        # otherwise stale historical locations can satisfy current-location checks.
+        is_location_only = len(collections) == 1 and collections[0] == "locations"
+        if is_location_only:
+            return False
+
         return normalized in profile.get("text", "")
 
     def _fuzzy_term_score(self, profile: Dict[str, Any], term: str, *collections: str) -> float:
@@ -857,18 +1504,18 @@ class UnifiedCandidateSearch:
         normalized_term = self._normalize_term(term)
         if not normalized_term:
             return 0.0
-            
+
         # Check for strict match first (100%)
         if self._contains_term(profile, term, *collections):
             return 1.0
-            
+
         # Keyword-based partial matching
         term_words = [w for w in normalized_term.split() if len(w) > 2] # ignore tiny words
         if not term_words:
             return 0.0
-            
+
         best_overlap_score = 0.0
-        
+
         # Check against structured collections (higher weight)
         for coll in collections:
             for item in profile.get(coll, []):
@@ -880,13 +1527,92 @@ class UnifiedCandidateSearch:
                 overlap = len(intersection) / len(term_words)
                 if overlap > best_overlap_score:
                     best_overlap_score = overlap
-                    
+
         # Check against full text (broad keyword match, lower weight)
         profile_text = profile.get("text", "")
-        text_matches = sum(1 for word in term_words if word in profile_text)
-        text_score = (text_matches / len(term_words)) * 0.35
-        
-        return max(best_overlap_score, text_score)
+        is_location_only = len(collections) == 1 and collections[0] == "locations"
+        if is_location_only:
+            text_score = 0.0
+        else:
+            text_matches = sum(1 for word in term_words if word in profile_text)
+            text_score = (text_matches / len(term_words)) * 0.35
+
+        # Embedding-cosine augmentation. When EMBEDDING_SKILL_MATCH is on
+        # and the embeddings have been pre-warmed (in `search_candidates`
+        # for the query side and `emit_candidate` for the candidate side),
+        # take the max of keyword score and cosine similarity. Below the
+        # configured threshold the cosine score is treated as 0 so noisy
+        # near-matches don't promote weak candidates. Locations and other
+        # non-skill collections are excluded — embeddings make sense only
+        # for free-form skill / title text.
+        embedding_score = 0.0
+        if EMBEDDING_SKILL_MATCH and not is_location_only:
+            candidate_terms: List[str] = []
+            for coll in collections:
+                for item in profile.get(coll, []) or []:
+                    candidate_terms.append(str(item))
+            if candidate_terms:
+                cosine = skill_embeddings.best_cosine(term, candidate_terms)
+                if cosine >= EMBEDDING_MATCH_THRESHOLD:
+                    embedding_score = cosine
+
+        return max(best_overlap_score, text_score, embedding_score)
+
+    def _criteria_query_terms(self, criteria: SearchCriteria) -> List[str]:
+        """Flat list of every skill / title / company / keyword term in
+        the criteria, used to pre-warm query-side embeddings once per
+        search."""
+        terms: List[str] = []
+        for source in (
+            criteria.title_criteria,
+            criteria.skill_criteria,
+            criteria.resume_match_filters,
+        ):
+            for item in source or []:
+                if isinstance(item, dict):
+                    val = item.get("value")
+                    if val:
+                        terms.append(str(val))
+        for kw in criteria.keywords or []:
+            if kw:
+                terms.append(str(kw))
+        for company in criteria.companies or []:
+            if company:
+                terms.append(str(company))
+        return terms
+
+    def _candidate_skill_terms(self, candidate: Dict[str, Any]) -> List[str]:
+        """Flat list of skill / title / company / cert / education
+        strings on a candidate, used to warm candidate-side embeddings
+        before scoring."""
+        terms: List[str] = []
+        for key in ("title", "headline", "company", "current_company"):
+            val = candidate.get(key)
+            if val:
+                terms.append(str(val))
+        for key in ("skills", "titles", "companies", "education", "certifications"):
+            val = candidate.get(key) or []
+            if isinstance(val, list):
+                for item in val:
+                    if isinstance(item, dict):
+                        for k in ("skill", "name", "value"):
+                            if item.get(k):
+                                terms.append(str(item[k]))
+                                break
+                    elif item:
+                        terms.append(str(item))
+            elif isinstance(val, str) and val:
+                terms.append(val)
+
+        enhanced = candidate.get("enhanced_info") or {}
+        if isinstance(enhanced, dict):
+            for key in ("key_skills", "skills"):
+                val = enhanced.get(key) or []
+                if isinstance(val, list):
+                    for item in val:
+                        if item:
+                            terms.append(str(item))
+        return terms
 
     def _dedupe_terms(self, terms: List[str]) -> List[str]:
         ordered: List[str] = []
@@ -1009,8 +1735,47 @@ class UnifiedCandidateSearch:
         matched: List[str] = []
         excluded: List[str] = []
 
-        if self._should_enforce_location(criteria) and not self._location_matches(candidate, criteria):
-            missing.append(f"Location: {criteria.location}")
+        # US-only scope is enforced at every stage (see `_filter_candidates`
+        # and `_filter_by_state`). Soft-fail: only drop on positive evidence
+        # of a non-US location.
+        if self._is_likely_non_us(candidate):
+            return {
+                "passes": False,
+                "missing": ["Location: outside US"],
+                "matched": self._dedupe_terms(matched),
+                "excluded": self._dedupe_terms(excluded),
+                "location_failure_reason": "non_us_candidate",
+            }
+
+        # PR-B: top-level minimum-years-of-experience floor.
+        # `years_of_experience > 0` matters: candidates whose YOE is
+        # unparseable (`0`) are kept and re-checked downstream once the
+        # enriched profile has real data — same soft-keep philosophy as
+        # the location gate. Pre-LLM heuristic enforcement happens in
+        # `_enrich_filtered_jobdiva_candidates` / `_process_external_single`
+        # so most failing candidates never reach this point.
+        min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
+        if min_years > 0:
+            years = float(profile.get("years_of_experience") or 0)
+            if 0 < years < min_years:
+                return {
+                    "passes": False,
+                    "missing": [f"YOE: needs {min_years}+ years (resume shows {int(years)})"],
+                    "matched": self._dedupe_terms(matched),
+                    "excluded": self._dedupe_terms(excluded),
+                    "min_years_failure": True,
+                }
+
+        if self._should_enforce_location(criteria):
+            location_ok, reason = self._location_match_verdict(candidate, criteria)
+            if not location_ok:
+                return {
+                    "passes": False,
+                    "missing": [f"Location: {criteria.location}"],
+                    "matched": self._dedupe_terms(matched),
+                    "excluded": self._dedupe_terms(excluded),
+                    "location_failure_reason": reason,
+                }
 
         for dimension in self._collect_sourcing_dimensions(criteria):
             collections = dimension["collections"]
@@ -1046,7 +1811,8 @@ class UnifiedCandidateSearch:
                 "passes": True,
                 "missing": self._dedupe_terms(missing),
                 "matched": self._dedupe_terms(matched),
-                "excluded": []
+                "excluded": [],
+                "location_failure_reason": None,
             }
 
         # Otherwise, enforce required groups (Standard strict scoring/filtering)
@@ -1055,6 +1821,7 @@ class UnifiedCandidateSearch:
             "missing": self._dedupe_terms(missing),
             "matched": self._dedupe_terms(matched),
             "excluded": self._dedupe_terms(excluded),
+            "location_failure_reason": None,
         }
 
     def _score_candidate(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Dict[str, Any]:
@@ -1067,6 +1834,11 @@ class UnifiedCandidateSearch:
         missing_required: List[str] = []
         matched_required_skills: List[str] = []
         score_details: Dict[str, Any] = {}
+        # Hard-veto trigger: any excluded group whose match strength meets
+        # SCORING_EXCLUSION_HARD_VETO_THRESHOLD forces score → 0 regardless
+        # of how strong the rest of the candidate looks. The soft penalty
+        # below still applies for borderline matches.
+        hard_veto_hits: List[str] = []
 
         for dimension in dimensions:
             total_weight = float(dimension["weight"])
@@ -1187,6 +1959,22 @@ class UnifiedCandidateSearch:
                     f"{dimension['label']}: conflicting match on {', '.join(excluded_matches[:2])}"
                 )
 
+                # Hard-veto check: if any excluded group scored above the
+                # configured threshold, mark the candidate for forced-zero
+                # after the dimension loop. We probe per-group rather than
+                # relying on `excluded_matches` (which only reports >0.5
+                # hits) because the threshold may be tighter or looser.
+                if SCORING_EXCLUSION_HARD_VETO_THRESHOLD <= 1.0:
+                    for group in excluded_groups:
+                        strength = self._term_group_score(
+                            profile, group, dimension["collections"]
+                        )
+                        if strength >= SCORING_EXCLUSION_HARD_VETO_THRESHOLD:
+                            hard_veto_hits.append(
+                                f"{dimension['label']}: {self._group_label(group)}"
+                            )
+                            break
+
             if required_groups:
                 missing = [
                     self._group_label(group) for group in required_groups
@@ -1224,7 +2012,18 @@ class UnifiedCandidateSearch:
         if weighted_max > 0:
             score = round(max(0.0, min(100.0, (sum(weighted_scores) / weighted_max) * 100)))
 
-        if score >= 85:
+        score_details["hard_veto"] = {
+            "triggered": bool(hard_veto_hits),
+            "reasons": hard_veto_hits[:3],
+        }
+
+        if hard_veto_hits:
+            score = 0
+            explainability.insert(
+                0,
+                f"Hard exclusion: matches recruiter exclusion rule ({hard_veto_hits[0]})",
+            )
+        elif score >= 85:
             explainability.insert(0, "Excellent rubric and sourcing alignment")
         elif score >= 70:
             explainability.insert(0, "Strong overall fit across active filters")
@@ -1247,8 +2046,69 @@ class UnifiedCandidateSearch:
     def _candidate_satisfies_required_filters(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> bool:
         return self._filter_assessment(candidate, criteria, enforce_years=True)["passes"]
 
+    # PR-B: cheap regex used by the pre-LLM YOE gate. Looks for forms
+    # like "8+ years", "5 years of experience", "10 yrs". Returns the
+    # first integer match, or 0 when nothing parses (caller treats 0 as
+    # "unknown → keep" to avoid penalising candidates with non-standard
+    # phrasing).
+    _YEARS_REGEX = re.compile(
+        r"\b(\d{1,2})\s*\+?\s*(?:years?|yrs?)\b", re.IGNORECASE
+    )
+
+    def _heuristic_years_from_text(self, text: str) -> int:
+        if not text:
+            return 0
+        # Cap input — only the first chunk is searched. Most resumes /
+        # headlines / abstracts surface the years number near the top.
+        sample = str(text)[:1500]
+        best = 0
+        for match in self._YEARS_REGEX.finditer(sample):
+            try:
+                value = int(match.group(1))
+            except ValueError:
+                continue
+            if 0 < value <= 50 and value > best:
+                best = value
+        return best
+
+    def _candidate_below_min_years_pre_llm(
+        self,
+        candidate: Dict[str, Any],
+        criteria: SearchCriteria,
+    ) -> bool:
+        """Cheap regex check before LLM enrichment runs.
+
+        True only when the candidate's headline / abstract / resume_text
+        head contains a parseable years number AND that number is below
+        `criteria.min_experience_years`. Returns False when no number is
+        found (deferred to the post-LLM gate via `_filter_assessment`).
+        """
+        min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
+        if min_years <= 0:
+            return False
+        haystack = " ".join([
+            str(candidate.get("headline") or ""),
+            str(candidate.get("title") or ""),
+            str(candidate.get("abstract") or ""),
+            str(candidate.get("resume_text") or "")[:1500],
+        ])
+        years = self._heuristic_years_from_text(haystack)
+        return 0 < years < min_years
+
     def _collect_sourcing_dimensions(self, criteria: SearchCriteria) -> List[Dict[str, Any]]:
-        """Collect match dimensions for PRE-SCREENING using ONLY Page 5 sourcing filters."""
+        """Collect match dimensions for PRE-SCREENING.
+
+        Uses Page-5 sourcing filters PLUS the non-overlapping subset of
+        Page-4 `resume_match_filters` (Certifications and Education).
+        Lifting cert/edu into pre-screen lets us drop candidates that
+        will fail the rubric anyway *before* paying for LLM enrichment;
+        the audit estimated 30-50% of enrichment cost on cert-heavy
+        roles was wasted on candidates that would later get filtered.
+
+        Skill / title / company / domain / location filters are NOT
+        lifted — they overlap with the existing pre-screen dimensions
+        and would double-count.
+        """
         dimensions = {
             "titles": {
                 "label": "Titles",
@@ -1286,6 +2146,25 @@ class UnifiedCandidateSearch:
                 "label": "Keywords",
                 "weight": 5.0,
                 "collections": ["skills", "titles", "companies", "locations"],
+                "required": [],
+                "preferred": [],
+                "excluded": [],
+            },
+            # PR-B: pre-screen rubric dimensions lifted from Step-4
+            # `resume_match_filters` so cert/edu requirements gate the
+            # LLM enrichment instead of being applied only after.
+            "certifications": {
+                "label": "Certifications",
+                "weight": 8.0,
+                "collections": ["certifications", "skills"],
+                "required": [],
+                "preferred": [],
+                "excluded": [],
+            },
+            "education": {
+                "label": "Education",
+                "weight": 6.0,
+                "collections": ["education"],
                 "required": [],
                 "preferred": [],
                 "excluded": [],
@@ -1360,8 +2239,37 @@ class UnifiedCandidateSearch:
         if self._should_enforce_location(criteria):
             add_terms("location", "must", [criteria.location])
 
-        # DO NOT include resume_match_filters here - only for scoring!
-        
+        # PR-B: lift Certifications + Education filters from the Step-4
+        # rubric into pre-screen. Other categories (skill / title /
+        # company / domain / location) overlap with the dimensions
+        # already populated above and would double-count, so they're
+        # left to the post-enrichment scorer.
+        for filter_item in criteria.resume_match_filters or []:
+            if not filter_item.get("active", True):
+                continue
+
+            category = str(filter_item.get("category", "")).lower()
+            if not ("cert" in category or "license" in category or "edu" in category):
+                continue
+
+            term = self._resume_filter_term(filter_item)
+            if not term:
+                continue
+
+            raw_value = str(filter_item.get("value", "")).strip().lower()
+            target_match_type = (
+                "can"
+                if "preferred" in category or raw_value.startswith("can ")
+                else "must"
+            )
+            target_bucket = "education" if "edu" in category else "certifications"
+            add_terms(
+                target_bucket,
+                target_match_type,
+                [term],
+                label=term,
+            )
+
         return list(dimensions.values())
 
     def _collect_scoring_dimensions(self, criteria: SearchCriteria) -> List[Dict[str, Any]]:
@@ -1546,7 +2454,18 @@ class UnifiedCandidateSearch:
         self._log_stage("ResumeScreen", f"checking {len(jobdiva_candidates)} JobDiva candidate resume(s) before LLM")
 
         semaphore = asyncio.Semaphore(5)
-        counters = {"screened": 0, "skipped": 0, "no_resume": 0, "failed_filter": 0, "llm_extraction_errors": 0}
+        counters = {
+            "screened": 0,
+            "skipped": 0,
+            "no_resume": 0,
+            "failed_filter": 0,
+            "failed_location": 0,
+            "failed_location_geocode": 0,
+            "llm_extraction_errors": 0,
+            "pre_llm_skipped_low_score": 0,
+            "pre_llm_skipped_no_required_hit": 0,
+            "pre_llm_skipped_min_years": 0,
+        }
 
         async def _process_single(candidate, index):
             async with semaphore:
@@ -1581,6 +2500,21 @@ class UnifiedCandidateSearch:
                         self._log_stage("ResumeScreen", f"skipped candidate_id={candidate_id}; no resume text available")
                         return {"status": "no_resume", "candidate": None}
 
+                    # PR-B: cheap pre-LLM YOE gate. Drops candidates whose
+                    # resume text confidently shows fewer years than the
+                    # configured floor, before paying for LLM enrichment.
+                    # Soft-keep if no number is parseable.
+                    if self._candidate_below_min_years_pre_llm(candidate, criteria):
+                        counters["pre_llm_skipped_min_years"] += 1
+                        self._log_stage(
+                            "LLMGate",
+                            "skipping LLM for candidate_id=%s reason=below_min_years_pre_llm threshold=%s" % (
+                                candidate_id,
+                                int(criteria.min_experience_years or 0),
+                            ),
+                        )
+                        return {"status": "failed_filter", "candidate": None}
+
                     if criteria.bypass_screening:
                         self._log_stage("ResumeScreen", f"Bypassing LLM extraction for candidate_id={candidate_id} (auto-sync mode)")
                         # In bypass mode, we still ensure name/title/location are basic-hydrated
@@ -1592,15 +2526,21 @@ class UnifiedCandidateSearch:
                     self._log_stage("ResumeScreen", f"running quick filter for candidate_id={candidate_id}")
                     assessment = self._filter_assessment(candidate, criteria, enforce_years=False)
                     if not assessment["passes"]:
+                        location_reason = assessment.get("location_failure_reason")
                         self._log_stage(
                             "ResumeScreen",
-                            "FAILED FILTER candidate_id=%s matched=%s missing=%s excluded=%s" % (
+                            "FAILED FILTER candidate_id=%s matched=%s missing=%s excluded=%s location_reason=%s" % (
                                 candidate_id,
                                 assessment["matched"][:5],
                                 assessment["missing"][:5],
                                 assessment["excluded"][:5],
+                                location_reason,
                             ),
                         )
+                        if location_reason:
+                            if location_reason in {"candidate_ungeocodable", "target_ungeocodable"}:
+                                return {"status": "failed_location_geocode", "candidate": None}
+                            return {"status": "failed_location", "candidate": None}
                         return {"status": "failed_filter", "candidate": None}
 
                     self._log_stage(
@@ -1610,6 +2550,42 @@ class UnifiedCandidateSearch:
                             assessment["matched"][:5],
                         ),
                     )
+
+                    # Pre-LLM gate to reduce expensive extraction calls on
+                    # obvious low-fit profiles while protecting borderline
+                    # candidates that already show required-term evidence.
+                    pre_score_result = self._score_candidate(candidate, criteria)
+                    pre_score = float(pre_score_result.get("score") or 0)
+                    pre_score_details = pre_score_result.get("score_details") or {}
+                    has_required_hit = any(
+                        isinstance(dim, dict)
+                        and int(dim.get("required_total") or 0) > 0
+                        and int(dim.get("required_matched") or 0) > 0
+                        for dim in pre_score_details.values()
+                    )
+
+                    skip_reason = None
+                    if pre_score < 25:
+                        skip_reason = "low_score"
+                        counters["pre_llm_skipped_low_score"] += 1
+                    elif pre_score < 40 and not has_required_hit:
+                        skip_reason = "no_required_hit"
+                        counters["pre_llm_skipped_no_required_hit"] += 1
+
+                    if skip_reason:
+                        self._log_stage(
+                            "LLMGate",
+                            "skipping LLM for candidate_id=%s pre_score=%.1f reason=%s required_hit=%s" % (
+                                candidate_id,
+                                pre_score,
+                                skip_reason,
+                                has_required_hit,
+                            ),
+                        )
+                        candidate["enhanced_info"] = candidate.get("enhanced_info") or {}
+                        candidate["enhanced_info_status"] = "skipped_pre_llm_gate"
+                        return {"status": "success", "candidate": candidate}
+
                     self._log_stage("LLM", f"STARTING LLM extraction for candidate_id={candidate_id}, resume_id={candidate.get('resume_id') or 'unknown'}")
                     
                     enhanced = await process_jobdiva_candidate(candidate)
@@ -1672,18 +2648,37 @@ class UnifiedCandidateSearch:
             elif status == "failed_filter":
                 counters["failed_filter"] += 1
                 counters["skipped"] += 1
+            elif status == "failed_location":
+                counters["failed_location"] += 1
+                counters["failed_filter"] += 1
+                counters["skipped"] += 1
+            elif status == "failed_location_geocode":
+                counters["failed_location_geocode"] += 1
+                counters["failed_location"] += 1
+                counters["failed_filter"] += 1
+                counters["skipped"] += 1
             elif status == "skipped":
                 counters["skipped"] += 1
 
         self._log_stage(
             "ResumeScreen",
-            "RESULTS: kept %s of %s JobDiva candidate(s); skipped %s total (no_resume=%s, failed_filter=%s, llm_extraction_errors=%s)" % (
+            "RESULTS: kept %s of %s JobDiva candidate(s); skipped %s total (no_resume=%s, failed_filter=%s, failed_location=%s, geocode_failures=%s, llm_extraction_errors=%s)" % (
                 counters["screened"],
                 len(jobdiva_candidates),
                 counters["skipped"],
                 counters["no_resume"],
                 counters["failed_filter"],
+                counters["failed_location"],
+                counters["failed_location_geocode"],
                 counters["llm_extraction_errors"],
+            ),
+        )
+        self._log_stage(
+            "LLMGate",
+            "pre-LLM skips: low_score=%s no_required_hit=%s min_years=%s" % (
+                counters["pre_llm_skipped_low_score"],
+                counters["pre_llm_skipped_no_required_hit"],
+                counters["pre_llm_skipped_min_years"],
             ),
         )
 
@@ -1797,10 +2792,12 @@ class UnifiedCandidateSearch:
             skills = [{"value": s, "priority": "Must Have"} for s in skill_values]
             candidates = await self.unipile_service.search_candidates(
                 skills=skills,
-                location=criteria.location,
+                location=self._scope_location_to_us(criteria.location),
                 open_to_work=criteria.open_to_work,
                 limit=criteria.page_size,
-                boolean_string=criteria.boolean_string or self._build_boolean_string(criteria)
+                boolean_string=self._scope_boolean_to_us(
+                    criteria.boolean_string or self._build_boolean_string(criteria)
+                ),
             )
 
             return {"candidates": candidates, "source_type": "LinkedIn-Unipile"}
@@ -1866,9 +2863,9 @@ class UnifiedCandidateSearch:
             boolean_string = criteria.boolean_string or self._build_boolean_string(criteria)
             candidates = await self.exa_service.search_dice_candidates(
                 skills=skills_values,
-                location=criteria.location,
+                location=self._scope_location_to_us(criteria.location),
                 limit=min(criteria.page_size, 20),
-                boolean_string=boolean_string,
+                boolean_string=self._scope_boolean_to_us(boolean_string),
             )
             return {"candidates": candidates, "source_type": "Dice"}
         except Exception as e:
@@ -1879,7 +2876,7 @@ class UnifiedCandidateSearch:
         try:
             candidates = await self.vetted_service.search_candidates(
                 skills=criteria.sourcing_skill_values(),
-                location=criteria.location,
+                location=self._scope_location_to_us(criteria.location),
                 limit=criteria.page_size
             )
             return {"candidates": candidates, "source_type": "VettedDB"}
@@ -1893,14 +2890,48 @@ class UnifiedCandidateSearch:
             boolean_string = criteria.boolean_string or self._build_boolean_string(criteria)
             candidates = await self.exa_service.search_candidates(
                 skills=skills_values,
-                location=criteria.location,
+                location=self._scope_location_to_us(criteria.location),
                 limit=min(criteria.page_size, 20),
-                boolean_string=boolean_string,
+                boolean_string=self._scope_boolean_to_us(boolean_string),
             )
             return {"candidates": candidates, "source_type": "LinkedIn-Exa"}
         except Exception as e:
             logger.error(f"Exa search failed: {e}")
             return {"candidates": [], "source_type": "LinkedIn-Exa"}
+
+    def _dedup_keys(self, candidate: Dict[str, Any]) -> List[str]:
+        """Cross-source dedup keys for one candidate.
+
+        Each key is namespaced (`email:`, `linkedin:`, `name_loc:`) so two
+        candidates only collide when *one* of them genuinely overlaps —
+        sharing a normalised LinkedIn URL is sufficient even if names
+        differ slightly, and an email-with-`@` gates the email key
+        against catastrophic empty-string collisions.
+        """
+        keys: List[str] = []
+
+        email = str(candidate.get("email") or "").strip().lower()
+        if email and "@" in email:
+            keys.append(f"email:{email}")
+
+        profile_url = str(candidate.get("profile_url") or "").strip().lower()
+        if profile_url and "linkedin.com" in profile_url:
+            normalized = profile_url.split("?", 1)[0].rstrip("/")
+            keys.append(f"linkedin:{normalized}")
+
+        first = str(candidate.get("firstName") or "").strip().lower()
+        last = str(candidate.get("lastName") or "").strip().lower()
+        full_name = f"{first} {last}".strip()
+        if not full_name:
+            full_name = str(candidate.get("name") or "").strip().lower()
+        location_raw = (
+            str(candidate.get("city") or "").strip().lower()
+            or str(candidate.get("location") or "").strip().lower()
+        )
+        if full_name and location_raw and " " in full_name:
+            keys.append(f"name_loc:{full_name}|{location_raw}")
+
+        return keys
 
     def _deduplicate_candidates(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen = {}
