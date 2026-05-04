@@ -988,7 +988,7 @@ async def _check_and_fire_candidate_passed_notification(
         # Scores are normalized to 100-point scale — threshold is >70
         if hf_status is not None and cand_score is not None:
             score = cand_score
-            engage_passes = str(hf_status).lower() == "passed" and float(cand_score) > 70
+            engage_passes = str(hf_status).lower() == "passed" and float(cand_score) >= 70
 
             # Also check resume match score from DB (must be >70%)
             resume_match_score = 0.0
@@ -1012,7 +1012,7 @@ async def _check_and_fire_candidate_passed_notification(
             except Exception as _re:
                 logger.warning(f"⚠️ Could not fetch resume match score for {candidate_id}: {_re}")
 
-            meets_criteria = engage_passes and resume_match_score > 70
+            meets_criteria = engage_passes and resume_match_score >= 70
             if not meets_criteria:
                 logger.info(
                     f"⏭️ Candidate {candidate_id} did not meet pass criteria "
@@ -1022,7 +1022,7 @@ async def _check_and_fire_candidate_passed_notification(
         else:
             # Legacy Score check (fallback) — PASS_SCORE_THRESHOLD is already 70
             score = interview_block.get("overall_score")
-            if score is None or float(score) <= PASS_SCORE_THRESHOLD:
+            if score is None or float(score) < PASS_SCORE_THRESHOLD:
                 return
 
             # 3. Legacy Evaluation fetch (fallback)
@@ -1131,6 +1131,13 @@ async def _check_and_fire_candidate_passed_notification(
             safe_name = "".join(c for c in (cand_row["name"] or "Candidate") if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
             resume_filename = f"Resume_{safe_name}_{job_id}.txt"
 
+        # Resolve Numeric Candidate ID for JobDiva API calls
+        jd_candidate_id = candidate_id
+        if cand_data and (cand_data.get("jobdiva_candidate_id") or cand_data.get("candidate_id")):
+            potential_id = cand_data.get("jobdiva_candidate_id") or cand_data.get("candidate_id")
+            if str(potential_id).isdigit():
+                jd_candidate_id = str(potential_id)
+        
         # 7. Fire the email & Update JobDiva Qualification
         recruiter_emails = _parse_json_list(job_row.get("recruiter_emails", []))
         
@@ -1143,7 +1150,7 @@ async def _check_and_fire_candidate_passed_notification(
         # We fire these asynchronously so they don't block the email or main flow
         asyncio.create_task(
             jobdiva_service.update_candidate_qualification(
-                candidate_id=candidate_id,
+                candidate_id=jd_candidate_id,
                 qualification_name=JOBDIVA_PAIR_QUALIFICATION_NAME,
                 value=JOBDIVA_PASS_QUALIFICATION_VALUE,
                 recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
@@ -1161,7 +1168,7 @@ async def _check_and_fire_candidate_passed_notification(
         
         async def create_and_pin_note():
             note_res = await jobdiva_service.create_candidate_note(
-                candidate_id=candidate_id,
+                candidate_id=jd_candidate_id,
                 job_id=job_id,
                 action=JOBDIVA_PASS_ACTION_NAME,
                 note_text=note_text,
