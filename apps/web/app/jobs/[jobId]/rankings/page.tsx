@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
+import Link from "next/link";
 import {
   ArrowLeft,
   Search,
@@ -15,10 +16,15 @@ import {
   ChevronsUpDown,
   Filter,
   Calendar,
-  X,
   MessageSquare,
   Send,
   ExternalLink,
+  User,
+  Briefcase,
+  Building2,
+  Zap,
+  Check,
+  X
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -44,9 +50,9 @@ const formatDate = (dateStr: string) => {
   try {
     const date = new Date(dateStr);
     if (isNaN(date.getTime())) return dateStr;
-    return date.toLocaleString('en-GB', { 
-      day: '2-digit', 
-      month: '2-digit', 
+    return date.toLocaleString('en-GB', {
+      day: '2-digit',
+      month: '2-digit',
       year: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
@@ -66,6 +72,33 @@ interface JobDetails {
   max_allowed_submittals?: number;
 }
 
+// B5: applied-filters panel — surfaces context set on Step 3 (criteria) and
+// Step 5 (sourcing_filters) on the rankings page so recruiters can see what
+// constraints produced this list.
+type SourcingTitleEntry = {
+  value?: string;
+  matchType?: string;
+  match_type?: string;
+  years?: number;
+  recent?: boolean;
+};
+type SourcingSkillEntry = SourcingTitleEntry;
+type SourcingLocationEntry = { value?: string; radius?: string };
+interface AppliedFilters {
+  titles?: SourcingTitleEntry[];
+  skills?: SourcingSkillEntry[];
+  locations?: SourcingLocationEntry[];
+  companies?: string[];
+  keywords?: string[];
+}
+interface AppliedCriterion {
+  id?: string;
+  name: string;
+  priority_score?: number;
+  is_required?: boolean;
+  category?: string;
+}
+
 interface Candidate {
   id: number;
   jobdiva_id?: string;
@@ -83,7 +116,10 @@ interface Candidate {
   match_score: number;
   resume_match_percentage?: number;
   engage_score?: number;
+  engage_candidate_score?: number;
+  engage_total_score?: number;
   engage_status?: string;
+  engage_hard_filter_status?: string;
   engage_completed_at?: string;
   engage_created_at?: string;
   availability?: string;
@@ -103,6 +139,72 @@ export default function CandidateRankingsPage() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
+  const [appliedFilters, setAppliedFilters] = useState<AppliedFilters | null>(null);
+  const [criteriaList, setCriteriaList] = useState<AppliedCriterion[]>([]);
+  const [appliedFiltersOpen, setAppliedFiltersOpen] = useState(false);
+  const [feedbacks, setFeedbacks] = useState<Record<string, string>>({});
+  const [syncingCandidateId, setSyncingCandidateId] = useState<number | null>(null);
+  const [integrationModalOpen, setIntegrationModalOpen] = useState<'submit' | 'reject' | null>(null);
+  const [actionCandidateId, setActionCandidateId] = useState<number | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
+
+  const handleConfirmSubmit = async () => {
+    if (actionCandidateId) {
+      setSyncingCandidateId(actionCandidateId);
+      try {
+        const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates/${actionCandidateId}/feedback`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ feedback_type: 'Submit' })
+        });
+
+        if (response.ok) {
+          setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
+        } else {
+          console.error('Failed to sync submission with JobDiva');
+          setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
+        }
+      } catch (error) {
+        console.error('Error syncing submission:', error);
+        setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Submit' }));
+      } finally {
+        setSyncingCandidateId(null);
+        setIntegrationModalOpen(null);
+        setActionCandidateId(null);
+      }
+    }
+  };
+
+  const handleConfirmReject = async () => {
+    if (actionCandidateId && rejectReason) {
+      setSyncingCandidateId(actionCandidateId);
+      try {
+        const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates/${actionCandidateId}/feedback`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            feedback_type: 'Reject',
+            reason: rejectReason
+          })
+        });
+
+        if (response.ok) {
+          setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
+        } else {
+          console.error('Failed to sync rejection with JobDiva');
+          setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
+        }
+      } catch (error) {
+        console.error('Error syncing rejection:', error);
+        setFeedbacks(prev => ({ ...prev, [actionCandidateId]: 'Reject' }));
+      } finally {
+        setSyncingCandidateId(null);
+        setIntegrationModalOpen(null);
+        setActionCandidateId(null);
+        setRejectReason('');
+      }
+    }
+  };
 
   // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
   // filter updates the table synchronously (no stale state via setFilteredCandidates).
@@ -158,7 +260,7 @@ export default function CandidateRankingsPage() {
     return raw;
   };
 
-  const normalizeScreenStatus = (c: Candidate): { label: string; color: string } => {
+  const normalizeInterviewStatus = (c: Candidate): { label: string; color: string } => {
     const interviewId = deriveInterviewId(c);
     if (!interviewId) {
       return { label: "N/A", color: "#94a3b8" };
@@ -175,91 +277,46 @@ export default function CandidateRankingsPage() {
       "created",
       "queued",
       "scheduled",
-      "in_progress",
-      "in-progress",
-      "inprogress",
       "started",
     ]);
     if (pendingStates.has(raw)) {
       return { label: "Pending", color: "#64748b" };
     }
 
-    if (raw.includes("complete")) {
+    if (raw === "in_progress" || raw === "in-progress" || raw === "inprogress" || raw === "in progress") {
+      return { label: "In Progress", color: "#f59e0b" };
+    }
+
+    if (raw.includes("complete") || raw === "passed" || raw === "pass") {
       return { label: "Completed", color: "#059669" };
     }
+
+    if (raw === "failed" || raw === "fail" || raw === "rejected") {
+      return { label: "Fail", color: "#e11d48" };
+    }
+
+    const label = raw.charAt(0).toUpperCase() + raw.slice(1).replace(/_/g, " ");
+    return { label, color: "#64748b" };
+  };
+
+  const normalizeHardFilterStatus = (c: Candidate): { label: string; color: string } => {
+    const raw = String(c.engage_hard_filter_status || c.data?.engage_hard_filter_status || "").trim().toLowerCase();
+    if (!raw) {
+      return { label: "—", color: "#94a3b8" };
+    }
+
     if (raw.includes("fail")) {
-      return { label: "Failed", color: "#dc2626" };
+      return { label: "Fail", color: "#dc2626" };
     }
     if (raw.includes("pass")) {
-      return { label: "Passed", color: "#059669" };
+      return { label: "Pass", color: "#059669" };
     }
 
     const label = raw.charAt(0).toUpperCase() + raw.slice(1);
     return { label, color: "#64748b" };
   };
 
-  const syncInterviewDetails = async (rows: Candidate[]): Promise<Candidate[]> => {
-    const interviewIds = Array.from(
-      new Set(
-        rows
-          .map((c) => deriveInterviewId(c))
-          .filter((id): id is string => Boolean(id))
-          .map((id) => Number.parseInt(id, 10))
-          .filter((n) => Number.isFinite(n) && n > 0)
-      )
-    );
 
-    if (!interviewIds.length) return rows;
-
-    try {
-      const res = await fetch(`${API_BASE}/api/v1/engagement/interviews/details-sync`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ interview_ids: interviewIds }),
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok || !Array.isArray(payload?.results)) {
-        return rows;
-      }
-
-      const detailByInterviewId = new Map<string, Record<string, unknown>>();
-      for (const item of payload.results) {
-        const iid = String(item?.interview_id || "").trim();
-        if (!iid || !item?.success) continue;
-        detailByInterviewId.set(iid, item as Record<string, unknown>);
-      }
-
-      return rows.map((c) => {
-        const iid = deriveInterviewId(c);
-        if (!iid) return c;
-
-        const detail = detailByInterviewId.get(String(Number.parseInt(iid, 10)) || iid) || detailByInterviewId.get(iid);
-        if (!detail) return c;
-
-        const interview = (detail.detail as Record<string, unknown> | undefined)?.interview as Record<string, unknown> | undefined;
-        const nextStatus = String(interview?.status || detail.status || c.engage_status || "").trim();
-        const scoreRaw = interview?.overall_score ?? detail.overall_score;
-        const score = Number(scoreRaw);
-        const completedAt = interview?.completed_at || detail.completed_at || c.data?.engage_completed_at || null;
-
-        return {
-          ...c,
-          engage_status: nextStatus || c.engage_status,
-          engage_score: Number.isFinite(score) ? score : c.engage_score,
-          data: {
-            ...(c.data || {}),
-            engage_interview_id: iid,
-            ...(nextStatus ? { engage_status: nextStatus } : {}),
-            ...(Number.isFinite(score) ? { engage_score: score } : {}),
-            ...(completedAt ? { engage_completed_at: completedAt } : {}),
-          },
-        };
-      });
-    } catch (error) {
-      console.warn("Failed to sync interview details", error);
-      return rows;
-    }
-  };
 
   const availabilityPillClasses = (raw: string | null): string => {
     if (!raw) return "text-slate-500";
@@ -652,10 +709,21 @@ export default function CandidateRankingsPage() {
       });
       setScreenApiResponse(data);
       if (data.success) {
-        setTimeout(() => {
-          setIsScreenModalOpen(false);
-          fetchData();
-        }, 1200);
+        // Optimistically update status to Initiated for all selected candidates
+        setCandidates(prev => prev.map(c => {
+          const cid = String(c.candidate_id || c.id || "");
+          if (selectedScreenCandidateIds.includes(cid)) {
+            return {
+              ...c,
+              engage_status: "Initiated",
+              engage_created_at: new Date().toISOString()
+            };
+          }
+          return c;
+        }));
+
+        // Refresh data in background while modal shows success
+        fetchData();
       } else {
         setScreenError(data.message || "Screen API returned an error");
       }
@@ -757,10 +825,10 @@ export default function CandidateRankingsPage() {
       // Fetch job details
       const jobRes = await fetch(`${apiBase}/jobs/${jobId}/monitored-data`);
       const jobData = await jobRes.json();
-      
+
       // Handle both { data: { ... } } and flat { ... } structures
       const data = jobData.data || jobData;
-      
+
       if (data) {
         setJob({
           job_id: jobId as string,
@@ -770,12 +838,49 @@ export default function CandidateRankingsPage() {
           openings: data.openings,
           max_allowed_submittals: data.max_allowed_submittals
         });
+        // B5: surface step-5 sourcing filters on this page.
+        const sf = data.sourcing_filters || {};
+        if (sf && typeof sf === "object" && Object.keys(sf).length > 0) {
+          setAppliedFilters({
+            titles: Array.isArray(sf.titles) ? sf.titles : [],
+            skills: Array.isArray(sf.skills) ? sf.skills : [],
+            locations: Array.isArray(sf.locations) ? sf.locations : [],
+            companies: Array.isArray(sf.companies) ? sf.companies : [],
+            keywords: Array.isArray(sf.keywords) ? sf.keywords : [],
+          });
+        } else {
+          setAppliedFilters(null);
+        }
+      }
+
+      // B5: parallel fetch step-3 criteria so the applied-filters panel can
+      // render priority + required/preferred chips next to sourcing filters.
+      try {
+        const critRes = await fetch(`${apiBase}/api/jobs/${jobId}/criteria`);
+        if (critRes.ok) {
+          const critData = await critRes.json();
+          if (Array.isArray(critData?.criteria)) {
+            setCriteriaList(critData.criteria);
+          }
+        }
+      } catch (e) {
+        // Non-fatal: panel just hides the criteria column when unavailable.
+        console.warn("Failed to fetch job criteria:", e);
       }
 
       // Fetch candidates
       const candRes = await fetch(`${apiBase}/jobs/${jobId}/candidates`);
       const candData = await candRes.json();
       if (candData.status === "success" && Array.isArray(candData.candidates)) {
+        // Initialize feedbacks state from persisted data
+        const initialFeedbacks: Record<string, string> = {};
+        candData.candidates.forEach((c: any) => {
+          if (c.data?.feedback_type) {
+            initialFeedbacks[c.id] = c.data.feedback_type;
+          }
+        });
+        setFeedbacks(initialFeedbacks);
+
         // Deduplicate candidates by their JobDiva candidate ID.
         // We keep the first occurrence since they are sorted by created_at DESC from the backend.
         const seen = new Set();
@@ -816,13 +921,12 @@ export default function CandidateRankingsPage() {
           const totalB = (b.match_score || b.resume_match_percentage || 0);
           return totalB - totalA;
         });
-        const synced = await syncInterviewDetails(sorted as Candidate[]);
-        setCandidates(synced);
+        setCandidates(sorted as Candidate[]);
 
         // EXTRA FALLBACK: If job title is still Unknown, borrow from candidates
         setJob(prev => {
           if (!prev || prev.title === `Job ${jobId}`) {
-            const firstCand = synced[0];
+            const firstCand = sorted[0];
             const recoveredTitle = firstCand?.headline || firstCand?.job_title || `Job ${jobId}`;
             return {
               ...(prev || {}),
@@ -872,7 +976,7 @@ export default function CandidateRankingsPage() {
               <>
                 <Medal className="w-[24px] h-[24px] text-indigo-600" />
                 <h2 className="text-[24px] font-bold text-slate-900 m-0 leading-none flex items-center gap-1.5">
-                  {job?.title} 
+                  {job?.title}
                   <span className="text-slate-500 font-medium text-[16px]">
                     ({job?.jobdiva_id || job?.job_id || jobId}) <span className="text-indigo-600 text-[14px] ml-1">🔗</span>
                   </span>
@@ -924,6 +1028,162 @@ export default function CandidateRankingsPage() {
           </Button>
         </div>
       </div>
+
+      {/* B5: applied filters panel — criteria from Step 3 + sourcing filters
+          from Step 5. Read-only, collapsed by default. */}
+      {(appliedFilters || criteriaList.length > 0) && (
+        <div className="mb-4 bg-white border border-slate-200 rounded-[8px] shadow-sm">
+          <button
+            type="button"
+            onClick={() => setAppliedFiltersOpen(v => !v)}
+            className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-slate-50 rounded-[8px] transition-colors"
+          >
+            <div className="flex items-center gap-2">
+              <Filter className="w-4 h-4 text-slate-400" />
+              <span className="text-[13px] font-semibold text-slate-700">
+                Filters applied at sourcing
+              </span>
+              <span className="text-[11px] text-slate-400">
+                {criteriaList.length > 0 && `${criteriaList.length} criteria`}
+                {appliedFilters && criteriaList.length > 0 && " · "}
+                {appliedFilters && (() => {
+                  const counts: string[] = [];
+                  if (appliedFilters.titles?.length) counts.push(`${appliedFilters.titles.length} titles`);
+                  if (appliedFilters.skills?.length) counts.push(`${appliedFilters.skills.length} skills`);
+                  if (appliedFilters.locations?.length) counts.push(`${appliedFilters.locations.length} locations`);
+                  if (appliedFilters.companies?.length) counts.push(`${appliedFilters.companies.length} companies`);
+                  return counts.join(" · ");
+                })()}
+              </span>
+            </div>
+            {appliedFiltersOpen ? <ChevronUp className="w-4 h-4 text-slate-400" /> : <ChevronDown className="w-4 h-4 text-slate-400" />}
+          </button>
+
+          {appliedFiltersOpen && (
+            <div className="border-t border-slate-100 p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Column 1 — criteria from Step 3 */}
+              <div>
+                <h4 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2">
+                  Criteria (Step 3)
+                </h4>
+                {criteriaList.length === 0 ? (
+                  <div className="text-[12px] text-slate-400 italic">
+                    No criteria recorded for this job.
+                  </div>
+                ) : (
+                  <ul className="space-y-1.5">
+                    {criteriaList.map((c, i) => (
+                      <li key={c.id || i} className="flex items-start gap-2 text-[12px]">
+                        <span className="flex-shrink-0 inline-flex items-center justify-center w-7 h-5 rounded bg-slate-100 text-slate-700 font-bold text-[10px]">
+                          {(c.priority_score ?? 0)}/10
+                        </span>
+                        <span className="flex-1 text-slate-700">{c.name}</span>
+                        <span className={`flex-shrink-0 px-1.5 py-0.5 rounded text-[10px] font-medium ${c.is_required ? "bg-indigo-50 text-indigo-700 border border-indigo-200" : "bg-slate-50 text-slate-600 border border-slate-200"}`}>
+                          {c.is_required ? "Required" : "Preferred"}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+
+              {/* Column 2 — sourcing filters from Step 5 */}
+              <div>
+                <h4 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mb-2">
+                  Sourcing filters (Step 5)
+                </h4>
+                {!appliedFilters || (
+                  !appliedFilters.titles?.length &&
+                  !appliedFilters.skills?.length &&
+                  !appliedFilters.locations?.length &&
+                  !appliedFilters.companies?.length &&
+                  !appliedFilters.keywords?.length
+                ) ? (
+                  <div className="text-[12px] text-slate-400 italic">
+                    No structured filters captured for this run.
+                  </div>
+                ) : (
+                  <div className="space-y-2 text-[12px]">
+                    {appliedFilters.titles && appliedFilters.titles.length > 0 && (
+                      <div>
+                        <div className="text-[10px] font-semibold text-slate-500 uppercase mb-1">Titles</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {appliedFilters.titles.map((t, i) => {
+                            const mt = t.matchType || t.match_type || "must";
+                            return (
+                              <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-50 border border-slate-200 text-slate-700">
+                                <span className="font-medium">{t.value}</span>
+                                <span className={`text-[10px] ${mt === "must" ? "text-indigo-600" : "text-slate-400"}`}>{mt}</span>
+                                {t.years && t.years > 0 ? <span className="text-[10px] text-slate-500">≥{t.years}y</span> : null}
+                                {t.recent ? <span className="text-[10px] text-emerald-600">recent</span> : null}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                    {appliedFilters.skills && appliedFilters.skills.length > 0 && (
+                      <div>
+                        <div className="text-[10px] font-semibold text-slate-500 uppercase mb-1">Skills</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {appliedFilters.skills.map((s, i) => {
+                            const mt = s.matchType || s.match_type || "must";
+                            return (
+                              <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-50 border border-slate-200 text-slate-700">
+                                <span className="font-medium">{s.value}</span>
+                                <span className={`text-[10px] ${mt === "must" ? "text-indigo-600" : "text-slate-400"}`}>{mt}</span>
+                                {s.years && s.years > 0 ? <span className="text-[10px] text-slate-500">≥{s.years}y</span> : null}
+                                {s.recent ? <span className="text-[10px] text-emerald-600">recent</span> : null}
+                              </span>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                    {appliedFilters.locations && appliedFilters.locations.length > 0 && (
+                      <div>
+                        <div className="text-[10px] font-semibold text-slate-500 uppercase mb-1">Locations</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {appliedFilters.locations.map((l, i) => (
+                            <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-50 border border-slate-200 text-slate-700">
+                              <span className="font-medium">{l.value}</span>
+                              {l.radius ? <span className="text-[10px] text-slate-500">{l.radius}</span> : null}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {appliedFilters.companies && appliedFilters.companies.length > 0 && (
+                      <div>
+                        <div className="text-[10px] font-semibold text-slate-500 uppercase mb-1">Companies</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {appliedFilters.companies.map((c, i) => (
+                            <span key={i} className="px-2 py-0.5 rounded bg-slate-50 border border-slate-200 text-slate-700 font-medium">
+                              {c}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {appliedFilters.keywords && appliedFilters.keywords.length > 0 && (
+                      <div>
+                        <div className="text-[10px] font-semibold text-slate-500 uppercase mb-1">Keywords</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {appliedFilters.keywords.map((k, i) => (
+                            <span key={i} className="px-2 py-0.5 rounded bg-slate-50 border border-slate-200 text-slate-700">
+                              {k}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Table Interface */}
       <div className="space-y-4">
@@ -1002,34 +1262,49 @@ export default function CandidateRankingsPage() {
         </div>
 
         {/* HTML Exact Replica Table */}
-        <div className="bg-white rounded-[12px] border border-slate-200 shadow-sm overflow-hidden relative max-w-full">
-          <div className="overflow-x-auto pb-1">
-            <Table className="table-fixed min-w-[1200px] w-full">
+        <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm overflow-hidden relative max-w-full">
+          <div className="overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
+            <Table className="table-fixed min-w-[1200px] w-full border-collapse">
               <TableHeader>
-                <TableRow className="bg-white border-b border-slate-200 hover:bg-white h-[34px]">
-                  <TableHead className="w-[44px] text-center font-bold text-slate-900 text-[11px] uppercase tracking-wider border-r border-[#e2e8f0] py-1 px-1">#</TableHead>
-                  {(() => {
-                    // Helper that turns a column header into a sortable button.
-                    // Shows an active arrow when that column is the current sort.
-                    const SortIcon = ({ field }: { field: SortField }) => {
-                      if (sortField !== field) {
-                        return <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />;
-                      }
-                      return sortDir === "asc"
-                        ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" />
-                        : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />;
-                    };
-                    return null; // just a hoist trick; the component is used inline below
-                  })()}
-                  <TableHead className="w-[180px] font-bold text-slate-900 text-[10px] uppercase tracking-wide border-r border-slate-200 py-0">
+                <TableRow className="bg-slate-50/80 border-b border-slate-200 hover:bg-slate-50/80 h-[42px] transition-colors">
+                  <TableHead className="w-[44px] sticky left-0 z-10 bg-white text-center font-bold text-slate-900 text-[11px] uppercase tracking-wider border-r border-[#e2e8f0] py-1 px-1">#</TableHead>
+                  <TableHead className="w-[160px] sticky left-[44px] z-10 bg-white font-bold text-slate-900 text-[9.5px] uppercase tracking-wide border-r border-slate-200 py-0">
                     <button
                       onClick={() => toggleSort("name")}
                       className="flex items-center justify-between w-full h-full px-1.5 cursor-pointer hover:bg-slate-50 transition-colors"
                     >
-                      <div className="w-[20px]" />
-                      <span className="whitespace-nowrap flex-1 text-center">CANDIDATE NAME</span>
-                      <div className="w-[20px] flex items-center justify-end gap-1 px-0.5">
+                      <div className="w-[10px]" />
+                      <span className="whitespace-nowrap flex-1 text-center">CANDIDATE</span>
+                      <div className="w-[10px] flex items-center justify-end gap-1 px-0.5">
                         {sortField === "name"
+                          ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
+                          : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
+                      </div>
+                    </button>
+                  </TableHead>
+                  <TableHead className="w-[90px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                    <div className="flex items-center justify-between w-full h-full px-1">
+                      <div className="w-[10px]" />
+                      <span className="flex-1 text-center leading-tight">SOURCE</span>
+                      <div className="w-[10px]" />
+                    </div>
+                  </TableHead>
+                  <TableHead className="w-[100px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                    <div className="flex items-center justify-between w-full h-full px-1">
+                      <div className="w-[10px]" />
+                      <span className="flex-1 text-center leading-tight">RESUME STATUS</span>
+                      <div className="w-[10px]" />
+                    </div>
+                  </TableHead>
+                  <TableHead className="w-[90px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                    <button
+                      onClick={() => toggleSort("screening_score")}
+                      className="flex items-center justify-between w-full h-full px-1 cursor-pointer hover:bg-slate-50 transition-colors"
+                    >
+                      <div className="w-[10px]" />
+                      <span className="flex-1 text-center leading-tight">MATCH SCORE</span>
+                      <div className="w-[10px] flex items-center justify-end gap-1 px-0.5">
+                        {sortField === "screening_score"
                           ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
                           : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
                       </div>
@@ -1037,86 +1312,72 @@ export default function CandidateRankingsPage() {
                   </TableHead>
                   <TableHead className="w-[120px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
                     <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[20px]" />
-                      <span className="flex-1 text-center leading-tight">SOURCE</span>
-                      <div className="w-[20px]" />
-                    </div>
-                  </TableHead>
-                  <TableHead className="w-[118px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
-                    <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[20px]" />
-                      <span className="flex-1 text-center leading-tight">RESUME MATCHING STATUS</span>
-                      <div className="w-[20px]" />
-                    </div>
-                  </TableHead>
-                  <TableHead className="w-[108px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
-                    <button
-                      onClick={() => toggleSort("screening_score")}
-                      className="flex items-center justify-between w-full h-full px-1 cursor-pointer hover:bg-slate-50 transition-colors"
-                    >
-                      <div className="w-[20px]" />
-                      <span className="flex-1 text-center leading-tight">RESUME MATCHING SCORE</span>
-                      <div className="w-[20px] flex items-center justify-end gap-1 px-0.5">
-                        {sortField === "screening_score"
-                          ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
-                          : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
-                      </div>
-                    </button>
-                  </TableHead>
-                  <TableHead className="w-[98px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
-                    <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[20px]" />
+                      <div className="w-[10px]" />
                       <span className="flex-1 text-center leading-tight">SCREEN STATUS</span>
-                      <div className="w-[20px]" />
+                      <div className="w-[10px]" />
                     </div>
                   </TableHead>
-                  <TableHead className="w-[98px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                  <TableHead className="w-[100px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                    <div className="flex items-center justify-between w-full h-full px-1">
+                      <div className="w-[10px]" />
+                      <span className="flex-1 text-center leading-tight">HARD FILTER</span>
+                      <div className="w-[10px]" />
+                    </div>
+                  </TableHead>
+                  <TableHead className="w-[90px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
                     <button
                       onClick={() => toggleSort("engage_score")}
                       className="flex items-center justify-between w-full h-full px-1 cursor-pointer hover:bg-slate-50 transition-colors"
                     >
-                      <div className="w-[20px]" />
+                      <div className="w-[10px]" />
                       <span className="flex-1 text-center leading-tight">SCREEN SCORE</span>
-                      <div className="w-[20px] flex items-center justify-end gap-1 px-0.5">
+                      <div className="w-[10px] flex items-center justify-end gap-1 px-0.5">
                         {sortField === "engage_score"
                           ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
                           : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
                       </div>
                     </button>
                   </TableHead>
-                  <TableHead className="w-[128px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                  <TableHead className="w-[125px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
                     <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[20px]" />
+                      <div className="w-[10px]" />
                       <span className="flex-1 text-center leading-tight">SCREEN COMPLETED AT</span>
-                      <div className="w-[20px]" />
+                      <div className="w-[10px]" />
                     </div>
                   </TableHead>
-                  <TableHead className="w-[88px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                  <TableHead className="w-[100px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
                     <button
                       onClick={() => toggleSort("total_score")}
                       className="flex items-center justify-between w-full h-full px-1 cursor-pointer hover:bg-slate-50 transition-colors"
                     >
-                      <div className="w-[20px]" />
+                      <div className="w-[10px]" />
                       <span className="flex-1 text-center leading-tight">TOTAL FIT SCORE</span>
-                      <div className="w-[20px] flex items-center justify-end gap-1 px-0.5">
+                      <div className="w-[10px] flex items-center justify-end gap-1 px-0.5">
                         {sortField === "total_score"
                           ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
                           : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
                       </div>
                     </button>
                   </TableHead>
-                  <TableHead className="w-[78px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
+                  <TableHead className="w-[90px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
                     <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[20px]" />
+                      <div className="w-[10px]" />
                       <span className="flex-1 text-center leading-tight">JOB CONFIG</span>
-                      <div className="w-[20px]" />
+                      <div className="w-[10px]" />
                     </div>
                   </TableHead>
-                  <TableHead className="w-[150px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide border-l border-slate-200 py-0">
+                  <TableHead className="w-[240px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide border-l border-slate-200 py-0">
                     <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[20px]" />
+                      <div className="w-[10px]" />
                       <span className="flex-1 text-center leading-tight">ACTIONS</span>
-                      <div className="w-[20px]" />
+                      <div className="w-[10px]" />
+                    </div>
+                  </TableHead>
+                  <TableHead className="w-[160px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide border-l border-slate-200 py-0">
+                    <div className="flex items-center justify-between w-full h-full px-1">
+                      <div className="w-[10px]" />
+                      <span className="flex-1 text-center leading-tight">FEEDBACK</span>
+                      <div className="w-[10px]" />
                     </div>
                   </TableHead>
                 </TableRow>
@@ -1125,8 +1386,8 @@ export default function CandidateRankingsPage() {
                 {isInitialLoading ? (
                   Array.from({ length: 5 }).map((_, i) => (
                     <TableRow key={i} className="h-20">
-                      <TableCell className="pl-4"><Skeleton className="h-4 w-4 mx-auto" /></TableCell>
-                      <TableCell className="sticky left-0 bg-white z-20 border-r border-slate-200/50"><Skeleton className="h-12 w-64" /></TableCell>
+                      <TableCell className="w-[44px] sticky left-0 z-10 bg-white border-r border-slate-200/50 px-1"><Skeleton className="h-4 w-4 mx-auto" /></TableCell>
+                      <TableCell className="w-[160px] sticky left-[44px] z-10 bg-white border-r border-slate-200/50 px-1"><Skeleton className="h-12 w-40 mx-auto" /></TableCell>
                       <TableCell className="pl-6"><Skeleton className="h-8 w-24 mx-auto" /></TableCell>
                       <TableCell><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
                       <TableCell><Skeleton className="h-8 w-20 mx-auto" /></TableCell>
@@ -1141,20 +1402,21 @@ export default function CandidateRankingsPage() {
                   filteredCandidates.map((candidate, idx) => {
                     const screeningScore = candidate.match_score || 0;
                     const engageScore = candidate.engage_score || 0;
-                    const totalScore = screeningScore + engageScore;
+                    const isDone = ["completed", "passed", "failed", "rejected", "pass", "fail"].includes((candidate.engage_status || "").toLowerCase());
+                    const totalScore = isDone ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : screeningScore;
 
                     return (
-                      <TableRow key={`${candidate.id || candidate.candidate_id}-${idx}`} className="border-b border-[#e2e8f0] hover:bg-slate-50/80 transition-colors h-auto group leading-tight">
-                        <TableCell className="relative text-center font-semibold text-slate-500 text-[11px] border-r border-[#e2e8f0] w-[44px] p-0 align-middle">
+                      <TableRow key={`${candidate.id || candidate.candidate_id}-${idx}`} className="border-b border-slate-100 hover:bg-indigo-50/30 transition-all duration-200 h-auto group leading-tight relative">
+                        <TableCell className="w-[44px] sticky left-0 z-10 bg-white border-r border-[#e2e8f0] py-1 px-1 align-middle text-center">
                           <div className="absolute inset-0 flex items-center justify-center">{idx + 1}</div>
                         </TableCell>
-                        <TableCell className="border-r border-[#e2e8f0] w-[180px] py-1 px-1 align-middle text-center">
-                          <button
-                            onClick={() => openDetails(candidate)}
+                        <TableCell className="sticky left-[44px] z-10 bg-white border-r border-[#e2e8f0] w-[160px] py-1 px-1 align-middle text-center">
+                          <Link
+                            href={`/jobs/${jobId}/report?candidateId=${encodeURIComponent(candidate.candidate_id || candidate.id)}`}
                             className="text-[14px] font-bold text-indigo-600 hover:underline text-center w-full block mb-0.5"
                           >
                             {candidate.name}
-                          </button>
+                          </Link>
                           <span className="text-[11px] text-[#64748b] block mb-0 text-center">
                             <Mail className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {candidate.email || <span className="font-normal opacity-50">—</span>}
                           </span>
@@ -1205,6 +1467,11 @@ export default function CandidateRankingsPage() {
                           <span className={`text-[11px] block text-center mt-0.5 ${availabilityPillClasses(deriveAvailability(candidate))}`}>
                             <Calendar className="w-3.5 h-3.5 inline mr-1 opacity-70" /> Available: {deriveAvailability(candidate) || <span className="font-normal opacity-50">—</span>}
                           </span>
+                          {candidate.data?.open_to_relocation && (
+                            <span className="text-[10px] inline-block mt-0.5 px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 font-medium">
+                              Open to Relocation
+                            </span>
+                          )}
                         </TableCell>
 
                         <TableCell className="text-center align-middle py-1">
@@ -1217,11 +1484,8 @@ export default function CandidateRankingsPage() {
                           <div className="flex items-center justify-center gap-1.5">
                             {(() => {
                               const statusFromData = String(candidate.data?.resume_matching_status || "").toLowerCase();
-                              if (statusFromData === "done") {
-                                return <span className="font-medium text-[12px] text-emerald-600">Done</span>;
-                              }
-                              if (screeningScore > 0) {
-                                return <span className="font-medium text-[12px] text-emerald-600">Done</span>;
+                              if (statusFromData === "done" || screeningScore > 0) {
+                                return <span className="font-medium text-[12px] text-emerald-600">Completed</span>;
                               }
                               const cid = String(candidate.candidate_id || candidate.id || "");
                               const isRefreshing = refreshingResumeMatchIds.has(cid);
@@ -1247,79 +1511,113 @@ export default function CandidateRankingsPage() {
                           <div className="flex items-center justify-center gap-1.5 w-full text-center">
 
                             {screeningScore > 0 ? (
-                              <button
-                                onClick={() => openDetails(candidate)}
-                                className="font-semibold text-indigo-600 hover:underline"
-                                title="View detailed resume matching breakdown"
+                              <span
+                                className="font-bold text-slate-700"
                               >
                                 {screeningScore}
-                              </button>
+                              </span>
                             ) : (
-                              <span className="font-normal opacity-50">—</span>
+                              <span className="font-normal opacity-40 italic text-slate-400">Pending</span>
                             )}
                           </div>
                         </TableCell>
 
-                        <TableCell className="text-center align-middle py-1">
-                          <div className="flex items-center justify-center w-full min-h-[40px]">
-                            {(() => {
-                              const rawStatus = String(candidate.engage_status || candidate.data?.engage_status || "").trim().toLowerCase();
-                              if (rawStatus === "initiated" || rawStatus === "sent" || rawStatus === "sms sent") {
-                                return (
-                                  <div className="flex flex-col items-center gap-1.5 py-1">
-                                    <span className="inline-flex items-center px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 font-bold text-[11px] border border-amber-200 shadow-sm leading-none">
-                                      SMS Sent
-                                    </span>
-                                    {(candidate.engage_created_at || candidate.data?.engage_created_at) && (
-                                      <div className="flex flex-col items-center gap-0.5">
-                                        <div className="text-[10px] text-emerald-600 flex items-center gap-1 font-bold" title="Time when automated outreach was first initiated">
-                                          <Mail className="w-2.5 h-2.5" /> {formatDate(candidate.engage_created_at || candidate.data?.engage_created_at)}
-                                        </div>
-                                        {(() => {
-                                          const baseTime = candidate.engage_created_at || candidate.data?.engage_created_at;
-                                          const phoneTime = new Date(new Date(baseTime).getTime() + 30 * 60000);
-                                          const isActive = new Date() > phoneTime;
-                                          return (
-                                            <div 
-                                              className={`text-[10px] flex items-center gap-1 font-bold ${isActive ? 'text-blue-600' : 'text-slate-400'}`}
-                                              title={isActive ? "Automated follow-up call has been triggered" : "Scheduled time for automated follow-up call if no response"}
-                                            >
-                                              <Phone className="w-2.5 h-2.5" /> {formatDate(phoneTime.toISOString())}
-                                            </div>
-                                          );
-                                        })()}
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              }
-                              const screenStatus = normalizeScreenStatus(candidate);
+                        <TableCell className="text-center align-middle py-2 group-hover:bg-indigo-50/5 transition-colors">
+                          {(() => {
+                            const rawStatus = String(candidate.engage_status || candidate.data?.engage_status || "").trim().toLowerCase();
+                            // If in outreach phase, show the timeline
+                            if (rawStatus === "initiated" || rawStatus === "sent" || rawStatus === "sms sent") {
                               return (
-                                <span className="font-medium text-[13px]" style={{ color: screenStatus.color }}>
-                                  {screenStatus.label}
+                                <div className="flex flex-col items-center gap-1 py-1">
+                                  <div className="flex items-center gap-1 mb-1">
+                                    <div className="w-1.5 h-1.5 rounded-full bg-yellow-500 animate-pulse" />
+                                    <span className="text-[10px] font-bold text-yellow-600 tracking-wide">Initiated</span>
+                                  </div>
+                                  {(candidate.engage_created_at || candidate.data?.engage_created_at) && (
+                                    <div className="flex flex-col items-center gap-0.5 px-2 py-1 rounded-lg bg-slate-50 border border-slate-100">
+                                      <div className="text-[10px] text-emerald-600 flex items-center gap-1 font-semibold" title="Outreach initiated">
+                                        <Mail className="w-2.5 h-2.5" /> {formatDate(candidate.engage_created_at || candidate.data?.engage_created_at)}
+                                      </div>
+                                      {(() => {
+                                        const baseTime = candidate.engage_created_at || candidate.data?.engage_created_at;
+                                        const phoneTime = new Date(new Date(baseTime).getTime() + 30 * 60000);
+                                        const isActive = new Date() > phoneTime;
+                                        return (
+                                          <div
+                                            className={`text-[10px] flex items-center gap-1 font-semibold ${isActive ? 'text-blue-600' : 'text-slate-400'}`}
+                                            title={isActive ? "Follow-up triggered" : "Scheduled follow-up"}
+                                          >
+                                            <Phone className="w-2.5 h-2.5" /> {formatDate(phoneTime.toISOString())}
+                                          </div>
+                                        );
+                                      })()}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            }
+                            const { label, color } = normalizeInterviewStatus(candidate);
+                            return (
+                              <div className="flex justify-center items-center w-full">
+                                <span
+                                  className="px-2.5 py-0.5 rounded-full text-[10px] font-bold border"
+                                  style={{ backgroundColor: `${color}08`, color, borderColor: `${color}30` }}
+                                >
+                                  {label}
+                                </span>
+                              </div>
+                            );
+                          })()}
+                        </TableCell>
+
+                        <TableCell className="text-center align-middle py-2 group-hover:bg-indigo-50/5 transition-colors">
+                          {(() => {
+                            const { label, color } = normalizeHardFilterStatus(candidate);
+                            return (
+                              <div className="flex justify-center items-center w-full">
+                                <span
+                                  className="px-2.5 py-0.5 rounded-full text-[10px] font-bold border"
+                                  style={{ backgroundColor: `${color}08`, color, borderColor: `${color}30` }}
+                                >
+                                  {label}
+                                </span>
+                              </div>
+                            );
+                          })()}
+                        </TableCell>
+
+                        <TableCell className="text-center align-middle py-2 font-medium text-slate-700 text-[12px] group-hover:bg-indigo-50/5 transition-colors">
+                          {(() => {
+                            const eScore = candidate.engage_score;
+                            const eTotal = candidate.engage_total_score;
+                            
+                            if (eScore !== undefined && eScore !== null) {
+                              return (
+                                <span
+                                  className="text-center w-full font-bold text-slate-900 bg-slate-50/50 px-2 py-1 rounded border border-slate-100 inline-block mx-auto"
+                                >
+                                  {eScore}<span className="text-slate-400 font-normal mx-0.5">/</span>{eTotal || 100}
                                 </span>
                               );
-                            })()}
-                          </div>
+                            }
+                            return <span className="font-normal opacity-40 italic">Waiting</span>;
+                          })()}
                         </TableCell>
 
+                        <TableCell className="text-center font-medium text-slate-600 text-[11px] align-middle py-1 group-hover:bg-indigo-50/5 transition-colors">
+                          {candidate.engage_completed_at || candidate.data?.engage_completed_at ? formatDate(candidate.engage_completed_at || candidate.data.engage_completed_at) : <span className="font-normal opacity-30 italic">—</span>}
+                        </TableCell>
 
-                        <TableCell className="text-center align-middle py-1 font-medium text-slate-700 text-[12px]">
-                          {engageScore > 0 ? (
-                            <div className="flex items-center justify-center gap-1.5 w-full text-center">
-                              {engageScore}
-                            </div>
+                        <TableCell className="text-center font-bold text-indigo-700 text-[13px] align-middle py-2 bg-indigo-50/10 group-hover:bg-indigo-50/30 transition-colors">
+                          {totalScore ? (
+                            <span
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-100 shadow-sm"
+                            >
+                              {totalScore}
+                            </span>
                           ) : (
-                            <span className="font-normal opacity-50">—</span>
+                            <span className="font-normal opacity-30 italic">—</span>
                           )}
-                        </TableCell>
-
-                        <TableCell className="text-center font-medium text-slate-700 text-[11px] align-middle py-1">
-                          {candidate.data?.engage_completed_at ? formatDate(candidate.data.engage_completed_at) : <span className="font-normal opacity-50">—</span>}
-                        </TableCell>
-
-                        <TableCell className="text-center font-medium text-slate-700 text-[12px] align-middle py-1">
-                          {totalScore || <span className="font-normal opacity-50">—</span>}
                         </TableCell>
 
                         <TableCell className="text-center align-middle py-1 font-medium text-slate-700 text-[11px]">
@@ -1328,28 +1626,28 @@ export default function CandidateRankingsPage() {
                           </div>
                         </TableCell>
 
-                        <TableCell className="text-center pr-0.5 pl-0.5 border-l border-[#e2e8f0] py-1 align-middle transition-colors group-hover:bg-slate-50/80">
-                          <div className="flex items-center justify-center gap-0.5">
+                        <TableCell className="text-center pr-4 pl-4 border-l border-[#e2e8f0] py-2 align-middle transition-colors group-hover:bg-indigo-50/5">
+                          <div className="flex items-center justify-center gap-3">
                             <Button
                               size="sm"
-                              className="h-6 px-1 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[8.5px] rounded-md shadow-sm"
+                              className="h-7 px-2.5 bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-600 hover:text-white font-bold text-[9px] rounded-md shadow-sm transition-all duration-200"
                               onClick={() => handleEmailCandidate(candidate)}
                             >
-                              <Mail className="w-3 h-3 mr-0.5" />
+                              <Mail className="w-3.5 h-3.5 mr-1" />
                               Email
                             </Button>
                             <Button
                               size="sm"
-                              className="h-6 px-1 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[8.5px] rounded-md shadow-sm"
+                              className="h-7 px-2.5 bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-600 hover:text-white font-bold text-[9px] rounded-md shadow-sm transition-all duration-200"
                               onClick={() => handleScreenClick(candidate)}
                               disabled={screenLoading}
                             >
-                              <MessageSquare className="w-3 h-3 mr-0.5" />
+                              <MessageSquare className="w-3.5 h-3.5 mr-1" />
                               Screen
                             </Button>
                             <Button
                               size="sm"
-                              className="h-6 px-1 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[8.5px] rounded-md shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                              className="h-7 px-2.5 bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-600 hover:text-white font-bold text-[9px] rounded-md shadow-sm transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
 
                               onClick={() => handleSmsCandidate(candidate)}
                               disabled={candidate.engage_status === "Initiated" || candidate.engage_status === "sent" || candidate.engage_status === "SMS Sent"}
@@ -1358,6 +1656,35 @@ export default function CandidateRankingsPage() {
                               <Send className="w-3 h-3 mr-0.5" />
                               SMS
                             </Button>
+                          </div>
+                        </TableCell>
+
+                        <TableCell className="text-center pr-4 pl-4 border-l border-[#e2e8f0] py-2 align-middle transition-colors group-hover:bg-indigo-50/5">
+                          <div className="flex flex-col items-center gap-1.5">
+                            <select
+                              className="w-full text-[11px] font-medium text-[#334155] bg-white border border-[#cbd5e1] rounded h-7 px-1 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                              value={feedbacks[candidate.id]?.startsWith("Reject") ? "Reject" : feedbacks[candidate.id] || ""}
+                              onChange={(e) => {
+                                const val = e.target.value;
+                                if (val === "Reject") {
+                                  setActionCandidateId(candidate.id);
+                                  setRejectReason("");
+                                  setIntegrationModalOpen('reject');
+                                } else if (val === "Submit") {
+                                  setActionCandidateId(candidate.id);
+                                  setIntegrationModalOpen('submit');
+                                }
+                              }}
+                            >
+                              <option value="" disabled>Select Action...</option>
+                              <option value="Submit">Submit</option>
+                              <option value="Reject">Reject</option>
+                            </select>
+                            {feedbacks[candidate.id] && (
+                              <div className={`text-[9px] font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : 'text-rose-600'}`}>
+                                {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : <><X className="w-3 h-3" /> Rejected</>}
+                              </div>
+                            )}
                           </div>
                         </TableCell>
                       </TableRow>
@@ -1429,6 +1756,24 @@ export default function CandidateRankingsPage() {
           if (!cand) return;
           const cid = String(cand.candidate_id || cand.id);
           const picked = phones[cid] || cand.phone || "";
+          
+          if (picked && picked !== cand.phone) {
+            try {
+              // Passing candidate_id in the body bypasses strict URL path decoders on QA
+              await fetch(`${API_BASE}/candidates/${encodeURIComponent(cid)}/phone`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ 
+                  phone: picked,
+                  jobdiva_id: cand.jobdiva_id || String(jobId || ""),
+                  candidate_id: cid
+                }),
+              });
+            } catch (err) {
+              console.error("Failed to save phone number:", err);
+            }
+          }
+
           const next = { ...cand, phone: picked };
           setCandidates(prev => prev.map(c => String(c.candidate_id || c.id) === cid ? next : c));
           await runScreen(next);
@@ -1437,16 +1782,124 @@ export default function CandidateRankingsPage() {
         description="PAIR can only call candidates with a phone number on file. Add it below to continue."
         primaryLabel="Save & Screen"
       />
+
+      {/* Integration Modals */}
+      {integrationModalOpen && actionCandidateId && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg overflow-hidden border border-slate-200">
+            {integrationModalOpen === 'submit' ? (
+              <>
+                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                    <ExternalLink className="w-5 h-5 text-indigo-600" />
+                    Submit to JobDiva
+                  </h3>
+                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
+                </div>
+                <div className="p-6 space-y-4">
+                  <p className="text-sm text-slate-500">
+                    This action will initiate an <strong className="text-slate-900 font-semibold">external submission in JobDiva</strong> for:
+                  </p>
+                  <div className="bg-slate-50 p-4 rounded-xl border border-slate-100 space-y-3 text-sm text-slate-700">
+                    <div className="flex items-center gap-2.5">
+                      <User className="w-4 h-4 text-slate-400" />
+                      <p><strong className="text-slate-900">Candidate:</strong> {candidates.find(c => c.id === actionCandidateId)?.name}</p>
+                    </div>
+                    <div className="flex items-center gap-2.5">
+                      <Briefcase className="w-4 h-4 text-slate-400" />
+                      <p><strong className="text-slate-900">Job:</strong> {job?.title} ({job?.jobdiva_id || job?.job_id || jobId})</p>
+                    </div>
+                    <div className="flex items-center gap-2.5">
+                      <Building2 className="w-4 h-4 text-slate-400" />
+                      <p><strong className="text-slate-900">Client:</strong> {job?.customer_name || "—"}</p>
+                    </div>
+                    <div className="flex items-center gap-2.5">
+                      <Zap className="w-4 h-4 text-slate-400" />
+                      <p><strong className="text-slate-900">Action:</strong> Create external submission record in JobDiva</p>
+                    </div>
+                  </div>
+                </div>
+                <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
+                  <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
+                  <Button
+                    className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold"
+                    onClick={handleConfirmSubmit}
+                    disabled={syncingCandidateId === actionCandidateId}
+                  >
+                    {syncingCandidateId === actionCandidateId ? 'Syncing...' : 'Confirm & Submit to JobDiva'}
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+                  <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                    <span className="w-5 h-5 rounded-full bg-rose-100 text-rose-600 flex items-center justify-center font-bold text-[11px]">✕</span>
+                    Reject Candidate
+                  </h3>
+                  <button onClick={() => setIntegrationModalOpen(null)} className="text-slate-400 hover:text-slate-600">×</button>
+                </div>
+                <div className="p-6 space-y-4">
+                  <p className="text-sm text-slate-500">
+                    Please provide a reason for rejecting <strong className="text-slate-900 font-semibold">{candidates.find(c => c.id === actionCandidateId)?.name}</strong>.
+                  </p>
+                  <div className="space-y-2">
+                    <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Rejection Reason</label>
+                    <select
+                      className="w-full h-11 px-3 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500/50"
+                      value={rejectReason}
+                      onChange={e => setRejectReason(e.target.value)}
+                    >
+                      <option value="" disabled>Select a reason...</option>
+                      <option value="Skills do not meet requirements">Skills do not meet requirements</option>
+                      <option value="Communication skills">Communication skills</option>
+                      <option value="Domain experience mismatch">Domain experience mismatch</option>
+                      <option value="More qualified candidates identified">More qualified candidates identified</option>
+                      <option value="Overqualified for the role">Overqualified for the role</option>
+                      <option value="Compensation expectations exceed budget">Compensation expectations exceed budget</option>
+                      <option value="Not aligned with employment type (W2 / C2C / 1099)">Not aligned with employment type (W2 / C2C / 1099)</option>
+                      <option value="Work authorization / visa constraints">Work authorization / visa constraints</option>
+                      <option value="Not comfortable with background check / drug test">Not comfortable with background check / drug test</option>
+                      <option value="Not local and not open to relocation">Not local and not open to relocation</option>
+                      <option value="Open to remote only">Open to remote only</option>
+                      <option value="Not available within required timeline">Not available within required timeline</option>
+                      <option value="Accepted another offer">Accepted another offer</option>
+                      <option value="Candidate withdrew interest">Candidate withdrew interest</option>
+                      <option value="Career gap concern">Career gap concern</option>
+                      <option value="Job Hopping (short-term engagements throughout or in the last 5-7 years)">Job Hopping (short-term engagements throughout or in the last 5-7 years)</option>
+                      <option value="Fake candidate — Multiple profiles/resumes; misrepresentation of past experience">Fake candidate — Multiple profiles/resumes; misrepresentation of past experience</option>
+                      <option value="Already submitted to same client / hiring manager by another vendor">Already submitted to same client / hiring manager by another vendor</option>
+                      <option value="Previously rejected by client">Previously rejected by client</option>
+                      <option value="Not eligible for rehire">Not eligible for rehire</option>
+                      <option value="Past performance concern (Internal note as per past Pyramid client feedback)">Past performance concern (Internal note as per past Pyramid client feedback)</option>
+                    </select>
+                  </div>
+                </div>
+                <div className="px-6 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
+                  <Button variant="outline" onClick={() => setIntegrationModalOpen(null)} className="font-semibold text-slate-600">Cancel</Button>
+                  <Button
+                    variant="destructive"
+                    onClick={handleConfirmReject}
+                    disabled={!rejectReason || syncingCandidateId === actionCandidateId}
+                    className="font-bold"
+                  >
+                    {syncingCandidateId === actionCandidateId ? 'Syncing...' : 'Confirm Rejection'}
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
       {toast && (
         <div className="fixed right-4 top-4 z-[90]">
           <div
-            className={`rounded-lg border px-3 py-2 text-[12px] font-semibold shadow-md transition-all ${
-              toast.type === "success"
-                ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                : toast.type === "error"
-                  ? "border-rose-200 bg-rose-50 text-rose-700"
-                  : "border-slate-200 bg-white text-slate-700"
-            }`}
+            className={`rounded-lg border px-3 py-2 text-[12px] font-semibold shadow-md transition-all ${toast.type === "success"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+              : toast.type === "error"
+                ? "border-rose-200 bg-rose-50 text-rose-700"
+                : "border-slate-200 bg-white text-slate-700"
+              }`}
           >
             {toast.message}
           </div>
