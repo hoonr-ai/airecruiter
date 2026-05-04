@@ -3514,38 +3514,46 @@ class JobDivaService:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(url, json=payload, headers=headers)
+                logger.info(f"🔎 createCandidate response: {response.status_code} — {response.text[:300]}")
                 if response.status_code in [200, 201]:
                     data = response.json()
                     if isinstance(data, dict):
-                        return data.get("candidateId")
-                    return data # If it's directly the ID
+                        cid = data.get("candidateId") or data.get("id") or data.get("CANDIDATEID")
+                        logger.info(f"✅ createCandidate: created candidateId={cid}, response keys={list(data.keys())}")
+                        return cid
+                    logger.info(f"✅ createCandidate: returned raw ID={data}")
+                    return data  # If it's directly the ID
                 else:
                     logger.error(f"❌ createCandidate failed: {response.status_code} - {response.text}")
         except Exception as e:
             logger.error(f"❌ createCandidate exception: {e}")
         return None
 
-    async def create_job_application_with_resume(self, candidate_id: Any, job_id: Any, resume_text: str = "", filename: str = "candidate_resume.txt") -> bool:
+    async def create_job_application_with_resume(
+        self,
+        candidate_id: Any,
+        job_id: Any,
+        resume_text: str = "",
+        filename: str = "candidate_resume.txt",
+        first_name: str = "",
+        last_name: str = "",
+        email: str = ""
+    ) -> tuple:
         """
-        Uploads a resume and links the candidate to a job.
-        Matches the exact field names JobDiva expects:
-          filename, textfile, filecontent, jobid, recruiterid, resumeDate, resumesource
-        Uses requests.Session with manual body to prevent charset=UTF-8 injection while
-        keeping SSL compatibility (urllib caused 'Connection reset by peer').
+        Creates a job application via JSON (application/json).
+        After creation, updates the candidate's name since the JSON endpoint
+        cannot parse names from textfile (that only works with multipart which is
+        blocked by a proxy adding charset=UTF-8).
+        Returns (success: bool, new_candidateId: int|None).
         """
         token = await self.authenticate()
         if not token:
-            return False
-
-        url = f"{self.api_url}/apiv2/jobdiva/CreateJobApplicationWithResume"
-        if candidate_id:
-            url += f"?candidateId={candidate_id}"
+            return False, None
 
         from datetime import datetime
         resume_date = datetime.now().strftime("%m/%d/%Y 12:00:00")
 
-        # Send as JSON — JobDiva explicitly supports application/json
-        # This completely bypasses the multipart charset=UTF-8 injection issue
+        url = f"{self.api_url}/apiv2/jobdiva/CreateJobApplicationWithResume"
         json_payload = {
             "filename": filename,
             "textfile": resume_text,
@@ -3567,14 +3575,62 @@ class JobDivaService:
                     }
                 )
             status, res_body = response.status_code, response.text
+            logger.info(f"🔎 CreateJobApplicationWithResume: {status} — {res_body[:200]}")
+
             if status in [200, 201]:
-                logger.info(f"✅ Successfully created JobDiva application for candidate {candidate_id} -> job {job_id}")
-                return True
+                try:
+                    new_cid = int(res_body.strip())
+                except (ValueError, TypeError):
+                    new_cid = None
+
+                logger.info(f"✅ JobDiva application created → candidateId={new_cid}, job={job_id}")
+
+                # The JSON endpoint creates "Unknown Unknown" since it can't parse names
+                # from textfile. Fix the name immediately using editCandidate.
+                if new_cid and (first_name or last_name):
+                    await self._update_candidate_name(token, new_cid, first_name, last_name, email)
+
+                return True, new_cid
             else:
                 logger.error(f"❌ CreateJobApplicationWithResume failed: {status} - {res_body}")
         except Exception as e:
             logger.error(f"❌ CreateJobApplicationWithResume exception: {e}")
+        return False, None
+
+    async def _update_candidate_name(self, token: str, candidate_id: int, first_name: str, last_name: str, email: str = "") -> bool:
+        """
+        Updates a JobDiva candidate's first/last name after creation.
+        Used to fix 'Unknown Unknown' created by CreateJobApplicationWithResume JSON mode.
+        Endpoint: POST /apiv2/jobdiva/updateCandidateProfile
+        """
+        url = f"{self.api_url}/apiv2/jobdiva/updateCandidateProfile"
+        payload = {
+            "candidateid": candidate_id,
+            "firstName": first_name,
+            "lastName": last_name,
+        }
+            
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    url,
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json"
+                    }
+                )
+            logger.info(f"🔎 updateCandidateProfile response: {response.status_code} — {response.text[:300]}")
+            if response.status_code in [200, 201]:
+                logger.info(f"✅ Name updated for candidateId={candidate_id}: {first_name} {last_name}")
+                return True
+            else:
+                logger.warning(f"⚠️ updateCandidateProfile failed: {response.status_code} - {response.text[:300]}")
+        except Exception as e:
+            logger.warning(f"⚠️ updateCandidateProfile exception: {e}")
         return False
+
+
 
 
     async def get_job_applicants_detail(self, job_id: int) -> List[Dict[str, Any]]:
