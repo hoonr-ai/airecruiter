@@ -2799,22 +2799,8 @@ async def get_candidate_evaluation_report(
                 else:
                     pair_data["evaluation"] = eval_map
 
-                # Refresh scores from live PAIR data
-                if isinstance(interview_data, dict):
-                    iv = interview_data.get("interview") or interview_data
-                    if iv.get("candidate_score") is not None:
-                        engage_score = float(iv["candidate_score"])
-                    elif iv.get("overall_score") is not None:
-                        engage_score = float(iv["overall_score"])
-                    
-                    if iv.get("total_score") is not None:
-                        engage_total_score = float(iv["total_score"])
-                    if iv.get("hard_filter_overall") or iv.get("hard_filter_status"):
-                        hard_filter_status = str(iv.get("hard_filter_overall") or iv.get("hard_filter_status") or hard_filter_status)
-                    if iv.get("status"):
-                        engage_status = str(iv["status"])
-                    if iv.get("completed_at"):
-                        engage_completed_at = iv["completed_at"]
+                # Live data fetch is for transcriptions/evaluation details mainly
+                # Scores should be picked from data_blob/audit_row for consistency with rankings
             except Exception as pair_err:
                 logger.warning(f"PAIR data fetch failed for interview {engage_interview_id}: {pair_err}")
 
@@ -2861,12 +2847,9 @@ async def get_candidate_evaluation_report(
 
         # Normalize engage_score to a 100-point scale if total_score is available
         display_engage_score = None
-        if engage_score is not None:
-            if engage_total_score and engage_total_score > 0:
-                # Calculate percentage: (score / total) * 100
-                display_engage_score = round((float(engage_score) / float(engage_total_score)) * 100, 1)
-            else:
-                display_engage_score = float(engage_score)
+        if engage_score is not None and engage_total_score and engage_total_score > 0:
+            # Calculate percentage: (score / total) * 100
+            display_engage_score = round((float(engage_score) / float(engage_total_score)) * 100, 1)
 
         # Calculate Total Fit Score: Average of only COMPLETED stages
         # Exclude Engage score if it's still in progress or initiated
