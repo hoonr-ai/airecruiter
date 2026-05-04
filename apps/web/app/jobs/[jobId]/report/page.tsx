@@ -204,12 +204,12 @@ export default function CandidateEvaluationReportPage() {
   const formatStatusLabel = (status: string): string => {
     const s = String(status || "").toLowerCase();
     if (!s) return "N/A";
-    if (s === "completed") return "Completed";
-    if (s === "passed") return "Pass";
-    if (s === "failed") return "Fail";
-    if (s === "in_progress" || s === "in progress") return "In Progress";
-    if (s === "pending" || s === "initiated") return "Pending";
-    return status;
+    if (s.includes("pass") || s === "completed") return "Pass";
+    if (s.includes("fail") || s.includes("reject")) return "Fail";
+    if (s.includes("progress")) return "In Progress";
+    if (s.includes("pending") || s.includes("init")) return "Pending";
+    // Title Case fallback for any other status
+    return s.charAt(0).toUpperCase() + s.slice(1).replace(/_/g, ' ');
   };
 
   if (isLoading) {

@@ -306,10 +306,10 @@ export default function CandidateRankingsPage() {
     }
 
     if (raw.includes("fail")) {
-      return { label: "Failed", color: "#dc2626" };
+      return { label: "Fail", color: "#dc2626" };
     }
     if (raw.includes("pass")) {
-      return { label: "Passed", color: "#059669" };
+      return { label: "Pass", color: "#059669" };
     }
 
     const label = raw.charAt(0).toUpperCase() + raw.slice(1);
