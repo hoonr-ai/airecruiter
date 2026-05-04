@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -37,6 +37,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { EngageWizardModal } from "@/components/EngageWizardModal";
@@ -62,6 +69,101 @@ const formatDate = (dateStr: string) => {
     return dateStr;
   }
 };
+
+const ColumnFilterPopup = ({ 
+  field, 
+  label, 
+  onClose, 
+  onApply, 
+  onClear, 
+  currentFilter,
+  align = "left"
+}: { 
+  field: string; 
+  label: string; 
+  onClose: () => void; 
+  onApply: (filter: { condition: any; value: string }) => void; 
+  onClear: () => void;
+  currentFilter?: { condition: any; value: string };
+  align?: "left" | "right";
+}) => {
+  const [condition, setCondition] = useState<any>(currentFilter?.condition || "contains");
+  const [value, setValue] = useState(currentFilter?.value || "");
+  const popupRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (popupRef.current && !popupRef.current.contains(event.target as Node)) {
+        onClose();
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [onClose]);
+
+  return (
+    <div 
+      ref={popupRef}
+      className={`absolute top-full ${align === "left" ? "left-0" : "right-0"} mt-1 w-64 bg-white border border-slate-200 rounded-lg shadow-xl z-[100] p-4 text-left normal-case tracking-normal cursor-default`}
+    >
+      <div className="flex items-center justify-between mb-4 border-b border-slate-100 pb-2">
+        <span className="text-[12px] font-bold text-slate-700 uppercase">Filter {label}</span>
+        <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+      
+      <div className="space-y-4">
+        <div>
+          <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1.5">Condition</label>
+          <select
+            value={condition}
+            onChange={(e) => setCondition(e.target.value as any)}
+            className="w-full h-9 px-3 text-[13px] bg-slate-50 border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
+          >
+            <option value="contains">Contains</option>
+            <option value="not_contains">Does Not Contain</option>
+            <option value="equals">Equals</option>
+            <option value="starts_with">Starts With</option>
+          </select>
+        </div>
+
+        <div>
+          <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1.5">Value</label>
+          <input
+            type="text"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder="Search text..."
+            className="w-full h-9 px-3 text-[13px] bg-slate-50 border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') onApply({ condition, value });
+              if (e.key === 'Escape') onClose();
+            }}
+          />
+        </div>
+
+        <div className="flex items-center gap-2 pt-2">
+          <button
+            onClick={onClear}
+            className="flex-1 h-9 text-[12px] font-bold text-slate-500 hover:bg-slate-100 rounded-md transition-colors border border-slate-200"
+          >
+            Clear
+          </button>
+          <button
+            onClick={() => onApply({ condition, value })}
+            className="flex-1 h-9 text-[12px] font-bold text-white bg-indigo-600 hover:bg-indigo-700 rounded-md transition-colors shadow-sm"
+          >
+            Apply
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
 
 interface JobDetails {
   job_id: string;
@@ -208,22 +310,29 @@ export default function CandidateRankingsPage() {
 
   // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
   // filter updates the table synchronously (no stale state via setFilteredCandidates).
-  type StatusFilter = "all" | "done" | "pending";
-  type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score";
+  type StatusFilter = "all" | "completed" | "pending";
+  type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score" | "source" | "engage_status";
   type SortDir = "asc" | "desc";
+  type ColumnFilterCondition = "contains" | "not_contains" | "equals" | "starts_with";
+  interface ColumnFilter {
+    condition: ColumnFilterCondition;
+    value: string;
+  }
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
   const [minScore, setMinScore] = useState<number>(0);
   const [sortField, setSortField] = useState<SortField>("index");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const [columnFilters, setColumnFilters] = useState<Record<string, ColumnFilter>>({});
+  const [activeFilterField, setActiveFilterField] = useState<string | null>(null);
 
   // Resume-matching completion status for filter + table labels.
-  const deriveStatus = (c: Candidate): "done" | "pending" => {
+  const deriveStatus = (c: Candidate): "completed" | "pending" => {
     const fromData = String(c.data?.resume_matching_status || "").toLowerCase();
-    if (fromData === "done") return "done";
+    if (fromData === "done" || fromData === "completed") return "completed";
     const s = c.match_score ?? c.resume_match_percentage ?? 0;
-    return s > 0 ? "done" : "pending";
+    return s > 0 ? "completed" : "pending";
   };
 
   // Pull availability off the JSONB `data` blob. Different producers put it in
@@ -374,6 +483,43 @@ export default function CandidateRankingsPage() {
       // Min score
       const score = c.match_score ?? c.resume_match_percentage ?? 0;
       if (score < minScore) return false;
+
+      // Column (Funnel) Filters
+      for (const [field, filter] of Object.entries(columnFilters)) {
+        if (!filter.value) continue;
+
+        let val = "";
+        if (field === "name") val = c.name || "";
+        else if (field === "source") val = normalizeSourceLabel(c.source);
+        else if (field === "engage_status") val = normalizeInterviewStatus(c).label;
+        else if (field === "screening_score") val = String(c.match_score || 0);
+        else if (field === "engage_score") val = String(c.engage_score || 0);
+        else if (field === "total_score") {
+          const screeningScore = c.match_score || 0;
+          const engageScore = c.engage_score || 0;
+          const isDone = ["completed", "passed", "failed", "rejected", "pass", "fail"].includes((c.engage_status || "").toLowerCase());
+          val = String(isDone ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : screeningScore);
+        }
+
+        const v = val.toLowerCase();
+        const fv = filter.value.toLowerCase();
+
+        switch (filter.condition) {
+          case "contains":
+            if (!v.includes(fv)) return false;
+            break;
+          case "not_contains":
+            if (v.includes(fv)) return false;
+            break;
+          case "equals":
+            if (v !== fv) return false;
+            break;
+          case "starts_with":
+            if (!v.startsWith(fv)) return false;
+            break;
+        }
+      }
+
       return true;
     });
 
@@ -391,6 +537,10 @@ export default function CandidateRankingsPage() {
             return dir * (getEngage(a) - getEngage(b));
           case "total_score":
             return dir * ((getScore(a) + getEngage(a)) - (getScore(b) + getEngage(b)));
+          case "source":
+            return dir * (normalizeSourceLabel(a.source)).localeCompare(normalizeSourceLabel(b.source));
+          case "engage_status":
+            return dir * (normalizeInterviewStatus(a).label).localeCompare(normalizeInterviewStatus(b).label);
           default:
             return 0;
         }
@@ -404,7 +554,7 @@ export default function CandidateRankingsPage() {
       setSortDir(prev => (prev === "asc" ? "desc" : "asc"));
     } else {
       setSortField(field);
-      setSortDir(field === "name" ? "asc" : "desc");
+      setSortDir(field === "name" || field === "source" || field === "engage_status" ? "asc" : "desc");
     }
   };
 
@@ -413,6 +563,7 @@ export default function CandidateRankingsPage() {
     setStatusFilter("all");
     setSourceFilter("all");
     setMinScore(0);
+    setColumnFilters({});
   };
 
   // Modal states
@@ -966,65 +1117,71 @@ export default function CandidateRankingsPage() {
         </Button>
       </div>
 
-      {/* Rankings Page Header matching the exact HTML vibe */}
-      <div className="bg-white rounded-[14px] border border-slate-200 p-4 flex flex-row items-center justify-between shadow-[0_2px_10px_rgba(0,0,0,0.02)]">
-        <div className="flex flex-col gap-1">
+      {/* Rankings Page Header matching the premium UI */}
+      <div className="bg-white rounded-xl border border-slate-200 p-6 flex flex-col md:flex-row md:items-center justify-between shadow-sm mb-6 gap-6">
+        <div className="flex flex-col gap-2">
           <div className="flex items-center gap-3">
             {isInitialLoading ? (
-              <Skeleton className="h-7 w-64 rounded bg-slate-100" />
+              <Skeleton className="h-8 w-64 rounded bg-slate-100" />
             ) : (
               <>
-                <Medal className="w-[24px] h-[24px] text-indigo-600" />
-                <h2 className="text-[24px] font-bold text-slate-900 m-0 leading-none flex items-center gap-1.5">
+                <Medal className="w-8 h-8 text-indigo-600" />
+                <h2 className="text-2xl font-bold text-slate-900 m-0 flex items-center gap-2">
                   {job?.title}
-                  <span className="text-slate-500 font-medium text-[16px]">
-                    ({job?.jobdiva_id || job?.job_id || jobId}) <span className="text-indigo-600 text-[14px] ml-1">🔗</span>
+                  <span className="text-slate-500 font-medium text-lg">
+                    ({job?.jobdiva_id || job?.job_id || jobId}) <span className="text-indigo-600 text-sm ml-1 cursor-pointer hover:underline">🔗</span>
                   </span>
                 </h2>
               </>
             )}
           </div>
-          <div className="text-[14px] text-slate-500 font-medium mt-0.5">Candidate Rank List</div>
+          <div className="text-base text-slate-500 font-medium pl-[44px]">Candidate Rank List</div>
         </div>
-        <div className="flex items-center gap-4">
-          <div className="flex items-center gap-8 py-1 px-4 border-r border-slate-100">
-            <div className="space-y-1.5 text-[14px] text-slate-600">
+
+        <div className="flex items-center gap-8">
+          <div className="flex gap-8 border-r border-slate-200 pr-8">
+            <div className="flex flex-col gap-3 text-sm text-slate-600">
               {isInitialLoading ? (
                 <>
-                  <Skeleton className="h-4 w-40 bg-slate-100" />
-                  <Skeleton className="h-4 w-48 bg-slate-100" />
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                  <Skeleton className="h-5 w-56 bg-slate-100" />
                 </>
               ) : (
                 <>
                   <div className="flex items-center gap-2">
-                    <div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div> Total Candidates Sourced: <strong className="text-slate-900 ml-1">{candidates.length}</strong>
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Total Candidates Sourced: <strong className="text-slate-900 ml-1">{candidates.length}</strong>
                   </div>
                   <div className="flex items-center gap-2">
-                    <div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div> Resume Shortlisted Candidates: <strong className="text-slate-900 ml-1">{candidates.filter(c => c.match_score >= 70).length}</strong>
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Resume Shortlisted Candidates: <strong className="text-slate-900 ml-1">{candidates.filter(c => (c.match_score ?? c.resume_match_percentage ?? 0) >= 70).length}</strong>
                   </div>
                 </>
               )}
             </div>
-            <div className="space-y-1.5 text-[14px] text-slate-600">
+            <div className="flex flex-col gap-3 text-sm text-slate-600">
               {isInitialLoading ? (
                 <>
-                  <Skeleton className="h-4 w-40 bg-slate-100" />
-                  <Skeleton className="h-4 w-32 bg-slate-100" />
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                  <Skeleton className="h-5 w-32 bg-slate-100" />
                 </>
               ) : (
                 <>
                   <div className="flex items-center gap-2">
-                    <div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div> Max. Allowed Submittals: <strong className="text-slate-900 ml-1">{job?.max_allowed_submittals ?? 0}</strong>
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Max. Allowed Submittals: <strong className="text-slate-900 ml-1">{job?.max_allowed_submittals ?? 0}</strong>
                   </div>
                   <div className="flex items-center gap-2">
-                    <div className="w-1.5 h-1.5 rounded-full bg-slate-300"></div> Openings: <strong className="text-slate-900 ml-1">{job?.openings ?? 0}</strong>
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Openings: <strong className="text-slate-900 ml-1">{job?.openings ?? 0}</strong>
                   </div>
                 </>
               )}
             </div>
           </div>
-          <Button variant="outline" className="w-[36px] h-[36px] p-0 flex items-center justify-center text-slate-500 hover:text-slate-800" onClick={fetchData} disabled={isLoading}>
-            <RefreshCw className={`w-[16px] h-[16px] ${isRefreshing ? "animate-spin" : ""}`} />
+          <Button
+            variant="outline"
+            className="w-10 h-10 p-0 flex items-center justify-center text-slate-500 hover:text-slate-800 rounded-lg"
+            onClick={fetchData}
+            disabled={isLoading}
+          >
+            <RefreshCw className={`w-5 h-5 ${isRefreshing ? "animate-spin text-indigo-600" : ""}`} />
           </Button>
         </div>
       </div>
@@ -1189,40 +1346,40 @@ export default function CandidateRankingsPage() {
       <div className="space-y-4">
         {/* Filter bar: search + status + source + min-score. All filter state
             feeds into the `filteredCandidates` useMemo above. */}
-        <div className="flex flex-wrap items-center gap-3">
-          <div className="relative flex-1 min-w-[260px] h-[40px]">
-            <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
-              <Search className="h-4 w-4 text-slate-400" />
+        <div className="flex flex-wrap items-center gap-3 bg-white p-3 rounded-xl border border-slate-200 shadow-sm mb-6">
+          <div className="relative w-[350px] shrink-0">
+            <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none">
+              <Search className="h-5 w-5 text-slate-400" />
             </div>
             <Input
-              placeholder="Search name, email, headline, or location…"
+              placeholder="Search name, email, or location..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="h-full pl-10 pr-6 bg-white border-slate-200 rounded-[8px] shadow-sm text-[14px] focus:ring-indigo-500/20 focus:border-indigo-500/50"
+              className="h-12 pl-12 pr-6 w-full bg-slate-50 border-transparent focus:bg-white rounded-lg text-[13px] focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
             />
           </div>
 
-          <div className="flex items-center gap-2 h-[40px] bg-white border border-slate-200 rounded-[8px] px-3 shadow-sm">
-            <Filter className="w-3.5 h-3.5 text-slate-400" />
-            <label className="text-[12px] font-semibold text-slate-500 uppercase tracking-wide">Status</label>
+          <div className="flex items-center gap-2 bg-slate-50 rounded-lg px-3 h-12 border border-transparent focus-within:bg-white focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all">
+            <Filter className="w-4 h-4 text-slate-400" />
+            <label className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Status</label>
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-              className="text-[13px] font-medium text-slate-700 bg-transparent focus:outline-none cursor-pointer"
+              className="text-[13px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer py-2 pr-2"
             >
               <option value="all">All</option>
-              <option value="done">Done</option>
+              <option value="completed">Completed</option>
               <option value="pending">Pending</option>
             </select>
           </div>
 
-          <div className="flex items-center gap-2 h-[40px] bg-white border border-slate-200 rounded-[8px] px-3 shadow-sm">
-            <Filter className="w-3.5 h-3.5 text-slate-400" />
-            <label className="text-[12px] font-semibold text-slate-500 uppercase tracking-wide">Source</label>
+          <div className="flex items-center gap-2 bg-slate-50 rounded-lg px-3 h-12 border border-transparent focus-within:bg-white focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all">
+            <Filter className="w-4 h-4 text-slate-400" />
+            <label className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Source</label>
             <select
               value={sourceFilter}
               onChange={(e) => setSourceFilter(e.target.value)}
-              className="text-[13px] font-medium text-slate-700 bg-transparent focus:outline-none cursor-pointer max-w-[180px]"
+              className="text-[13px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer py-2 pr-2 max-w-[100px]"
             >
               <option value="all">All</option>
               {availableSources.map(s => (
@@ -1231,9 +1388,8 @@ export default function CandidateRankingsPage() {
             </select>
           </div>
 
-          <div className="flex items-center gap-2 h-[40px] bg-white border border-slate-200 rounded-[8px] px-3 shadow-sm">
-            <Filter className="w-3.5 h-3.5 text-slate-400" />
-            <label className="text-[12px] font-semibold text-slate-500 uppercase tracking-wide">Min score</label>
+          <div className="flex items-center gap-2 bg-slate-50 rounded-lg px-3 h-12 border border-transparent focus-within:bg-white focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all">
+            <label className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Min score</label>
             <Input
               type="number"
               min={0}
@@ -1243,20 +1399,20 @@ export default function CandidateRankingsPage() {
                 const n = Number.parseInt(e.target.value, 10);
                 setMinScore(Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0);
               }}
-              className="h-7 w-16 text-[13px] font-medium border-slate-200 px-2"
+              className="h-8 w-16 text-[13px] font-bold bg-white border-slate-200 rounded px-2 text-center"
             />
           </div>
 
           {(searchQuery || statusFilter !== "all" || sourceFilter !== "all" || minScore > 0) && (
             <button
               onClick={clearFilters}
-              className="h-[40px] px-3 text-[13px] font-semibold text-slate-500 hover:text-slate-700 flex items-center gap-1"
+              className="h-12 px-4 text-[13px] font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg flex items-center gap-2 transition-colors"
             >
-              <X className="w-3.5 h-3.5" /> Clear
+              <X className="w-4 h-4" /> Clear
             </button>
           )}
 
-          <div className="ml-auto text-[12.5px] font-semibold text-slate-500 px-2">
+          <div className="ml-auto text-[13px] font-bold text-slate-500 px-2">
             Showing <span className="text-slate-900">{filteredCandidates.length}</span> of <span className="text-slate-900">{candidates.length}</span>
           </div>
         </div>
@@ -1266,136 +1422,221 @@ export default function CandidateRankingsPage() {
           <div className="overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
             <Table className="table-fixed min-w-[1200px] w-full border-collapse">
               <TableHeader>
-                <TableRow className="bg-slate-50/80 border-b border-slate-200 hover:bg-slate-50/80 h-[42px] transition-colors">
-                  <TableHead className="w-[44px] sticky left-0 z-10 bg-white text-center font-bold text-slate-900 text-[11px] uppercase tracking-wider border-r border-[#e2e8f0] py-1 px-1">#</TableHead>
-                  <TableHead className="w-[160px] sticky left-[44px] z-10 bg-white font-bold text-slate-900 text-[9.5px] uppercase tracking-wide border-r border-slate-200 py-0">
-                    <button
-                      onClick={() => toggleSort("name")}
-                      className="flex items-center justify-between w-full h-full px-1.5 cursor-pointer hover:bg-slate-50 transition-colors"
-                    >
-                      <div className="w-[10px]" />
-                      <span className="whitespace-nowrap flex-1 text-center">CANDIDATE</span>
-                      <div className="w-[10px] flex items-center justify-end gap-1 px-0.5">
-                        {sortField === "name"
-                          ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
-                          : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
-                      </div>
-                    </button>
-                  </TableHead>
-                  <TableHead className="w-[90px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
-                    <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[10px]" />
-                      <span className="flex-1 text-center leading-tight">SOURCE</span>
-                      <div className="w-[10px]" />
+                <TableRow className="bg-slate-50 border-b border-slate-200 hover:bg-slate-50 h-[50px] transition-colors">
+                  <TableHead className="w-[50px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider border-r border-slate-200 px-2">#</TableHead>
+                  <TableHead className="w-[320px] sticky left-0 z-20 bg-slate-50 font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 text-center after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200">
+                    <div className="flex items-center justify-center w-full h-full group/header relative">
+                      <button
+                        onClick={() => toggleSort("name")}
+                        className="flex items-center justify-center h-full px-3 cursor-pointer hover:bg-slate-100 transition-colors flex-1"
+                      >
+                        <span className="whitespace-nowrap">CANDIDATE NAME</span>
+                        <div className="flex items-center gap-1 ml-2">
+                          {sortField === "name"
+                            ? (sortDir === "asc" ? <ChevronUp className="w-4 h-4 text-indigo-600" /> : <ChevronDown className="w-4 h-4 text-indigo-600" />)
+                            : <ChevronsUpDown className="w-4 h-4 opacity-40" />}
+                        </div>
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === "name" ? null : "name"); }}
+                        className={`p-1 mr-2 rounded hover:bg-slate-200 transition-colors ${columnFilters["name"]?.value ? 'text-indigo-600' : 'text-slate-400'}`}
+                        title="Filter Candidate Name"
+                      >
+                        <Filter className="w-3.5 h-3.5" />
+                      </button>
+                      {activeFilterField === "name" && (
+                        <ColumnFilterPopup
+                          field="name" label="CANDIDATE NAME"
+                          onClose={() => setActiveFilterField(null)}
+                          onApply={(f) => { setColumnFilters(p => ({ ...p, name: f })); setActiveFilterField(null); }}
+                          onClear={() => { setColumnFilters(p => { const n = { ...p }; delete n.name; return n; }); setActiveFilterField(null); }}
+                          currentFilter={columnFilters["name"]}
+                        />
+                      )}
                     </div>
                   </TableHead>
-                  <TableHead className="w-[100px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
-                    <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[10px]" />
-                      <span className="flex-1 text-center leading-tight">RESUME STATUS</span>
-                      <div className="w-[10px]" />
+                  <TableHead className="w-[160px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-slate-200">
+                    <div className="flex items-center justify-center w-full h-full group/header relative">
+                      <button
+                        onClick={() => toggleSort("source")}
+                        className="flex items-center justify-center h-full px-4 cursor-pointer hover:bg-slate-100 transition-colors flex-1"
+                      >
+                        <span>SOURCE</span>
+                        <div className="flex items-center gap-1 ml-2">
+                          {sortField === "source"
+                            ? (sortDir === "asc" ? <ChevronUp className="w-4 h-4 text-indigo-600" /> : <ChevronDown className="w-4 h-4 text-indigo-600" />)
+                            : <ChevronsUpDown className="w-4 h-4 opacity-40" />}
+                        </div>
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === "source" ? null : "source"); }}
+                        className={`p-1 mr-1 rounded hover:bg-slate-200 transition-colors ${columnFilters["source"]?.value ? 'text-indigo-600' : 'text-slate-400'}`}
+                        title="Filter Source"
+                      >
+                        <Filter className="w-3.5 h-3.5" />
+                      </button>
+                      {activeFilterField === "source" && (
+                        <ColumnFilterPopup
+                          field="source" label="SOURCE"
+                          onClose={() => setActiveFilterField(null)}
+                          onApply={(f) => { setColumnFilters(p => ({ ...p, source: f })); setActiveFilterField(null); }}
+                          onClear={() => { setColumnFilters(p => { const n = { ...p }; delete n.source; return n; }); setActiveFilterField(null); }}
+                          currentFilter={columnFilters["source"]}
+                        />
+                      )}
                     </div>
                   </TableHead>
-                  <TableHead className="w-[90px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
-                    <button
-                      onClick={() => toggleSort("screening_score")}
-                      className="flex items-center justify-between w-full h-full px-1 cursor-pointer hover:bg-slate-50 transition-colors"
-                    >
-                      <div className="w-[10px]" />
-                      <span className="flex-1 text-center leading-tight">MATCH SCORE</span>
-                      <div className="w-[10px] flex items-center justify-end gap-1 px-0.5">
-                        {sortField === "screening_score"
-                          ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
-                          : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
-                      </div>
-                    </button>
-                  </TableHead>
-                  <TableHead className="w-[120px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
-                    <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[10px]" />
-                      <span className="flex-1 text-center leading-tight">SCREEN STATUS</span>
-                      <div className="w-[10px]" />
+
+                  <TableHead className="w-[260px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-slate-200">
+                    <div className="flex items-center justify-center w-full h-full group/header relative">
+                      <button
+                        onClick={() => toggleSort("screening_score")}
+                        className="flex items-center justify-center h-full px-4 cursor-pointer hover:bg-slate-100 transition-colors flex-1"
+                      >
+                        <span>RESUME SCREENING SCORE</span>
+                        <div className="flex items-center gap-1 ml-2">
+                          {sortField === "screening_score"
+                            ? (sortDir === "asc" ? <ChevronUp className="w-4 h-4 text-indigo-600" /> : <ChevronDown className="w-4 h-4 text-indigo-600" />)
+                            : <ChevronsUpDown className="w-4 h-4 opacity-40" />}
+                        </div>
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === "screening_score" ? null : "screening_score"); }}
+                        className={`p-1 mr-1 rounded hover:bg-slate-200 transition-colors ${columnFilters["screening_score"]?.value ? 'text-indigo-600' : 'text-slate-400'}`}
+                        title="Filter Resume Screening Score"
+                      >
+                        <Filter className="w-3.5 h-3.5" />
+                      </button>
+                      {activeFilterField === "screening_score" && (
+                        <ColumnFilterPopup
+                          field="screening_score" label="SCREENING SCORE"
+                          onClose={() => setActiveFilterField(null)}
+                          onApply={(f) => { setColumnFilters(p => ({ ...p, screening_score: f })); setActiveFilterField(null); }}
+                          onClear={() => { setColumnFilters(p => { const n = { ...p }; delete n.screening_score; return n; }); setActiveFilterField(null); }}
+                          currentFilter={columnFilters["screening_score"]}
+                        />
+                      )}
                     </div>
                   </TableHead>
-                  <TableHead className="w-[100px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
-                    <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[10px]" />
-                      <span className="flex-1 text-center leading-tight">HARD FILTER</span>
-                      <div className="w-[10px]" />
+                  <TableHead className="w-[200px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-slate-200">
+                    <div className="flex items-center justify-center w-full h-full group/header relative">
+                      <button
+                        onClick={() => toggleSort("engage_status")}
+                        className="flex items-center justify-center h-full px-4 cursor-pointer hover:bg-slate-100 transition-colors flex-1"
+                      >
+                        <span>ENGAGE STATUS</span>
+                        <div className="flex items-center gap-1 ml-2">
+                          {sortField === "engage_status"
+                            ? (sortDir === "asc" ? <ChevronUp className="w-4 h-4 text-indigo-600" /> : <ChevronDown className="w-4 h-4 text-indigo-600" />)
+                            : <ChevronsUpDown className="w-4 h-4 opacity-40" />}
+                        </div>
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === "engage_status" ? null : "engage_status"); }}
+                        className={`p-1 mr-1 rounded hover:bg-slate-200 transition-colors ${columnFilters["engage_status"]?.value ? 'text-indigo-600' : 'text-slate-400'}`}
+                        title="Filter Engage Status"
+                      >
+                        <Filter className="w-3.5 h-3.5" />
+                      </button>
+                      {activeFilterField === "engage_status" && (
+                        <ColumnFilterPopup
+                          field="engage_status" label="ENGAGE STATUS"
+                          onClose={() => setActiveFilterField(null)}
+                          onApply={(f) => { setColumnFilters(p => ({ ...p, engage_status: f })); setActiveFilterField(null); }}
+                          onClear={() => { setColumnFilters(p => { const n = { ...p }; delete n.engage_status; return n; }); setActiveFilterField(null); }}
+                          currentFilter={columnFilters["engage_status"]}
+                        />
+                      )}
                     </div>
                   </TableHead>
-                  <TableHead className="w-[90px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
-                    <button
-                      onClick={() => toggleSort("engage_score")}
-                      className="flex items-center justify-between w-full h-full px-1 cursor-pointer hover:bg-slate-50 transition-colors"
-                    >
-                      <div className="w-[10px]" />
-                      <span className="flex-1 text-center leading-tight">SCREEN SCORE</span>
-                      <div className="w-[10px] flex items-center justify-end gap-1 px-0.5">
-                        {sortField === "engage_score"
-                          ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
-                          : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
-                      </div>
-                    </button>
-                  </TableHead>
-                  <TableHead className="w-[125px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
-                    <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[10px]" />
-                      <span className="flex-1 text-center leading-tight">SCREEN COMPLETED AT</span>
-                      <div className="w-[10px]" />
+
+                  <TableHead className="w-[200px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-slate-200">
+                    <div className="flex items-center justify-center w-full h-full group/header relative">
+                      <button
+                        onClick={() => toggleSort("engage_score")}
+                        className="flex items-center justify-center h-full px-4 cursor-pointer hover:bg-slate-100 transition-colors flex-1"
+                      >
+                        <span>ENGAGE SCORE</span>
+                        <div className="flex items-center gap-1 ml-2">
+                          {sortField === "engage_score"
+                            ? (sortDir === "asc" ? <ChevronUp className="w-4 h-4 text-indigo-600" /> : <ChevronDown className="w-4 h-4 text-indigo-600" />)
+                            : <ChevronsUpDown className="w-4 h-4 opacity-40" />}
+                        </div>
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === "engage_score" ? null : "engage_score"); }}
+                        className={`p-1 mr-1 rounded hover:bg-slate-200 transition-colors ${columnFilters["engage_score"]?.value ? 'text-indigo-600' : 'text-slate-400'}`}
+                        title="Filter Engage Score"
+                      >
+                        <Filter className="w-3.5 h-3.5" />
+                      </button>
+                      {activeFilterField === "engage_score" && (
+                        <ColumnFilterPopup
+                          field="engage_score" label="ENGAGE SCORE"
+                          align="right"
+                          onClose={() => setActiveFilterField(null)}
+                          onApply={(f) => { setColumnFilters(p => ({ ...p, engage_score: f })); setActiveFilterField(null); }}
+                          onClear={() => { setColumnFilters(p => { const n = { ...p }; delete n.engage_score; return n; }); setActiveFilterField(null); }}
+                          currentFilter={columnFilters["engage_score"]}
+                        />
+                      )}
                     </div>
                   </TableHead>
-                  <TableHead className="w-[100px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
-                    <button
-                      onClick={() => toggleSort("total_score")}
-                      className="flex items-center justify-between w-full h-full px-1 cursor-pointer hover:bg-slate-50 transition-colors"
-                    >
-                      <div className="w-[10px]" />
-                      <span className="flex-1 text-center leading-tight">TOTAL FIT SCORE</span>
-                      <div className="w-[10px] flex items-center justify-end gap-1 px-0.5">
-                        {sortField === "total_score"
-                          ? (sortDir === "asc" ? <ChevronUp className="w-3.5 h-3.5 text-indigo-600" /> : <ChevronDown className="w-3.5 h-3.5 text-indigo-600" />)
-                          : <ChevronsUpDown className="w-3.5 h-3.5 opacity-40" />}
-                      </div>
-                    </button>
-                  </TableHead>
-                  <TableHead className="w-[90px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide py-0">
-                    <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[10px]" />
-                      <span className="flex-1 text-center leading-tight">JOB CONFIG</span>
-                      <div className="w-[10px]" />
+
+                  <TableHead className="w-[220px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-slate-200">
+                    <div className="flex items-center justify-center w-full h-full group/header relative">
+                      <button
+                        onClick={() => toggleSort("total_score")}
+                        className="flex items-center justify-center h-full px-4 cursor-pointer hover:bg-slate-100 transition-colors flex-1"
+                      >
+                        <span>TOTAL FIT SCORE</span>
+                        <div className="flex items-center gap-1 ml-2">
+                          {sortField === "total_score"
+                            ? (sortDir === "asc" ? <ChevronUp className="w-4 h-4 text-indigo-600" /> : <ChevronDown className="w-4 h-4 text-indigo-600" />)
+                            : <ChevronsUpDown className="w-4 h-4 opacity-40" />}
+                        </div>
+                      </button>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); setActiveFilterField(activeFilterField === "total_score" ? null : "total_score"); }}
+                        className={`p-1 mr-1 rounded hover:bg-slate-200 transition-colors ${columnFilters["total_score"]?.value ? 'text-indigo-600' : 'text-slate-400'}`}
+                        title="Filter Total Fit Score"
+                      >
+                        <Filter className="w-3.5 h-3.5" />
+                      </button>
+                      {activeFilterField === "total_score" && (
+                        <ColumnFilterPopup
+                          field="total_score" label="FIT SCORE"
+                          align="right"
+                          onClose={() => setActiveFilterField(null)}
+                          onApply={(f) => { setColumnFilters(p => ({ ...p, total_score: f })); setActiveFilterField(null); }}
+                          onClear={() => { setColumnFilters(p => { const n = { ...p }; delete n.total_score; return n; }); setActiveFilterField(null); }}
+                          currentFilter={columnFilters["total_score"]}
+                        />
+                      )}
                     </div>
                   </TableHead>
-                  <TableHead className="w-[240px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide border-l border-slate-200 py-0">
-                    <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[10px]" />
-                      <span className="flex-1 text-center leading-tight">ACTIONS</span>
-                      <div className="w-[10px]" />
-                    </div>
+
+                  <TableHead className="w-[260px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider border-l border-slate-200 py-0 px-2">
+                    ACTIONS
                   </TableHead>
-                  <TableHead className="w-[160px] text-center font-bold text-slate-900 text-[9.5px] uppercase tracking-wide border-l border-slate-200 py-0">
-                    <div className="flex items-center justify-between w-full h-full px-1">
-                      <div className="w-[10px]" />
-                      <span className="flex-1 text-center leading-tight">FEEDBACK</span>
-                      <div className="w-[10px]" />
-                    </div>
+                  <TableHead className="w-[220px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider border-l border-slate-200 py-0 px-2">
+                    CANDIDATE FEEDBACK
                   </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody className={isRefreshing ? "opacity-60 transition-opacity duration-300 pointer-events-none" : ""}>
                 {isInitialLoading ? (
-                  Array.from({ length: 5 }).map((_, i) => (
-                    <TableRow key={i} className="h-20">
-                      <TableCell className="w-[44px] sticky left-0 z-10 bg-white border-r border-slate-200/50 px-1"><Skeleton className="h-4 w-4 mx-auto" /></TableCell>
-                      <TableCell className="w-[160px] sticky left-[44px] z-10 bg-white border-r border-slate-200/50 px-1"><Skeleton className="h-12 w-40 mx-auto" /></TableCell>
-                      <TableCell className="pl-6"><Skeleton className="h-8 w-24 mx-auto" /></TableCell>
-                      <TableCell><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
-                      <TableCell><Skeleton className="h-8 w-20 mx-auto" /></TableCell>
-                      <TableCell><Skeleton className="h-4 w-12 mx-auto" /></TableCell>
-                      <TableCell><Skeleton className="h-4 w-32 mx-auto" /></TableCell>
-                      <TableCell><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
-                      <TableCell><Skeleton className="h-6 w-16 mx-auto" /></TableCell>
-                      <TableCell className="sticky right-0 bg-white z-20 border-l border-slate-200/50 pr-10"><Skeleton className="h-9 w-32 mx-auto" /></TableCell>
+                  Array.from({ length: 8 }).map((_, i) => (
+                    <TableRow key={i} className="h-20 bg-white">
+                      <TableCell className="w-[50px] border-r border-slate-200/50 px-2 text-center"><Skeleton className="h-4 w-4 mx-auto" /></TableCell>
+                      <TableCell className="w-[320px] sticky left-0 z-10 bg-white px-3 after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200"><Skeleton className="h-10 w-48 mx-auto" /></TableCell>
+                      <TableCell className="w-[160px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-20 mx-auto" /></TableCell>
+                      <TableCell className="w-[260px] border-l border-slate-100 text-center"><Skeleton className="h-8 w-16 mx-auto" /></TableCell>
+                      <TableCell className="w-[200px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-24 mx-auto" /></TableCell>
+                      <TableCell className="w-[200px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
+                      <TableCell className="w-[220px] border-l border-slate-100 text-center"><Skeleton className="h-6 w-12 mx-auto" /></TableCell>
+                      <TableCell className="w-[260px] border-l border-slate-100 text-center"><Skeleton className="h-9 w-32 mx-auto" /></TableCell>
+                      <TableCell className="w-[220px] border-l border-slate-100 text-center"><Skeleton className="h-9 w-32 mx-auto" /></TableCell>
                     </TableRow>
                   ))
                 ) : (
@@ -1406,34 +1647,34 @@ export default function CandidateRankingsPage() {
                     const totalScore = isDone ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : screeningScore;
 
                     return (
-                      <TableRow key={`${candidate.id || candidate.candidate_id}-${idx}`} className="border-b border-slate-100 hover:bg-indigo-50/30 transition-all duration-200 h-auto group leading-tight relative">
-                        <TableCell className="w-[44px] sticky left-0 z-10 bg-white border-r border-[#e2e8f0] py-1 px-1 align-middle text-center">
-                          <div className="absolute inset-0 flex items-center justify-center">{idx + 1}</div>
+                      <TableRow key={`${candidate.id || candidate.candidate_id}-${idx}`} className="border-b border-slate-100 hover:bg-slate-50 transition-all duration-200 h-auto group leading-tight relative">
+                        <TableCell className="w-[50px] border-r border-slate-200 py-2 px-2 align-middle text-center font-medium text-slate-700 group-hover:bg-slate-50 transition-colors">
+                          {idx + 1}
                         </TableCell>
-                        <TableCell className="sticky left-[44px] z-10 bg-white border-r border-[#e2e8f0] w-[160px] py-1 px-1 align-middle text-center">
+                        <TableCell className="sticky left-0 z-10 bg-white w-[320px] py-2 px-3 align-middle text-center group-hover:bg-slate-50 transition-colors after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200">
                           <Link
                             href={`/jobs/${jobId}/report?candidateId=${encodeURIComponent(candidate.candidate_id || candidate.id)}`}
-                            className="text-[14px] font-bold text-indigo-600 hover:underline text-center w-full block mb-0.5"
+                            className="text-[14px] font-bold text-indigo-600 hover:underline text-center w-full block mb-1"
                           >
                             {candidate.name}
                           </Link>
-                          <span className="text-[11px] text-[#64748b] block mb-0 text-center">
+                          <span className="text-[12px] text-slate-500 block mb-0.5 text-center px-1 break-all whitespace-normal" title={candidate.email}>
                             <Mail className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {candidate.email || <span className="font-normal opacity-50">—</span>}
                           </span>
-                          <span className="text-[11px] text-[#64748b] block mb-0 text-center">
+                          <span className="text-[12px] text-slate-500 block mb-0.5 text-center">
                             <Phone className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {candidate.phone || <span className="font-normal opacity-50">—</span>}
                           </span>
                           <button
                             type="button"
                             onClick={() => openCandidateProfileUrl(candidate)}
-                            className="text-[11px] text-[#6366f1] hover:underline inline-flex items-center justify-center gap-1 mt-0.5"
+                            className="text-[12px] text-indigo-600 hover:underline inline-flex items-center justify-center gap-1 mt-1 font-medium"
                             title={String(candidate.source || "").toLowerCase().includes("linkedin") ? "Open LinkedIn profile" : "Open JobDiva profile"}
                           >
-                            <ExternalLink className="w-3 h-3" />
+                            <ExternalLink className="w-3.5 h-3.5" />
                             {String(candidate.source || "").toLowerCase().includes("linkedin") ? "LinkedIn URL" : "JobDiva URL"}
                           </button>
                           {needsContactEnrichment(candidate) && (
-                            <div className="text-center mt-1">
+                            <div className="text-center mt-2">
                               {(() => {
                                 const cid = String(candidate.candidate_id || candidate.id || "").trim();
                                 const status = enrichStatusByCandidateId[cid];
@@ -1443,7 +1684,7 @@ export default function CandidateRankingsPage() {
                                 return (
                                   <Button
                                     size="sm"
-                                    className="h-5 px-1.5 bg-white border border-[#6366f1]/30 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[9px] rounded-md shadow-sm"
+                                    className="h-6 px-2 bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-600 hover:text-white font-bold text-[10px] rounded-md shadow-sm"
                                     onClick={() => handleEnrichContact(candidate)}
                                     disabled={enrichingCandidateIds.has(String(candidate.candidate_id || candidate.id || ""))}
                                     title={hoverStatus}
@@ -1464,79 +1705,52 @@ export default function CandidateRankingsPage() {
                               })()}
                             </div>
                           )}
-                          <span className={`text-[11px] block text-center mt-0.5 ${availabilityPillClasses(deriveAvailability(candidate))}`}>
+                          <span className={`text-[12px] block text-center mt-1.5 ${availabilityPillClasses(deriveAvailability(candidate))}`}>
                             <Calendar className="w-3.5 h-3.5 inline mr-1 opacity-70" /> Available: {deriveAvailability(candidate) || <span className="font-normal opacity-50">—</span>}
                           </span>
                           {candidate.data?.open_to_relocation && (
-                            <span className="text-[10px] inline-block mt-0.5 px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 font-medium">
+                            <span className="text-[11px] inline-block mt-1 px-2 py-0.5 rounded-md bg-amber-50 text-amber-700 border border-amber-200 font-medium">
                               Open to Relocation
                             </span>
                           )}
                         </TableCell>
 
-                        <TableCell className="text-center align-middle py-1">
-                          <span className="text-[11px] font-semibold text-slate-700">
+                        <TableCell className="text-center align-middle py-2 px-2 border-l border-slate-200">
+                          <span className="text-[12px] font-semibold text-slate-700">
                             {normalizeSourceLabel(candidate.source)}
                           </span>
                         </TableCell>
 
-                        <TableCell className="text-center align-middle py-1">
-                          <div className="flex items-center justify-center gap-1.5">
-                            {(() => {
-                              const statusFromData = String(candidate.data?.resume_matching_status || "").toLowerCase();
-                              if (statusFromData === "done" || screeningScore > 0) {
-                                return <span className="font-medium text-[12px] text-emerald-600">Completed</span>;
-                              }
-                              const cid = String(candidate.candidate_id || candidate.id || "");
-                              const isRefreshing = refreshingResumeMatchIds.has(cid);
-                              return (
-                                <>
-                                  <span className="font-medium text-[12px] italic text-slate-400">Pending</span>
-                                  <button
-                                    type="button"
-                                    className="inline-flex items-center text-slate-500 hover:text-indigo-600"
-                                    title="Re-run resume matching"
-                                    onClick={() => handleRefreshResumeMatch(candidate)}
-                                    disabled={isRefreshing}
-                                  >
-                                    <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? "animate-spin" : ""}`} />
-                                  </button>
-                                </>
-                              );
-                            })()}
-                          </div>
-                        </TableCell>
 
-                        <TableCell className="text-center align-middle py-1 font-medium text-[#0f172a] text-[12px]">
-                          <div className="flex items-center justify-center gap-1.5 w-full text-center">
+
+                        <TableCell className="text-center align-middle py-2 px-2 font-medium text-slate-900 text-[13px] border-l border-slate-200">
+                          <div className="flex items-center justify-center gap-1 w-full text-center">
 
                             {screeningScore > 0 ? (
-                              <span
-                                className="font-bold text-slate-700"
-                              >
-                                {screeningScore}
+                              <span className="font-bold text-slate-900 text-[14px]">
+                                {screeningScore}/100
                               </span>
                             ) : (
-                              <span className="font-normal opacity-40 italic text-slate-400">Pending</span>
+                              <span className="font-normal opacity-40 italic text-slate-400 text-[13px]">Pending</span>
                             )}
                           </div>
                         </TableCell>
 
-                        <TableCell className="text-center align-middle py-2 group-hover:bg-indigo-50/5 transition-colors">
+                        <TableCell className="text-center align-middle py-3 px-2 group-hover:bg-indigo-50/5 transition-colors border-l border-slate-200">
                           {(() => {
                             const rawStatus = String(candidate.engage_status || candidate.data?.engage_status || "").trim().toLowerCase();
                             // If in outreach phase, show the timeline
                             if (rawStatus === "initiated" || rawStatus === "sent" || rawStatus === "sms sent") {
                               return (
                                 <div className="flex flex-col items-center gap-1 py-1">
-                                  <div className="flex items-center gap-1 mb-1">
-                                    <div className="w-1.5 h-1.5 rounded-full bg-yellow-500 animate-pulse" />
-                                    <span className="text-[10px] font-bold text-yellow-600 tracking-wide">Initiated</span>
+                                  <div className="flex items-center gap-1.5 mb-1">
+                                    <div className="w-2 h-2 rounded-full bg-yellow-500 animate-pulse" />
+                                    <span className="text-[11px] font-bold text-yellow-600 tracking-wide">Initiated</span>
                                   </div>
                                   {(candidate.engage_created_at || candidate.data?.engage_created_at) && (
-                                    <div className="flex flex-col items-center gap-0.5 px-2 py-1 rounded-lg bg-slate-50 border border-slate-100">
-                                      <div className="text-[10px] text-emerald-600 flex items-center gap-1 font-semibold" title="Outreach initiated">
-                                        <Mail className="w-2.5 h-2.5" /> {formatDate(candidate.engage_created_at || candidate.data?.engage_created_at)}
+                                    <div className="flex flex-col items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-50 border border-slate-100">
+                                      <div className="text-[11px] text-emerald-600 flex items-center gap-1 font-semibold" title="Outreach initiated">
+                                        <Mail className="w-3 h-3" /> {formatDate(candidate.engage_created_at || candidate.data?.engage_created_at)}
                                       </div>
                                       {(() => {
                                         const baseTime = candidate.engage_created_at || candidate.data?.engage_created_at;
@@ -1544,10 +1758,10 @@ export default function CandidateRankingsPage() {
                                         const isActive = new Date() > phoneTime;
                                         return (
                                           <div
-                                            className={`text-[10px] flex items-center gap-1 font-semibold ${isActive ? 'text-blue-600' : 'text-slate-400'}`}
+                                            className={`text-[11px] flex items-center gap-1 font-semibold ${isActive ? 'text-blue-600' : 'text-slate-400'}`}
                                             title={isActive ? "Follow-up triggered" : "Scheduled follow-up"}
                                           >
-                                            <Phone className="w-2.5 h-2.5" /> {formatDate(phoneTime.toISOString())}
+                                            <Phone className="w-3 h-3" /> {formatDate(phoneTime.toISOString())}
                                           </div>
                                         );
                                       })()}
@@ -1560,7 +1774,7 @@ export default function CandidateRankingsPage() {
                             return (
                               <div className="flex justify-center items-center w-full">
                                 <span
-                                  className="px-2.5 py-0.5 rounded-full text-[10px] font-bold border"
+                                  className="px-3 py-1 rounded-full text-[11px] font-bold border"
                                   style={{ backgroundColor: `${color}08`, color, borderColor: `${color}30` }}
                                 >
                                   {label}
@@ -1570,102 +1784,69 @@ export default function CandidateRankingsPage() {
                           })()}
                         </TableCell>
 
-                        <TableCell className="text-center align-middle py-2 group-hover:bg-indigo-50/5 transition-colors">
-                          {(() => {
-                            const { label, color } = normalizeHardFilterStatus(candidate);
-                            return (
-                              <div className="flex justify-center items-center w-full">
-                                <span
-                                  className="px-2.5 py-0.5 rounded-full text-[10px] font-bold border"
-                                  style={{ backgroundColor: `${color}08`, color, borderColor: `${color}30` }}
-                                >
-                                  {label}
-                                </span>
-                              </div>
-                            );
-                          })()}
-                        </TableCell>
 
-                        <TableCell className="text-center align-middle py-2 font-medium text-slate-700 text-[12px] group-hover:bg-indigo-50/5 transition-colors">
+
+                        <TableCell className="text-center align-middle py-3 px-2 font-medium text-slate-700 text-[13px] transition-colors border-l border-slate-200">
                           {(() => {
                             const eScore = candidate.engage_score;
-                            const eTotal = candidate.engage_total_score;
-                            
+                            const eTotal = candidate.engage_total_score || 100;
+
                             if (eScore !== undefined && eScore !== null) {
                               return (
-                                <span
-                                  className="text-center w-full font-bold text-slate-900 bg-slate-50/50 px-2 py-1 rounded border border-slate-100 inline-block mx-auto"
-                                >
-                                  {eScore}<span className="text-slate-400 font-normal mx-0.5">/</span>{eTotal || 100}
-                                </span>
+                                <div className="flex items-center justify-center w-full">
+                                  <span className="font-bold text-slate-900 text-[14px]">
+                                    {eScore}/{eTotal}
+                                  </span>
+                                </div>
                               );
                             }
-                            return <span className="font-normal opacity-40 italic">Waiting</span>;
+                            return <span className="font-normal opacity-40 italic text-[13px]">Waiting</span>;
                           })()}
                         </TableCell>
 
-                        <TableCell className="text-center font-medium text-slate-600 text-[11px] align-middle py-1 group-hover:bg-indigo-50/5 transition-colors">
-                          {candidate.engage_completed_at || candidate.data?.engage_completed_at ? formatDate(candidate.engage_completed_at || candidate.data.engage_completed_at) : <span className="font-normal opacity-30 italic">—</span>}
-                        </TableCell>
 
-                        <TableCell className="text-center font-bold text-indigo-700 text-[13px] align-middle py-2 bg-indigo-50/10 group-hover:bg-indigo-50/30 transition-colors">
+
+                        <TableCell className="text-center font-bold text-slate-900 text-[14px] align-middle py-3 px-2 transition-colors border-l border-slate-200">
                           {totalScore ? (
-                            <span
-                              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-100 shadow-sm"
-                            >
-                              {totalScore}
-                            </span>
+                            <span>{totalScore}/100</span>
                           ) : (
                             <span className="font-normal opacity-30 italic">—</span>
                           )}
                         </TableCell>
 
-                        <TableCell className="text-center align-middle py-1 font-medium text-slate-700 text-[11px]">
-                          <div className="flex items-center justify-center gap-1.5 w-full text-center">
-                            {candidate.data?.config_version || <span className="font-normal opacity-50">—</span>}
-                          </div>
-                        </TableCell>
 
-                        <TableCell className="text-center pr-4 pl-4 border-l border-[#e2e8f0] py-2 align-middle transition-colors group-hover:bg-indigo-50/5">
-                          <div className="flex items-center justify-center gap-3">
+
+                        <TableCell className="text-center pr-3 pl-3 border-l border-slate-200 py-3 align-middle transition-colors group-hover:bg-indigo-50/5">
+                          <div className="flex flex-wrap items-center justify-center gap-2">
+
                             <Button
                               size="sm"
-                              className="h-7 px-2.5 bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-600 hover:text-white font-bold text-[9px] rounded-md shadow-sm transition-all duration-200"
-                              onClick={() => handleEmailCandidate(candidate)}
-                            >
-                              <Mail className="w-3.5 h-3.5 mr-1" />
-                              Email
-                            </Button>
-                            <Button
-                              size="sm"
-                              className="h-7 px-2.5 bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-600 hover:text-white font-bold text-[9px] rounded-md shadow-sm transition-all duration-200"
+                              className="h-8 px-3 bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-600 hover:text-white font-bold text-[11px] rounded-md shadow-sm transition-all duration-200"
                               onClick={() => handleScreenClick(candidate)}
                               disabled={screenLoading}
                             >
-                              <MessageSquare className="w-3.5 h-3.5 mr-1" />
+                              <MessageSquare className="w-4 h-4 mr-1.5" />
                               Screen
                             </Button>
                             <Button
                               size="sm"
-                              className="h-7 px-2.5 bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-600 hover:text-white font-bold text-[9px] rounded-md shadow-sm transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                              className="h-8 px-3 bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-600 hover:text-white font-bold text-[11px] rounded-md shadow-sm transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
 
                               onClick={() => handleSmsCandidate(candidate)}
                               disabled={candidate.engage_status === "Initiated" || candidate.engage_status === "sent" || candidate.engage_status === "SMS Sent"}
                               title={(candidate.engage_status === "Initiated" || candidate.engage_status === "sent" || candidate.engage_status === "SMS Sent") ? "Outreach already initiated" : ""}
                             >
-                              <Send className="w-3 h-3 mr-0.5" />
+                              <Send className="w-3.5 h-3.5 mr-1" />
                               SMS
                             </Button>
                           </div>
                         </TableCell>
 
-                        <TableCell className="text-center pr-4 pl-4 border-l border-[#e2e8f0] py-2 align-middle transition-colors group-hover:bg-indigo-50/5">
-                          <div className="flex flex-col items-center gap-1.5">
-                            <select
-                              className="w-full text-[11px] font-medium text-[#334155] bg-white border border-[#cbd5e1] rounded h-7 px-1 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                              value={feedbacks[candidate.id]?.startsWith("Reject") ? "Reject" : feedbacks[candidate.id] || ""}
-                              onChange={(e) => {
-                                const val = e.target.value;
+                        <TableCell className="text-center pr-4 pl-4 border-l border-slate-200 py-3 align-middle transition-colors group-hover:bg-indigo-50/5">
+                          <div className="flex flex-col items-center gap-2">
+                            <Select
+                              value={feedbacks[candidate.id]?.startsWith("Reject") ? "Reject" : feedbacks[candidate.id] || undefined}
+                              onValueChange={(val) => {
                                 if (val === "Reject") {
                                   setActionCandidateId(candidate.id);
                                   setRejectReason("");
@@ -1676,10 +1857,14 @@ export default function CandidateRankingsPage() {
                                 }
                               }}
                             >
-                              <option value="" disabled>Select Action...</option>
-                              <option value="Submit">Submit</option>
-                              <option value="Reject">Reject</option>
-                            </select>
+                              <SelectTrigger className="w-[140px] h-8 text-[12px] font-semibold text-slate-700 bg-white border-slate-300 hover:border-slate-400 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500">
+                                <SelectValue placeholder="Select Action..." />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="Submit" className="text-[12px] font-semibold cursor-pointer">Submit</SelectItem>
+                                <SelectItem value="Reject" className="text-[12px] font-semibold cursor-pointer">Reject</SelectItem>
+                              </SelectContent>
+                            </Select>
                             {feedbacks[candidate.id] && (
                               <div className={`text-[9px] font-bold flex items-center justify-center gap-1 whitespace-nowrap ${feedbacks[candidate.id] === 'Submit' ? 'text-indigo-600' : 'text-rose-600'}`}>
                                 {feedbacks[candidate.id] === 'Submit' ? <><Check className="w-3 h-3" /> Submitted</> : <><X className="w-3 h-3" /> Rejected</>}
@@ -1756,14 +1941,14 @@ export default function CandidateRankingsPage() {
           if (!cand) return;
           const cid = String(cand.candidate_id || cand.id);
           const picked = phones[cid] || cand.phone || "";
-          
+
           if (picked && picked !== cand.phone) {
             try {
               // Passing candidate_id in the body bypasses strict URL path decoders on QA
               await fetch(`${API_BASE}/candidates/${encodeURIComponent(cid)}/phone`, {
                 method: "PATCH",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ 
+                body: JSON.stringify({
                   phone: picked,
                   jobdiva_id: cand.jobdiva_id || String(jobId || ""),
                   candidate_id: cid
