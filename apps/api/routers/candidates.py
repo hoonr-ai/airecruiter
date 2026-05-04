@@ -2806,6 +2806,9 @@ async def get_candidate_evaluation_report(
                         engage_score = float(iv["candidate_score"])
                     elif iv.get("overall_score") is not None:
                         engage_score = float(iv["overall_score"])
+                    
+                    if iv.get("total_score") is not None:
+                        engage_total_score = float(iv["total_score"])
                     if iv.get("hard_filter_overall") or iv.get("hard_filter_status"):
                         hard_filter_status = str(iv.get("hard_filter_overall") or iv.get("hard_filter_status") or hard_filter_status)
                     if iv.get("status"):
@@ -2860,14 +2863,10 @@ async def get_candidate_evaluation_report(
         display_engage_score = None
         if engage_score is not None:
             if engage_total_score and engage_total_score > 0:
-                # DEBUG: Log values to a file
-                with open("score_debug.log", "a") as f:
-                    f.write(f"CAND: {candidate_id} | RAW: {engage_score} / {engage_total_score} | STATUS: {engage_status}\n")
-                
                 # Calculate percentage: (score / total) * 100
-                display_engage_score = round((engage_score / engage_total_score) * 100, 1)
+                display_engage_score = round((float(engage_score) / float(engage_total_score)) * 100, 1)
             else:
-                display_engage_score = engage_score
+                display_engage_score = float(engage_score)
 
         # Calculate Total Fit Score: Average of only COMPLETED stages
         # Exclude Engage score if it's still in progress or initiated
