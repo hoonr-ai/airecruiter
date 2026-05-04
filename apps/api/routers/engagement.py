@@ -444,8 +444,6 @@ async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_int
         
         if not row:
             logger.warning(f"⚠️ [Provisioning] Candidate {candidate_id_internal} not found in sourced_candidates. Cannot provision.")
-            cur.close()
-            conn.close()
             return None
             
         cand_data = row.get("data") or {}
@@ -473,38 +471,58 @@ async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_int
                         cur.execute("UPDATE sourced_candidates SET data = %s WHERE candidate_id = %s", 
                                     (json.dumps(cand_data), candidate_id_internal))
                         conn.commit()
-                    cur.close()
-                    conn.close()
                     return app_cid
             
             logger.info(f"❓ [Provisioning] Candidate {candidate_id_internal} not found in JobDiva applicants list.")
 
-        # 3. Direct Provisioning via CreateJobApplicationWithResume
-        # This endpoint can create the candidate and apply them in one step.
-        candidate_name = row.get("name") or "Candidate"
-        safe_name = candidate_name.replace(" ", "_")
-        success = await jobdiva_service.create_job_application_with_resume(
-            candidate_id=existing_jd_id,
+        # 3. Provisioning: call CreateJobApplicationWithResume directly.
+        # NOTE: This endpoint ALWAYS creates a new candidate from the textfile —
+        # passing ?candidateId is ignored. So we ensure the name is parseable by
+        # ALWAYS putting "FIRSTNAME LASTNAME" as the very first line of the textfile,
+        # matching the format JobDiva's parser expects (like the Swati Pandey example).
+        candidate_name = row.get("name") or ""
+        name_parts = candidate_name.strip().split(" ", 1) if candidate_name else ["", ""]
+        first_name = name_parts[0]
+        last_name = name_parts[1] if len(name_parts) > 1 else ""
+        safe_name = (candidate_name or "Candidate").replace(" ", "_")
+        phone = row.get("phone") or ""
+
+        # Always prepend name as first line so JobDiva parser picks it up
+        actual_resume = row.get("resume_text") or ""
+        resume_text = (
+            f"{candidate_name.upper()}\n"
+            f"Email: {email or 'N/A'} | Phone: {phone or 'N/A'}\n\n"
+            + (actual_resume if actual_resume else "(Profile sourced via PAIR)")
+        )
+
+        success, new_jd_id = await jobdiva_service.create_job_application_with_resume(
+            candidate_id=None,   # Always omit — endpoint ignores it anyway
             job_id=numeric_job_id or job_id_internal,
-            resume_text=row.get("resume_text") or f"Name: {candidate_name}\nEmail: {email}\nPhone: {row.get('phone')}\n(Sourced via PAIR)",
-            filename=f"{safe_name}_Resume.txt"
+            resume_text=resume_text,
+            filename=f"{safe_name}_Resume.txt",
+            first_name=first_name,
+            last_name=last_name,
+            email=email or ""
         )
         
         if success:
-            logger.info(f"🎉 [Provisioning] Success! Candidate {candidate_id_internal} application initiated in JobDiva.")
-            if existing_jd_id:
-                cand_data["jobdiva_candidate_id"] = existing_jd_id
-                cur.execute("UPDATE sourced_candidates SET data = %s WHERE candidate_id = %s", 
+            logger.info(f"🎉 [Provisioning] Success! Candidate {candidate_id_internal} → JobDiva ID: {new_jd_id}")
+            if new_jd_id:
+                cand_data["jobdiva_candidate_id"] = new_jd_id
+                cur.execute("UPDATE sourced_candidates SET data = %s WHERE candidate_id = %s",
                             (json.dumps(cand_data), candidate_id_internal))
                 conn.commit()
-        
-        cur.close()
-        conn.close()
-        return existing_jd_id
+
+        return new_jd_id
 
     except Exception as e:
         logger.error(f"❌ [Provisioning] Error for {candidate_id_internal}: {e}", exc_info=True)
         return None
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
 
 
 @router.post("/engage/send-bulk-interview")
