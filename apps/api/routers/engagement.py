@@ -62,59 +62,53 @@ def _parse_json_list(val) -> list:
 def _ensure_audit_table():
     """Create engage_interview_audit table if it doesn't exist, and patch any missing columns."""
     try:
-        # connect_timeout=5 → slow/unreachable DB must fail fast. Previously an
-        # unbounded wait here (called at module import) could hang FastAPI
-        # startup past systemd's TimeoutStartSec, triggering a restart loop
-        # that returned 404 for every route until the DB recovered.
-        conn = get_db_connection()
-        cur = conn.cursor()
-        # Create table (no-op if already exists)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS engage_interview_audit (
-                id SERIAL PRIMARY KEY,
-                candidate_id VARCHAR(255) NOT NULL,
-                jobdiva_id VARCHAR(255),
-                interview_id VARCHAR(255),
-                candidate_name VARCHAR(255),
-                candidate_email VARCHAR(255),
-                payload JSONB,
-                response JSONB,
-                status VARCHAR(50) DEFAULT 'sent',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        # Patch columns that may be missing if table was created before schema updates
-        missing_columns = [
-            ("jobdiva_id",      "VARCHAR(255)"),
-            ("interview_id",   "VARCHAR(255)"),
-            ("candidate_name", "VARCHAR(255)"),
-            ("candidate_email","VARCHAR(255)"),
-            ("payload",        "JSONB"),
-            ("response",       "JSONB"),
-            ("status",         "VARCHAR(50) DEFAULT 'sent'"),
-            ("updated_at",     "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
-        ]
-        for col_name, col_def in missing_columns:
-            cur.execute(f"""
-                ALTER TABLE engage_interview_audit
-                ADD COLUMN IF NOT EXISTS {col_name} {col_def};
-            """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_engage_audit_candidate
-            ON engage_interview_audit(candidate_id);
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_engage_audit_interview
-            ON engage_interview_audit(interview_id);
-        """)
-        cur.execute("""
-            CREATE INDEX IF NOT EXISTS idx_engage_audit_job_candidate_id_desc
-            ON engage_interview_audit(jobdiva_id, candidate_id, id DESC);
-        """)
-        conn.commit()
-        cur.close()
-        conn.close()
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Create table (no-op if already exists)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS engage_interview_audit (
+                        id SERIAL PRIMARY KEY,
+                        candidate_id VARCHAR(255) NOT NULL,
+                        jobdiva_id VARCHAR(255),
+                        interview_id VARCHAR(255),
+                        candidate_name VARCHAR(255),
+                        candidate_email VARCHAR(255),
+                        payload JSONB,
+                        response JSONB,
+                        status VARCHAR(50) DEFAULT 'sent',
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                # Patch columns that may be missing if table was created before schema updates
+                missing_columns = [
+                    ("jobdiva_id",      "VARCHAR(255)"),
+                    ("interview_id",   "VARCHAR(255)"),
+                    ("candidate_name", "VARCHAR(255)"),
+                    ("candidate_email","VARCHAR(255)"),
+                    ("payload",        "JSONB"),
+                    ("response",       "JSONB"),
+                    ("status",         "VARCHAR(50) DEFAULT 'sent'"),
+                    ("updated_at",     "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+                ]
+                for col_name, col_def in missing_columns:
+                    cur.execute(f"""
+                        ALTER TABLE engage_interview_audit
+                        ADD COLUMN IF NOT EXISTS {col_name} {col_def};
+                    """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_engage_audit_candidate
+                    ON engage_interview_audit(candidate_id);
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_engage_audit_interview
+                    ON engage_interview_audit(interview_id);
+                """)
+                cur.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_engage_audit_job_candidate_id_desc
+                    ON engage_interview_audit(jobdiva_id, candidate_id, id DESC);
+                """)
+                conn.commit()
         logger.info("✅ engage_interview_audit table ready")
     except Exception as e:
         logger.error(f"❌ Failed to create engage_interview_audit table: {e}")
