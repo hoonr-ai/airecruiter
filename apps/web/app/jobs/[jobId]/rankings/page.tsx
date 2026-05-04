@@ -277,20 +277,25 @@ export default function CandidateRankingsPage() {
       "created",
       "queued",
       "scheduled",
-      "in_progress",
-      "in-progress",
-      "inprogress",
       "started",
     ]);
     if (pendingStates.has(raw)) {
       return { label: "Pending", color: "#64748b" };
     }
 
-    if (raw.includes("complete")) {
+    if (raw === "in_progress" || raw === "in-progress" || raw === "inprogress" || raw === "in progress") {
+      return { label: "In Progress", color: "#f59e0b" };
+    }
+
+    if (raw.includes("complete") || raw === "passed" || raw === "pass") {
       return { label: "Completed", color: "#059669" };
     }
 
-    const label = raw.charAt(0).toUpperCase() + raw.slice(1);
+    if (raw === "failed" || raw === "fail" || raw === "rejected") {
+      return { label: "Fail", color: "#e11d48" };
+    }
+
+    const label = raw.charAt(0).toUpperCase() + raw.slice(1).replace(/_/g, " ");
     return { label, color: "#64748b" };
   };
 
@@ -1397,7 +1402,8 @@ export default function CandidateRankingsPage() {
                   filteredCandidates.map((candidate, idx) => {
                     const screeningScore = candidate.match_score || 0;
                     const engageScore = candidate.engage_score || 0;
-                    const totalScore = screeningScore + engageScore;
+                    const isDone = ["completed", "passed", "failed", "rejected", "pass", "fail"].includes((candidate.engage_status || "").toLowerCase());
+                    const totalScore = isDone ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : screeningScore;
 
                     return (
                       <TableRow key={`${candidate.id || candidate.candidate_id}-${idx}`} className="border-b border-slate-100 hover:bg-indigo-50/30 transition-all duration-200 h-auto group leading-tight relative">
@@ -1582,23 +1588,15 @@ export default function CandidateRankingsPage() {
 
                         <TableCell className="text-center align-middle py-2 font-medium text-slate-700 text-[12px] group-hover:bg-indigo-50/5 transition-colors">
                           {(() => {
-                            const cScore = candidate.engage_candidate_score;
-                            const tScore = candidate.engage_total_score || candidate.engage_score;
-                            if (cScore !== undefined && tScore !== undefined) {
+                            const eScore = candidate.engage_score;
+                            const eTotal = candidate.engage_total_score;
+                            
+                            if (eScore !== undefined && eScore !== null) {
                               return (
                                 <span
                                   className="text-center w-full font-bold text-slate-900 bg-slate-50/50 px-2 py-1 rounded border border-slate-100 inline-block mx-auto"
                                 >
-                                  {cScore}<span className="text-slate-400 font-normal mx-0.5">/</span>{tScore}
-                                </span>
-                              );
-                            }
-                            if (tScore) {
-                              return (
-                                <span
-                                  className="text-center w-full font-bold text-slate-900"
-                                >
-                                  {tScore}
+                                  {eScore}<span className="text-slate-400 font-normal mx-0.5">/</span>{eTotal || 100}
                                 </span>
                               );
                             }
