@@ -73,7 +73,7 @@ def _ensure_audit_table():
             CREATE TABLE IF NOT EXISTS engage_interview_audit (
                 id SERIAL PRIMARY KEY,
                 candidate_id VARCHAR(255) NOT NULL,
-                job_id VARCHAR(255),
+                jobdiva_id VARCHAR(255),
                 interview_id VARCHAR(255),
                 candidate_name VARCHAR(255),
                 candidate_email VARCHAR(255),
@@ -86,7 +86,7 @@ def _ensure_audit_table():
         """)
         # Patch columns that may be missing if table was created before schema updates
         missing_columns = [
-            ("job_id",         "VARCHAR(255)"),
+            ("jobdiva_id",      "VARCHAR(255)"),
             ("interview_id",   "VARCHAR(255)"),
             ("candidate_name", "VARCHAR(255)"),
             ("candidate_email","VARCHAR(255)"),
@@ -110,7 +110,7 @@ def _ensure_audit_table():
         """)
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_engage_audit_job_candidate_id_desc
-            ON engage_interview_audit(job_id, candidate_id, id DESC);
+            ON engage_interview_audit(jobdiva_id, candidate_id, id DESC);
         """)
         conn.commit()
         cur.close()
@@ -149,8 +149,6 @@ class SendBulkInterviewRequest(BaseModel):
     is_initial_launch: bool = False
     dry_run: bool = False
 
-class SyncInterviewDetailsRequest(BaseModel):
-    interview_ids: List[Any]
 
 # ---------------------------------------------------------------------------
 # 1. POST /engage/generate-payload
@@ -223,9 +221,12 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 })
 
         # ----- Fetch job data -----
+        # Some jobs have duplicate rows where job_id matches jobdiva_id.
+        # We prioritize the row with a numeric job_id and the latest creation date.
         cur.execute("""
-            SELECT * FROM monitored_jobs
+            SELECT * FROM monitored_jobs 
             WHERE job_id = %s OR jobdiva_id = %s
+            ORDER BY (job_id ~ '^[0-9]+$') DESC, created_at DESC 
             LIMIT 1
         """, (request.job_id, request.job_id))
         job_row = cur.fetchone()
@@ -262,49 +263,54 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         rubric_db = JobRubricDB()
         jobdiva_id_for_rubric = job_row.get("jobdiva_id") if job_row else request.job_id
         rubric = rubric_db.get_full_rubric(jobdiva_id_for_rubric)
+        if rubric:
+            rubric.pop("screen_questions", None)
+            rubric.pop("soft_skills", None)
+            rubric.pop("bot_introduction", None)
 
         # Build JD block with structured context and rubric
         if job_row:
             jd = {
-                "job_id": job_row.get("job_id", request.job_id),
-                "jobdiva_id": job_row.get("jobdiva_id", ""),
-                "title": job_row.get("title", ""),
-                "customer_name": job_row.get("customer_name") or "Unknown",
-                "city": job_row.get("city") or "TBD",
-                "state": job_row.get("state") or "",
-                "location_type": job_row.get("location_type") or "Onsite",
-                "jobdiva_description": job_row.get("jobdiva_description") or "",
-                "ai_description": job_row.get("ai_description") or "",
-                "pre_screen_questions": pre_screen_questions,
+                "job_id": job_row.get("job_id") or request.job_id,
+                "jobdiva_id": job_row.get("jobdiva_id") or "",
                 "context": {
                     "title": job_row.get("title", ""),
                     "customer_name": job_row.get("customer_name") or "Unknown",
                     "city": job_row.get("city") or "TBD",
                     "state": job_row.get("state") or "",
                     "location_type": job_row.get("location_type") or "Onsite",
-                    "jobdiva_description": job_row.get("jobdiva_description") or job_row.get("ai_description") or "",
+                    "jobdiva_description": job_row.get("jobdiva_description") or "",
+                    "ai_description": job_row.get("ai_description") or "",
+                    "recruiter_notes": job_row.get("recruiter_notes") or "",
                 },
-                "rubric": rubric if rubric else {}
+                "rubric": rubric if rubric else {},
+                "pre_screen_questions": pre_screen_questions,
             }
         else:
             jd = {
                 "job_id": request.job_id,
                 "jobdiva_id": "",
-                "title": "",
-                "jobdiva_description": "",
-                "pre_screen_questions": [],
                 "context": {},
-                "rubric": {}
+                "rubric": {},
+                "pre_screen_questions": []
             }
 
         # Build resumes list using raw_resume_text
         final_resumes = []
         for r in resumes:
+            candidate_name = r.get("name") or "Unknown"
+            candidate_email = r.get("email") or ""
+            # LiveKit DB has chk_interviews_email_format — empty string fails the constraint.
+            # If email is missing, generate a safe placeholder so the interview can still be created.
+            if not candidate_email:
+                safe_name = candidate_name.lower().replace(" ", ".").replace(",", "")
+                candidate_email = f"{safe_name}@noemail.pair.ai"
             final_resumes.append({
-                "name": r.get("name"),
-                "email": r.get("email"),
+                "name": candidate_name,
+                "email": candidate_email,
                 "phone": r.get("phone"),
                 "raw_resume_text": r.get("experience", ""), # LiveKit expects raw_resume_text
+                "experience": r.get("experience", ""),      # Frontend expects experience for auto-population
                 "summary": r.get("summary", ""),
                 "skills": r.get("skills", ""),
                 "education": r.get("education", ""),
@@ -314,7 +320,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         payload = {
             "resumes": final_resumes,
             "jd": jd,
-            "company_intro": job_row.get("bot_introduction", "") if job_row else "",
+            "company_intro": (job_row.get("bot_introduction") or "") if job_row else "",
             "interview_duration": "20-25"
         }
 
@@ -345,17 +351,16 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
     try:
         conn = _get_db_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        cur.execute(
-            """
+        cur.execute("""
             SELECT job_id, jobdiva_id, title, customer_name,
-                   recruiter_emails, ai_description, recruiter_notes,
-                   selected_job_boards
+                   city, state, location_type, bot_introduction,
+                   jobdiva_description, ai_description, recruiter_notes,
+                   selected_job_boards, recruiter_emails
             FROM monitored_jobs
             WHERE job_id = %s OR jobdiva_id = %s
+            ORDER BY (job_id ~ '^[0-9]+$') DESC, created_at DESC
             LIMIT 1
-            """,
-            (job_id, job_id),
-        )
+        """, (job_id, job_id))
         row = cur.fetchone()
         cur.close()
         conn.close()
@@ -367,10 +372,10 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
         recruiter_emails: list = _parse_json_list(row.get("recruiter_emails", []))
         job_boards: list       = _parse_json_list(row.get("selected_job_boards", []))
 
-        jobdiva_id    = str(row.get("jobdiva_id") or job_id)
-        job_title     = str(row.get("title") or "")
-        customer_name = str(row.get("customer_name") or "")
-        ai_desc       = str(row.get("ai_description") or "")
+        jobdiva_id    = str(row.get("jobdiva_id") or "")
+        job_title      = row.get("title", "")
+        customer_name  = row.get("customer_name", "Unknown")
+        location       = f"{row.get('city', 'TBD')}, {row.get('state', '')}"
         db_job_id     = str(row.get("job_id") or job_id)
         clean_emails  = [str(e) for e in recruiter_emails if e]
 
@@ -548,7 +553,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
 
                 cur.execute("""
                     INSERT INTO engage_interview_audit
-                        (candidate_id, job_id, interview_id, candidate_name, candidate_email, payload, response, status)
+                        (candidate_id, jobdiva_id, interview_id, candidate_name, candidate_email, payload, response, status)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """, (
                     candidate_id,
@@ -581,10 +586,10 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
         else:
             # Still log the failed attempt
             for candidate_id in request.real_candidate_ids:
-                job_id = payload_obj.get("jd", {}).get("job_id", "")
+                job_id = payload_obj.get("jd", {}).get("jobdiva_id") or payload_obj.get("jd", {}).get("job_id", "")
                 cur.execute("""
                     INSERT INTO engage_interview_audit
-                        (candidate_id, job_id, payload, response, status)
+                        (candidate_id, jobdiva_id, payload, response, status)
                     VALUES (%s, %s, %s, %s, %s)
                 """, (
                     candidate_id,
@@ -650,7 +655,7 @@ async def get_latest_interview(candidate_id: str):
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         cur.execute("""
-            SELECT interview_id, candidate_name, candidate_email, job_id, status, created_at
+            SELECT interview_id, candidate_name, candidate_email, jobdiva_id, status, created_at
             FROM engage_interview_audit
             WHERE candidate_id = %s AND interview_id IS NOT NULL AND interview_id::text != ''
             ORDER BY id DESC
@@ -683,220 +688,6 @@ async def get_latest_interview(candidate_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------------------------------------------------------------------------
-# 4. POST /engage/interviews/details-sync
-# ---------------------------------------------------------------------------
-@router.post("/engage/interviews/details-sync")
-@router.post("/interviews/details-sync")
-async def sync_interview_details(request: SyncInterviewDetailsRequest):
-    """
-    Fetch interview detail(s) from PAIR for provided interview IDs, then:
-      1) store the full detail payload in engage_interview_audit.response
-      2) update engage_interview_audit.status from detail.interview.status
-      3) sync sourced_candidates.data engage fields for rank-list consumption
-
-    Note: PAIR detail endpoint currently supports single interview_id per call,
-    so this endpoint fans out one request per id and returns aggregated results.
-    """
-    # Normalize incoming IDs: keep only positive integers, de-duplicated.
-    normalized_ids: List[int] = []
-    seen = set()
-    for raw_id in request.interview_ids or []:
-        try:
-            parsed = int(str(raw_id).strip())
-            if parsed <= 0:
-                continue
-            if parsed in seen:
-                continue
-            seen.add(parsed)
-            normalized_ids.append(parsed)
-        except Exception:
-            continue
-
-    if not normalized_ids:
-        return {"success": True, "count": 0, "results": []}
-
-    conn = _get_db_connection()
-    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    results: List[Dict[str, Any]] = []
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            for interview_id in normalized_ids:
-                try:
-                    pair_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/interviews/{interview_id}/detail"
-                    pair_res = await client.get(pair_url)
-
-                    if pair_res.status_code != 200:
-                        results.append({
-                            "interview_id": interview_id,
-                            "success": False,
-                            "error": f"PAIR returned {pair_res.status_code}",
-                        })
-                        continue
-
-                    detail_payload = pair_res.json()
-                    # The PAIR/LiveKit API wraps the response in a "data" object
-                    data_wrapper = detail_payload.get("data", {}) if isinstance(detail_payload, dict) else {}
-                    interview_block = data_wrapper.get("interview", {}) if isinstance(data_wrapper, dict) else {}
-                    
-                    status_value = str(interview_block.get("status") or "pending")
-                    overall_score = interview_block.get("overall_score")
-                    # Try both potential completion timestamp fields
-                    completed_at = interview_block.get("completed_at") or interview_block.get("evaluation_completed_at")
-
-
-                    now_iso = datetime.now(timezone.utc).isoformat()
-
-                    # Update only the latest audit row for this interview_id.
-                    cur.execute(
-                        """
-                        WITH latest AS (
-                            SELECT id
-                            FROM engage_interview_audit
-                            WHERE interview_id = %s
-                            ORDER BY id DESC
-                            LIMIT 1
-                        )
-                        UPDATE engage_interview_audit eia
-                        SET response = %s::jsonb,
-                            status = %s,
-                            updated_at = CURRENT_TIMESTAMP
-                        FROM latest
-                        WHERE eia.id = latest.id
-                        RETURNING eia.candidate_id, eia.job_id
-                        """,
-                        (str(interview_id), json.dumps(detail_payload), status_value),
-                    )
-                    audit_row = cur.fetchone() or {}
-                    candidate_id = str(audit_row.get("candidate_id") or "")
-                    job_id = str(audit_row.get("job_id") or "")
-
-                    # Try both potential completion timestamp fields
-                    completed_at = interview_block.get("completed_at") or interview_block.get("evaluation_completed_at")
-                    
-                    # Deep Sync Fallback: If timing is still missing, use the latest session_end
-                    if not completed_at:
-                        sessions = data_wrapper.get("sessions", [])
-                        if sessions:
-                            # Get the most recent session_end
-                            session_ends = [s.get("session_end") for s in sessions if s.get("session_end")]
-                            if session_ends:
-                                completed_at = max(session_ends)
-
-                    # Extract rich metrics from the data wrapper
-                    hard_filter = interview_block.get("hard_filter_overall") or interview_block.get("hard_filter_status") or data_wrapper.get("hard_filter_status")
-                    
-                    # Deep Sync Fallback: if hard_filter is missing, cross-reference questions_answers with assigned_questions
-                    if not hard_filter:
-                        qa_list = data_wrapper.get("questions_answers", [])
-                        assigned_list = data_wrapper.get("assigned_questions", [])
-                        
-                        # Find IDs of questions marked as hard filters
-                        hard_filter_question_ids = {q.get("id") for q in assigned_list if q.get("is_hard_filter") or q.get("question_type") == "hard_filter"}
-                        
-                        if hard_filter_question_ids:
-                            # Check if any of these specific questions failed
-                            relevant_qas = [qa for qa in qa_list if qa.get("question_id") in hard_filter_question_ids]
-                            if any(qa.get("pass_fail") == "FAIL" for qa in relevant_qas):
-                                hard_filter = "FAILED"
-                            elif any(qa.get("pass_fail") == "PASS" for qa in relevant_qas):
-                                hard_filter = "PASSED"
-
-                    total_score = interview_block.get("total_score") or data_wrapper.get("total_score")
-                    cand_score = interview_block.get("candidate_score") or data_wrapper.get("candidate_score")
-
-                    now_iso = datetime.now(timezone.utc).isoformat()
-
-                    candidate_blob: Dict[str, Any] = {
-                        "engage_status": status_value,
-                        "engage_updated_at": now_iso,
-                        "engage_interview_id": str(interview_id),
-                        "engage_last_response": detail_payload,
-                    }
-                    if overall_score is not None:
-                        candidate_blob["engage_score"] = overall_score
-                    if total_score is not None:
-                        candidate_blob["engage_total_score"] = total_score
-                    if cand_score is not None:
-                        candidate_blob["engage_candidate_score"] = cand_score
-                    if hard_filter:
-                        candidate_blob["engage_hard_filter_status"] = hard_filter
-                    if completed_at:
-                        candidate_blob["engage_completed_at"] = completed_at
-
-
-                    candidate_rows_updated = 0
-                    if candidate_id:
-                        if job_id:
-                            cur.execute(
-                                """
-                                UPDATE sourced_candidates
-                                SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb,
-                                    updated_at = CURRENT_TIMESTAMP
-                                WHERE candidate_id = %s
-                                  AND (jobdiva_id = %s OR jobdiva_id = %s)
-                                """,
-                                (json.dumps(candidate_blob), candidate_id, job_id, job_id),
-                            )
-                            candidate_rows_updated = cur.rowcount or 0
-
-                        # Fallback when job_id does not map directly to sourced_candidates.jobdiva_id.
-                        if candidate_rows_updated == 0:
-                            cur.execute(
-                                """
-                                UPDATE sourced_candidates
-                                SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb,
-                                    updated_at = CURRENT_TIMESTAMP
-                                WHERE candidate_id = %s
-                                """,
-                                (json.dumps(candidate_blob), candidate_id),
-                            )
-                            candidate_rows_updated = cur.rowcount or 0
-
-                    conn.commit()
-
-                    # ── Fire Candidate Passed notification (non-blocking) ────────────
-                    if status_value.lower() in ENGAGE_PASSED_STATUSES and overall_score is not None:
-                        asyncio.create_task(
-                            _check_and_fire_candidate_passed_notification(
-                                interview_id=interview_id,
-                                detail_payload=detail_payload,
-                                job_id=job_id,
-                                candidate_id=candidate_id,
-                            )
-                        )
-
-                    results.append({
-                        "interview_id": interview_id,
-                        "success": True,
-                        "status": status_value,
-                        "overall_score": overall_score,
-                        "completed_at": completed_at,
-                        "candidate_id": candidate_id or None,
-                        "candidate_rows_updated": candidate_rows_updated,
-                        "detail": detail_payload,
-                    })
-                except Exception as item_err:
-                    conn.rollback()
-                    logger.warning(
-                        f"⚠️ interview detail sync failed for {interview_id}: {item_err}",
-                        exc_info=True,
-                    )
-                    results.append({
-                        "interview_id": interview_id,
-                        "success": False,
-                        "error": str(item_err),
-                    })
-    finally:
-        cur.close()
-        conn.close()
-
-    return {
-        "success": True,
-        "count": len(results),
-        "results": results,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -1065,13 +856,42 @@ async def _check_and_fire_candidate_passed_notification(
         meets_criteria = False
 
         # If we have the new fields, use them directly
+        # Scores are normalized to 100-point scale — threshold is >70
         if hf_status is not None and cand_score is not None:
-            meets_criteria = str(hf_status).lower() == "passed" and float(cand_score) > 7
+            score = cand_score
+            engage_passes = str(hf_status).lower() == "passed" and float(cand_score) > 70
+
+            # Also check resume match score from DB (must be >70%)
+            resume_match_score = 0.0
+            try:
+                conn_r = _get_db_connection()
+                cur_r = conn_r.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cur_r.execute("""
+                    SELECT data FROM sourced_candidates
+                    WHERE candidate_id = %s AND (jobdiva_id = %s OR jobdiva_id = %s)
+                    LIMIT 1
+                """, (candidate_id, job_id, job_id))
+                row_r = cur_r.fetchone()
+                cur_r.close()
+                conn_r.close()
+                if row_r:
+                    blob = row_r.get("data") or {}
+                    if isinstance(blob, str):
+                        import json as _json
+                        blob = _json.loads(blob)
+                    resume_match_score = float(blob.get("match_score") or blob.get("resume_match_score") or 0)
+            except Exception as _re:
+                logger.warning(f"⚠️ Could not fetch resume match score for {candidate_id}: {_re}")
+
+            meets_criteria = engage_passes and resume_match_score > 70
             if not meets_criteria:
-                logger.info(f"⏭️ Candidate {candidate_id} did not meet pass criteria (HF: {hf_status}, Score: {cand_score}).")
+                logger.info(
+                    f"⏭️ Candidate {candidate_id} did not meet pass criteria "
+                    f"(HF: {hf_status}, Engage: {cand_score}/100, Resume Match: {resume_match_score}/100)."
+                )
                 return
         else:
-            # 2. Legacy Score check (fallback)
+            # Legacy Score check (fallback) — PASS_SCORE_THRESHOLD is already 70
             score = interview_block.get("overall_score")
             if score is None or float(score) <= PASS_SCORE_THRESHOLD:
                 return
@@ -1134,6 +954,7 @@ async def _check_and_fire_candidate_passed_notification(
             SELECT title, city, state, pay_rate, recruiter_emails, jobdiva_id
             FROM monitored_jobs
             WHERE job_id = %s OR jobdiva_id = %s
+            ORDER BY (job_id ~ '^[0-9]+$') DESC, created_at DESC
             LIMIT 1
         """, (job_id, job_id))
         job_row = cur.fetchone()
@@ -1204,8 +1025,10 @@ async def _check_and_fire_candidate_passed_notification(
 
         # Create JobDiva Note: PAIR Pass Candidate Report
         # Note: We use the job title from job_row for the message
+        from core.email import APP_BASE_URL
         pair_job_title = job_row.get("title") or "the"
-        note_text = f"Candidate completed Phone Screen for {pair_job_title} position. Click Here to view the report."
+        report_link = f"{APP_BASE_URL}/jobs/{job_id}/report?candidateId={candidate_id}"
+        note_text = f"Candidate completed Phone Screen for {pair_job_title} position. <a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report."
         
         async def create_and_pin_note():
             note_res = await jobdiva_service.create_candidate_note(

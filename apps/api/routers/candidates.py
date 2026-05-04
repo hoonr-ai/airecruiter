@@ -765,7 +765,7 @@ async def get_job_candidates(job_id_or_ref: str):
                             interview_id,
                             created_at
                         FROM engage_interview_audit
-                        WHERE (job_id = %s OR job_id = %s)
+                        WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                         ORDER BY candidate_id, id DESC
                     )
                     SELECT
@@ -839,6 +839,45 @@ async def get_job_candidates(job_id_or_ref: str):
 
             if not cand.get("engage_created_at") and cand.get("audit_created_at"):
                 cand["engage_created_at"] = cand.get("audit_created_at")
+
+            # read-side normalization for consistency across views
+            norm_engage_score = None
+            raw_score = cand.get("engage_score") or cand.get("engage_candidate_score")
+            raw_total = cand.get("engage_total_score")
+            
+            if raw_score is not None and raw_total and raw_total > 0:
+                norm_engage_score = round((float(raw_score) / float(raw_total)) * 100, 1)
+                cand["engage_score"] = norm_engage_score
+                cand["engage_total_score"] = 100
+            elif raw_score is not None:
+                cand["engage_score"] = raw_score
+
+            # Format engage_status
+            cur_status = cand.get("engage_status") or "pending"
+            status_display = "Pending"
+            s = cur_status.lower()
+            if s in ["passed", "completed", "hired", "pass"]:
+                status_display = "Pass"
+            elif s in ["failed", "rejected", "fail"]:
+                status_display = "Fail"
+            elif s in ["in_progress", "in progress"]:
+                status_display = "In Progress"
+            
+            cand["engage_status"] = status_display
+
+            # Calculate total_fit_score — average only completed stages (matches Report page logic)
+            r_score = cand.get("match_score") or 0
+            is_engage_done = s in ["passed", "completed", "hired", "pass", "failed", "rejected", "fail"]
+
+            scores_to_avg = [float(r_score)]
+            if is_engage_done and cand.get("engage_score") is not None:
+                scores_to_avg.append(float(cand["engage_score"]))
+
+            cand["total_fit_score"] = round(sum(scores_to_avg) / len(scores_to_avg), 1)
+
+            # Suppress hard filter for in progress
+            if status_display == "In Progress":
+                cand["engage_hard_filter_status"] = None
 
             if isinstance(data_blob, dict):
                 cand["data"] = data_blob
@@ -1272,6 +1311,7 @@ async def save_candidates(request: CandidatesSaveRequest):
 class UpdateCandidatePhoneRequest(BaseModel):
     phone: str
     jobdiva_id: Optional[str] = None
+    candidate_id: Optional[str] = None
 
 
 class EnrichCandidateContactRequest(BaseModel):
@@ -2182,12 +2222,18 @@ async def enrich_candidate_contact(candidate_id: str, request: EnrichCandidateCo
 
 @router.patch("/candidates/{candidate_id:path}/phone")
 async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhoneRequest):
+    actual_candidate_id = request.candidate_id or candidate_id
+    
+    import urllib.parse
+    actual_candidate_id = urllib.parse.unquote(actual_candidate_id)
+    
     normalised = _normalise_phone(request.phone)
     digit_count = sum(1 for ch in normalised if ch.isdigit())
     if digit_count < 7:
         raise HTTPException(status_code=400, detail="Phone number must contain at least 7 digits")
 
     try:
+        logger.info(f"update_candidate_phone called with candidate_id='{actual_candidate_id}', request.jobdiva_id='{request.jobdiva_id}', phone='{normalised}'")
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
@@ -2198,7 +2244,7 @@ async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhon
                         SET phone = %s, updated_at = CURRENT_TIMESTAMP
                         WHERE candidate_id = %s AND jobdiva_id = %s
                         """,
-                        (normalised, candidate_id, request.jobdiva_id),
+                        (normalised, actual_candidate_id, request.jobdiva_id),
                     )
                 else:
                     cur.execute(
@@ -2207,7 +2253,7 @@ async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhon
                         SET phone = %s, updated_at = CURRENT_TIMESTAMP
                         WHERE candidate_id = %s
                         """,
-                        (normalised, candidate_id),
+                        (normalised, actual_candidate_id),
                     )
                 updated = cur.rowcount
             conn.commit()
@@ -2439,11 +2485,21 @@ async def analyze_candidates(request: CandidateAnalysisRequest):
 # ---------------------------------------------------------------------------
 # Candidate Evaluation Report
 # ---------------------------------------------------------------------------
+@router.get("/candidates/evaluation-report")
 @router.get("/candidates/{candidate_id:path}/evaluation-report")
 async def get_candidate_evaluation_report(
-    candidate_id: str,
+    candidate_id: Optional[str] = None,
     job_id: Optional[str] = Query(None, description="Job ID or JobDiva ID"),
+    # Allow candidate_id to be passed as a query param to bypass URL encoding issues on QA/Prod
+    q_candidate_id: Optional[str] = Query(None, alias="candidate_id"),
 ):
+    """
+    Aggregate a full Candidate Evaluation Report from multiple data sources.
+    Supports candidate_id in the path OR as a query parameter for Exa IDs.
+    """
+    candidate_id = q_candidate_id or candidate_id
+    if not candidate_id:
+        raise HTTPException(status_code=400, detail="candidate_id is required")
     """
     Aggregate a full Candidate Evaluation Report from multiple data sources:
       - sourced_candidates      : basic profile, resume, match scores
@@ -2538,7 +2594,7 @@ async def get_candidate_evaluation_report(
                 audit_where = ["candidate_id = %s"]
                 audit_params: list = [candidate_id]
                 if effective_jobdiva_id:
-                    audit_where.append("(job_id = %s OR job_id = %s)")
+                    audit_where.append("(jobdiva_id = %s OR jobdiva_id = %s)")
                     audit_params += [effective_jobdiva_id, job_id or effective_jobdiva_id]
                 cur.execute(
                     f"""
@@ -2586,10 +2642,48 @@ async def get_candidate_evaluation_report(
             return default
 
         resume_match_score = float(cand_row.get("resume_match_percentage") or 0)
-        engage_score       = float(data_blob.get("engage_score") or 0)
-        engage_total_score = float(data_blob.get("engage_total_score") or 0)
+        
+        # Prioritize candidate_score from audit_row response (webhook source)
+        engage_score = data_blob.get("engage_score")
+        if engage_score is not None:
+            engage_score = float(engage_score)
+        
+        engage_total_score = 0
+            
+        if audit_row and audit_row.get("response"):
+            resp = audit_row["response"]
+            if isinstance(resp, str):
+                try: resp = json.loads(resp)
+                except: resp = {}
+            if isinstance(resp, dict):
+                # Try candidate_score first, then overall_score (legacy)
+                aud_score = resp.get("candidate_score") or resp.get("overall_score")
+                if aud_score is not None:
+                    engage_score = float(aud_score)
+                
+                # Extract total_score for normalization
+                aud_total = resp.get("total_score")
+                if aud_total is not None:
+                    engage_total_score = float(aud_total)
+
+        # Fallback to data_blob for engage_total_score if not found in audit_row
+        if engage_total_score == 0:
+            engage_total_score = float(data_blob.get("engage_total_score") or 0)
         engage_status      = str(data_blob.get("engage_status") or "")
+        if audit_row and audit_row.get("status"):
+            engage_status = str(audit_row["status"])
+            
         hard_filter_status = str(data_blob.get("engage_hard_filter_status") or "")
+        if audit_row and audit_row.get("response"):
+            resp = audit_row["response"]
+            if isinstance(resp, str):
+                try: resp = json.loads(resp)
+                except: resp = {}
+            if isinstance(resp, dict):
+                # Check for hard filter status in the webhook response
+                aud_hf = resp.get("hard_filter_status")
+                if aud_hf:
+                    hard_filter_status = str(aud_hf)
         engage_interview_id = str(data_blob.get("engage_interview_id") or (audit_row or {}).get("interview_id") or "")
         engage_completed_at = data_blob.get("engage_completed_at") or (audit_row or {}).get("updated_at") or None
         engage_created_at   = (audit_row or {}).get("created_at") or None
@@ -2706,19 +2800,26 @@ async def get_candidate_evaluation_report(
                 else:
                     pair_data["evaluation"] = eval_map
 
-                # Refresh scores from live PAIR data
-                if isinstance(interview_data, dict):
-                    iv = interview_data.get("interview") or interview_data
-                    if iv.get("overall_score") is not None:
-                        engage_score = float(iv["overall_score"])
-                    if iv.get("hard_filter_overall") or iv.get("hard_filter_status"):
-                        hard_filter_status = str(iv.get("hard_filter_overall") or iv.get("hard_filter_status") or hard_filter_status)
-                    if iv.get("status"):
-                        engage_status = str(iv["status"])
-                    if iv.get("completed_at"):
-                        engage_completed_at = iv["completed_at"]
+                # Live data fetch is for transcriptions/evaluation details mainly
+                # Scores should be picked from data_blob/audit_row for consistency with rankings
             except Exception as pair_err:
                 logger.warning(f"PAIR data fetch failed for interview {engage_interview_id}: {pair_err}")
+
+        # Inject audit data if available
+        if audit_row:
+            if not pair_data: pair_data = {}
+            if audit_row.get("payload"):
+                try:
+                    pld = audit_row["payload"]
+                    if isinstance(pld, str): pld = json.loads(pld)
+                    pair_data["audit_payload"] = pld
+                except: pass
+            if audit_row.get("response"):
+                try:
+                    resp = audit_row["response"]
+                    if isinstance(resp, str): resp = json.loads(resp)
+                    pair_data["audit_response"] = resp
+                except: pass
 
         # ----------------------------------------------------------------
         # Compose final report
@@ -2740,15 +2841,52 @@ async def get_candidate_evaluation_report(
             "company_experience": _jl(data_blob.get("company_experience"), []),
             "education":       _jl(data_blob.get("education"), []),
             "certifications":  _jl(data_blob.get("certifications"), []),
+            "feedback_type":   data_blob.get("feedback_type"),
+            "feedback_reason": data_blob.get("feedback_reason"),
+            "feedback_at":     data_blob.get("feedback_at"),
         }
+
+        # Normalize engage_score to a 100-point scale if total_score is available
+        display_engage_score = None
+        if engage_score is not None and engage_total_score and engage_total_score > 0:
+            # Calculate percentage: (score / total) * 100
+            display_engage_score = round((float(engage_score) / float(engage_total_score)) * 100, 1)
+
+        # Calculate Total Fit Score: Average of only COMPLETED stages
+        # Exclude Engage score if it's still in progress or initiated
+        is_engage_done = (engage_status or "").lower() in ["completed", "failed", "passed", "rejected", "pass", "fail"]
+        
+        scores_to_average = []
+        if resume_match_score is not None:
+            scores_to_average.append(resume_match_score)
+            
+        if is_engage_done and display_engage_score is not None:
+            scores_to_average.append(display_engage_score)
+            
+        if scores_to_average:
+            total_fit_score = sum(scores_to_average) / len(scores_to_average)
+        else:
+            total_fit_score = 0
+
+        # Status label formatting
+        status_display = "Pending"
+        if engage_status:
+            s = engage_status.lower()
+            if s in ["passed", "completed", "hired", "pass"]:
+                status_display = "Pass"
+            elif s in ["failed", "rejected", "fail"]:
+                status_display = "Fail"
+            elif s in ["in_progress", "in progress"]:
+                status_display = "In Progress"
 
         scores = {
             "resume_match_score":    resume_match_score,
             "resume_match_status":   str(data_blob.get("resume_matching_status") or ("done" if resume_match_score > 0 else "pending")),
-            "engage_score":          engage_score,
-            "engage_total_score":    engage_total_score,
-            "engage_status":         engage_status,
-            "hard_filter_status":    hard_filter_status,
+            "engage_score":          display_engage_score,
+            "engage_total_score":    100 if engage_total_score else None,
+            "engage_status":         status_display,
+            "hard_filter_status":    None if status_display == "In Progress" else hard_filter_status,
+            "total_fit_score":       round(total_fit_score, 1),
             "engage_interview_id":   engage_interview_id,
             "engage_completed_at":   str(engage_completed_at) if engage_completed_at else None,
             "engage_created_at":     str(engage_created_at) if engage_created_at else None,
@@ -2870,12 +3008,15 @@ async def save_candidate_feedback(
     # 3. Push to JobDiva — POST /apiv2/jobdiva/createCandidateNote
     #    Recruiter = PAIR (configured via JOBDIVA_PAIR_RECRUITER_ID env var)
     from core import JOBDIVA_PAIR_RECRUITER_ID
+    from core.email import APP_BASE_URL
+    
+    report_link = f"{APP_BASE_URL}/jobs/{jd_job_ref}/report?candidateId={jd_candidate_id}"
 
     jobdiva_result = await jobdiva_service.create_candidate_note(
         candidate_id=jd_candidate_id,
         job_id=jd_job_ref,
         action=action_string,
-        note_text="Click Here to view the report.",
+        note_text=f"<a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report.",
         recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
     )
 
