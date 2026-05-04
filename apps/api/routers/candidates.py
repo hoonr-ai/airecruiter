@@ -3008,12 +3008,15 @@ async def save_candidate_feedback(
     # 3. Push to JobDiva — POST /apiv2/jobdiva/createCandidateNote
     #    Recruiter = PAIR (configured via JOBDIVA_PAIR_RECRUITER_ID env var)
     from core import JOBDIVA_PAIR_RECRUITER_ID
+    from core.email import APP_BASE_URL
+    
+    report_link = f"{APP_BASE_URL}/jobs/{jd_job_ref}/report?candidateId={jd_candidate_id}"
 
     jobdiva_result = await jobdiva_service.create_candidate_note(
         candidate_id=jd_candidate_id,
         job_id=jd_job_ref,
         action=action_string,
-        note_text="Click Here to view the report.",
+        note_text=f"<a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report.",
         recruiter_id=JOBDIVA_PAIR_RECRUITER_ID,
     )
 
