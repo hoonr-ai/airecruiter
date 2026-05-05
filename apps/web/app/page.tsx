@@ -57,26 +57,26 @@ export default function DashboardPage() {
   // (the latest attempt timed out or errored). The list still renders so
   // the user never sees a blank dashboard during a backend slow spike.
   const [isStale, setIsStale] = useState(false);
-  
+
   // Archive dialog state
   const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
   const [jobToArchive, setJobToArchive] = useState<Job | null>(null);
   const [isArchiving, setIsArchiving] = useState(false);
   const [archiveReason, setArchiveReason] = useState("");
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
-  
+
   // Unarchive dialog state
   const [unarchiveDialogOpen, setUnarchiveDialogOpen] = useState(false);
   const [jobToUnarchive, setJobToUnarchive] = useState<Job | null>(null);
   const [isUnarchiving, setIsUnarchiving] = useState(false);
-  
+
   // Tab state
   const [activeTab, setActiveTab] = useState<"active" | "archived">("active");
 
   useEffect(() => {
     fetchJobs();
   }, [activeTab]);
-  
+
   useEffect(() => {
     if (toast) {
       const timer = setTimeout(() => setToast(null), 3000);
@@ -99,7 +99,7 @@ export default function DashboardPage() {
       );
       const data = await response.json();
 
-      const jobs: Job[] = Object.entries(data.jobs).map(([id, details]: [string, any]) => {
+      const jobs: Job[] = Object.entries(data.jobs || {}).map(([id, details]: [string, any]) => {
         const status = details.status || "Open";
         const procStatus = details.processing_status || "pending";
 
@@ -132,7 +132,7 @@ export default function DashboardPage() {
           ].filter(Boolean).join(" ") || "—",
           priority: (!details.priority || details.priority === "[null]") ? "—" : details.priority,
           programDuration: (!details.program_duration && !details.duration) || details.program_duration === "[null]" || details.duration === "[null]"
-            ? "—" 
+            ? "—"
             : details.program_duration || details.duration,
           maxAllowedSubmittals: (!details.max_allowed_submittals || details.max_allowed_submittals === "[null]" || Number.isNaN(Number.parseInt(details.max_allowed_submittals, 10)))
             ? "—"
@@ -281,26 +281,24 @@ export default function DashboardPage() {
       {/* Page Header */}
       <div className="flex items-center justify-between mt-2">
         <h1 className="text-[28px] font-bold text-slate-900 tracking-tight">Jobs Portfolio</h1>
-        
+
         {/* Tabs */}
         <div className="flex bg-slate-100 p-1 rounded-lg">
           <button
             onClick={() => setActiveTab("active")}
-            className={`px-4 py-2 rounded-md text-[13px] font-medium transition-all ${
-              activeTab === "active"
+            className={`px-4 py-2 rounded-md text-[13px] font-medium transition-all ${activeTab === "active"
                 ? "bg-white text-slate-900 shadow-sm"
                 : "text-slate-500 hover:text-slate-700"
-            }`}
+              }`}
           >
             Active Jobs
           </button>
           <button
             onClick={() => setActiveTab("archived")}
-            className={`px-4 py-2 rounded-md text-[13px] font-medium transition-all ${
-              activeTab === "archived"
+            className={`px-4 py-2 rounded-md text-[13px] font-medium transition-all ${activeTab === "archived"
                 ? "bg-white text-slate-900 shadow-sm"
                 : "text-slate-500 hover:text-slate-700"
-            }`}
+              }`}
           >
             Archived Jobs
           </button>
@@ -389,7 +387,7 @@ export default function DashboardPage() {
               {filteredJobs.length > 0 ? filteredJobs.map((job) => (
                 <tr key={job.id} className="hover:bg-slate-50/70 transition-colors group">
                   <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-[#4f46e5]">
-                    <Link 
+                    <Link
                       prefetch={false}
                       href={`/jobs/${job.jobdiva_id || job.id}/rankings`}
                       className="flex items-center gap-1.5 hover:underline decoration-[#4f46e5]/40 underline-offset-4"
@@ -481,7 +479,7 @@ export default function DashboardPage() {
                           </DropdownMenuItem>
                         )}
                         {activeTab === "archived" ? (
-                          <DropdownMenuItem 
+                          <DropdownMenuItem
                             className="text-green-600 focus:text-green-700 cursor-pointer"
                             onClick={() => {
                               setJobToUnarchive(job);
@@ -491,7 +489,7 @@ export default function DashboardPage() {
                             Unarchive Job
                           </DropdownMenuItem>
                         ) : (
-                          <DropdownMenuItem 
+                          <DropdownMenuItem
                             className="text-red-600 focus:text-red-700 cursor-pointer"
                             onClick={() => {
                               setJobToArchive(job);
@@ -550,7 +548,7 @@ export default function DashboardPage() {
           </table>
         </div>
       </div>
-      
+
       {/* Archive Confirmation Dialog */}
       <Dialog open={archiveDialogOpen} onOpenChange={setArchiveDialogOpen}>
         <DialogContent className="sm:max-w-[425px]">
@@ -639,7 +637,7 @@ export default function DashboardPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      
+
       {/* Unarchive Confirmation Dialog */}
       <Dialog open={unarchiveDialogOpen} onOpenChange={setUnarchiveDialogOpen}>
         <DialogContent className="sm:max-w-[425px]">
@@ -709,12 +707,11 @@ export default function DashboardPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-      
+
       {/* Toast Notification */}
       {toast && (
-        <div className={`fixed top-4 right-4 z-50 rounded-lg p-4 text-white ${
-          toast.type === 'success' ? 'bg-green-500' : 'bg-red-500'
-        }`}>
+        <div className={`fixed top-4 right-4 z-50 rounded-lg p-4 text-white ${toast.type === 'success' ? 'bg-green-500' : 'bg-red-500'
+          }`}>
           {toast.message}
         </div>
       )}

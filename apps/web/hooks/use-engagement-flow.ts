@@ -75,12 +75,20 @@ export function useEngagementFlow() {
         dry_run: input.dryRun ?? false
       }),
     });
-    const data = (await res.json()) as any;
+    let data: any = null;
+    try {
+      data = await res.json();
+    } catch {
+      data = { success: false, message: "Invalid JSON response from server" };
+    }
+    
     if (!res.ok) {
       const errorMsg = data?.message || (typeof data?.detail === 'string' ? data.detail : "API request failed");
       logger.error("engagement.send_bulk.failed", { status: res.status, message: errorMsg });
+      // Ensure we return an object even on error
+      return (data || { success: false, message: errorMsg }) as SendBulkInterviewResult;
     }
-    return data as SendBulkInterviewResult;
+    return (data || { success: true, message: "Success" }) as SendBulkInterviewResult;
   }
 
   async function latestInterviewById(candidateId: string): Promise<LatestInterviewResult> {

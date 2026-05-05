@@ -2971,18 +2971,26 @@ async def save_candidate_feedback(
                 try:
                     pk_int = int(candidate_id)
                     _cur.execute(
-                        "SELECT id, candidate_id, jobdiva_id FROM sourced_candidates WHERE id = %s LIMIT 1",
+                        "SELECT id, candidate_id, jobdiva_id, data FROM sourced_candidates WHERE id = %s LIMIT 1",
                         (pk_int,)
                     )
                     row = _cur.fetchone()
                     if row:
                         sc_row_id      = row[0]
-                        jd_candidate_id = str(row[1])   # real JobDiva numeric candidate ID
+                        sc_candidate_id = str(row[1])   # real candidate ID string (JobDiva ID or LinkedIn ID)
                         jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
+                        
+                        # Use JobDiva candidate ID if available in data blob (for auto-provisioned candidates)
+                        data_blob = row[3] if isinstance(row[3], dict) else _json_load_safe(row[3], {})
+                        if data_blob.get("jobdiva_candidate_id"):
+                            jd_candidate_id = str(data_blob.get("jobdiva_candidate_id"))
+                        else:
+                            jd_candidate_id = sc_candidate_id
+                            
                 except (ValueError, TypeError):
                     # candidate_id is not an integer PK – try matching as a candidate_id string
                     _cur.execute(
-                        """SELECT id, candidate_id, jobdiva_id
+                        """SELECT id, candidate_id, jobdiva_id, data
                              FROM sourced_candidates
                             WHERE candidate_id = %s
                               AND (jobdiva_id = %s
@@ -2995,8 +3003,15 @@ async def save_candidate_feedback(
                     row = _cur.fetchone()
                     if row:
                         sc_row_id      = row[0]
-                        jd_candidate_id = str(row[1])
+                        sc_candidate_id = str(row[1])
                         jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
+                        
+                        # Use JobDiva candidate ID if available in data blob
+                        data_blob = row[3] if isinstance(row[3], dict) else _json_load_safe(row[3], {})
+                        if data_blob.get("jobdiva_candidate_id"):
+                            jd_candidate_id = str(data_blob.get("jobdiva_candidate_id"))
+                        else:
+                            jd_candidate_id = sc_candidate_id
         finally:
             _conn.close()
     except Exception as e:
