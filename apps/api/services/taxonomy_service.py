@@ -50,6 +50,26 @@ _ROLES_CACHE: Optional[List[str]] = None
 _SKILLS_LOOKUP_UPPER: Optional[Dict[str, str]] = None
 _ROLES_LOOKUP_UPPER: Optional[Dict[str, str]] = None
 
+# Hierarchy caches: row-by-norm gives "term -> {level: cluster_value}".
+# Reverse "by-cluster" gives "level -> cluster_value -> [terms in cluster]".
+# Used by find_similar_* and shared_cluster_level for sibling lookups.
+_ROLE_ROW_BY_NORM: Optional[Dict[str, Dict[str, str]]] = None
+_SKILL_ROW_BY_NORM: Optional[Dict[str, Dict[str, str]]] = None
+_ROLE_BY_CLUSTER: Optional[Dict[str, Dict[str, List[str]]]] = None
+_SKILL_BY_CLUSTER: Optional[Dict[str, Dict[str, List[str]]]] = None
+
+# Hierarchy levels ordered FINEST → COARSEST.
+# Index 0 is the leaf (the term itself); subsequent entries are progressively
+# more generic clusters (smaller cluster count = coarser).
+ROLE_LEVELS: List[str] = [
+    "role_k17000", "role_k10000", "role_k5000", "role_k1500",
+    "role_k1000", "role_k500", "role_k150", "role_k50", "role_k10",
+]
+SKILL_LEVELS: List[str] = [
+    "skill_mapped", "skill_k15000", "skill_k5000", "skill_k1500",
+    "skill_k500", "skill_k150", "skill_k50", "skill_k15",
+]
+
 def _get_conn():
     if not DATABASE_URL:
         logger.error("❌ DATABASE_URL not set in environment.")
@@ -61,6 +81,7 @@ def _get_conn():
 def _load_master_caches():
     """Initializes in-memory master taxonomies."""
     global _SKILLS_CACHE, _ROLES_CACHE, _SKILLS_LOOKUP_UPPER, _ROLES_LOOKUP_UPPER
+    global _ROLE_ROW_BY_NORM, _SKILL_ROW_BY_NORM, _ROLE_BY_CLUSTER, _SKILL_BY_CLUSTER
     if _SKILLS_CACHE is not None and _ROLES_CACHE is not None:
         return
 
@@ -68,25 +89,149 @@ def _load_master_caches():
     try:
         cur = conn.cursor()
         if _SKILLS_CACHE is None:
-            logger.info("🧠 Loading 33k master skills into memory...")
-            cur.execute("SELECT skill_mapped FROM public.skills_master")
-            _SKILLS_CACHE = [r[0] for r in cur.fetchall() if r[0]]
+            logger.info("🧠 Loading 33k master skills with hierarchy into memory...")
+            cur.execute(f"SELECT {', '.join(SKILL_LEVELS)} FROM public.skills_master")
+            rows = cur.fetchall()
+            _SKILLS_CACHE = []
+            _SKILL_ROW_BY_NORM = {}
+            _SKILL_BY_CLUSTER = {lvl: {} for lvl in SKILL_LEVELS}
+            for row in rows:
+                leaf = row[0]
+                if not leaf:
+                    continue
+                _SKILLS_CACHE.append(leaf)
+                hier = {SKILL_LEVELS[i]: row[i] for i in range(len(SKILL_LEVELS)) if row[i]}
+                _SKILL_ROW_BY_NORM[leaf.upper()] = hier
+                for lvl, val in hier.items():
+                    _SKILL_BY_CLUSTER[lvl].setdefault(val, []).append(leaf)
             _SKILLS_LOOKUP_UPPER = {s.upper(): s for s in _SKILLS_CACHE}
-            logger.info(f"✅ Cached {len(_SKILLS_CACHE):,} master skills.")
+            logger.info(f"✅ Cached {len(_SKILLS_CACHE):,} master skills with full hierarchy.")
 
         if _ROLES_CACHE is None:
-            logger.info("🧠 Loading 17k master roles into memory...")
-            cur.execute("SELECT role_k17000 FROM public.roles_master")
-            _ROLES_CACHE = [r[0] for r in cur.fetchall() if r[0]]
+            logger.info("🧠 Loading 17k master roles with hierarchy into memory...")
+            cur.execute(f"SELECT {', '.join(ROLE_LEVELS)} FROM public.roles_master")
+            rows = cur.fetchall()
+            _ROLES_CACHE = []
+            _ROLE_ROW_BY_NORM = {}
+            _ROLE_BY_CLUSTER = {lvl: {} for lvl in ROLE_LEVELS}
+            for row in rows:
+                leaf = row[0]
+                if not leaf:
+                    continue
+                _ROLES_CACHE.append(leaf)
+                hier = {ROLE_LEVELS[i]: row[i] for i in range(len(ROLE_LEVELS)) if row[i]}
+                _ROLE_ROW_BY_NORM[leaf.upper()] = hier
+                for lvl, val in hier.items():
+                    _ROLE_BY_CLUSTER[lvl].setdefault(val, []).append(leaf)
             _ROLES_LOOKUP_UPPER = {r.upper(): r for r in _ROLES_CACHE}
-            logger.info(f"✅ Cached {len(_ROLES_CACHE):,} master roles.")
+            logger.info(f"✅ Cached {len(_ROLES_CACHE):,} master roles with full hierarchy.")
         cur.close()
     except Exception as e:
         logger.error(f"❌ Failed to cache master taxonomies: {e}")
         _SKILLS_CACHE, _ROLES_CACHE = [], []
         _SKILLS_LOOKUP_UPPER, _ROLES_LOOKUP_UPPER = {}, {}
+        _ROLE_ROW_BY_NORM, _SKILL_ROW_BY_NORM = {}, {}
+        _ROLE_BY_CLUSTER, _SKILL_BY_CLUSTER = (
+            {lvl: {} for lvl in ROLE_LEVELS},
+            {lvl: {} for lvl in SKILL_LEVELS},
+        )
     finally:
         conn.close()
+
+
+def _resolve_term(phrase: str, kind: str) -> Optional[str]:
+    """Anchor `phrase` against the master cache. Returns the canonical
+    leaf term (case-preserved from master) or None. Exact upper-match,
+    then fuzzy via token_set_ratio ≥ 85."""
+    if not phrase or len(phrase) < 2:
+        return None
+    _load_master_caches()
+    up = phrase.upper().strip()
+    if kind == "role":
+        lookup = _ROLES_LOOKUP_UPPER or {}
+        choices = _ROLES_CACHE or []
+    else:
+        lookup = _SKILLS_LOOKUP_UPPER or {}
+        choices = _SKILLS_CACHE or []
+    if up in lookup:
+        return lookup[up]
+    if not choices:
+        return None
+    res = rfprocess.extractOne(phrase, choices, scorer=fuzz.token_set_ratio, score_cutoff=85)
+    return res[0] if res else None
+
+
+def find_similar_titles(term: str, level: str = "role_k1500", limit: int = 8) -> List[str]:
+    """Return up to `limit` sibling roles in the same `level` cluster as
+    `term`. Empty list when `term` doesn't anchor or has no siblings."""
+    canonical = _resolve_term(term, "role")
+    if not canonical or _ROLE_ROW_BY_NORM is None or _ROLE_BY_CLUSTER is None:
+        return []
+    hier = _ROLE_ROW_BY_NORM.get(canonical.upper(), {})
+    cluster_val = hier.get(level)
+    if not cluster_val:
+        return []
+    siblings = _ROLE_BY_CLUSTER.get(level, {}).get(cluster_val, [])
+    out: List[str] = []
+    seen = {canonical.upper()}
+    for s in siblings:
+        if s.upper() in seen:
+            continue
+        seen.add(s.upper())
+        out.append(s)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def find_similar_skills(term: str, level: str = "skill_k1500", limit: int = 8) -> List[str]:
+    """Return up to `limit` sibling skills in the same `level` cluster.
+    Empty list when `term` doesn't anchor or has no siblings."""
+    canonical = _resolve_term(term, "skill")
+    if not canonical or _SKILL_ROW_BY_NORM is None or _SKILL_BY_CLUSTER is None:
+        return []
+    hier = _SKILL_ROW_BY_NORM.get(canonical.upper(), {})
+    cluster_val = hier.get(level)
+    if not cluster_val:
+        return []
+    siblings = _SKILL_BY_CLUSTER.get(level, {}).get(cluster_val, [])
+    out: List[str] = []
+    seen = {canonical.upper()}
+    for s in siblings:
+        if s.upper() in seen:
+            continue
+        seen.add(s.upper())
+        out.append(s)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def shared_cluster_level(term_a: str, term_b: str, kind: str) -> Optional[str]:
+    """Return the FINEST shared hierarchy level between two terms (the
+    level with the smallest cluster size where their cluster values
+    coincide), or None if they don't share any cluster or either fails
+    to anchor. `kind` ∈ {'role', 'skill'}."""
+    canon_a = _resolve_term(term_a, kind)
+    canon_b = _resolve_term(term_b, kind)
+    if not canon_a or not canon_b or canon_a.upper() == canon_b.upper():
+        return None
+    if kind == "role":
+        rows = _ROLE_ROW_BY_NORM or {}
+        levels = ROLE_LEVELS
+    else:
+        rows = _SKILL_ROW_BY_NORM or {}
+        levels = SKILL_LEVELS
+    hier_a = rows.get(canon_a.upper(), {})
+    hier_b = rows.get(canon_b.upper(), {})
+    # Skip the leaf level (index 0) — equal there means same term, already
+    # short-circuited above. Walk from finest non-leaf toward coarsest.
+    for lvl in levels[1:]:
+        va = hier_a.get(lvl)
+        vb = hier_b.get(lvl)
+        if va and vb and va == vb:
+            return lvl
+    return None
 
 # ── Grounding Logic ──────────────────────────────────────────────────────────
 

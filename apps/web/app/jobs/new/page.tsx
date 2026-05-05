@@ -51,7 +51,11 @@ import {
   Mail,
   MessageSquare,
   ExternalLink,
-  Loader2
+  Loader2,
+  Briefcase,
+  Clock,
+  Phone,
+  Calendar
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -362,14 +366,56 @@ function NewJobPageContent() {
 
     // Only proceed with real resume content
     if (resumeText && resumeText.trim().length > 50) {
+      const { primary, similar } = collectResumeHighlightKeywords(candidate);
       setSelectedCandidateForResume({
         name: `${candidate.firstName} ${candidate.lastName}`,
-        resumeText: resumeText
+        resumeText: resumeText,
+        keywords: primary,
+        similarKeywords: similar,
       });
       setResumeModalOpen(true);
     } else {
       alert("This candidate's resume is not available from JobDiva. Only real resumes from JobDiva are displayed.");
     }
+  };
+
+  // Build keyword lists for the resume highlight overlay. Returns two
+  // tiers: 'primary' (yellow) for direct matches the user typed and the
+  // rubric confirmed; 'similar' (light blue) for the auto-suggested
+  // similar titles/skills the recruiter selected. Excludes any criteria
+  // flagged as 'exclude'.
+  const collectResumeHighlightKeywords = (candidate: any): { primary: string[]; similar: string[] } => {
+    const primary = new Set<string>();
+    const similar = new Set<string>();
+    const addTo = (set: Set<string>, val: unknown) => {
+      if (typeof val !== "string") return;
+      const trimmed = val.trim();
+      if (trimmed.length >= 2 && trimmed.length <= 60) set.add(trimmed);
+    };
+
+    if (Array.isArray(candidate?.matched_skills)) {
+      candidate.matched_skills.forEach((s: any) => addTo(primary, typeof s === "string" ? s : s?.name));
+    }
+    if (Array.isArray(candidate?.matched_titles)) {
+      candidate.matched_titles.forEach((s: any) => addTo(primary, typeof s === "string" ? s : s?.name));
+    }
+
+    sourceTitles.forEach((t) => {
+      if (t.matchType === "exclude") return;
+      addTo(primary, t.value);
+      (t.selectedSimilarTitles || []).forEach((s) => addTo(similar, s));
+    });
+    sourceSkills.forEach((s) => {
+      if (s.matchType === "exclude") return;
+      addTo(primary, s.value);
+      (s.selectedSimilarSkills || []).forEach((sim) => addTo(similar, sim));
+    });
+    sourceKeywords.forEach((k) => addTo(primary, k));
+
+    // If a term ended up in both buckets, primary wins.
+    primary.forEach((p) => similar.delete(p));
+
+    return { primary: Array.from(primary), similar: Array.from(similar) };
   };
   const [selectedCandidateForResume, setSelectedCandidateForResume] = useState<any>(null);
   const [resumeModalOpen, setResumeModalOpen] = useState(false);
@@ -3749,10 +3795,11 @@ function NewJobPageContent() {
   const addSourceTitle = (value: string) => {
     const cleanValue = value.trim();
     if (!cleanValue) return;
+    const rowId = Date.now();
     setSourceTitles(prev => [
       ...prev,
       {
-        id: Date.now(),
+        id: rowId,
         value: cleanValue,
         matchType: "must",
         years: 0,
@@ -3770,15 +3817,32 @@ function NewJobPageContent() {
       step: 5,
       value: truncateForTelemetry(cleanValue),
     });
+    // Fire taxonomy lookup so the new row's "similar titles" checklist
+    // auto-populates (same UX as rubric-grounded rows). Best-effort —
+    // empty result or network error leaves the row's similarTitles
+    // empty, which the existing UI handles gracefully.
+    void fetch(`${API_BASE}/api/v1/taxonomy/similar-titles?term=${encodeURIComponent(cleanValue)}&limit=8`)
+      .then(r => (r.ok ? r.json() : null))
+      .then((data: { similar?: string[] } | null) => {
+        const siblings = Array.isArray(data?.similar) ? data!.similar : [];
+        if (siblings.length === 0) return;
+        setSourceTitles(prev => prev.map(t =>
+          t.id === rowId
+            ? { ...t, similarTitles: siblings, similarCount: `0/${siblings.length} similar` }
+            : t
+        ));
+      })
+      .catch(() => { /* swallow — UI stays usable */ });
   };
 
   const addSourceSkill = (value: string) => {
     const cleanValue = value.trim();
     if (!cleanValue) return;
+    const rowId = Date.now();
     setSourceSkills(prev => [
       ...prev,
       {
-        id: Date.now(),
+        id: rowId,
         value: cleanValue,
         matchType: "can",
         years: 0,
@@ -3796,6 +3860,18 @@ function NewJobPageContent() {
       step: 5,
       value: truncateForTelemetry(cleanValue),
     });
+    void fetch(`${API_BASE}/api/v1/taxonomy/similar-skills?term=${encodeURIComponent(cleanValue)}&limit=8`)
+      .then(r => (r.ok ? r.json() : null))
+      .then((data: { similar?: string[] } | null) => {
+        const siblings = Array.isArray(data?.similar) ? data!.similar : [];
+        if (siblings.length === 0) return;
+        setSourceSkills(prev => prev.map(s =>
+          s.id === rowId
+            ? { ...s, similarSkills: siblings, similarCount: `0/${siblings.length} similar` }
+            : s
+        ));
+      })
+      .catch(() => { /* swallow — UI stays usable */ });
   };
 
   const addSourceLocation = (value: string) => {
@@ -6299,10 +6375,96 @@ function NewJobPageContent() {
                           sourceLocations[0]?.value ? `Local to ${sourceLocations[0].value}` : null
                         ].filter(Boolean);
 
+                        const displayName = getCandidateDisplayName(candidate);
+                        const isLinkedIn = !!candidate.source?.startsWith('LinkedIn');
+                        const isJobDivaTalent = candidate.source === 'JobDiva-TalentSearch';
+                        const enhanced = (candidate.enhanced_info || {}) as Record<string, any>;
+                        const titleStr = String(candidate.title || candidate.current_title || candidate.headline || "").trim();
+                        const companyExp =
+                          (Array.isArray(candidate.company_experience) && candidate.company_experience.length > 0
+                            ? candidate.company_experience
+                            : Array.isArray(enhanced.company_experience)
+                              ? enhanced.company_experience
+                              : []) as Array<{ company?: string }>;
+                        const companyStr = String(companyExp[0]?.company || "").trim();
+                        const titleAtCompany = titleStr && companyStr
+                          ? `${titleStr} @ ${companyStr}`
+                          : titleStr || companyStr;
+                        const yearsRaw =
+                          candidate.experience_years ??
+                          candidate.years_experience ??
+                          enhanced.years_of_experience;
+                        const yearsNum = typeof yearsRaw === "number" ? yearsRaw : Number(yearsRaw);
+                        const yearsStr = Number.isFinite(yearsNum) && yearsNum > 0 ? `${yearsNum}+ yrs exp` : "";
+                        const skillsRaw = Array.isArray(candidate.matched_skills) ? candidate.matched_skills : [];
+                        const topSkills = skillsRaw
+                          .map((s: any) => (typeof s === "string" ? s : s?.name))
+                          .filter((s: any) => typeof s === "string" && s.trim().length > 0)
+                          .slice(0, 3) as string[];
+                        const matchScore = typeof candidate.match_score === "number" ? candidate.match_score : null;
+                        const matchTone = matchScore == null
+                          ? null
+                          : matchScore >= 80
+                            ? { ring: "#2563eb", bg: "#dbeafe", text: "#1d4ed8" }
+                            : matchScore >= 60
+                              ? { ring: "#d97706", bg: "#fef3c7", text: "#b45309" }
+                              : { ring: "#e11d48", bg: "#ffe4e6", text: "#be123c" };
+                        const recentAvailabilityRaw = String(
+                          candidate.recent_availability ||
+                          candidate.recentAvailability ||
+                          candidate.availability_status ||
+                          candidate.available ||
+                          ""
+                        ).trim();
+                        const availabilityLower = recentAvailabilityRaw.toLowerCase();
+                        const availabilityChip = recentAvailabilityRaw
+                          ? availabilityLower.includes("available") || availabilityLower.includes("open")
+                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                            : availabilityLower.includes("placed") || availabilityLower.includes("assignment") || availabilityLower.includes("employed")
+                              ? "bg-slate-100 text-slate-600 border-slate-200"
+                              : "bg-amber-50 text-amber-700 border-amber-200"
+                          : "";
+                        const locationStr = candidate.location || (candidate.city || candidate.state
+                          ? `${candidate.city || ""}${candidate.city && candidate.state ? ", " : ""}${candidate.state || ""}`
+                          : "");
+                        const receivedRaw = candidate.received || candidate.received_date || candidate.receivedDate || candidate.last_modified || candidate.lastModified;
+                        let receivedStr = "";
+                        if (receivedRaw) {
+                          const d = new Date(receivedRaw);
+                          if (!Number.isNaN(d.getTime())) {
+                            receivedStr = d.toISOString().slice(0, 19);
+                          } else if (typeof receivedRaw === "string") {
+                            receivedStr = receivedRaw;
+                          }
+                        }
+                        const sourceBadgeColor = isLinkedIn
+                          ? 'bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]'
+                          : isJobDivaTalent
+                            ? 'bg-[#fff7ed] text-[#c2410c] border-[#fed7aa]'
+                            : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]';
+                        const handleOpenDetails = () => {
+                          setSelectedCandidateForDetails({
+                            name: displayName,
+                            profileUrl: candidate.profile_url,
+                            imageUrl: candidate.image_url,
+                            jobTitle: candidate.title || candidate.headline || "",
+                            location: candidate.location || (candidate.city ? `${candidate.city}, ${candidate.state}` : ""),
+                            experienceYears: candidate.experience_years || candidate.yearsExtracted || candidate.enhanced_info?.years_of_experience || null,
+                            tags: badgeOptions,
+                            matchScore: candidate.match_score,
+                            missingSkills: candidate.missing_skills,
+                            explainability: candidate.explainability,
+                            matchScoreDetails: candidate.match_score_details,
+                            matchedSkills: candidate.matched_skills,
+                            candidateId: candidate.candidate_id || candidate.jobdiva_candidate_id || candidate.id,
+                            source: candidate.source,
+                          });
+                          setDetailsModalOpen(true);
+                        };
                         return (
-                          <div key={`${candidate.candidate_id || candidate.id}-${idx}`} className="p-5 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-purple-200 hover:shadow-md transition-all flex items-center gap-4">
+                          <div key={`${candidate.candidate_id || candidate.id}-${idx}`} className="p-5 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-purple-200 hover:shadow-md transition-all flex items-start gap-4">
                             <Checkbox
-                              className="w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600"
+                              className="w-4.5 h-4.5 mt-1.5 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600 shrink-0"
                               checked={selectedCandidates.has(candidate.candidate_id || candidate.id)}
                               onCheckedChange={(checked) => {
                                 setSelectedCandidates(prev => {
@@ -6315,203 +6477,154 @@ function NewJobPageContent() {
                               }}
                             />
                             <div className="flex-1 min-w-0">
-                              {(() => {
-                                const displayName = getCandidateDisplayName(candidate);
-                                return (
-                                  <div className="flex items-center justify-between gap-4">
-                                    <div className="flex items-center gap-3 min-w-0">
-                                      <a
-                                        href={candidate.source?.startsWith('LinkedIn') ? candidate.profile_url || '#' : '#'}
-                                        target={candidate.source?.startsWith('LinkedIn') ? "_blank" : undefined}
-                                        rel={candidate.source?.startsWith('LinkedIn') ? "noopener noreferrer" : undefined}
-                                        className={`text-[17px] font-bold text-slate-900 flex items-center gap-3 transition-colors group/name ${candidate.source?.startsWith('LinkedIn') ? 'hover:text-[#1d4ed8]' :
-                                          candidate.source === 'JobDiva-TalentSearch' ? 'hover:text-[#c2410c]' :
-                                            'hover:text-[#6366f1]'
-                                          }`}
-                                        onClick={async (e) => {
-                                          if (candidate.source?.startsWith('LinkedIn')) return;
-                                          e.preventDefault();
-                                          // 5.8: prefer JobDiva profile URL when
-                                          // available (opens in new tab); fall back
-                                          // to the resume modal so the name is
-                                          // never a dead click.
-                                          const opened = await fetchAndOpenProfileUrl(candidate);
-                                          if (!opened) handleViewResume(candidate);
-                                        }}
-                                      >
-                                        <span className="flex items-center gap-2">
-                                          <span className={`text-[17px] font-bold text-slate-900 transition-colors ${candidate.source?.startsWith('LinkedIn') ? 'group-hover/name:text-[#1d4ed8]' :
-                                            candidate.source === 'JobDiva-TalentSearch' ? 'group-hover/name:text-[#c2410c]' :
-                                              'group-hover/name:text-[#6366f1]'
-                                            }`}>
-                                            {displayName}
-                                          </span>
-                                          <span
-                                            className={`h-7 w-7 flex items-center justify-center border border-slate-200 bg-white text-slate-400 rounded-lg shadow-sm transition-all ${candidate.source?.startsWith('LinkedIn')
-                                              ? 'group-hover/name:border-[#bfdbfe] group-hover/name:bg-[#eff6ff] group-hover/name:text-[#1d4ed8]' :
-                                              candidate.source === 'JobDiva-TalentSearch'
-                                                ? 'group-hover/name:border-[#fed7aa] group-hover/name:bg-[#fff7ed] group-hover/name:text-[#c2410c]' :
-                                                'group-hover/name:border-[#c7d2fe] group-hover/name:bg-[#f5f3ff] group-hover/name:text-[#6366f1]'
-                                              }`}
-                                            title={candidate.source?.startsWith('LinkedIn') ? "View LinkedIn Profile" : "Click to view resume"}
-                                          >
-                                            <ExternalLink className="w-3.5 h-3.5" />
-                                          </span>
-                                        </span>
-                                      </a>
-                                      <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow-sm h-fit border ${candidate.source?.startsWith('LinkedIn')
-                                        ? 'bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]'
-                                        : candidate.source === 'JobDiva-TalentSearch'
-                                          ? 'bg-[#fff7ed] text-[#c2410c] border-[#fed7aa]'
-                                          : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]'
-                                        }`}>
-                                        {candidate.source?.startsWith('LinkedIn') ? <Linkedin className="w-3 h-3 fill-current" /> : candidate.source === 'JobDiva-TalentSearch' ? <Zap className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
-                                        {candidate.source || "JobDiva"}
-                                      </span>
-                                      <PhoneIndicator
-                                        candidateId={String(candidate.candidate_id || candidate.id || "")}
-                                        jobdivaId={jobdivaId || jobData?.jobdiva_id || String(numericJobId || "")}
-                                        phone={candidate.phone}
-                                        persist={false}
-                                        onSaved={(normalised) => {
-                                          const cid = candidate.candidate_id || candidate.id;
-                                          setCandidates(prev =>
-                                            prev.map(c =>
-                                              (c.candidate_id || c.id) === cid
-                                                ? { ...c, phone: normalised }
-                                                : c
-                                            )
-                                          );
-                                        }}
-                                      />
-                                      {(() => {
-                                        const recentAvailability = String(
-                                          candidate.recent_availability ||
-                                          candidate.recentAvailability ||
-                                          candidate.availability_status ||
-                                          candidate.available ||
-                                          ""
-                                        ).trim();
-                                        if (!recentAvailability) return null;
-
-                                        const low = recentAvailability.toLowerCase();
-                                        const chipClass =
-                                          low.includes("available") || low.includes("open")
-                                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                                            : low.includes("placed") || low.includes("assignment") || low.includes("employed")
-                                              ? "bg-slate-100 text-slate-600 border-slate-200"
-                                              : "bg-amber-50 text-amber-700 border-amber-200";
-
-                                        return (
-                                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${chipClass}`} title="Recent availability from JobDiva">
-                                            {recentAvailability}
-                                          </span>
+                              {/* Top: name+meta on the left, action buttons on the right */}
+                              <div className="flex items-start justify-between gap-4">
+                                <div className="flex-1 min-w-0">
+                                  {/* Name row */}
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <a
+                                      href={isLinkedIn ? candidate.profile_url || '#' : '#'}
+                                      target={isLinkedIn ? "_blank" : undefined}
+                                      rel={isLinkedIn ? "noopener noreferrer" : undefined}
+                                      className={`text-[18px] font-bold text-slate-900 transition-colors ${isLinkedIn ? 'hover:text-[#1d4ed8]' : isJobDivaTalent ? 'hover:text-[#c2410c]' : 'hover:text-[#6366f1]'}`}
+                                      onClick={async (e) => {
+                                        if (isLinkedIn) return;
+                                        e.preventDefault();
+                                        const opened = await fetchAndOpenProfileUrl(candidate);
+                                        if (!opened) handleViewResume(candidate);
+                                      }}
+                                      title={isLinkedIn ? "View LinkedIn Profile" : "Click to view resume"}
+                                    >
+                                      {displayName}
+                                    </a>
+                                    <span className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center gap-1 border ${sourceBadgeColor}`}>
+                                      {isLinkedIn ? <Linkedin className="w-2.5 h-2.5 fill-current" /> : isJobDivaTalent ? <Zap className="w-2.5 h-2.5 fill-current" /> : <ShieldCheck className="w-2.5 h-2.5" />}
+                                      {candidate.source || "JobDiva"}
+                                    </span>
+                                    <PhoneIndicator
+                                      candidateId={String(candidate.candidate_id || candidate.id || "")}
+                                      jobdivaId={jobdivaId || jobData?.jobdiva_id || String(numericJobId || "")}
+                                      phone={candidate.phone}
+                                      persist={false}
+                                      onSaved={(normalised) => {
+                                        const cid = candidate.candidate_id || candidate.id;
+                                        setCandidates(prev =>
+                                          prev.map(c =>
+                                            (c.candidate_id || c.id) === cid
+                                              ? { ...c, phone: normalised }
+                                              : c
+                                          )
                                         );
-                                      })()}
-                                    </div>
+                                      }}
+                                    />
+                                  </div>
 
-                                    <div className="flex items-center gap-3 shrink-0">
-                                      {candidate.match_score !== undefined && (
-                                        <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center shadow-sm h-fit border ${candidate.match_score >= 80 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
-                                          candidate.match_score >= 60 ? 'bg-amber-50 text-amber-700 border-amber-200' :
-                                            'bg-rose-50 text-rose-700 border-rose-200'
-                                          }`}>
-                                          {candidate.match_score}% Match
+                                  {/* Subtitle: title @ company */}
+                                  {titleAtCompany && (
+                                    <p className="text-[13.5px] text-slate-600 mt-1 truncate" title={titleAtCompany}>
+                                      {titleAtCompany}
+                                    </p>
+                                  )}
+
+                                  {/* Contact row */}
+                                  {(candidate.phone || candidate.email || yearsStr) && (
+                                    <div className="flex items-center gap-x-5 gap-y-1 mt-2 flex-wrap text-[12.5px] text-slate-600">
+                                      {candidate.phone && (
+                                        <span className="inline-flex items-center gap-1.5">
+                                          <Phone className="w-3.5 h-3.5 text-slate-400" />
+                                          {candidate.phone}
                                         </span>
                                       )}
-                                      {!candidate.source?.startsWith('LinkedIn') && (
-                                        <Button
-                                          size="sm"
-                                          className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2"
-                                          onClick={() => handleViewResume({ ...candidate, firstName: displayName.split(" ")[0] || displayName, lastName: displayName.split(" ").slice(1).join(" ") })}
-                                          title="Open candidate resume"
-                                        >
-                                          <FileText className="w-3.5 h-3.5" />
-                                          Resume
-                                          <ExternalLink className="w-3 h-3 opacity-70" />
-                                        </Button>
+                                      {candidate.email && (
+                                        <span className="inline-flex items-center gap-1.5 truncate max-w-[28ch]" title={candidate.email}>
+                                          <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                          <span className="truncate">{candidate.email}</span>
+                                        </span>
                                       )}
+                                      {yearsStr && (
+                                        <span className="inline-flex items-center gap-1.5">
+                                          <Clock className="w-3.5 h-3.5 text-slate-400" />
+                                          {yearsStr}
+                                        </span>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Match circle + skill chips + buttons (right cluster) */}
+                                <div className="flex items-start gap-3 shrink-0">
+                                  {matchScore !== null && matchTone && (
+                                    <div
+                                      className="w-14 h-14 rounded-full flex flex-col items-center justify-center shrink-0"
+                                      style={{ backgroundColor: matchTone.bg, color: matchTone.text, border: `2px solid ${matchTone.ring}` }}
+                                      title="Match score"
+                                    >
+                                      <span className="text-[15px] font-extrabold leading-none">{matchScore}%</span>
+                                      <span className="text-[9px] font-bold uppercase tracking-wider mt-0.5">Match</span>
+                                    </div>
+                                  )}
+
+                                  {topSkills.length > 0 && (
+                                    <div className="flex flex-wrap gap-1.5 max-w-[260px] items-center self-center">
+                                      {topSkills.map((skill, i) => (
+                                        <span
+                                          key={`${skill}-${i}`}
+                                          className="px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 text-[11px] font-semibold border border-slate-200"
+                                          title={`Matched skill: ${skill}`}
+                                        >
+                                          {skill}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
+
+                                  <div className="flex flex-col gap-1.5 shrink-0 ml-1">
+                                    <Button
+                                      size="sm"
+                                      className="h-8 px-3 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300 font-semibold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-1.5 min-w-[150px]"
+                                      onClick={handleOpenDetails}
+                                    >
+                                      <Eye className="w-3.5 h-3.5" />
+                                      Score Details
+                                    </Button>
+                                    {!isLinkedIn && (
                                       <Button
                                         size="sm"
-                                        className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 min-w-[70px]"
-                                        onClick={() => {
-                                          setSelectedCandidateForDetails({
-                                            name: displayName,
-                                            profileUrl: candidate.profile_url,
-                                            imageUrl: candidate.image_url,
-                                            jobTitle: candidate.title || candidate.headline || "",
-                                            location: candidate.location || (candidate.city ? `${candidate.city}, ${candidate.state}` : ""),
-                                            experienceYears: candidate.experience_years || candidate.yearsExtracted || candidate.enhanced_info?.years_of_experience || null,
-                                            tags: badgeOptions,
-                                            matchScore: candidate.match_score,
-                                            missingSkills: candidate.missing_skills,
-                                            explainability: candidate.explainability,
-                                            matchScoreDetails: candidate.match_score_details,
-                                            matchedSkills: candidate.matched_skills,
-                                          });
-                                          setDetailsModalOpen(true);
-                                        }}
+                                        className="h-8 px-3 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300 font-semibold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-1.5 min-w-[150px]"
+                                        onClick={() => handleViewResume({ ...candidate, firstName: displayName.split(" ")[0] || displayName, lastName: displayName.split(" ").slice(1).join(" ") })}
+                                        title="Open candidate resume"
                                       >
-                                        <Eye className="w-3.5 h-3.5" />
-                                        View
+                                        <FileText className="w-3.5 h-3.5" />
+                                        View Resume
                                       </Button>
-                                    </div>
+                                    )}
                                   </div>
-                                );
-                              })()}
-                              {(candidate.phone || candidate.email) && (
-                                <div className="mt-2 flex items-center gap-2 flex-wrap text-[11.5px]">
-                                  {candidate.phone && (
-                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
-                                      Mobile: {candidate.phone}
+                                </div>
+                              </div>
+
+                              {/* Footer strip: date | location | availability */}
+                              {(receivedStr || locationStr || recentAvailabilityRaw) && (
+                                <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center gap-3 flex-wrap text-[11.5px] text-slate-500">
+                                  {receivedStr && (
+                                    <span className="inline-flex items-center gap-1.5">
+                                      <Calendar className="w-3 h-3 text-slate-400" />
+                                      {receivedStr}
                                     </span>
                                   )}
-                                  {candidate.email && (
-                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200 font-semibold">
-                                      <Mail className="w-3 h-3" />
-                                      {candidate.email}
+                                  {receivedStr && locationStr && <span className="text-slate-300">|</span>}
+                                  {locationStr && (
+                                    <span className="inline-flex items-center gap-1.5">
+                                      <MapPin className="w-3 h-3 text-slate-400" />
+                                      {locationStr}
+                                    </span>
+                                  )}
+                                  {recentAvailabilityRaw && (
+                                    <span className={`ml-auto px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${availabilityChip}`} title="Recent availability from JobDiva">
+                                      {recentAvailabilityRaw}
                                     </span>
                                   )}
                                 </div>
                               )}
-                              {/* 5.7: availability pill + abstract + location row.
-                              Fields populated by jobdiva.py Talent Search
-                              mapper. All three are optional — only render the
-                              strip if at least one is present. */}
-                              {(() => {
-                                const availability =
-                                  candidate.recent_availability ||
-                                  candidate.recentAvailability ||
-                                  candidate.availability_status ||
-                                  candidate.available;
-                                const abstract = candidate.abstract || "";
-                                const locationStr = candidate.location || (candidate.city || candidate.state ? `${candidate.city || ""}${candidate.city && candidate.state ? ", " : ""}${candidate.state || ""}` : "");
-                                if (!availability && !abstract && !locationStr) return null;
-                                const availabilityColor =
-                                  String(availability || "").toLowerCase().includes("available") ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
-                                    String(availability || "").toLowerCase().includes("placed") ? "bg-slate-100 text-slate-600 border-slate-200" :
-                                      "bg-amber-50 text-amber-700 border-amber-200";
-                                return (
-                                  <div className="flex items-center gap-3 mt-2 text-[12px] text-slate-600">
-                                    {availability && (
-                                      <span className={`px-2 py-0.5 rounded-full text-[10.5px] font-bold uppercase tracking-wider border ${availabilityColor}`}>
-                                        {availability}
-                                      </span>
-                                    )}
-                                    {locationStr && (
-                                      <span className="inline-flex items-center gap-1 text-slate-500">
-                                        <MapPin className="w-3 h-3" />
-                                        {locationStr}
-                                      </span>
-                                    )}
-                                    {abstract && (
-                                      <span className="text-slate-500 truncate" title={abstract}>
-                                        {abstract.length > 90 ? `${abstract.slice(0, 90).trimEnd()}…` : abstract}
-                                      </span>
-                                    )}
-                                  </div>
-                                );
-                              })()}
                             </div>
                           </div>
                         )
@@ -7002,6 +7115,8 @@ function NewJobPageContent() {
         <ResumeModal
           candidateName={selectedCandidateForResume.name}
           resumeText={selectedCandidateForResume.resumeText}
+          keywords={selectedCandidateForResume.keywords}
+          similarKeywords={selectedCandidateForResume.similarKeywords}
           isOpen={resumeModalOpen}
           onClose={() => {
             setResumeModalOpen(false);
@@ -7039,6 +7154,8 @@ function NewJobPageContent() {
           matchedSkills={selectedCandidateForDetails.matchedSkills}
           matchScoreDetails={selectedCandidateForDetails.matchScoreDetails}
           explainability={selectedCandidateForDetails.explainability}
+          candidateId={selectedCandidateForDetails.candidateId}
+          source={selectedCandidateForDetails.source}
           onClose={() => {
             setDetailsModalOpen(false);
             setSelectedCandidateForDetails(null);

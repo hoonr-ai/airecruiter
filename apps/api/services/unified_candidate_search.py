@@ -29,6 +29,7 @@ from core.config import (
     EMBEDDING_MATCH_THRESHOLD,
 )
 from services import skill_embeddings
+from services import taxonomy_service
 
 logger = logging.getLogger(__name__)
 
@@ -1556,7 +1557,45 @@ class UnifiedCandidateSearch:
                 if cosine >= EMBEDDING_MATCH_THRESHOLD:
                     embedding_score = cosine
 
-        return max(best_overlap_score, text_score, embedding_score)
+        # Taxonomy sibling check. Awards partial credit when the criterion
+        # term and the candidate's term cluster together in the role/skill
+        # taxonomy hierarchy (e.g. "Solutions Architect" vs "Logistics
+        # Architect" — same K1500 cluster). Gated on bucket: only titles
+        # or skills, never locations / companies / education / certs.
+        # Finer shared cluster ⇒ higher credit. Falls through to 0 when
+        # neither term anchors in the master tables.
+        taxonomy_score = 0.0
+        if "titles" in collections or "skills" in collections:
+            kind = "role" if "titles" in collections else "skill"
+            for coll in collections:
+                for item in profile.get(coll, []) or []:
+                    item_str = str(item).strip()
+                    if not item_str:
+                        continue
+                    shared = taxonomy_service.shared_cluster_level(term, item_str, kind=kind)
+                    if not shared:
+                        continue
+                    # Map shared level to score. "Finest" (largest K
+                    # number, smallest cluster size) gives the most
+                    # credit; coarser levels less. K150 and below are
+                    # treated as too generic to count.
+                    if shared in ("role_k10000", "role_k5000",
+                                  "skill_k15000", "skill_k5000"):
+                        candidate_score = 0.85
+                    elif shared in ("role_k1500", "role_k1000", "skill_k1500"):
+                        candidate_score = 0.75
+                    elif shared in ("role_k500", "skill_k500"):
+                        candidate_score = 0.55
+                    else:
+                        candidate_score = 0.0
+                    if candidate_score > taxonomy_score:
+                        taxonomy_score = candidate_score
+                        if taxonomy_score >= 0.85:
+                            break
+                if taxonomy_score >= 0.85:
+                    break
+
+        return max(best_overlap_score, text_score, embedding_score, taxonomy_score)
 
     def _criteria_query_terms(self, criteria: SearchCriteria) -> List[str]:
         """Flat list of every skill / title / company / keyword term in

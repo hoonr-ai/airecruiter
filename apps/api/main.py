@@ -230,6 +230,7 @@ job_criteria_router = _safe_import("job_criteria")
 manual_candidates_router = _safe_import("manual_candidates")
 candidates_router = _safe_import("candidates")
 jobs_router = _safe_import("jobs")
+taxonomy_router = _safe_import("taxonomy")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
 # prod reverse proxy a 307 with the wrong scheme (when uvicorn isn't running
@@ -268,6 +269,7 @@ _mount(manual_candidates_router, "manual_candidates")
 _mount(candidates_router, "candidates")
 _mount(jobs_router, "jobs")
 _mount(engagement, "engagement", prefix="/api/v1/engagement")
+_mount(taxonomy_router, "taxonomy", prefix="/api/v1/taxonomy")
 
 app.add_middleware(
     CORSMiddleware,
