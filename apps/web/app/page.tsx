@@ -123,7 +123,7 @@ export default function DashboardPage() {
         return {
           id,
           jobdiva_id: details.jobdiva_id || "",
-          title: details.title || "—",
+          title: details.enhanced_title || details.title || "—",
           customer_name: details.customer_name || "—",
           status: status || "—",
           location: [

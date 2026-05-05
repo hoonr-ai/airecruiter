@@ -1684,7 +1684,7 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
             # blobs (jobdiva_description, ai_description, notes, filters, etc.) when
             # only list-level metadata is needed.
             select_sql = (
-                "SELECT job_id, jobdiva_id, title, customer_name, status, "
+                "SELECT job_id, jobdiva_id, title, enhanced_title, customer_name, status, "
                 "city, state, zip_code, priority, program_duration, max_allowed_submittals, "
                 "processing_status, is_archived, "
                 "candidates_sourced, resumes_shortlisted, complete_submissions, "
