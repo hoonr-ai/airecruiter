@@ -4,6 +4,7 @@ import "./globals.css";
 import { Sidebar } from "@/components/layout/sidebar";
 import { AIProvider } from "@/context/ai-context";
 import { MsalProviderWrapper } from "@/components/auth/MsalProviderWrapper";
+import { AuthGuard } from "@/components/auth/AuthGuard";
 import { TiraChat } from "@/components/ai/tira-chat";
 import { TiraFab } from "@/components/ai/tira-fab";
 import { TelemetryBootstrap } from "@/components/TelemetryBootstrap";
@@ -25,17 +26,19 @@ export default function RootLayout({
     <html lang="en">
       <body className={`${inter.variable} ${outfit.variable} antialiased min-h-screen bg-background text-foreground font-inter`}>
         <MsalProviderWrapper>
-          <AIProvider>
-            <TelemetryBootstrap />
-            <div className="flex min-h-screen">
-              <Sidebar />
-              <main className="flex-1 ml-64 p-8 overflow-y-auto min-h-screen bg-[#f8fafc]">
-                {children}
-              </main>
-            </div>
-            <TiraChat />
-            <TiraFab />
-          </AIProvider>
+          <AuthGuard>
+            <AIProvider>
+              <TelemetryBootstrap />
+              <div className="flex min-h-screen">
+                <Sidebar />
+                <main className="flex-1 ml-64 p-8 overflow-y-auto min-h-screen bg-[#f8fafc]">
+                  {children}
+                </main>
+              </div>
+              <TiraChat />
+              <TiraFab />
+            </AIProvider>
+          </AuthGuard>
         </MsalProviderWrapper>
       </body>
     </html>
