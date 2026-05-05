@@ -1898,6 +1898,8 @@ export default function CandidateRankingsPage() {
           matchedSkills={selectedCandidate.data?.matched_skills}
           missingSkills={selectedCandidate.data?.missing_skills}
           explainability={selectedCandidate.data?.explainability}
+          candidateId={selectedCandidate.candidate_id}
+          source={selectedCandidate.source}
         />
       )}
 
