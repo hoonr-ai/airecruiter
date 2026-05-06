@@ -174,8 +174,9 @@ def detect_role_family(
     """Return one of: it | recruiting | finance | ops | sales | hr |
     marketing | customer_success | generic_non_it.
 
-    Conservative: defaults to `generic_non_it` when nothing matches, so
-    non-IT roles never silently route through the IT prompt path.
+    Compares IT signal vs non-IT family signal so a JD with strong technical
+    skills (e.g. "Java, Kafka, Spring Boot") doesn't get misclassified as ops
+    or finance just because the title or industry happens to share a token.
     """
     title = (job_title or "").lower()
     skill_blob = " ".join(
@@ -189,12 +190,25 @@ def detect_role_family(
         h = _hits_in(haystack, terms)
         if h > 0:
             family_scores[family] = h
+
+    it_title_hits = sum(1 for t in _IT_TITLE_KEYWORDS if t in title)
+    it_skill_hits = sum(_hits_in(haystack, terms) for _, terms in _IT_DOMAIN_RULES)
+    # Title evidence is stronger than skill evidence: a JD titled "Software
+    # Engineer" is unambiguously IT; one merely mentioning "Java" might be a
+    # non-tech role using a tool name.
+    it_score = it_title_hits * 3 + it_skill_hits
+
+    top_family_score = max(family_scores.values()) if family_scores else 0
+
+    # IT wins outright when title is IT, or when its weighted score
+    # outpaces the strongest non-IT family signal.
+    if it_title_hits > 0 or it_score > top_family_score:
+        return "it"
+
     if family_scores:
         return max(family_scores.items(), key=lambda kv: kv[1])[0]
 
-    it_title_hit = any(t in title for t in _IT_TITLE_KEYWORDS)
-    it_skill_hit = any(_hits_in(haystack, terms) > 0 for _, terms in _IT_DOMAIN_RULES)
-    if it_title_hit or it_skill_hit:
+    if it_score > 0:
         return "it"
     return "generic_non_it"
 
@@ -452,12 +466,13 @@ STRICT RULES — FOLLOW EVERY ONE:
 5. Reference specific named concepts, tools, or artifacts where sensible — for THIS
    domain that means: {artifacts}. Do not be generic, and do not pull in concepts from
    unrelated domains.
-6. Each question must include a `pass_criteria` — a one-sentence CONCRETE signal the
+6. {"BANNED PATTERNS for IT roles — if any question matches these patterns, the entire output is invalid and you must rewrite. NEVER use ANY of: 'Tell me about a time', 'Tell me about a recent', 'Tell me about a situation', 'Describe a situation', 'Describe a challenging issue/problem/project', 'Walk me through a time', 'When priorities conflicted', 'How did you balance', 'directly influenced the final outcome', 'What does strong execution look like', 'What does success look like', 'share an example', 'share one example', 'What decision mattered most', 'How did you approach', 'How do you typically'. Replace every one of these with a probe of a specific technical artifact (a config flag, an API method, a syntax detail, a metric/log signal, an algorithm choice, a concrete trade-off between named alternatives like X vs Y)." if is_it else "Ground questions in stakeholder, process, or outcome language consistent with this non-technical role."}
+7. Each question must include a `pass_criteria` — a one-sentence CONCRETE signal the
     recruiter should listen for in the answer. Never ask for years or use wording like
     "N+ years", "X years of experience", "minimum years", or similar duration thresholds.
-7. Questions must be answerable in under 90 seconds each during a phone screen.
-8. Do not repeat or paraphrase the same question.
-9. Return nothing except the JSON array below.
+8. Questions must be answerable in under 90 seconds each during a phone screen.
+9. Do not repeat or paraphrase the same question.
+10. Return nothing except the JSON array below.
 
 OUTPUT FORMAT — return a STRICT JSON object like this:
 {{
@@ -476,8 +491,46 @@ No markdown, no preamble, no trailing commentary. JSON only.
 """
 
 
-def _sanitize_questions(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Normalize LLM output onto the shape the frontend expects."""
+# Phrases that indicate a question is behavioral / observational rather than
+# probing concrete technical knowledge. Matched case-insensitively against the
+# IT-role question text. When any of these hits, the question is dropped and
+# the deterministic technical template fills its slot.
+_IT_BEHAVIORAL_BAN_PATTERNS = re.compile(
+    r"(tell me about (a |the )?(time|recent|situation|experience|challenging|project)"
+    r"|describe (a |the )?(time|situation|challenging|project|experience|real situation)"
+    r"|walk me through (a |the )?(time|situation)"
+    r"|when priorities (have )?conflict"
+    r"|how did you balance"
+    r"|directly influenced (the )?(final )?outcome"
+    r"|what does (strong execution|success|good) look like"
+    r"|share (an? |one )?example"
+    r"|what decision mattered (most|the most)"
+    r"|how did you typically approach"
+    r"|how do you typically (handle|approach)"
+    r"|describe your (approach|experience) (with|to)"
+    r"|tell me how you (would |usually )?(approach|handle)"
+    r")",
+    flags=re.IGNORECASE,
+)
+
+
+def _is_it_behavioral_question(text: str) -> bool:
+    """True if an IT-role question reads as behavioral/observational instead
+    of probing concrete technical knowledge."""
+    return bool(_IT_BEHAVIORAL_BAN_PATTERNS.search(text or ""))
+
+
+def _sanitize_questions(
+    raw: List[Dict[str, Any]],
+    *,
+    is_it_role: bool = False,
+) -> List[Dict[str, Any]]:
+    """Normalize LLM output onto the shape the frontend expects.
+
+    For IT roles, drop any question whose phrasing reads as behavioral or
+    observational so the caller can refill the slot with a deterministic
+    technical template instead.
+    """
     years_phrase = re.compile(
         r"(\b\d+\s*\+?\s*years?\b|\byears?\s+of\s+experience\b|\bminimum\s+years?\b)",
         flags=re.IGNORECASE,
@@ -495,6 +548,12 @@ def _sanitize_questions(raw: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             continue
         qt = _strip_years_language((q.get("question_text") or q.get("question") or "").strip())
         if not qt:
+            continue
+        if is_it_role and _is_it_behavioral_question(qt):
+            logger.info(
+                "screening_question_generator: dropping behavioral IT question (will be replaced): %r",
+                qt[:160],
+            )
             continue
         pc = _strip_years_language((q.get("pass_criteria") or q.get("criteria") or "").strip())
         if not pc:
@@ -669,7 +728,7 @@ async def generate_screening_questions(
             timeout=45,
         )
         raw = json.loads(completion.choices[0].message.content or "{}")
-        role_specific = _sanitize_questions(raw.get("questions", []))
+        role_specific = _sanitize_questions(raw.get("questions", []), is_it_role=is_it_role)
     except Exception as exc:
         logger.error(f"❌ screening_question_generator LLM failed: {exc}")
         # Fall back to deterministic per-skill templates — level-aware,
@@ -761,23 +820,50 @@ async def generate_screening_questions(
         role_specific = fallback
 
     # Enforce exact role-specific count regardless of model output variance.
+    # When questions were dropped (e.g. IT behavioral filter), refill slots
+    # with deterministic technical templates so the role-specific budget is
+    # always met without re-introducing observational phrasing.
     if len(role_specific) > target_count:
         role_specific = role_specific[:target_count]
     elif len(role_specific) < target_count:
         focus_skills = required_skills or preferred_skills
         if not focus_skills:
             focus_skills = [{"value": "core role responsibilities"}]
+        already_anchored = {(q.get("related_skill") or "").lower() for q in role_specific}
+        skill_pool = [
+            s for s in focus_skills
+            if (s.get("value") or s.get("name") or "").lower() not in already_anchored
+        ] or focus_skills
         for idx in range(len(role_specific), target_count):
-            skill = focus_skills[idx % len(focus_skills)]
-            name = skill.get("value") or skill.get("name") or "this area"
+            skill = skill_pool[idx % len(skill_pool)]
+            name = skill.get("value") or skill.get("name") or (
+                "this technology" if is_it_role else "this area"
+            )
+            if is_it_role:
+                q_text = (
+                    f"Name one specific configuration, syntax detail, API, or version-pinned "
+                    f"behavior in {name} that you have personally tuned, and what observable "
+                    "system behavior changed as a result."
+                )
+                criteria = (
+                    f"Candidate names a real {name} flag/API/syntax detail and ties it to a "
+                    "concrete, verifiable behavior change — not a generic 'we used it for X'."
+                )
+                category = "technical-depth"
+            else:
+                q_text = (
+                    f"Walk through a recent piece of work involving {name}: who did you "
+                    "coordinate with, what trade-off did you make, and what was the result?"
+                )
+                criteria = (
+                    f"Candidate explains a concrete {name} situation with stakeholders, a "
+                    "trade-off, and a measurable outcome."
+                )
+                category = "scenario"
             role_specific.append({
-                "question_text": (
-                    f"Describe a real example where you used {name} to solve a non-trivial problem under constraints."
-                ),
-                "pass_criteria": (
-                    "Candidate provides a specific situation, concrete decisions, and clear outcomes."
-                ),
-                "category": "scenario",
+                "question_text": q_text,
+                "pass_criteria": criteria,
+                "category": category,
                 "related_skill": name,
                 "is_default": False,
                 "is_hard_filter": False,
