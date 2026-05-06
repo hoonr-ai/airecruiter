@@ -5002,8 +5002,8 @@ function NewJobPageContent() {
                 <textarea
                   value={q.question_text}
                   onChange={(e) => updateScreenQuestion(q.id, 'question_text', e.target.value)}
-                  className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium resize-none"
-                  rows={2}
+                  className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium resize-none whitespace-pre-wrap break-words"
+                  rows={3}
                 />
               </div>
 
@@ -5054,11 +5054,11 @@ function NewJobPageContent() {
                     </div>
                   );
                 })() : (
-                  <input
-                    type="text"
+                  <textarea
                     value={q.pass_criteria}
                     onChange={(e) => updateScreenQuestion(q.id, 'pass_criteria', e.target.value)}
-                    className={`w-full text-[13px] bg-transparent border-none outline-none font-medium ${q.pass_criteria ? 'text-[#4f46e5]' : 'text-slate-300 italic'}`}
+                    rows={2}
+                    className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${q.pass_criteria ? 'text-[#4f46e5]' : 'text-slate-300 italic'}`}
                     placeholder="No hard filter"
                   />
                 )}
