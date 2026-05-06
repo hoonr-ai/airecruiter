@@ -6552,7 +6552,6 @@ function NewJobPageContent() {
                           sourceTitles[0]?.value,
                           sourceSkills[0]?.value ? `${sourceSkills[0]?.value} certified` : null,
                           sourceSkills[1]?.value,
-                          sourceLocations[0]?.value ? `Local to ${sourceLocations[0].value}` : null
                         ].filter(Boolean);
 
                         const displayName = getCandidateDisplayName(candidate);
