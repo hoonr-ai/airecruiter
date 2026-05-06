@@ -1684,13 +1684,26 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
             # blobs (jobdiva_description, ai_description, notes, filters, etc.) when
             # only list-level metadata is needed.
             select_sql = (
-                "SELECT job_id, jobdiva_id, title, enhanced_title, customer_name, status, "
-                "city, state, zip_code, priority, program_duration, max_allowed_submittals, "
-                "processing_status, is_archived, "
-                "candidates_sourced, resumes_shortlisted, complete_submissions, "
-                "pass_submissions, pair_external_subs, feedback_completed, "
-                "time_to_first_pass, created_at, updated_at "
-                "FROM monitored_jobs"
+                "SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name, mj.status, "
+                "mj.city, mj.state, mj.zip_code, mj.priority, mj.program_duration, mj.max_allowed_submittals, "
+                "mj.processing_status, mj.is_archived, "
+                "COALESCE(metrics.candidates_launched, 0) AS candidates_launched, "
+                "mj.resumes_shortlisted, "
+                "COALESCE(metrics.complete_submissions, 0) AS complete_submissions, "
+                "COALESCE(metrics.pass_submissions, 0) AS pass_submissions, "
+                "mj.pair_external_subs, mj.feedback_completed, "
+                "mj.time_to_first_pass, mj.created_at, mj.updated_at "
+                "FROM monitored_jobs mj "
+                "LEFT JOIN ("
+                "    SELECT "
+                "        mj2.job_id AS mj_job_id, "
+                "        COUNT(*) AS candidates_launched, "
+                "        COUNT(*) FILTER (WHERE sc.data->>'engage_status' IN ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')) AS complete_submissions, "
+                "        COUNT(*) FILTER (WHERE (sc.data->>'engage_status' IN ('passed', 'pass')) OR (LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed') AND (NULLIF(sc.data->>'engage_score', '')::float >= 70))) AS pass_submissions "
+                "    FROM sourced_candidates sc "
+                "    JOIN monitored_jobs mj2 ON sc.jobdiva_id = mj2.jobdiva_id OR sc.jobdiva_id = mj2.job_id::text "
+                "    GROUP BY mj2.job_id "
+                ") metrics ON metrics.mj_job_id = mj.job_id"
             )
 
         if include_archived:

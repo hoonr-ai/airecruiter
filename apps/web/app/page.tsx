@@ -34,7 +34,7 @@ interface Job {
   programDuration: string;
   maxAllowedSubmittals: string;
   pairStatus: string;
-  candidatesSourced: number;
+  candidatesLaunched: number;
   resumesShortlisted: number;
   completeSubmissions: number;
   passSubmissions: number;
@@ -138,7 +138,7 @@ export default function DashboardPage() {
             ? "—"
             : Number.parseInt(details.max_allowed_submittals, 10).toString(),
           pairStatus: pairStatus,
-          candidatesSourced: details.candidates_sourced || 0,
+          candidatesLaunched: details.candidates_launched || 0,
           resumesShortlisted: details.resumes_shortlisted || 0,
           completeSubmissions: details.complete_submissions || 0,
           passSubmissions: details.pass_submissions || 0,
@@ -371,7 +371,7 @@ export default function DashboardPage() {
                 <SortableHeader field="maxAllowedSubmittals">MAX ALLOWED SUBMITTALS</SortableHeader>
                 <SortableHeader field="status">JOB STATUS</SortableHeader>
                 <SortableHeader field="pairStatus">HOONR-CURATE STATUS</SortableHeader>
-                <SortableHeader field="candidatesSourced">CANDIDATES SOURCED</SortableHeader>
+                <SortableHeader field="candidatesLaunched">CANDIDATES LAUNCHED</SortableHeader>
                 <SortableHeader field="resumesShortlisted">RESUMES SHORTLISTED</SortableHeader>
                 <SortableHeader field="completeSubmissions">COMPLETE SUBMISSIONS</SortableHeader>
                 <SortableHeader field="passSubmissions">PASS SUBMISSIONS</SortableHeader>
@@ -430,7 +430,7 @@ export default function DashboardPage() {
                     </div>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
-                    {job.candidatesSourced}
+                    {job.candidatesLaunched}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
                     {job.resumesShortlisted}
