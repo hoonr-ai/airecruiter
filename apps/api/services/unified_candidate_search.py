@@ -202,6 +202,31 @@ class UnifiedCandidateSearch:
             }
 
         async def emit_candidate(cand, assessment, qualified_counter_key=None):
+            # Hard location gate: when the candidate's current residence is
+            # definitively outside the requested radius (or in the wrong
+            # state), drop them entirely instead of streaming through with a
+            # "failed" badge. This is what users mean by "filter by miles
+            # radius" — they want the candidates gone, not annotated.
+            #
+            # Soft-keep paths (geocode_failure, missing structured location,
+            # state_unknown) are intentionally allowed through so a Nominatim
+            # outage or a sparse JobDiva record doesn't silently filter out
+            # the entire pool.
+            location_reason = assessment.get("location_failure_reason") if isinstance(assessment, dict) else None
+            if not assessment.get("passes") and location_reason in {
+                "outside_radius",
+                "state_mismatch",
+                "relocation_excluded_by_filter",
+                "non_us_candidate",
+            }:
+                distance = cand.get("distance_miles")
+                self._log_stage(
+                    "LocationGate",
+                    f"dropping candidate_id={cand.get('candidate_id') or cand.get('id')} "
+                    f"reason={location_reason} distance={distance}",
+                )
+                return
+
             cand["screening_summary"] = build_screening(assessment)
 
             # Warm candidate-side skill embeddings before scoring so the
@@ -1134,11 +1159,29 @@ class UnifiedCandidateSearch:
         return is_match
 
     def _candidate_structured_locations(self, candidate: Dict[str, Any]) -> List[str]:
+        """Return the candidate's current residence locations only.
+
+        Only "where the candidate is now" signals are used — never historical
+        job locations, resume free-text locations, or company HQ addresses —
+        so the radius filter doesn't accidentally match a candidate to a city
+        they worked in five years ago.
+
+        Order of preference:
+        1. ``enhanced_info.current_location`` (LLM-extracted from resume header)
+        2. ``candidate.location`` (live source field)
+        3. ``candidate.city + ", " + candidate.state`` (live source field)
+        """
         enhanced = candidate.get("enhanced_info") or {}
+        enhanced_dict = enhanced if isinstance(enhanced, dict) else {}
+
+        city = str(candidate.get("city") or "").strip()
+        state = str(candidate.get("state") or "").strip()
+        city_state = f"{city}, {state}".strip(", ") if (city or state) else ""
+
         location_values = [
-            enhanced.get("current_location") if isinstance(enhanced, dict) else "",
+            enhanced_dict.get("current_location"),
             candidate.get("location"),
-            f"{candidate.get('city', '')}, {candidate.get('state', '')}".strip(", "),
+            city_state,
         ]
         cleaned: List[str] = []
         seen = set()
