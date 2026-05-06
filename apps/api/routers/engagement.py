@@ -42,7 +42,8 @@ router = APIRouter(tags=["Engagement"])
 # ---------------------------------------------------------------------------
 EXTERNAL_INTERVIEW_API_URL = os.getenv("EXTERNAL_INTERVIEW_API_URL", "https://pairbotqa.hoonr.ai")
 PASS_SCORE_THRESHOLD = float(os.getenv("PASS_SCORE_THRESHOLD", "70"))
-HARD_FILTER_PASS_STATUS = os.getenv("HARD_FILTER_PASS_STATUS", "pass").lower()
+PASS_CANDIDATE_SCORE_RATIO = float(os.getenv("PASS_CANDIDATE_SCORE_RATIO", "0.7"))
+HARD_FILTER_PASS_STATUS = os.getenv("HARD_FILTER_PASS_STATUS", "passed").lower()
 ENGAGE_PASSED_STATUSES = os.getenv("ENGAGE_PASSED_STATUSES", "completed,passed").lower().split(",")
 
 def _parse_json_list(val) -> list:
@@ -968,103 +969,27 @@ async def _check_and_fire_candidate_passed_notification(
         if not job_id or not candidate_id:
             return
 
-        evaluation = []
-        # 1. New Pass Criteria (Prioritize Webhook Payload)
+        # 1. New Pass Criteria (Strictly from Webhook Payload)
         interview_block = detail_payload.get("interview", {})
-        hf_status = interview_block.get("hard_filter_status")
+        hf_status = str(interview_block.get("hard_filter_status") or "").lower()
         cand_score = interview_block.get("candidate_score")
+        total_possible = interview_block.get("total_score")
         
-        meets_criteria = False
-
-        # If we have the new fields, use them directly
-        # Scores are normalized to 100-point scale — threshold is >70
-        if hf_status is not None and cand_score is not None:
-            score = cand_score
-            engage_passes = str(hf_status).lower() == "passed" and float(cand_score) >= 70
-
-            # Also check resume match score from DB (must be >70%)
-            resume_match_score = 0.0
-            try:
-                conn_r = _get_db_connection()
-                cur_r = conn_r.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-                cur_r.execute("""
-                    SELECT data FROM sourced_candidates
-                    WHERE candidate_id = %s AND (jobdiva_id = %s OR jobdiva_id = %s)
-                    LIMIT 1
-                """, (candidate_id, job_id, job_id))
-                row_r = cur_r.fetchone()
-                cur_r.close()
-                conn_r.close()
-                if row_r:
-                    blob = row_r.get("data") or {}
-                    if isinstance(blob, str):
-                        import json as _json
-                        blob = _json.loads(blob)
-                    resume_match_score = float(blob.get("match_score") or blob.get("resume_match_score") or 0)
-            except Exception as _re:
-                logger.warning(f"⚠️ Could not fetch resume match score for {candidate_id}: {_re}")
-
-            meets_criteria = engage_passes and resume_match_score >= 70
-            if not meets_criteria:
-                logger.info(
-                    f"⏭️ Candidate {candidate_id} did not meet pass criteria "
-                    f"(HF: {hf_status}, Engage: {cand_score}/100, Resume Match: {resume_match_score}/100)."
-                )
-                return
-        else:
-            # Legacy Score check (fallback) — PASS_SCORE_THRESHOLD is already 70
-            score = interview_block.get("overall_score")
-            if score is None or float(score) < PASS_SCORE_THRESHOLD:
-                return
-
-            # 3. Legacy Evaluation fetch (fallback)
-            evaluation = detail_payload.get("evaluation")
-            if not evaluation:
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    pair_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/interviews/{interview_id}/evaluation"
-                    res = await client.get(pair_url)
-                    if res.status_code == 200:
-                        ev_payload = res.json()
-                        evaluation = ev_payload.get("data") or ev_payload
-                    else:
-                        logger.warning(f"⚠️ Could not fetch evaluation for {interview_id} (HTTP {res.status_code})")
-                        return
-
-            if not evaluation or not isinstance(evaluation, list):
-                return
-
-            # 4. Check hard filters from database (legacy fallback)
-            conn = _get_db_connection()
-            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            
-            # Get hard filter questions for this job
-            cur.execute("""
-                SELECT question_text 
-                FROM job_screen_questions 
-                WHERE (jobdiva_id = %s OR jobdiva_id = %s) AND is_hard_filter = TRUE
-            """, (job_id, job_id))
-            hard_filter_rows = cur.fetchall()
-            hard_filter_texts = {r["question_text"].strip().lower() for r in hard_filter_rows}
-
-            # If no hard filters defined, we proceed based on score
-            meets_criteria = True # Score already checked above
-            if hard_filter_texts:
-                # Match evaluation items to hard filters
-                for ev in evaluation:
-                    q_text = str(ev.get("question", "")).strip().lower()
-                    if q_text in hard_filter_texts:
-                        ev_status = str(ev.get("status", "")).lower()
-                        if ev_status != HARD_FILTER_PASS_STATUS:
-                            logger.info(f"⏭️ Candidate {candidate_id} failed hard filter '{q_text}' for job {job_id}. Skipping email.")
-                            cur.close()
-                            conn.close()
-                            return
-            
-            cur.close()
-            conn.close()
-
+        # Pass logic: Must have 'passed' status AND (if scores provided) score >= 70% of total
+        meets_criteria = (hf_status == HARD_FILTER_PASS_STATUS)
+        
+        if meets_criteria and cand_score is not None and total_possible:
+            # Check ratio (e.g. 35/40 = 0.875 >= 0.7)
+            ratio = float(cand_score) / float(total_possible)
+            if ratio < PASS_CANDIDATE_SCORE_RATIO:
+                logger.info(f"⏭️ Candidate {candidate_id} passed hard filters but score ratio {ratio:.2f} is below threshold {PASS_CANDIDATE_SCORE_RATIO}")
+                meets_criteria = False
+        
         if not meets_criteria:
+            logger.info(f"⏭️ Candidate {candidate_id} did not meet strict pass criteria (HF: {hf_status}, Score: {cand_score}/{total_possible}).")
             return
+
+        score_display = f"{cand_score}/{total_possible}" if cand_score is not None else "Passed"
 
         # 5. Fetch Job & Candidate metadata for email
         conn = _get_db_connection()
@@ -1100,18 +1025,42 @@ async def _check_and_fire_candidate_passed_notification(
             conn.close()
             return
 
-        # 5. Build screening summary (all items in evaluation)
+        # 5. Build screening summary (all items in evaluation/transcriptions)
         screening_summary = []
-        if evaluation:
-            for ev in evaluation:
+        transcriptions = detail_payload.get("transcriptions") or []
+        
+        if transcriptions:
+            for item in transcriptions:
+                q_text = item.get("question") or "Question"
+                a_text = item.get("answer") or "—"
+                score = item.get("candidate_score")
+                total = item.get("total_score", 10.0)
+                reason = item.get("reason")
+                hf_status_item = item.get("hard_filter_status")
+                
+                value_str = a_text
+                if score is not None:
+                    value_str += f" (Score: {score}/{total})"
+                if hf_status_item:
+                    value_str += f" [HF: {hf_status_item.capitalize()}]"
+                if reason:
+                    value_str += f"\nReason: {reason}"
+                
+                screening_summary.append({
+                    "field": q_text,
+                    "value": value_str
+                })
+        elif hf_status != "":
+            # Fallback for simple status-based payload
+            screening_summary.append({"field": "Hard Filter Status", "value": str(hf_status).capitalize()})
+            screening_summary.append({"field": "Phone Screen Score", "value": score_display})
+        else:
+            # Legacy fallback
+            for ev in (detail_payload.get("evaluation") or []):
                 screening_summary.append({
                     "field": ev.get("question", "Question"),
                     "value": ev.get("answer", ev.get("status", "—"))
                 })
-        else:
-            # Fallback for new webhook path
-            screening_summary.append({"field": "Hard Filter Status", "value": str(hf_status).capitalize()})
-            screening_summary.append({"field": "Phone Screen Score", "value": f"{cand_score}/10"})
 
         # 6. Prepare attachment (resume text as .txt fallback)
         resume_bytes = None
@@ -1178,7 +1127,7 @@ async def _check_and_fire_candidate_passed_notification(
             candidate_name=cand_row["name"] or "Candidate",
             candidate_email=cand_row["email"],
             candidate_phone=cand_row["phone"],
-            screen_score=f"{score}%",
+            screen_score=score_display,
             summary=interview_block.get("summary") or "Passed screening criteria.",
             screening_summary=screening_summary,
             jobdiva_id=job_row["jobdiva_id"] or job_id,
