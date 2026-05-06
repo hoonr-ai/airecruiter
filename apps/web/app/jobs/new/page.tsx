@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useEffectEvent, useRef, Suspense } from "react";
+import { useState, useEffect, useEffectEvent, useMemo, useRef, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -76,6 +76,7 @@ import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { PasteResumeModal } from "@/components/jobs/PasteResumeModal";
 import { BulkUploadSection } from "@/components/jobs/BulkUploadSection";
 import { PhoneIndicator } from "@/components/phone-indicator";
+import { CandidateMatchTable, type CandidateMatchSortKey } from "@/components/candidate-match-table";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { API_BASE } from "@/lib/api";
 import { trackEvent } from "@/lib/analytics";
@@ -651,11 +652,44 @@ function NewJobPageContent() {
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
-  const [candidatesPerPage, setCandidatesPerPage] = useState(10);
-  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "linkedin-unipile" | "linkedin-exa" | "dice" | "upload-resume">("all");
+  const [candidatesPerPage, setCandidatesPerPage] = useState(20);
+  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "linkedin-unipile" | "linkedin-exa" | "dice" | "upload-resume" | "beyond">("all");
+  const [locationFilter, setLocationFilter] = useState<Set<string>>(new Set());
+  const [minScore, setMinScore] = useState<number>(0);
+  const [candidateSearchQuery, setCandidateSearchQuery] = useState<string>("");
+  const [sortKey, setSortKey] = useState<CandidateMatchSortKey>("match");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [locationFilterOpen, setLocationFilterOpen] = useState(false);
+  const locationFilterRef = useRef<HTMLDivElement | null>(null);
+  const [locationOptionSearch, setLocationOptionSearch] = useState("");
+
+  useEffect(() => {
+    if (!locationFilterOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (locationFilterRef.current && !locationFilterRef.current.contains(e.target as Node)) {
+        setLocationFilterOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [locationFilterOpen]);
+
+  const currentWithinMiles = useMemo(() => {
+    const radius = sourceLocations[0]?.radius;
+    const parsed = typeof radius === "string" ? Number(radius.match(/(\d+)/)?.[1] ?? 25) : 25;
+    return Math.min(100, Math.max(1, parsed));
+  }, [sourceLocations]);
+
+  const isBeyondRadius = (cand: any): boolean => {
+    const d = cand?.distance_miles;
+    if (typeof d !== "number" || !Number.isFinite(d)) return false;
+    return d > currentWithinMiles;
+  };
 
   const matchesSourceFilter = (cand: any) => {
     const src = String(cand.source || "").toLowerCase();
+    if (sourceFilter === "beyond") return isBeyondRadius(cand);
+    if (isBeyondRadius(cand)) return false;
     switch (sourceFilter) {
       case "all": return true;
       case "jobdiva": return src.startsWith("jobdiva");
@@ -667,6 +701,10 @@ function NewJobPageContent() {
     }
   };
   const sourceCounts = candidates.reduce((acc: Record<string, number>, c) => {
+    if (isBeyondRadius(c)) {
+      acc["beyond"] = (acc["beyond"] || 0) + 1;
+      return acc;
+    }
     const s = String(c.source || "").toLowerCase();
     if (s.startsWith("jobdiva")) acc["jobdiva"] = (acc["jobdiva"] || 0) + 1;
     else if (s === "linkedin-unipile" || s === "linkedin") acc["linkedin-unipile"] = (acc["linkedin-unipile"] || 0) + 1;
@@ -675,6 +713,8 @@ function NewJobPageContent() {
     else if (s === "upload-resume") acc["upload-resume"] = (acc["upload-resume"] || 0) + 1;
     return acc;
   }, {});
+
+  const inRadiusCount = candidates.length - (sourceCounts["beyond"] || 0);
 
   const getJobdivaSkills = () => {
     const seen = new Set<string>();
@@ -762,30 +802,111 @@ function NewJobPageContent() {
     ? `https://www1.jobdiva.com/employers/myjobs/vieweditjobform.jsp?lstjobs=1&jobid=${encodeURIComponent(jobdivaId || numericJobId)}`
     : "";
 
-  const sortedCandidates = [...candidates]
-    .filter(matchesSourceFilter)
-    .sort((a, b) => {
-      // Priority 1: JobDiva Applicants
-      // Priority 2: LinkedIn
-      // Priority 3: TalentSearch / Others
-      const getPriority = (c: any) => {
-        const source = String(c.source || "").toLowerCase();
-        if (source.includes("applicant")) return 1;
-        if (source.includes("linkedin")) return 2;
-        if (source.includes("talentsearch")) return 3;
-        return 4;
-      };
+  const candidateLocationOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const c of candidates) {
+      const loc =
+        (c as any).location ||
+        ((c as any).city
+          ? `${(c as any).city}${(c as any).state ? `, ${(c as any).state}` : ""}`
+          : "");
+      if (!loc) continue;
+      counts.set(loc, (counts.get(loc) ?? 0) + 1);
+    }
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+  }, [candidates]);
 
-      const prioA = getPriority(a);
-      const prioB = getPriority(b);
+  const getCandidateLocationStr = (c: any): string => {
+    if (c.location) return String(c.location);
+    if (c.city || c.state) {
+      return `${c.city || ""}${c.city && c.state ? ", " : ""}${c.state || ""}`;
+    }
+    return "";
+  };
 
-      if (prioA !== prioB) return prioA - prioB;
+  const getCandidateReceivedDate = (c: any): Date | null => {
+    const raw =
+      c.received || c.received_date || c.receivedDate || c.last_modified || c.lastModified;
+    if (!raw) return null;
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
 
-      // Secondary sort: Match Score
-      const scoreA = a.match_score || 0;
-      const scoreB = b.match_score || 0;
-      return scoreB - scoreA;
+  const sortedCandidates = useMemo(() => {
+    const trimmedQuery = candidateSearchQuery.trim().toLowerCase();
+    const sourcePriority = (c: any) => {
+      const source = String(c.source || "").toLowerCase();
+      if (source.includes("applicant")) return 1;
+      if (source.includes("linkedin")) return 2;
+      if (source.includes("talentsearch")) return 3;
+      return 4;
+    };
+
+    const filtered = candidates.filter((c: any) => {
+      if (!matchesSourceFilter(c)) return false;
+      if (minScore > 0) {
+        const score = typeof c.match_score === "number" ? c.match_score : 0;
+        if (score < minScore) return false;
+      }
+      if (locationFilter.size > 0) {
+        const loc = getCandidateLocationStr(c);
+        if (!loc || !locationFilter.has(loc)) return false;
+      }
+      if (trimmedQuery) {
+        const haystack = [
+          c.name,
+          c.firstName,
+          c.lastName,
+          c.email,
+          c.phone,
+          c.title,
+          c.headline,
+        ]
+          .map((v) => String(v || "").toLowerCase())
+          .join(" ");
+        if (!haystack.includes(trimmedQuery)) return false;
+      }
+      return true;
     });
+
+    const dirMul = sortDir === "asc" ? 1 : -1;
+    const cmp = (a: any, b: any) => {
+      switch (sortKey) {
+        case "match": {
+          const prioA = sourcePriority(a);
+          const prioB = sourcePriority(b);
+          if (prioA !== prioB) return prioA - prioB;
+          const scoreA = typeof a.match_score === "number" ? a.match_score : 0;
+          const scoreB = typeof b.match_score === "number" ? b.match_score : 0;
+          return (scoreA - scoreB) * dirMul;
+        }
+        case "name": {
+          const nameA = String(a.name || `${a.firstName || ""} ${a.lastName || ""}`).trim().toLowerCase();
+          const nameB = String(b.name || `${b.firstName || ""} ${b.lastName || ""}`).trim().toLowerCase();
+          return nameA.localeCompare(nameB) * dirMul;
+        }
+        case "lastActive": {
+          const dA = getCandidateReceivedDate(a)?.getTime() ?? 0;
+          const dB = getCandidateReceivedDate(b)?.getTime() ?? 0;
+          return (dA - dB) * dirMul;
+        }
+        case "location": {
+          const locA = getCandidateLocationStr(a).toLowerCase();
+          const locB = getCandidateLocationStr(b).toLowerCase();
+          return locA.localeCompare(locB) * dirMul;
+        }
+        case "source": {
+          const srcA = String(a.source || "").toLowerCase();
+          const srcB = String(b.source || "").toLowerCase();
+          return srcA.localeCompare(srcB) * dirMul;
+        }
+        default:
+          return 0;
+      }
+    };
+
+    return [...filtered].sort(cmp);
+  }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, sortKey, sortDir]);
 
   const totalPages = Math.max(1, Math.ceil(sortedCandidates.length / candidatesPerPage));
   const paginatedCandidates = sortedCandidates.slice(
@@ -4852,13 +4973,9 @@ function NewJobPageContent() {
     setScreenQuestions(prev => {
       if (from === to || from < 0 || to < 0) return prev;
       if (from >= prev.length || to >= prev.length) return prev;
-      const firstReorderableIdx = prev.findIndex(q => !q.is_default);
-      if (firstReorderableIdx < 0) return prev;
-      if (from < firstReorderableIdx) return prev;
-      const safeTo = Math.max(firstReorderableIdx, to);
       const next = [...prev];
       const [moved] = next.splice(from, 1);
-      next.splice(safeTo, 0, moved);
+      next.splice(to, 0, moved);
       return next.map((q, i) => ({ ...q, order_index: i }));
     });
     userHasEditedQuestionsRef.current = true;
@@ -4870,7 +4987,6 @@ function NewJobPageContent() {
   };
 
   const questionsDrag = useDragReorder((from, to) => moveScreenQuestion(from, to));
-  const firstReorderableQuestionIdx = screenQuestions.findIndex(q => !q.is_default);
 
   const setFiltersStep = (
     <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
@@ -5094,30 +5210,25 @@ function NewJobPageContent() {
           </div>
 
           {screenQuestions.map((q, index) => {
-            const isReorderable = firstReorderableQuestionIdx >= 0 && index >= firstReorderableQuestionIdx;
             return (
             <div
               key={q.id}
               className="flex items-start gap-3 py-3 border-b border-slate-100 last:border-b-0 group"
-              onDragOver={isReorderable ? questionsDrag.onDragOver : undefined}
-              onDrop={isReorderable ? questionsDrag.onDrop(index) : undefined}
+              onDragOver={questionsDrag.onDragOver}
+              onDrop={questionsDrag.onDrop(index)}
               onDragEnd={questionsDrag.onDragEnd}
             >
-              {isReorderable ? (
-                <button
-                  type="button"
-                  draggable
-                  onDragStart={questionsDrag.onDragStart(index)}
-                  onDragEnd={questionsDrag.onDragEnd}
-                  className="w-5 flex-shrink-0 flex items-center justify-center text-slate-300 hover:text-slate-600 cursor-grab active:cursor-grabbing mt-1.5"
-                  title="Drag to reorder"
-                  aria-label="Drag to reorder question"
-                >
-                  <GripVertical className="w-4 h-4" />
-                </button>
-              ) : (
-                <div className="w-5 flex-shrink-0" aria-hidden />
-              )}
+              <button
+                type="button"
+                draggable
+                onDragStart={questionsDrag.onDragStart(index)}
+                onDragEnd={questionsDrag.onDragEnd}
+                className="w-5 flex-shrink-0 flex items-center justify-center text-slate-300 hover:text-slate-600 cursor-grab active:cursor-grabbing mt-1.5"
+                title="Drag to reorder"
+                aria-label="Drag to reorder question"
+              >
+                <GripVertical className="w-4 h-4" />
+              </button>
               <div className="w-8 h-8 rounded-full bg-[#6366f1] text-white flex items-center justify-center text-[12px] font-bold flex-shrink-0 mt-0.5">
                 {index + 1}
               </div>
@@ -6428,22 +6539,26 @@ function NewJobPageContent() {
                   {candidates.length > 0 && (
                     <div className="flex items-center gap-1.5 mt-3 flex-wrap">
                       {([
-                        { id: "all", label: "All", count: candidates.length },
+                        { id: "all", label: "All", count: inRadiusCount },
                         { id: "jobdiva", label: "JobDiva", count: sourceCounts["jobdiva"] || 0 },
                         { id: "linkedin-unipile", label: "LinkedIn-Unipile", count: sourceCounts["linkedin-unipile"] || 0 },
                         { id: "linkedin-exa", label: "LinkedIn-Exa", count: sourceCounts["linkedin-exa"] || 0 },
                         { id: "dice", label: "Dice", count: sourceCounts["dice"] || 0 },
-                        { id: "upload-resume", label: "Upload-Resume", count: sourceCounts["upload-resume"] || 0 }
+                        { id: "upload-resume", label: "Upload-Resume", count: sourceCounts["upload-resume"] || 0 },
+                        { id: "beyond", label: `Beyond ${currentWithinMiles}mi`, count: sourceCounts["beyond"] || 0 }
                       ] as const).map(pill => {
                         if (pill.id !== "all" && pill.count === 0) return null;
                         const active = sourceFilter === pill.id;
+                        const isBeyond = pill.id === "beyond";
                         return (
                           <button
                             key={pill.id}
                             onClick={() => { setSourceFilter(pill.id as any); setCurrentPage(1); }}
-                            className={`px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider border transition-colors ${active ? 'bg-[#6366f1] text-white border-[#6366f1]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+                            className={`px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider border transition-colors ${active
+                              ? (isBeyond ? 'bg-amber-500 text-white border-amber-500' : 'bg-[#6366f1] text-white border-[#6366f1]')
+                              : (isBeyond ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50')}`}
                           >
-                            {pill.label} <span className={`ml-1 font-medium ${active ? 'text-white/80' : 'text-slate-400'}`}>{pill.count}</span>
+                            {pill.label} <span className={`ml-1 font-medium ${active ? 'text-white/80' : isBeyond ? 'text-amber-500' : 'text-slate-400'}`}>{pill.count}</span>
                           </button>
                         );
                       })}
@@ -6550,297 +6665,236 @@ function NewJobPageContent() {
                     </div>
                   )}
 
-                  {candidates.length > 0 ? (
-                    <div className="space-y-4">
-                      {paginatedCandidates.map((candidate, idx) => {
-                        // Select random badges to show matching elements
-                        const badgeOptions = [
-                          sourceTitles[0]?.value,
-                          sourceSkills[0]?.value ? `${sourceSkills[0]?.value} certified` : null,
-                          sourceSkills[1]?.value,
-                        ].filter(Boolean);
+                  {candidates.length > 0 && (
+                    <div className="mb-4 flex flex-wrap items-center gap-2 bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
+                      <div className="relative w-[280px] shrink-0">
+                        <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
+                          <Search className="h-4 w-4 text-slate-400" />
+                        </div>
+                        <Input
+                          placeholder="Search name, email, phone..."
+                          value={candidateSearchQuery}
+                          onChange={(e) => { setCandidateSearchQuery(e.target.value); setCurrentPage(1); }}
+                          className="h-9 pl-9 pr-3 w-full bg-slate-50 border-transparent focus:bg-white rounded-lg text-[13px]"
+                        />
+                      </div>
 
-                        const displayName = getCandidateDisplayName(candidate);
-                        const isLinkedIn = !!candidate.source?.startsWith('LinkedIn');
-                        const isJobDivaTalent = candidate.source === 'JobDiva-TalentSearch';
-                        const enhanced = (candidate.enhanced_info || {}) as Record<string, any>;
-                        const titleStr = String(candidate.title || candidate.current_title || candidate.headline || "").trim();
-                        const companyExp =
-                          (Array.isArray(candidate.company_experience) && candidate.company_experience.length > 0
-                            ? candidate.company_experience
-                            : Array.isArray(enhanced.company_experience)
-                              ? enhanced.company_experience
-                              : []) as Array<{ company?: string }>;
-                        const companyStr = String(companyExp[0]?.company || "").trim();
-                        const titleAtCompany = titleStr && companyStr
-                          ? `${titleStr} @ ${companyStr}`
-                          : titleStr || companyStr;
-                        const yearsRaw =
-                          candidate.experience_years ??
-                          candidate.years_experience ??
-                          enhanced.years_of_experience;
-                        const yearsNum = typeof yearsRaw === "number" ? yearsRaw : Number(yearsRaw);
-                        const yearsStr = Number.isFinite(yearsNum) && yearsNum > 0 ? `${yearsNum}+ yrs exp` : "";
-                        const skillsRaw = Array.isArray(candidate.matched_skills) ? candidate.matched_skills : [];
-                        const topSkills = skillsRaw
-                          .map((s: any) => (typeof s === "string" ? s : s?.name))
-                          .filter((s: any) => typeof s === "string" && s.trim().length > 0)
-                          .slice(0, 3) as string[];
-                        const matchScore = typeof candidate.match_score === "number" ? candidate.match_score : null;
-                        const matchTone = matchScore == null
-                          ? null
-                          : matchScore >= 80
-                            ? { ring: "#2563eb", bg: "#dbeafe", text: "#1d4ed8" }
-                            : matchScore >= 60
-                              ? { ring: "#d97706", bg: "#fef3c7", text: "#b45309" }
-                              : { ring: "#e11d48", bg: "#ffe4e6", text: "#be123c" };
-                        const recentAvailabilityRaw = String(
-                          candidate.recent_availability ||
-                          candidate.recentAvailability ||
-                          candidate.availability_status ||
-                          candidate.available ||
-                          ""
-                        ).trim();
-                        const availabilityLower = recentAvailabilityRaw.toLowerCase();
-                        const availabilityChip = recentAvailabilityRaw
-                          ? availabilityLower.includes("available") || availabilityLower.includes("open")
-                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                            : availabilityLower.includes("placed") || availabilityLower.includes("assignment") || availabilityLower.includes("employed")
-                              ? "bg-slate-100 text-slate-600 border-slate-200"
-                              : "bg-amber-50 text-amber-700 border-amber-200"
-                          : "";
-                        const locationStr = candidate.location || (candidate.city || candidate.state
-                          ? `${candidate.city || ""}${candidate.city && candidate.state ? ", " : ""}${candidate.state || ""}`
-                          : "");
-                        const receivedRaw = candidate.received || candidate.received_date || candidate.receivedDate || candidate.last_modified || candidate.lastModified;
-                        let receivedStr = "";
-                        if (receivedRaw) {
-                          const d = new Date(receivedRaw);
-                          if (!Number.isNaN(d.getTime())) {
-                            receivedStr = d.toISOString().slice(0, 19);
-                          } else if (typeof receivedRaw === "string") {
-                            receivedStr = receivedRaw;
-                          }
-                        }
-                        const sourceBadgeColor = isLinkedIn
-                          ? 'bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]'
-                          : isJobDivaTalent
-                            ? 'bg-[#fff7ed] text-[#c2410c] border-[#fed7aa]'
-                            : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]';
-                        const handleOpenDetails = () => {
-                          setSelectedCandidateForDetails({
-                            name: displayName,
-                            profileUrl: candidate.profile_url,
-                            imageUrl: candidate.image_url,
-                            jobTitle: candidate.title || candidate.headline || "",
-                            location: candidate.location || (candidate.city ? `${candidate.city}, ${candidate.state}` : ""),
-                            experienceYears: candidate.experience_years || candidate.yearsExtracted || candidate.enhanced_info?.years_of_experience || null,
-                            tags: badgeOptions,
-                            matchScore: candidate.match_score,
-                            missingSkills: candidate.missing_skills,
-                            explainability: candidate.explainability,
-                            matchScoreDetails: candidate.match_score_details,
-                            matchedSkills: candidate.matched_skills,
-                            candidateId: candidate.candidate_id || candidate.jobdiva_candidate_id || candidate.id,
-                            source: candidate.source,
-                          });
-                          setDetailsModalOpen(true);
-                        };
-                        return (
-                          <div key={`${candidate.candidate_id || candidate.id}-${idx}`} className="p-5 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-purple-200 hover:shadow-md transition-all flex items-start gap-4">
-                            <Checkbox
-                              className="w-4.5 h-4.5 mt-1.5 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600 shrink-0"
-                              checked={selectedCandidates.has(candidate.candidate_id || candidate.id)}
-                              onCheckedChange={(checked) => {
-                                setSelectedCandidates(prev => {
-                                  const next = new Set(prev);
-                                  const id = candidate.candidate_id || candidate.id;
-                                  if (checked) next.add(id);
-                                  else next.delete(id);
-                                  return next;
-                                });
-                              }}
-                            />
-                            <div className="flex-1 min-w-0">
-                              {/* Top: name+meta on the left, action buttons on the right */}
-                              <div className="flex items-start justify-between gap-4">
-                                <div className="flex-1 min-w-0">
-                                  {/* Name row — name truncates first; badge + phone stay together */}
-                                  <div className="flex items-center gap-2 min-w-0">
-                                    <a
-                                      href={isLinkedIn ? candidate.profile_url || '#' : '#'}
-                                      target={isLinkedIn ? "_blank" : undefined}
-                                      rel={isLinkedIn ? "noopener noreferrer" : undefined}
-                                      className={`text-[18px] font-bold text-slate-900 transition-colors truncate min-w-0 ${isLinkedIn ? 'hover:text-[#1d4ed8]' : isJobDivaTalent ? 'hover:text-[#c2410c]' : 'hover:text-[#6366f1]'}`}
-                                      onClick={async (e) => {
-                                        if (isLinkedIn) return;
-                                        e.preventDefault();
-                                        const opened = await fetchAndOpenProfileUrl(candidate);
-                                        if (!opened) handleViewResume(candidate);
-                                      }}
-                                      title={isLinkedIn ? "View LinkedIn Profile" : `${displayName} — Click to view resume`}
-                                    >
-                                      {displayName}
-                                    </a>
-                                    <span
-                                      className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center gap-1 border shrink-0 ${sourceBadgeColor}`}
-                                      title={candidate.source || "JobDiva"}
-                                    >
-                                      {isLinkedIn ? <Linkedin className="w-2.5 h-2.5 fill-current" /> : isJobDivaTalent ? <Zap className="w-2.5 h-2.5 fill-current" /> : <ShieldCheck className="w-2.5 h-2.5" />}
-                                      {isLinkedIn
-                                        ? "LinkedIn"
-                                        : isJobDivaTalent
-                                          ? "JobDiva"
-                                          : (candidate.source || "JobDiva")}
-                                    </span>
-                                    <div className="shrink-0">
-                                      <PhoneIndicator
-                                        candidateId={String(candidate.candidate_id || candidate.id || "")}
-                                        jobdivaId={jobdivaId || jobData?.jobdiva_id || String(numericJobId || "")}
-                                        phone={candidate.phone}
-                                        persist={false}
-                                        onSaved={(normalised) => {
-                                          const cid = candidate.candidate_id || candidate.id;
-                                          setCandidates(prev =>
-                                            prev.map(c =>
-                                              (c.candidate_id || c.id) === cid
-                                                ? { ...c, phone: normalised }
-                                                : c
-                                            )
-                                          );
-                                        }}
-                                      />
-                                    </div>
-                                  </div>
-                                  {/* Subtitle: title @ company */}
-                                  {titleAtCompany && (
-                                    <p className="text-[13.5px] text-slate-600 mt-1 truncate" title={titleAtCompany}>
-                                      {titleAtCompany}
-                                    </p>
-                                  )}
-
-                                  {/* Contact row */}
-                                  {(candidate.phone || candidate.email || yearsStr) && (
-                                    <div className="flex items-center gap-x-5 gap-y-1 mt-2 flex-wrap text-[12.5px] text-slate-600">
-                                      {candidate.phone && (
-                                        <span className="inline-flex items-center gap-1.5">
-                                          <Phone className="w-3.5 h-3.5 text-slate-400" />
-                                          {candidate.phone}
-                                        </span>
-                                      )}
-                                      {candidate.email && (
-                                        <span className="inline-flex items-center gap-1.5 truncate max-w-[28ch]" title={candidate.email}>
-                                          <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
-                                          <span className="truncate">{candidate.email}</span>
-                                        </span>
-                                      )}
-                                      {yearsStr && (
-                                        <span className="inline-flex items-center gap-1.5">
-                                          <Clock className="w-3.5 h-3.5 text-slate-400" />
-                                          {yearsStr}
-                                        </span>
-                                      )}
-                                    </div>
-                                  )}
-                                </div>
+                      <div className="relative" ref={locationFilterRef}>
+                        <button
+                          type="button"
+                          onClick={() => setLocationFilterOpen((v) => !v)}
+                          className={`h-9 px-3 inline-flex items-center gap-2 rounded-lg border text-[13px] font-medium transition-colors ${
+                            locationFilter.size > 0
+                              ? "bg-indigo-50 border-indigo-200 text-indigo-700"
+                              : "bg-slate-50 border-transparent text-slate-700 hover:bg-white hover:border-slate-200"
+                          }`}
+                        >
+                          <MapPin className="w-3.5 h-3.5" />
+                          Location
+                          {locationFilter.size > 0 && (
+                            <span className="px-1.5 py-0.5 rounded-full bg-indigo-600 text-white text-[10px] font-bold">
+                              {locationFilter.size}
+                            </span>
+                          )}
+                          <ChevronDown className="w-3.5 h-3.5 opacity-60" />
+                        </button>
+                        {locationFilterOpen && (
+                          <div className="absolute z-30 mt-1 left-0 w-[300px] max-h-[340px] flex flex-col bg-white rounded-lg border border-slate-200 shadow-lg">
+                            <div className="p-2 border-b border-slate-100">
+                              <Input
+                                placeholder="Filter locations..."
+                                value={locationOptionSearch}
+                                onChange={(e) => setLocationOptionSearch(e.target.value)}
+                                className="h-8 text-[12.5px]"
+                              />
+                            </div>
+                            <div className="overflow-y-auto p-1">
+                              {candidateLocationOptions.length === 0 ? (
+                                <div className="px-3 py-4 text-[12px] text-slate-400 text-center">No locations found.</div>
+                              ) : (
+                                candidateLocationOptions
+                                  .filter(([loc]) =>
+                                    loc.toLowerCase().includes(locationOptionSearch.trim().toLowerCase())
+                                  )
+                                  .map(([loc, count]) => {
+                                    const checked = locationFilter.has(loc);
+                                    return (
+                                      <label
+                                        key={loc}
+                                        className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-slate-50 cursor-pointer text-[12.5px]"
+                                      >
+                                        <Checkbox
+                                          checked={checked}
+                                          onCheckedChange={(v) => {
+                                            setLocationFilter((prev) => {
+                                              const next = new Set(prev);
+                                              if (v) next.add(loc);
+                                              else next.delete(loc);
+                                              return next;
+                                            });
+                                            setCurrentPage(1);
+                                          }}
+                                          className="w-3.5 h-3.5"
+                                        />
+                                        <span className="flex-1 truncate text-slate-700" title={loc}>{loc}</span>
+                                        <span className="text-[11px] text-slate-400">{count}</span>
+                                      </label>
+                                    );
+                                  })
+                              )}
+                            </div>
+                            {locationFilter.size > 0 && (
+                              <div className="border-t border-slate-100 p-2">
+                                <button
+                                  type="button"
+                                  onClick={() => { setLocationFilter(new Set()); setCurrentPage(1); }}
+                                  className="text-[12px] font-semibold text-indigo-600 hover:text-indigo-800"
+                                >
+                                  Clear selection
+                                </button>
                               </div>
-
-                                {/* Match circle + skill chips + buttons (right cluster) */}
-        <div className="flex items-start gap-3 shrink-0">
-          {matchScore !== null && matchTone && (
-            <div
-              className="w-14 h-14 rounded-full flex flex-col items-center justify-center shrink-0"
-              style={{ backgroundColor: matchTone.bg, color: matchTone.text, border: `2px solid ${matchTone.ring}` }}
-              title="Match score"
-            >
-              <span className="text-[15px] font-extrabold leading-none">{matchScore}%</span>
-              <span className="text-[9px] font-bold uppercase tracking-wider mt-0.5">Match</span>
-            </div>
-          )}
-
-          {topSkills.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 max-w-[260px] items-center self-center">
-              {topSkills.map((skill, i) => (
-                <span
-                  key={`${skill}-${i}`}
-                  className="px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 text-[11px] font-semibold border border-slate-200"
-                  title={`Matched skill: ${skill}`}
-                >
-                  {skill}
-                </span>
-              ))}
-            </div>
-          )}
-
-          <div className="flex flex-col gap-1.5 shrink-0 ml-1">
-            <Button
-              size="sm"
-              className="h-8 px-3 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300 font-semibold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-1.5 min-w-[150px]"
-              onClick={handleOpenDetails}
-            >
-              <Eye className="w-3.5 h-3.5" />
-              View Full Profile
-            </Button>
-            {!isLinkedIn && (
-              <Button
-                size="sm"
-                className="h-8 px-3 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300 font-semibold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-1.5 min-w-[150px]"
-                onClick={() => handleViewResume({ ...candidate, firstName: displayName.split(" ")[0] || displayName, lastName: displayName.split(" ").slice(1).join(" ") })}
-                title="Open candidate resume"
-              >
-                <FileText className="w-3.5 h-3.5" />
-                View Resume
-              </Button>
-            )}
-          </div>
-        </div>
-      </div>
-
-                              {/* Footer strip: date | location | availability */ }
-    {
-      (receivedStr || locationStr || recentAvailabilityRaw) && (
-        <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center gap-3 flex-wrap text-[11.5px] text-slate-500">
-          {receivedStr && (
-            <span className="inline-flex items-center gap-1.5">
-              <Calendar className="w-3 h-3 text-slate-400" />
-              {receivedStr}
-            </span>
-          )}
-          {receivedStr && locationStr && <span className="text-slate-300">|</span>}
-          {locationStr && (
-            <span className="inline-flex items-center gap-1.5">
-              <MapPin className="w-3 h-3 text-slate-400" />
-              {locationStr}
-            </span>
-          )}
-          {recentAvailabilityRaw && (
-            <span className={`ml-auto px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${availabilityChip}`} title="Recent availability from JobDiva">
-              {recentAvailabilityRaw}
-            </span>
-          )}
-        </div>
-                                  )}
-                                </div>
-                              );
-                            })}
+                            )}
                           </div>
-                        ) : isSearching ? (
-  <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-pulse mt-4">
-    <div className="flex flex-col items-center gap-3">
-      <div className="w-12 h-12 border-4 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-2" />
-      <p className="text-slate-600 text-sm font-bold animate-pulse">{searchStatus}</p>
-      <p className="text-slate-400 text-[12px] font-medium italic">Retrieving candidate records associated with Job ID {numericJobId || jobdivaId}...</p>
-    </div>
-  </div>
-) : (
-  <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
-    <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-6 shadow-inner">
-      <Users className="w-8 h-8 text-slate-300" />
-    </div>
-    <p className="text-slate-600 text-base font-bold">No candidates found with the current filters.</p>
-    <p className="text-slate-400 text-[13px] mt-2 font-medium">Try broadening your criteria or adding more titles/skills.</p>
-  </div>
-)}
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-1.5 h-9 px-3 rounded-lg bg-slate-50 border border-transparent">
+                        <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Min match</label>
+                        <input
+                          type="number"
+                          min={0}
+                          max={100}
+                          value={minScore}
+                          onChange={(e) => {
+                            const n = Math.max(0, Math.min(100, Number(e.target.value) || 0));
+                            setMinScore(n);
+                            setCurrentPage(1);
+                          }}
+                          className="w-14 bg-transparent text-[13px] font-semibold text-slate-800 focus:outline-none"
+                        />
+                        <span className="text-[11px] text-slate-400">%</span>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 h-9 px-3 rounded-lg bg-slate-50 border border-transparent">
+                        <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Sort</label>
+                        <select
+                          value={`${sortKey}:${sortDir}`}
+                          onChange={(e) => {
+                            const [k, d] = e.target.value.split(":") as [CandidateMatchSortKey, "asc" | "desc"];
+                            setSortKey(k);
+                            setSortDir(d);
+                            setCurrentPage(1);
+                          }}
+                          className="bg-transparent text-[13px] font-semibold text-slate-700 focus:outline-none cursor-pointer"
+                        >
+                          <option value="match:desc">Match score (high → low)</option>
+                          <option value="match:asc">Match score (low → high)</option>
+                          <option value="name:asc">Name (A → Z)</option>
+                          <option value="name:desc">Name (Z → A)</option>
+                          <option value="lastActive:desc">Last active (newest)</option>
+                          <option value="lastActive:asc">Last active (oldest)</option>
+                          <option value="location:asc">Location (A → Z)</option>
+                          <option value="source:asc">Source (A → Z)</option>
+                        </select>
+                      </div>
+
+                      <div className="ml-auto text-[12px] text-slate-500">
+                        {sortedCandidates.length} of {candidates.length}
+                      </div>
+                    </div>
+                  )}
+
+                  {candidates.length > 0 ? (
+                    <CandidateMatchTable
+                      candidates={paginatedCandidates}
+                      selectedIds={selectedCandidates}
+                      onToggleSelect={(id, checked) => {
+                        setSelectedCandidates((prev) => {
+                          const next = new Set(prev);
+                          if (checked) next.add(id);
+                          else next.delete(id);
+                          return next;
+                        });
+                      }}
+                      onOpenDetails={(candidate) => {
+                        setSelectedCandidateForDetails({
+                          name: getCandidateDisplayName(candidate),
+                          profileUrl: candidate.profile_url,
+                          imageUrl: candidate.image_url,
+                          jobTitle: candidate.title || candidate.headline || "",
+                          location:
+                            candidate.location ||
+                            (candidate.city ? `${candidate.city}, ${candidate.state}` : ""),
+                          experienceYears:
+                            candidate.experience_years ||
+                            candidate.yearsExtracted ||
+                            candidate.enhanced_info?.years_of_experience ||
+                            null,
+                          tags: [
+                            sourceTitles[0]?.value,
+                            sourceSkills[0]?.value ? `${sourceSkills[0]?.value} certified` : null,
+                            sourceSkills[1]?.value,
+                          ].filter(Boolean),
+                          matchScore: candidate.match_score,
+                          missingSkills: candidate.missing_skills,
+                          explainability: candidate.explainability,
+                          matchScoreDetails: candidate.match_score_details,
+                          matchedSkills: candidate.matched_skills,
+                          candidateId:
+                            candidate.candidate_id || candidate.jobdiva_candidate_id || candidate.id,
+                          source: candidate.source,
+                        });
+                        setDetailsModalOpen(true);
+                      }}
+                      onOpenResume={async (candidate) => {
+                        const isLinkedIn = !!candidate.source?.startsWith("LinkedIn");
+                        if (isLinkedIn && candidate.profile_url) {
+                          window.open(candidate.profile_url, "_blank", "noopener,noreferrer");
+                          return;
+                        }
+                        const opened = await fetchAndOpenProfileUrl(candidate);
+                        if (!opened) {
+                          const displayName = getCandidateDisplayName(candidate);
+                          handleViewResume({
+                            ...candidate,
+                            firstName: displayName.split(" ")[0] || displayName,
+                            lastName: displayName.split(" ").slice(1).join(" "),
+                          });
+                        }
+                      }}
+                      onPhoneSaved={(id, normalised) => {
+                        setCandidates((prev) =>
+                          prev.map((c) =>
+                            (c.candidate_id || c.id) === id ? { ...c, phone: normalised } : c
+                          )
+                        );
+                      }}
+                      jobdivaId={jobdivaId || jobData?.jobdiva_id || String(numericJobId || "")}
+                      sortKey={sortKey}
+                      sortDir={sortDir}
+                      onSortChange={(k, d) => {
+                        setSortKey(k);
+                        setSortDir(d);
+                        setCurrentPage(1);
+                      }}
+                    />
+                  ) : isSearching ? (
+                    <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-pulse mt-4">
+                      <div className="flex flex-col items-center gap-3">
+                        <div className="w-12 h-12 border-4 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-2" />
+                        <p className="text-slate-600 text-sm font-bold animate-pulse">{searchStatus}</p>
+                        <p className="text-slate-400 text-[12px] font-medium italic">Retrieving candidate records associated with Job ID {numericJobId || jobdivaId}...</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
+                      <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-6 shadow-inner">
+                        <Users className="w-8 h-8 text-slate-300" />
+                      </div>
+                      <p className="text-slate-600 text-base font-bold">No candidates found with the current filters.</p>
+                      <p className="text-slate-400 text-[13px] mt-2 font-medium">Try broadening your criteria or adding more titles/skills.</p>
+                    </div>
+                  )}
 
 {/* Pagination Controls */ }
 {/* Pagination Controls */ }

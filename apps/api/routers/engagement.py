@@ -226,9 +226,10 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 ORDER BY order_index
             """, (jobdiva_id_for_lookup, job_id_for_lookup))
             rows = cur.fetchall()
+            from routers.voice_agent import _humanize_question_text
             pre_screen_questions = [
                 {
-                    "question_text": r["question_text"],
+                    "question_text": _humanize_question_text(r["question_text"]),
                     "pass_criteria": r["pass_criteria"],
                     "is_default": r["is_default"],
                     "category": r["category"],

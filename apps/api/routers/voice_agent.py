@@ -3,6 +3,7 @@ from services.job_rubric_db import JobRubricDB
 from services.jobdiva import jobdiva_service
 import psycopg2
 import psycopg2.extras
+import re
 from core.config import DATABASE_URL
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -14,6 +15,23 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Voice Agent Integration"])
+
+# Questions stored verbatim often begin with "You ..." (declarative). When
+# spoken aloud by the screener, prepending a soft hedge — "Let's say you ..." —
+# lands as a natural lead-in rather than an interrogation. Applied only at the
+# voice-agent boundary; the editor and DB keep the original text.
+_LEADING_YOU_RE = re.compile(r"^You\b", re.IGNORECASE)
+
+
+def _humanize_question_text(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return text
+    leading = len(text) - len(text.lstrip())
+    body = text[leading:]
+    match = _LEADING_YOU_RE.match(body)
+    if not match:
+        return text
+    return f"{text[:leading]}Let's say you{body[match.end():]}"
 
 @router.get("/jobs/{job_id}")
 async def get_voice_job_context(job_id: str):
@@ -64,6 +82,8 @@ async def get_voice_job_context(job_id: str):
         pre_screen_questions = rubric.pop('screen_questions', [])
         for q in pre_screen_questions:
             q.pop('order_index', None)
+            if 'question_text' in q:
+                q['question_text'] = _humanize_question_text(q.get('question_text'))
         rubric.pop('bot_introduction', None)
         
         return {
