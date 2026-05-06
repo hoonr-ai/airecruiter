@@ -360,6 +360,7 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
         location       = f"{row.get('city', 'TBD')}, {row.get('state', '')}"
         db_job_id     = str(row.get("job_id") or job_id)
         clean_emails  = [str(e) for e in recruiter_emails if e]
+        ai_desc       = row.get("ai_description") or ""
 
         # ── Email #1: PAIR Launch Confirmation ───────────────────────────────
         await asyncio.to_thread(
