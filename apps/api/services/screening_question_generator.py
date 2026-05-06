@@ -396,18 +396,49 @@ def _build_prompt(
     artifacts = _FAMILY_ARTIFACTS.get(shot_key) or _FAMILY_ARTIFACTS["generic_it"]
 
     intro = (
-        "You are a senior technical recruiter writing screening questions for a live phone screen."
+        "You are a senior technical recruiter and AI interview screener specializing in\n"
+        f"engineering hiring for a {seniority} {job_title} role.\n\n"
+        "This is a 10–20 minute first-round AUDIO screening — NOT a deep technical interview,\n"
+        "NOT a behavioral interview, NOT a coding exercise. Your job:\n"
+        "  - Verify the candidate genuinely possesses the rubric skills (no keyword stuffing)\n"
+        "  - Detect fake or surface-level experience\n"
+        "  - Validate practical understanding through verbal discussion\n"
+        "  - Surface depth, production exposure, and problem-solving maturity"
         if is_it
         else "You are an experienced recruiter writing screening questions for a live phone screen."
     )
     rule3 = (
-        "Mix question types across the set: ~70% technical-depth (one per must-have skill where\n"
-        "   possible) and ~30% architecture / scenario / debugging. NO behavioral, observational,\n"
-        "   or 'tell me about a time when' questions. NO 'describe your experience with X'\n"
-        "   phrasing. Every question must require concrete technical knowledge — a tool name,\n"
-        "   syntax detail, algorithm, configuration choice, failure-mode signal, or trade-off\n"
-        "   rationale. For junior seniority: favor factual + debugging questions. For\n"
-        "   senior/staff/principal: favor architecture, scaling, and failure-mode questions."
+        "Questions must be PRACTICAL and SCENARIO-DRIVEN. Anchor each question on a concrete\n"
+        "   production-shaped problem (real OR hypothetical) — \"You have a service doing X —\n"
+        "   what would you check first?\" is fine; \"sort an array in O(log n)\" is not. Lead\n"
+        "   with the scenario, end with the ask. Prefer \"You have a REST API slow at 10k\n"
+        "   users. What would you check?\" over \"Can you explain how you used X to do Y?\"\n\n"
+        "   Each question must surface ONE of:\n"
+        "     - System / production experience (real or hypothetical, but concrete)\n"
+        "     - Architecture understanding (how the pieces fit at the system level)\n"
+        "     - Real usage of frameworks/tools (how, when, why — not what)\n"
+        "     - Problem-solving maturity (trade-offs, failure-mode reasoning, prioritization\n"
+        "       under constraint)\n"
+        "     - End-to-end workflow understanding (how the rubric skills connect into a flow)\n"
+        "     - Conceptual fundamentals — fair game when paired with a 'why we use it' or\n"
+        "       'when does this matter' that requires real-world judgment (e.g. \"difference\n"
+        "       between sync and async in JavaScript — why use async/await?\"). NOT trivia.\n\n"
+        "   Strongly recommended for full-stack or multi-layer roles: include AT LEAST ONE\n"
+        "   end-to-end workflow question — e.g. \"A user clicks Save. Trace the complete flow\n"
+        "   from UI through API, service, and DB, and back.\" These naturally exercise multiple\n"
+        "   rubric skills in one question.\n\n"
+        f"   Calibrate difficulty by the {total_years}+ year target experience for this role:\n"
+        "     - 2–4 yrs → implementation understanding (how they used the tool, what they\n"
+        "       configured, what broke and how they noticed)\n"
+        "     - 5–8 yrs → architecture + debugging (how the pieces connect, how they diagnose\n"
+        "       a real production issue end to end)\n"
+        "     - 8+ yrs → scalability, design decisions, production hardening (what they'd\n"
+        "       change at 10× scale, what trade-off they made and why, system evolution)\n\n"
+        "   AVOID, every time:\n"
+        "     - Coding exercises, live coding, LeetCode / DSA / algorithm puzzles\n"
+        "     - Trivia (memorizing one keyword or syntax form, with no 'why' or 'when' angle)\n"
+        "     - Behavioral / observational phrasing (\"tell me about a time\", \"describe a\n"
+        "       challenging issue\", \"what does success look like\", \"share an example\")"
     ) if is_it else (
         "Mix question types across the set: ~50% process/scenario, ~25% stakeholder/communication,\n"
         "   ~25% behavioral/ownership. For junior seniority: favor concrete-task questions. For\n"
@@ -416,16 +447,19 @@ def _build_prompt(
         "   production systems, release pipelines) — this is not a technical role."
     )
     categories_line = (
-        '"category": "technical-depth" | "architecture" | "scenario" | "debugging",'
+        '"category": "scenario" | "architecture" | "debugging" | "production" | "trade-off" | "end-to-end" | "fundamentals",'
         if is_it
         else '"category": "process" | "stakeholder" | "behavioral" | "scenario",'
     )
     rubric_anchor_rule = (
-        "RUBRIC ANCHORING (IT): Allocate one technical-depth question per must-have skill in\n"
-        "   the rubric, in listed order, until you exhaust must-have skills or hit the\n"
-        "   technical-depth budget (~70% of the target count). Each anchored question's\n"
-        "   `related_skill` MUST exactly match the rubric skill name. Remaining slots fill with\n"
-        "   architecture / scenario / debugging questions that combine ≥2 rubric skills."
+        "RUBRIC COVERAGE (IT): Cover the must-have skills across the question set, but BUNDLE\n"
+        "   related skills into single questions where natural — Java + Spring Boot together,\n"
+        "   Angular + React in a state-sharing question, HTML + CSS + JavaScript in a UI\n"
+        "   question, Agile woven into how the work was delivered. It's better to cover 7\n"
+        "   skills sharply across 5 questions than to one-shot each skill awkwardly. Set\n"
+        "   `related_skill` to the primary rubric skill the question targets (when bundled,\n"
+        "   pick the strongest). Skills that are methodologies (Agile, Scrum, TDD) should be\n"
+        "   woven INTO scenario questions, not asked as standalone process questions."
     ) if is_it else (
         "RUBRIC ANCHORING: Where the rubric lists named tools, processes, or frameworks, ground\n"
         "   each question in one of them and set `related_skill` to the matching rubric value."
@@ -457,22 +491,37 @@ STRICT RULES — FOLLOW EVERY ONE:
 1. Do NOT write "Can you describe your experience with <skill>?" — that is the boilerplate
    you are replacing. Always probe a specific sub-capability, decision, trade-off, or
    failure mode.
-2. For each skill in must-haves, write a question that assumes the candidate has used it
-   in real work and asks something concrete about HOW they used it. Domain example for
-   THIS role ({domain if is_it else family}):
+2. Ground questions in the rubric skills. Bundle naturally related skills into a single
+   question (Java + Spring Boot, Angular + React, HTML + CSS + JS into a UI question)
+   rather than forcing one question per skill. Domain example for THIS role
+   ({domain if is_it else family}):
      {shot_block}
 3. {rubric_anchor_rule}
 4. {rule3}
 5. Reference specific named concepts, tools, or artifacts where sensible — for THIS
    domain that means: {artifacts}. Do not be generic, and do not pull in concepts from
    unrelated domains.
-6. {"BANNED PATTERNS for IT roles — if any question matches these patterns, the entire output is invalid and you must rewrite. NEVER use ANY of: 'Tell me about a time', 'Tell me about a recent', 'Tell me about a situation', 'Describe a situation', 'Describe a challenging issue/problem/project', 'Walk me through a time', 'When priorities conflicted', 'How did you balance', 'directly influenced the final outcome', 'What does strong execution look like', 'What does success look like', 'share an example', 'share one example', 'What decision mattered most', 'How did you approach', 'How do you typically'. Replace every one of these with a probe of a specific technical artifact (a config flag, an API method, a syntax detail, a metric/log signal, an algorithm choice, a concrete trade-off between named alternatives like X vs Y)." if is_it else "Ground questions in stakeholder, process, or outcome language consistent with this non-technical role."}
-7. Each question must include a `pass_criteria` — a one-sentence CONCRETE signal the
-    recruiter should listen for in the answer. Never ask for years or use wording like
-    "N+ years", "X years of experience", "minimum years", or similar duration thresholds.
-8. Questions must be answerable in under 90 seconds each during a phone screen.
+6. {"Behavioral / observational phrasing is invalid and will be rejected by a post-filter — do not write 'tell me about a time / situation / recent', 'describe a challenging issue', 'what does success look like', 'share an example', 'how did you balance', 'how did you typically approach'. Rewrite any such draft as a scenario-driven probe." if is_it else "Ground questions in stakeholder, process, or outcome language consistent with this non-technical role."}
+7. The `pass_criteria` field MUST be ONE string with two parts:
+    - "Pass: " followed by a comma-separated CHECKLIST of 5–8 named concepts, tools,
+      patterns, or layers a real practitioner would mention while answering — items the
+      recruiter can literally tick off during the call. NOT a sentence.
+    - " | Red flag: " followed by ONE short phrase a fake/surface candidate would say.
+    Format examples:
+      - "Pass: thread pool tuning, DB connection pool, query plan / N+1, caching layer,
+        async/queue offload, JVM heap & GC. | Red flag: 'we'd just add more servers.'"
+      - "Pass: event loop, microtask queue, promises, async/await as syntactic sugar,
+        non-blocking I/O, error propagation in awaited calls. | Red flag: 'async/await
+        makes JavaScript multi-threaded.'"
+      - "Pass: HTTP request, controller, service layer, validation, DB transaction,
+        response payload, optimistic UI update, error rollback. | Red flag: 'the
+        frontend just calls the backend.'"
+    Never use "N+ years", "X years of experience", or duration thresholds anywhere.
+8. Each `question_text` is ≤ 25 words and answerable verbally in 60–90 seconds — no
+    coding. Lead with the scenario and end with the ask: "You have X. What would you
+    check?" / "A user does Y. Trace the flow." NOT "Can you explain how you used X?"
 9. Do not repeat or paraphrase the same question.
-10. Return nothing except the JSON array below.
+10. Return nothing except the JSON below.
 
 OUTPUT FORMAT — return a STRICT JSON object like this:
 {{
@@ -702,12 +751,14 @@ async def generate_screening_questions(
 
     is_it_role = family == "it"
     system_message = (
-        "You write sharp, specific TECHNICAL screening questions that separate real practitioners "
-        "from surface-level candidates. You avoid generic 'describe your experience' phrasing. "
-        "You NEVER produce behavioral or 'tell me about a time when' questions for IT roles — "
-        "every question must be answerable only by someone who has hands-on coded, configured, "
-        "or operated the tool, naming a concrete syntax detail, configuration knob, failure "
-        "signal, or trade-off. You always return strict JSON."
+        "You are a senior technical recruiter and AI interview screener for engineering hiring. "
+        "You write 4–6 question first-round audio screens that verify a candidate genuinely "
+        "possesses the rubric skills, detect keyword stuffing, and validate practical "
+        "understanding through verbal discussion. NOT a deep technical interview. NOT a "
+        "behavioral interview. NOT a coding exercise. Questions are practical, scenario-driven, "
+        "anchored to real production work, and answerable in 60–90 seconds on a phone call. "
+        "Each question pairs a pass signal (what to expect from a real practitioner) with a red "
+        "flag (phrasing that indicates fake or surface-level experience). Output strict JSON only."
     ) if is_it_role else (
         "You write sharp, role-relevant screening questions for non-technical roles. "
         "You avoid software-delivery jargon (CI/CD, deployment, rollback, architecture, "
