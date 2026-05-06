@@ -27,7 +27,6 @@ interface Job {
   id: string;
   jobdiva_id?: string;
   title: string;
-  enhancedTitle: string;
   customer_name: string;
   status: string;
   location: string;
