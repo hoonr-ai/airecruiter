@@ -6603,43 +6603,52 @@ function NewJobPageContent() {
                               {/* Top: name+meta on the left, action buttons on the right */}
                               <div className="flex items-start justify-between gap-4">
                                 <div className="flex-1 min-w-0">
-                                  {/* Name row */}
-                                  <div className="flex items-center gap-2 flex-wrap">
+                                  {/* Name row — name truncates first; badge + phone stay together */}
+                                  <div className="flex items-center gap-2 min-w-0">
                                     <a
                                       href={isLinkedIn ? candidate.profile_url || '#' : '#'}
                                       target={isLinkedIn ? "_blank" : undefined}
                                       rel={isLinkedIn ? "noopener noreferrer" : undefined}
-                                      className={`text-[18px] font-bold text-slate-900 transition-colors ${isLinkedIn ? 'hover:text-[#1d4ed8]' : isJobDivaTalent ? 'hover:text-[#c2410c]' : 'hover:text-[#6366f1]'}`}
+                                      className={`text-[18px] font-bold text-slate-900 transition-colors truncate min-w-0 ${isLinkedIn ? 'hover:text-[#1d4ed8]' : isJobDivaTalent ? 'hover:text-[#c2410c]' : 'hover:text-[#6366f1]'}`}
                                       onClick={async (e) => {
                                         if (isLinkedIn) return;
                                         e.preventDefault();
                                         const opened = await fetchAndOpenProfileUrl(candidate);
                                         if (!opened) handleViewResume(candidate);
                                       }}
-                                      title={isLinkedIn ? "View LinkedIn Profile" : "Click to view resume"}
+                                      title={isLinkedIn ? "View LinkedIn Profile" : `${displayName} — Click to view resume`}
                                     >
                                       {displayName}
                                     </a>
-                                    <span className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center gap-1 border ${sourceBadgeColor}`}>
+                                    <span
+                                      className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center gap-1 border shrink-0 ${sourceBadgeColor}`}
+                                      title={candidate.source || "JobDiva"}
+                                    >
                                       {isLinkedIn ? <Linkedin className="w-2.5 h-2.5 fill-current" /> : isJobDivaTalent ? <Zap className="w-2.5 h-2.5 fill-current" /> : <ShieldCheck className="w-2.5 h-2.5" />}
-                                      {candidate.source || "JobDiva"}
+                                      {isLinkedIn
+                                        ? "LinkedIn"
+                                        : isJobDivaTalent
+                                          ? "JobDiva"
+                                          : (candidate.source || "JobDiva")}
                                     </span>
-                                    <PhoneIndicator
-                                      candidateId={String(candidate.candidate_id || candidate.id || "")}
-                                      jobdivaId={jobdivaId || jobData?.jobdiva_id || String(numericJobId || "")}
-                                      phone={candidate.phone}
-                                      persist={false}
-                                      onSaved={(normalised) => {
-                                        const cid = candidate.candidate_id || candidate.id;
-                                        setCandidates(prev =>
-                                          prev.map(c =>
-                                            (c.candidate_id || c.id) === cid
-                                              ? { ...c, phone: normalised }
-                                              : c
-                                          )
-                                        );
-                                      }}
-                                    />
+                                    <div className="shrink-0">
+                                      <PhoneIndicator
+                                        candidateId={String(candidate.candidate_id || candidate.id || "")}
+                                        jobdivaId={jobdivaId || jobData?.jobdiva_id || String(numericJobId || "")}
+                                        phone={candidate.phone}
+                                        persist={false}
+                                        onSaved={(normalised) => {
+                                          const cid = candidate.candidate_id || candidate.id;
+                                          setCandidates(prev =>
+                                            prev.map(c =>
+                                              (c.candidate_id || c.id) === cid
+                                                ? { ...c, phone: normalised }
+                                                : c
+                                            )
+                                          );
+                                        }}
+                                      />
+                                    </div>
                                   </div>
                                   {/* Subtitle: title @ company */}
                                   {titleAtCompany && (
