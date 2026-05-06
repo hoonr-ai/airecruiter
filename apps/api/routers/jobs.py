@@ -1682,7 +1682,7 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
             # only list-level metadata is needed.
             select_sql = (
                 "SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name, mj.status, "
-                "mj.city, mj.state, mj.zip_code, mj.priority, mj.program_duration, mj.max_allowed_submittals, "
+                "mj.city, mj.state, mj.zip_code, mj.location_type, mj.priority, mj.program_duration, mj.max_allowed_submittals, "
                 "mj.processing_status, mj.is_archived, "
                 "COALESCE(metrics.candidates_sourced, 0) AS candidates_sourced, "
                 "COALESCE(metrics.candidates_launched, 0) AS candidates_launched, "
@@ -1696,7 +1696,7 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
                 "    SELECT "
                 "        mj2.job_id AS mj_job_id, "
                 "        COUNT(*) AS candidates_sourced, "
-                "        COUNT(*) FILTER (WHERE sc.data->>'engage_status' IS NOT NULL) AS candidates_launched, "
+                "        COUNT(*) AS candidates_launched, "
                 "        COUNT(*) FILTER (WHERE sc.data->>'engage_status' IN ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')) AS complete_submissions, "
                 "        COUNT(*) FILTER (WHERE (sc.data->>'engage_status' IN ('passed', 'pass')) OR (LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed') AND (NULLIF(sc.data->>'engage_score', '')::float >= 70))) AS pass_submissions "
                 "    FROM sourced_candidates sc "
