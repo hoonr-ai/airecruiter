@@ -265,18 +265,15 @@ class UnifiedCandidateSearch:
                     "Applicants",
                     f"Found {len(applicants)} applicants; starting resume screen...",
                 )
-                self._attach_cached_enhanced_info(applicants)
-                async for cand in self._enrich_filtered_jobdiva_candidates(applicants, criteria):
-                    # From feature/job-diva-sync-optimization (2c287a1): in
-                    # bypass_screening mode (auto-assign sync), skip the
-                    # filter assessment — scoring is already short-circuited
-                    # upstream in finalize_candidate, so every applicant
-                    # should flow through unaltered.
-                    if criteria.bypass_screening:
+                if criteria.bypass_screening:
+                    self._log_stage("Applicants", f"Bypassing LLM enrichment for {len(applicants)} applicants (instant sync mode).")
+                    for cand in applicants:
                         assessment = {"passes": True, "matched": [], "missing": [], "excluded": []}
                         await emit_candidate(cand, assessment, "qualified_applicants")
-                        continue
+                    return
 
+                self._attach_cached_enhanced_info(applicants)
+                async for cand in self._enrich_filtered_jobdiva_candidates(applicants, criteria):
                     assessment = self._filter_assessment(cand, criteria, enforce_years=True)
                     if not assessment["passes"]:
                         self._log_stage(

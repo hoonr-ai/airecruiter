@@ -123,23 +123,6 @@ def _ensure_monitored_jobs_schema() -> None:
         conn.autocommit = True
         cur = conn.cursor()
         for stmt in (
-            # v21 columns
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS archive_reason TEXT",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS job_requirements JSONB DEFAULT '[]'",
-            # v22: extraction columns (previously ALTER'd per write in
-            # services/monitored_jobs_storage.py).
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS summary TEXT",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS hard_skills JSONB",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS soft_skills JSONB",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS experience_level TEXT",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS extraction_metadata JSONB",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS bot_introduction TEXT",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS sourcing_filters JSONB",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS resume_match_filters JSONB",
-            # v30: keep job rubric screen-question schema changes out of request path.
-            "ALTER TABLE IF EXISTS job_screen_questions ADD COLUMN IF NOT EXISTS is_hard_filter BOOLEAN NOT NULL DEFAULT FALSE",
             # v28: hot-path read optimizations for GET /jobs/monitored
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_active_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS NOT TRUE",
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_archived_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS TRUE",
@@ -1409,6 +1392,20 @@ async def publish_job_draft(job_id: str, publish_request: JobPublishRequest):
         conn.close()
         
         if result == "Draft published successfully":
+            # Update pair_launched_at timestamp in monitored_jobs
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE monitored_jobs SET pair_launched_at = NOW() WHERE jobdiva_id = %s OR id = %s",
+                    (job_id, job_id)
+                )
+                conn.commit()
+                cursor.close()
+                conn.close()
+            except Exception as update_err:
+                logger.warning(f"Failed to set pair_launched_at for job {job_id}: {update_err}")
+
             logger.info(f"🚀 Published draft {publish_request.draft_id} for job {job_id}")
             return {
                 "status": "success",
@@ -1684,13 +1681,28 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
             # blobs (jobdiva_description, ai_description, notes, filters, etc.) when
             # only list-level metadata is needed.
             select_sql = (
-                "SELECT job_id, jobdiva_id, title, customer_name, status, "
-                "city, state, zip_code, priority, program_duration, max_allowed_submittals, "
-                "processing_status, is_archived, "
-                "candidates_sourced, resumes_shortlisted, complete_submissions, "
-                "pass_submissions, pair_external_subs, feedback_completed, "
-                "time_to_first_pass, created_at, updated_at "
-                "FROM monitored_jobs"
+                "SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name, mj.status, "
+                "mj.city, mj.state, mj.zip_code, mj.location_type, mj.priority, mj.program_duration, mj.max_allowed_submittals, "
+                "mj.processing_status, mj.is_archived, "
+                "COALESCE(metrics.candidates_sourced, 0) AS candidates_sourced, "
+                "COALESCE(metrics.candidates_launched, 0) AS candidates_launched, "
+                "mj.resumes_shortlisted, "
+                "COALESCE(metrics.complete_submissions, 0) AS complete_submissions, "
+                "COALESCE(metrics.pass_submissions, 0) AS pass_submissions, "
+                "mj.pair_external_subs, mj.feedback_completed, "
+                "mj.pair_launched_at, mj.time_to_first_pass, mj.created_at, mj.updated_at "
+                "FROM monitored_jobs mj "
+                "LEFT JOIN ("
+                "    SELECT "
+                "        mj2.job_id AS mj_job_id, "
+                "        COUNT(*) AS candidates_sourced, "
+                "        COUNT(*) AS candidates_launched, "
+                "        COUNT(*) FILTER (WHERE sc.data->>'engage_status' IN ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')) AS complete_submissions, "
+                "        COUNT(*) FILTER (WHERE (sc.data->>'engage_status' IN ('passed', 'pass', 'completed')) OR (LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed') AND (NULLIF(sc.data->>'engage_score', '')::float >= 70))) AS pass_submissions "
+                "    FROM sourced_candidates sc "
+                "    JOIN monitored_jobs mj2 ON sc.jobdiva_id = mj2.jobdiva_id OR sc.jobdiva_id = mj2.job_id::text "
+                "    GROUP BY mj2.job_id "
+                ") metrics ON metrics.mj_job_id = mj.job_id"
             )
 
         if include_archived:
@@ -1714,6 +1726,20 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
                 job_data["created_at"] = job_data["created_at"].isoformat()
             if job_data.get("updated_at") and hasattr(job_data["updated_at"], "isoformat"):
                 job_data["updated_at"] = job_data["updated_at"].isoformat()
+
+            # PAIR Status Logic:
+            # - Unpublished: Job has not been launched (pair_launched_at is NULL)
+            # - Active: Job is launched AND status is OPEN
+            # - Inactive: Job is launched AND status is NOT OPEN (e.g. CLOSED)
+            is_published = job_data.get("pair_launched_at") is not None
+            raw_status = str(job_data.get("status") or "OPEN").strip().upper()
+
+            if not is_published:
+                job_data["pair_status"] = "Unpublished"
+            elif raw_status == "OPEN":
+                job_data["pair_status"] = "Active"
+            else:
+                job_data["pair_status"] = "Inactive"
 
             jobs[jid] = job_data
 

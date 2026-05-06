@@ -708,6 +708,23 @@ function NewJobPageContent() {
   const sortedCandidates = [...candidates]
     .filter(matchesSourceFilter)
     .sort((a, b) => {
+      // Priority 1: JobDiva Applicants
+      // Priority 2: LinkedIn
+      // Priority 3: TalentSearch / Others
+      const getPriority = (c: any) => {
+        const source = String(c.source || "").toLowerCase();
+        if (source.includes("applicant")) return 1;
+        if (source.includes("linkedin")) return 2;
+        if (source.includes("talentsearch")) return 3;
+        return 4;
+      };
+
+      const prioA = getPriority(a);
+      const prioB = getPriority(b);
+
+      if (prioA !== prioB) return prioA - prioB;
+
+      // Secondary sort: Match Score
       const scoreA = a.match_score || 0;
       const scoreB = b.match_score || 0;
       return scoreB - scoreA;
@@ -6488,7 +6505,6 @@ function NewJobPageContent() {
                                       }}
                                     />
                                   </div>
-
                                   {/* Subtitle: title @ company */}
                                   {titleAtCompany && (
                                     <p className="text-[13.5px] text-slate-600 mt-1 truncate" title={titleAtCompany}>
@@ -6520,198 +6536,201 @@ function NewJobPageContent() {
                                     </div>
                                   )}
                                 </div>
-
-                                {/* Match circle + skill chips + buttons (right cluster) */}
-                                <div className="flex items-start gap-3 shrink-0">
-                                  {matchScore !== null && matchTone && (
-                                    <div
-                                      className="w-14 h-14 rounded-full flex flex-col items-center justify-center shrink-0"
-                                      style={{ backgroundColor: matchTone.bg, color: matchTone.text, border: `2px solid ${matchTone.ring}` }}
-                                      title="Match score"
-                                    >
-                                      <span className="text-[15px] font-extrabold leading-none">{matchScore}%</span>
-                                      <span className="text-[9px] font-bold uppercase tracking-wider mt-0.5">Match</span>
-                                    </div>
-                                  )}
-
-                                  {topSkills.length > 0 && (
-                                    <div className="flex flex-wrap gap-1.5 max-w-[260px] items-center self-center">
-                                      {topSkills.map((skill, i) => (
-                                        <span
-                                          key={`${skill}-${i}`}
-                                          className="px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 text-[11px] font-semibold border border-slate-200"
-                                          title={`Matched skill: ${skill}`}
-                                        >
-                                          {skill}
-                                        </span>
-                                      ))}
-                                    </div>
-                                  )}
-
-                                  <div className="flex flex-col gap-1.5 shrink-0 ml-1">
-                                    <Button
-                                      size="sm"
-                                      className="h-8 px-3 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300 font-semibold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-1.5 min-w-[150px]"
-                                      onClick={handleOpenDetails}
-                                    >
-                                      <Eye className="w-3.5 h-3.5" />
-                                      View Full Profile
-                                    </Button>
-                                    {!isLinkedIn && (
-                                      <Button
-                                        size="sm"
-                                        className="h-8 px-3 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300 font-semibold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-1.5 min-w-[150px]"
-                                        onClick={() => handleViewResume({ ...candidate, firstName: displayName.split(" ")[0] || displayName, lastName: displayName.split(" ").slice(1).join(" ") })}
-                                        title="Open candidate resume"
-                                      >
-                                        <FileText className="w-3.5 h-3.5" />
-                                        View Resume
-                                      </Button>
-                                    )}
-                                  </div>
-                                </div>
                               </div>
 
-                              {/* Footer strip: date | location | availability */}
-                              {(receivedStr || locationStr || recentAvailabilityRaw) && (
-                                <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center gap-3 flex-wrap text-[11.5px] text-slate-500">
-                                  {receivedStr && (
-                                    <span className="inline-flex items-center gap-1.5">
-                                      <Calendar className="w-3 h-3 text-slate-400" />
-                                      {receivedStr}
-                                    </span>
-                                  )}
-                                  {receivedStr && locationStr && <span className="text-slate-300">|</span>}
-                                  {locationStr && (
-                                    <span className="inline-flex items-center gap-1.5">
-                                      <MapPin className="w-3 h-3 text-slate-400" />
-                                      {locationStr}
-                                    </span>
-                                  )}
-                                  {recentAvailabilityRaw && (
-                                    <span className={`ml-auto px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${availabilityChip}`} title="Recent availability from JobDiva">
-                                      {recentAvailabilityRaw}
-                                    </span>
+                                {/* Match circle + skill chips + buttons (right cluster) */}
+        <div className="flex items-start gap-3 shrink-0">
+          {matchScore !== null && matchTone && (
+            <div
+              className="w-14 h-14 rounded-full flex flex-col items-center justify-center shrink-0"
+              style={{ backgroundColor: matchTone.bg, color: matchTone.text, border: `2px solid ${matchTone.ring}` }}
+              title="Match score"
+            >
+              <span className="text-[15px] font-extrabold leading-none">{matchScore}%</span>
+              <span className="text-[9px] font-bold uppercase tracking-wider mt-0.5">Match</span>
+            </div>
+          )}
+
+          {topSkills.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 max-w-[260px] items-center self-center">
+              {topSkills.map((skill, i) => (
+                <span
+                  key={`${skill}-${i}`}
+                  className="px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 text-[11px] font-semibold border border-slate-200"
+                  title={`Matched skill: ${skill}`}
+                >
+                  {skill}
+                </span>
+              ))}
+            </div>
+          )}
+
+          <div className="flex flex-col gap-1.5 shrink-0 ml-1">
+            <Button
+              size="sm"
+              className="h-8 px-3 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300 font-semibold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-1.5 min-w-[150px]"
+              onClick={handleOpenDetails}
+            >
+              <Eye className="w-3.5 h-3.5" />
+              View Full Profile
+            </Button>
+            {!isLinkedIn && (
+              <Button
+                size="sm"
+                className="h-8 px-3 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300 font-semibold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-1.5 min-w-[150px]"
+                onClick={() => handleViewResume({ ...candidate, firstName: displayName.split(" ")[0] || displayName, lastName: displayName.split(" ").slice(1).join(" ") })}
+                title="Open candidate resume"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                View Resume
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+
+                              {/* Footer strip: date | location | availability */ }
+    {
+      (receivedStr || locationStr || recentAvailabilityRaw) && (
+        <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center gap-3 flex-wrap text-[11.5px] text-slate-500">
+          {receivedStr && (
+            <span className="inline-flex items-center gap-1.5">
+              <Calendar className="w-3 h-3 text-slate-400" />
+              {receivedStr}
+            </span>
+          )}
+          {receivedStr && locationStr && <span className="text-slate-300">|</span>}
+          {locationStr && (
+            <span className="inline-flex items-center gap-1.5">
+              <MapPin className="w-3 h-3 text-slate-400" />
+              {locationStr}
+            </span>
+          )}
+          {recentAvailabilityRaw && (
+            <span className={`ml-auto px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${availabilityChip}`} title="Recent availability from JobDiva">
+              {recentAvailabilityRaw}
+            </span>
+          )}
+        </div>
                                   )}
                                 </div>
-                              )}
-                            </div>
+                              );
+                            })}
                           </div>
-                        )
-                      })}
-                    </div>
-                  ) : isSearching ? (
-                    <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-pulse mt-4">
-                      <div className="flex flex-col items-center gap-3">
-                        <div className="w-12 h-12 border-4 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-2" />
-                        <p className="text-slate-600 text-sm font-bold animate-pulse">{searchStatus}</p>
-                        <p className="text-slate-400 text-[12px] font-medium italic">Retrieving candidate records associated with Job ID {numericJobId || jobdivaId}...</p>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
-                      <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-6 shadow-inner">
-                        <Users className="w-8 h-8 text-slate-300" />
-                      </div>
-                      <p className="text-slate-600 text-base font-bold">No candidates found with the current filters.</p>
-                      <p className="text-slate-400 text-[13px] mt-2 font-medium">Try broadening your criteria or adding more titles/skills.</p>
-                    </div>
-                  )}
+                        ) : isSearching ? (
+  <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-pulse mt-4">
+    <div className="flex flex-col items-center gap-3">
+      <div className="w-12 h-12 border-4 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-2" />
+      <p className="text-slate-600 text-sm font-bold animate-pulse">{searchStatus}</p>
+      <p className="text-slate-400 text-[12px] font-medium italic">Retrieving candidate records associated with Job ID {numericJobId || jobdivaId}...</p>
+    </div>
+  </div>
+) : (
+  <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
+    <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-6 shadow-inner">
+      <Users className="w-8 h-8 text-slate-300" />
+    </div>
+    <p className="text-slate-600 text-base font-bold">No candidates found with the current filters.</p>
+    <p className="text-slate-400 text-[13px] mt-2 font-medium">Try broadening your criteria or adding more titles/skills.</p>
+  </div>
+)}
 
-                  {/* Pagination Controls */}
-                  {/* Pagination Controls */}
-                  {candidates.length > 0 && (
-                    <div className="mt-8 flex items-center justify-between bg-white/70 backdrop-blur-xl p-3.5 px-5 rounded-2xl border border-slate-200/60 shadow-[0_8px_30px_rgb(0,0,0,0.04)] animate-in fade-in slide-in-from-bottom-2 duration-500 sticky bottom-6 z-10">
+{/* Pagination Controls */ }
+{/* Pagination Controls */ }
+{
+  candidates.length > 0 && (
+    <div className="mt-8 flex items-center justify-between bg-white/70 backdrop-blur-xl p-3.5 px-5 rounded-2xl border border-slate-200/60 shadow-[0_8px_30px_rgb(0,0,0,0.04)] animate-in fade-in slide-in-from-bottom-2 duration-500 sticky bottom-6 z-10">
 
-                      {/* Context & Rows Selection */}
-                      <div className="flex items-center gap-4">
-                        <div className="flex items-center gap-2 text-[13px]">
-                          <span className="text-slate-500 font-medium">Showing</span>
-                          <span className="font-bold text-slate-800">
-                            {(currentPage - 1) * candidatesPerPage + 1}-{Math.min(currentPage * candidatesPerPage, candidates.length)}
-                          </span>
-                          <span className="text-slate-500 font-medium">
-                            of {candidates.length} {isSearching ? <span className="italic text-slate-400 font-normal ml-0.5">(sourcing...)</span> : 'candidates'}
-                          </span>
-                        </div>
+      {/* Context & Rows Selection */}
+      <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2 text-[13px]">
+          <span className="text-slate-500 font-medium">Showing</span>
+          <span className="font-bold text-slate-800">
+            {(currentPage - 1) * candidatesPerPage + 1}-{Math.min(currentPage * candidatesPerPage, candidates.length)}
+          </span>
+          <span className="text-slate-500 font-medium">
+            of {candidates.length} {isSearching ? <span className="italic text-slate-400 font-normal ml-0.5">(sourcing...)</span> : 'candidates'}
+          </span>
+        </div>
 
-                        <div className="h-4 w-[1px] bg-slate-200/80"></div>
+        <div className="h-4 w-[1px] bg-slate-200/80"></div>
 
-                        <select
-                          value={candidatesPerPage}
-                          onChange={(e) => {
-                            setCandidatesPerPage(Number(e.target.value));
-                            setCurrentPage(1);
-                          }}
-                          className="bg-transparent text-[13px] font-bold text-slate-600 outline-none cursor-pointer border hover:bg-white/50 border-transparent hover:border-slate-200 rounded-md py-1 px-2 transition-all appearance-none pr-6 relative"
-                          style={{ backgroundImage: `url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 6px center', backgroundSize: '12px' }}
-                        >
-                          <option value={10}>10 / page</option>
-                          <option value={20}>20 / page</option>
-                          <option value={50}>50 / page</option>
-                        </select>
-                      </div>
+        <select
+          value={candidatesPerPage}
+          onChange={(e) => {
+            setCandidatesPerPage(Number(e.target.value));
+            setCurrentPage(1);
+          }}
+          className="bg-transparent text-[13px] font-bold text-slate-600 outline-none cursor-pointer border hover:bg-white/50 border-transparent hover:border-slate-200 rounded-md py-1 px-2 transition-all appearance-none pr-6 relative"
+          style={{ backgroundImage: `url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 6px center', backgroundSize: '12px' }}
+        >
+          <option value={10}>10 / page</option>
+          <option value={20}>20 / page</option>
+          <option value={50}>50 / page</option>
+        </select>
+      </div>
 
-                      {/* Numbered Pagination & Prev/Next */}
-                      <div className="flex items-center gap-1.5" key={`pagination-${currentPage}-${totalPages}`}>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={currentPage === 1}
-                          onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-                          className="h-8 px-2.5 rounded-lg text-slate-500 font-bold hover:bg-slate-100 disabled:opacity-30 transition-all flex items-center justify-center"
-                        >
-                          <ChevronLeft className="w-4 h-4 shrink-0" />
-                          <span className="sr-only">Previous</span>
-                        </Button>
+      {/* Numbered Pagination & Prev/Next */}
+      <div className="flex items-center gap-1.5" key={`pagination-${currentPage}-${totalPages}`}>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={currentPage === 1}
+          onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+          className="h-8 px-2.5 rounded-lg text-slate-500 font-bold hover:bg-slate-100 disabled:opacity-30 transition-all flex items-center justify-center"
+        >
+          <ChevronLeft className="w-4 h-4 shrink-0" />
+          <span className="sr-only">Previous</span>
+        </Button>
 
-                        <div className="flex items-center gap-1 mx-0.5">
-                          {visiblePages.map((pageNum, idx) => (
-                            pageNum === "..." ? (
-                              <span key={`ellipsis-${idx}`} className="w-8 h-8 flex items-center justify-center text-slate-400 font-bold text-[14px]">
-                                ...
-                              </span>
-                            ) : (
-                              <button
-                                key={`page-${pageNum}`}
-                                disabled={currentPage === pageNum}
-                                onClick={() => setCurrentPage(pageNum as number)}
-                                className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[13px] transition-all duration-200 ${currentPage === pageNum
-                                  ? 'bg-[#6366f1] text-white shadow-md transform scale-105 cursor-default'
-                                  : 'text-slate-600 hover:bg-slate-100/80 cursor-pointer'
-                                  }`}
-                              >
-                                {pageNum}
-                              </button>
-                            )
-                          ))}
-                        </div>
+        <div className="flex items-center gap-1 mx-0.5">
+          {visiblePages.map((pageNum, idx) => (
+            pageNum === "..." ? (
+              <span key={`ellipsis-${idx}`} className="w-8 h-8 flex items-center justify-center text-slate-400 font-bold text-[14px]">
+                ...
+              </span>
+            ) : (
+              <button
+                key={`page-${pageNum}`}
+                disabled={currentPage === pageNum}
+                onClick={() => setCurrentPage(pageNum as number)}
+                className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[13px] transition-all duration-200 ${currentPage === pageNum
+                  ? 'bg-[#6366f1] text-white shadow-md transform scale-105 cursor-default'
+                  : 'text-slate-600 hover:bg-slate-100/80 cursor-pointer'
+                  }`}
+              >
+                {pageNum}
+              </button>
+            )
+          ))}
+        </div>
 
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={currentPage === totalPages}
-                          onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
-                          className="h-8 px-2.5 rounded-lg text-slate-500 font-bold hover:bg-slate-100 disabled:opacity-30 transition-all flex items-center justify-center"
-                        >
-                          <ChevronRight className="w-4 h-4 shrink-0" />
-                          <span className="sr-only">Next</span>
-                        </Button>
-                      </div>
-                    </div>
-                  )}
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={currentPage === totalPages}
+          onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+          className="h-8 px-2.5 rounded-lg text-slate-500 font-bold hover:bg-slate-100 disabled:opacity-30 transition-all flex items-center justify-center"
+        >
+          <ChevronRight className="w-4 h-4 shrink-0" />
+          <span className="sr-only">Next</span>
+        </Button>
+      </div>
+    </div>
+  )
+}
                 </>
               ) : (
-                <div className="h-4 flex items-center justify-center opacity-0 mt-4">
-                </div>
-              )}
+  <div className="h-4 flex items-center justify-center opacity-0 mt-4">
+  </div>
+)}
 
-              {/* Bulk resume upload lives in the Tira chatbot now — removed from
+{/* Bulk resume upload lives in the Tira chatbot now — removed from
                 Step 5 to keep sourcing focused on the boolean-string workflow. */}
             </div>
 
-            {/* Launch Footer */}
-            <div className="border-t border-slate-200 pt-6 mt-2 flex items-center justify-between">
+  {/* Launch Footer */ }
+  < div className = "border-t border-slate-200 pt-6 mt-2 flex items-center justify-between" >
               <span className="text-[13px] font-medium text-slate-400">
                 {hasSearched && !isSearching ? `${selectedCandidates.size} candidates selected` : ''}
               </span>
@@ -6734,404 +6753,404 @@ function NewJobPageContent() {
     </div>
   );
 
-  const renderStepContent = () => {
-    switch (currentStep) {
-      case 1: return intakeStep;
-      case 2: return publishStep;
-      case 3: return establishRubricStep;
-      case 4: return setFiltersStep;
-      case 5: return sourceStep;
-      default: return null;
-    }
-  };
-
-  // Full-page loader while we hydrate a saved draft. Prevents the flash-of-
-  // empty-form that recruiters see on Resume Setup while /jobs/{id}/draft
-  // (plus rubric / screen questions) resolve.
-  if (isLoadingDraft) {
-    return (
-      <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center">
-        <div className="flex flex-col items-center gap-3 text-slate-500">
-          <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
-          <div className="text-[15px] font-medium">Loading draft…</div>
-        </div>
-      </div>
-    );
+const renderStepContent = () => {
+  switch (currentStep) {
+    case 1: return intakeStep;
+    case 2: return publishStep;
+    case 3: return establishRubricStep;
+    case 4: return setFiltersStep;
+    case 5: return sourceStep;
+    default: return null;
   }
+};
 
+// Full-page loader while we hydrate a saved draft. Prevents the flash-of-
+// empty-form that recruiters see on Resume Setup while /jobs/{id}/draft
+// (plus rubric / screen questions) resolve.
+if (isLoadingDraft) {
   return (
-    <div className="p-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
-      {/* Breadcrumb */}
-      <div className="mb-5">
-        <Link href="/jobs" className="text-slate-500 hover:text-slate-700 text-[15px] flex items-center gap-2 transition-colors font-medium">
-          <ArrowLeft className="w-4 h-4" />
-          Back to Jobs
-        </Link>
+    <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center">
+      <div className="flex flex-col items-center gap-3 text-slate-500">
+        <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
+        <div className="text-[15px] font-medium">Loading draft…</div>
       </div>
+    </div>
+  );
+}
 
-      {/* Page Header */}
-      <div className="mb-7">
-        <h1 className="text-[32px] font-bold text-slate-900 leading-tight">New Job</h1>
-        <p className="text-slate-500 text-[16px] font-medium mt-1">
-          {(() => {
-            const title = jobData?.title || jobTitle;
-            const customer = jobData?.customer_name || jobData?.customer || "";
-            if (!title && !customer) return "Enter a JobDiva Job ID to get started.";
-            if (title && customer) return `${title} · ${customer}`;
-            return title || customer;
-          })()}
-        </p>
-      </div>
+return (
+  <div className="p-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
+    {/* Breadcrumb */}
+    <div className="mb-5">
+      <Link href="/jobs" className="text-slate-500 hover:text-slate-700 text-[15px] flex items-center gap-2 transition-colors font-medium">
+        <ArrowLeft className="w-4 h-4" />
+        Back to Jobs
+      </Link>
+    </div>
 
-      {/* Step Indicator */}
-      <StepIndicator />
+    {/* Page Header */}
+    <div className="mb-7">
+      <h1 className="text-[32px] font-bold text-slate-900 leading-tight">New Job</h1>
+      <p className="text-slate-500 text-[16px] font-medium mt-1">
+        {(() => {
+          const title = jobData?.title || jobTitle;
+          const customer = jobData?.customer_name || jobData?.customer || "";
+          if (!title && !customer) return "Enter a JobDiva Job ID to get started.";
+          if (title && customer) return `${title} · ${customer}`;
+          return title || customer;
+        })()}
+      </p>
+    </div>
 
-      {/* Step Content */}
-      <div className="mt-8">
-        {renderStepContent()}
-      </div>
+    {/* Step Indicator */}
+    <StepIndicator />
 
-      {/* Wizard Navigation — Back | Save & Exit … Next */}
-      <div className="flex items-center justify-between pt-10 border-t border-slate-200 mt-12 mb-20 px-4">
-        <div className="flex items-center gap-4">
-          {currentStep > 1 && (
-            <button
-              onClick={() => {
-                const toStep = (currentStep - 1) as Step;
-                trackEvent("job_wizard_step_back_clicked", {
-                  from_step: currentStep,
-                  to_step: toStep,
-                  from_step_label: STEP_LABELS[currentStep],
-                  to_step_label: STEP_LABELS[toStep],
-                });
-                setCurrentStep(toStep);
-              }}
-              className="flex items-center gap-2.5 px-6 py-2.5 bg-white border border-slate-200 rounded-xl font-bold text-slate-700 hover:bg-slate-50 transition-all active:scale-95 shadow-sm"
-            >
-              <ArrowLeft className="w-4.5 h-4.5" />
-              Back
-            </button>
-          )}
+    {/* Step Content */}
+    <div className="mt-8">
+      {renderStepContent()}
+    </div>
 
-          <Button
-            variant="outline"
-            className="h-[44px] px-6 bg-white border-slate-200 flex items-center gap-2.5 shadow-sm text-[15px] font-bold text-slate-700 transition-all rounded-xl active:scale-95 hover:bg-slate-50"
-            onClick={async () => {
-              const saved = await saveJobDraft({ currentStep, saveType: "manual" });
-              if (saved) {
-                router.push("/");
-              }
+    {/* Wizard Navigation — Back | Save & Exit … Next */}
+    <div className="flex items-center justify-between pt-10 border-t border-slate-200 mt-12 mb-20 px-4">
+      <div className="flex items-center gap-4">
+        {currentStep > 1 && (
+          <button
+            onClick={() => {
+              const toStep = (currentStep - 1) as Step;
+              trackEvent("job_wizard_step_back_clicked", {
+                from_step: currentStep,
+                to_step: toStep,
+                from_step_label: STEP_LABELS[currentStep],
+                to_step_label: STEP_LABELS[toStep],
+              });
+              setCurrentStep(toStep);
             }}
+            className="flex items-center gap-2.5 px-6 py-2.5 bg-white border border-slate-200 rounded-xl font-bold text-slate-700 hover:bg-slate-50 transition-all active:scale-95 shadow-sm"
           >
-            <Save className="w-4.5 h-4.5 text-slate-400" />
-            Save & Exit
-          </Button>
-        </div>
+            <ArrowLeft className="w-4.5 h-4.5" />
+            Back
+          </button>
+        )}
 
-        <div className="flex items-center gap-3">
-          {currentStep < 5 && (
-            <Button
-              className="h-[44px] px-8 bg-[#6366f1] hover:bg-[#4f46e5] flex items-center gap-2 shadow-lg shadow-indigo-100 text-[15px] font-bold text-white transition-all rounded-xl active:scale-95"
-              onClick={async () => {
-                // Per-step loading: every Next click flips isAdvancingStep on
-                // for the duration of its own save (+ rubric fetch on step 2),
-                // so the button shows "Preparing..." while something is
-                // actually in flight. Passing currentStep+1 to saveJobDraft
-                // records the step the user is navigating TO, so Resume Setup
-                // lands them back where they were — not one step behind.
-                if (currentStep === 1) {
-                  if (!jobData) {
-                    showToast("Fetch a job first before saving.", "info");
-                    return;
-                  }
-                  if (recruiterEmails.length === 0) {
-                    setEmailError(true);
-                    showToast("Recruiter Email is required.", "info");
-                    return;
-                  }
-                  if (selectedEmpTypes.length === 0) {
-                    showToast("Employment Type is required.", "info");
-                    return;
-                  }
+        <Button
+          variant="outline"
+          className="h-[44px] px-6 bg-white border-slate-200 flex items-center gap-2.5 shadow-sm text-[15px] font-bold text-slate-700 transition-all rounded-xl active:scale-95 hover:bg-slate-50"
+          onClick={async () => {
+            const saved = await saveJobDraft({ currentStep, saveType: "manual" });
+            if (saved) {
+              router.push("/");
+            }
+          }}
+        >
+          <Save className="w-4.5 h-4.5 text-slate-400" />
+          Save & Exit
+        </Button>
+      </div>
 
-                  setIsAdvancingStep(true);
-                  try {
-                    const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
-                    if (!saved) {
-                      showToast("Failed to save Step 1 data. Please try again.", "info");
-                      return;
-                    }
-                    trackStepAdvance(1, 2, { via: "next_button" });
-                    setCurrentStep(2);
-                  } finally {
-                    setIsAdvancingStep(false);
-                  }
+      <div className="flex items-center gap-3">
+        {currentStep < 5 && (
+          <Button
+            className="h-[44px] px-8 bg-[#6366f1] hover:bg-[#4f46e5] flex items-center gap-2 shadow-lg shadow-indigo-100 text-[15px] font-bold text-white transition-all rounded-xl active:scale-95"
+            onClick={async () => {
+              // Per-step loading: every Next click flips isAdvancingStep on
+              // for the duration of its own save (+ rubric fetch on step 2),
+              // so the button shows "Preparing..." while something is
+              // actually in flight. Passing currentStep+1 to saveJobDraft
+              // records the step the user is navigating TO, so Resume Setup
+              // lands them back where they were — not one step behind.
+              if (currentStep === 1) {
+                if (!jobData) {
+                  showToast("Fetch a job first before saving.", "info");
                   return;
-                } else if (currentStep === 2) {
-                  setIsAdvancingStep(true);
-                  try {
-                    const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
-                    if (!saved) {
-                      showToast("Failed to save Step 2 data. Please try again.", "info");
-                      return;
-                    }
-
-                    // Regenerate rubric when (a) none exists yet, or (b) the
-                    // JD text has been edited since the last rubric was
-                    // generated. Otherwise preserve the existing rubric +
-                    // recruiter edits on Step 3.
-                    const jdFingerprint = (jobPosting || "").trim();
-                    const rubricIsEmpty = !rubricData || (rubricData.titles?.length === 0 && rubricData.skills?.length === 0);
-                    const jdChanged = jdFingerprint !== "" && jdFingerprint !== lastRubricJdRef.current;
-                    if (rubricIsEmpty || jdChanged) {
-                      setIsGeneratingRubric(true);
-                      try {
-                        const apiUrl = API_BASE;
-                        const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
-                            jobId: numericJobId || jobdivaId,
-                            jobdivaId: jobdivaId,
-                            jobTitle: jobData?.title || jobTitle,
-                            enhancedJobTitle: enhancedTitle || "",
-                            jobDescription: jobPosting,
-                            jobNotes: recruiterNotes,
-                            originalDescription: jobData?.description || "",
-                            customerName: jobData?.customer_name || jobData?.customer || "",
-                            requiredDegree: jobData?.required_degree || "",
-                            jobCity: jobData?.city || "",
-                            jobState: jobData?.state || "",
-                            locationType: jobData?.location_type || ""
-                          })
-                        });
-                        if (res.ok) {
-                          const data = await res.json();
-                          setRubricData(applyTitleRequiredSafetyNet(data));
-                          lastRubricJdRef.current = jdFingerprint;
-                          showToast("Step 2 saved and rubric generated!", "success");
-                        } else {
-                          throw new Error("API failed");
-                        }
-                      } catch (e) {
-                        console.error(e);
-                        showToast("Failed to generate rubric.", "info");
-                        setRubricData(null);
-                      } finally {
-                        setIsGeneratingRubric(false);
-                      }
-                    }
-                    trackStepAdvance(2, 3, {
-                      via: "next_button",
-                      rubric_regenerated: rubricIsEmpty || jdChanged,
-                    });
-                    setCurrentStep(3);
-                    return;
-                  } finally {
-                    setIsAdvancingStep(false);
-                  }
-                } else if (currentStep === 3) {
-                  setIsAdvancingStep(true);
-                  try {
-                    const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
-                    if (!saved) return;
-                    trackStepAdvance(3, 4, { via: "next_button" });
-                  } finally {
-                    setIsAdvancingStep(false);
-                  }
-                } else if (currentStep === 4) {
-                  setIsAdvancingStep(true);
-                  try {
-                    const saved = await saveJobDraft({ currentStep: 5, skipToast: true });
-                    if (!saved) return;
-                    // Only derive sourcing criteria on first entry (5.3). The
-                    // sync effect below won't override it on subsequent visits.
-                    if (!sourcingCriteriaInitializedRef.current) {
-                      initializeSourceFromRubric();
-                      sourcingCriteriaInitializedRef.current = true;
-                    }
-                    trackStepAdvance(4, 5, { via: "next_button" });
-                  } finally {
-                    setIsAdvancingStep(false);
-                  }
+                }
+                if (recruiterEmails.length === 0) {
+                  setEmailError(true);
+                  showToast("Recruiter Email is required.", "info");
+                  return;
+                }
+                if (selectedEmpTypes.length === 0) {
+                  showToast("Employment Type is required.", "info");
+                  return;
                 }
 
-                if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
-              }}
-              disabled={(currentStep === 1 && !jobData) || isGeneratingJD || isSearching || isAdvancingStep || isGeneratingRubric}
-            >
-              {isGeneratingJD ? (
-                <>
-                  <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
-                  Enriching...
-                </>
-              ) : (isAdvancingStep || isGeneratingRubric) ? (
-                <>
-                  <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
-                  Preparing...
-                </>
-              ) : (
-                <>
-                  Next
-                  <ArrowRight className="w-5 h-5 ml-1.5" />
-                </>
-              )}
-            </Button>
-          )}
-        </div>
-      </div>
+                setIsAdvancingStep(true);
+                try {
+                  const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
+                  if (!saved) {
+                    showToast("Failed to save Step 1 data. Please try again.", "info");
+                    return;
+                  }
+                  trackStepAdvance(1, 2, { via: "next_button" });
+                  setCurrentStep(2);
+                } finally {
+                  setIsAdvancingStep(false);
+                }
+                return;
+              } else if (currentStep === 2) {
+                setIsAdvancingStep(true);
+                try {
+                  const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
+                  if (!saved) {
+                    showToast("Failed to save Step 2 data. Please try again.", "info");
+                    return;
+                  }
 
-      {/* Toast Notification */}
-      {toast && (
-        <div
-          className={`fixed bottom-8 right-8 flex items-center gap-2.5 px-5 py-3 rounded-lg text-[14px] font-medium text-white shadow-xl z-50 transition-all duration-300 transform translate-y-0 opacity-100 ${toast.type === "success" ? "bg-[#166534]" : "bg-primary"}`}
-        >
-          {toast.type === "success" ? (
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
-          ) : (
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" /></svg>
-          )}
-          {toast.message}
-        </div>
-      )}
-
-      {showJobdivaSkillsModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
-          <div className="w-full max-w-2xl rounded-xl bg-white border border-slate-200 shadow-2xl overflow-hidden">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
-              <div>
-                <h3 className="text-[16px] font-bold text-slate-900">JobDiva Search Agent string</h3>
-                <p className="text-[12px] text-slate-500 mt-0.5">Use this Boolean-ready string in JobDiva Search Agent, including location format.</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowJobdivaSkillsModal(false)}
-                className="w-8 h-8 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center"
-                aria-label="Close skills modal"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="px-5 py-4 space-y-3">
-              <div className={`text-[12px] rounded-lg px-3 py-2 border ${jobdivaCriteriaUnconfigured ? "text-amber-800 bg-amber-50 border-amber-200" : "text-indigo-800 bg-indigo-50 border-indigo-200"}`}>
-                {jobdivaCriteriaUnconfigured
-                  ? "JobDiva AI matcher isn’t configured for this job yet. We’ll still search, but quality improves once criteria are saved in JobDiva."
-                  : "Tip: copy this string into JobDiva Search Agent criteria for stronger portal-side matching."}
-              </div>
-              <div className="text-[12px] text-slate-600">
-                {jobdivaSkillsToUse.length} skill{jobdivaSkillsToUse.length === 1 ? "" : "s"} formatted in Boolean form with location suffix: <span className="font-semibold">(HADOOP) AND (SPARK OR PYSPARK), IN (NC-US)</span>
-              </div>
-              <textarea
-                value={jobdivaSkillsCopyText}
-                readOnly
-                rows={8}
-                className="w-full rounded-lg border border-slate-200 bg-slate-50 text-[13px] text-slate-800 font-medium px-3 py-2 outline-none resize-y"
-              />
-              <div className="flex items-center justify-end gap-2">
-                {jobdivaJobEditUrl ? (
-                  <a
-                    href={jobdivaJobEditUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="h-9 px-3 border border-slate-200 rounded-md inline-flex items-center gap-1.5 text-[12.5px] font-bold text-slate-700 hover:bg-slate-50"
-                  >
-                    Open JobDiva Job
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
-                ) : null}
-                <Button
-                  variant="outline"
-                  className="h-9 px-3 text-[12.5px] font-bold"
-                  onClick={() => setShowJobdivaSkillsModal(false)}
-                >
-                  Close
-                </Button>
-                <Button
-                  className="h-9 px-3 bg-[#6366f1] hover:bg-[#4f46e5] text-white text-[12.5px] font-bold flex items-center gap-1.5"
-                  onClick={async () => {
+                  // Regenerate rubric when (a) none exists yet, or (b) the
+                  // JD text has been edited since the last rubric was
+                  // generated. Otherwise preserve the existing rubric +
+                  // recruiter edits on Step 3.
+                  const jdFingerprint = (jobPosting || "").trim();
+                  const rubricIsEmpty = !rubricData || (rubricData.titles?.length === 0 && rubricData.skills?.length === 0);
+                  const jdChanged = jdFingerprint !== "" && jdFingerprint !== lastRubricJdRef.current;
+                  if (rubricIsEmpty || jdChanged) {
+                    setIsGeneratingRubric(true);
                     try {
-                      await navigator.clipboard.writeText(jobdivaSkillsCopyText);
-                      setSkillsCopied(true);
-                      setTimeout(() => setSkillsCopied(false), 1800);
-                    } catch {
-                      showToast("Copy failed. Please copy manually.", "info");
+                      const apiUrl = API_BASE;
+                      const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          jobId: numericJobId || jobdivaId,
+                          jobdivaId: jobdivaId,
+                          jobTitle: jobData?.title || jobTitle,
+                          enhancedJobTitle: enhancedTitle || "",
+                          jobDescription: jobPosting,
+                          jobNotes: recruiterNotes,
+                          originalDescription: jobData?.description || "",
+                          customerName: jobData?.customer_name || jobData?.customer || "",
+                          requiredDegree: jobData?.required_degree || "",
+                          jobCity: jobData?.city || "",
+                          jobState: jobData?.state || "",
+                          locationType: jobData?.location_type || ""
+                        })
+                      });
+                      if (res.ok) {
+                        const data = await res.json();
+                        setRubricData(applyTitleRequiredSafetyNet(data));
+                        lastRubricJdRef.current = jdFingerprint;
+                        showToast("Step 2 saved and rubric generated!", "success");
+                      } else {
+                        throw new Error("API failed");
+                      }
+                    } catch (e) {
+                      console.error(e);
+                      showToast("Failed to generate rubric.", "info");
+                      setRubricData(null);
+                    } finally {
+                      setIsGeneratingRubric(false);
                     }
-                  }}
+                  }
+                  trackStepAdvance(2, 3, {
+                    via: "next_button",
+                    rubric_regenerated: rubricIsEmpty || jdChanged,
+                  });
+                  setCurrentStep(3);
+                  return;
+                } finally {
+                  setIsAdvancingStep(false);
+                }
+              } else if (currentStep === 3) {
+                setIsAdvancingStep(true);
+                try {
+                  const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
+                  if (!saved) return;
+                  trackStepAdvance(3, 4, { via: "next_button" });
+                } finally {
+                  setIsAdvancingStep(false);
+                }
+              } else if (currentStep === 4) {
+                setIsAdvancingStep(true);
+                try {
+                  const saved = await saveJobDraft({ currentStep: 5, skipToast: true });
+                  if (!saved) return;
+                  // Only derive sourcing criteria on first entry (5.3). The
+                  // sync effect below won't override it on subsequent visits.
+                  if (!sourcingCriteriaInitializedRef.current) {
+                    initializeSourceFromRubric();
+                    sourcingCriteriaInitializedRef.current = true;
+                  }
+                  trackStepAdvance(4, 5, { via: "next_button" });
+                } finally {
+                  setIsAdvancingStep(false);
+                }
+              }
+
+              if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
+            }}
+            disabled={(currentStep === 1 && !jobData) || isGeneratingJD || isSearching || isAdvancingStep || isGeneratingRubric}
+          >
+            {isGeneratingJD ? (
+              <>
+                <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
+                Enriching...
+              </>
+            ) : (isAdvancingStep || isGeneratingRubric) ? (
+              <>
+                <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
+                Preparing...
+              </>
+            ) : (
+              <>
+                Next
+                <ArrowRight className="w-5 h-5 ml-1.5" />
+              </>
+            )}
+          </Button>
+        )}
+      </div>
+    </div>
+
+    {/* Toast Notification */}
+    {toast && (
+      <div
+        className={`fixed bottom-8 right-8 flex items-center gap-2.5 px-5 py-3 rounded-lg text-[14px] font-medium text-white shadow-xl z-50 transition-all duration-300 transform translate-y-0 opacity-100 ${toast.type === "success" ? "bg-[#166534]" : "bg-primary"}`}
+      >
+        {toast.type === "success" ? (
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
+        ) : (
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" /></svg>
+        )}
+        {toast.message}
+      </div>
+    )}
+
+    {showJobdivaSkillsModal && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+        <div className="w-full max-w-2xl rounded-xl bg-white border border-slate-200 shadow-2xl overflow-hidden">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+            <div>
+              <h3 className="text-[16px] font-bold text-slate-900">JobDiva Search Agent string</h3>
+              <p className="text-[12px] text-slate-500 mt-0.5">Use this Boolean-ready string in JobDiva Search Agent, including location format.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowJobdivaSkillsModal(false)}
+              className="w-8 h-8 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center"
+              aria-label="Close skills modal"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="px-5 py-4 space-y-3">
+            <div className={`text-[12px] rounded-lg px-3 py-2 border ${jobdivaCriteriaUnconfigured ? "text-amber-800 bg-amber-50 border-amber-200" : "text-indigo-800 bg-indigo-50 border-indigo-200"}`}>
+              {jobdivaCriteriaUnconfigured
+                ? "JobDiva AI matcher isn’t configured for this job yet. We’ll still search, but quality improves once criteria are saved in JobDiva."
+                : "Tip: copy this string into JobDiva Search Agent criteria for stronger portal-side matching."}
+            </div>
+            <div className="text-[12px] text-slate-600">
+              {jobdivaSkillsToUse.length} skill{jobdivaSkillsToUse.length === 1 ? "" : "s"} formatted in Boolean form with location suffix: <span className="font-semibold">(HADOOP) AND (SPARK OR PYSPARK), IN (NC-US)</span>
+            </div>
+            <textarea
+              value={jobdivaSkillsCopyText}
+              readOnly
+              rows={8}
+              className="w-full rounded-lg border border-slate-200 bg-slate-50 text-[13px] text-slate-800 font-medium px-3 py-2 outline-none resize-y"
+            />
+            <div className="flex items-center justify-end gap-2">
+              {jobdivaJobEditUrl ? (
+                <a
+                  href={jobdivaJobEditUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="h-9 px-3 border border-slate-200 rounded-md inline-flex items-center gap-1.5 text-[12.5px] font-bold text-slate-700 hover:bg-slate-50"
                 >
-                  <Clipboard className="w-3.5 h-3.5" />
-                  {skillsCopied ? "Copied" : "Copy agent string"}
-                </Button>
-              </div>
+                  Open JobDiva Job
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              ) : null}
+              <Button
+                variant="outline"
+                className="h-9 px-3 text-[12.5px] font-bold"
+                onClick={() => setShowJobdivaSkillsModal(false)}
+              >
+                Close
+              </Button>
+              <Button
+                className="h-9 px-3 bg-[#6366f1] hover:bg-[#4f46e5] text-white text-[12.5px] font-bold flex items-center gap-1.5"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(jobdivaSkillsCopyText);
+                    setSkillsCopied(true);
+                    setTimeout(() => setSkillsCopied(false), 1800);
+                  } catch {
+                    showToast("Copy failed. Please copy manually.", "info");
+                  }
+                }}
+              >
+                <Clipboard className="w-3.5 h-3.5" />
+                {skillsCopied ? "Copied" : "Copy agent string"}
+              </Button>
             </div>
           </div>
         </div>
-      )}
+      </div>
+    )}
 
-      {/* Email Modal */}
-      {selectedCandidateForEmail && (
-        <CandidateMessageModal
-          candidateName={selectedCandidateForEmail.name}
-          candidateEmail={selectedCandidateForEmail.email}
-          isOpen={messageModalOpen}
-          onClose={() => {
-            setMessageModalOpen(false);
-            setSelectedCandidateForEmail(null);
-          }}
-        />
-      )}
-
-      {selectedCandidateForResume && (
-        <ResumeModal
-          candidateName={selectedCandidateForResume.name}
-          resumeText={selectedCandidateForResume.resumeText}
-          keywords={selectedCandidateForResume.keywords}
-          similarKeywords={selectedCandidateForResume.similarKeywords}
-          isOpen={resumeModalOpen}
-          onClose={() => {
-            setResumeModalOpen(false);
-            setSelectedCandidateForResume(null);
-          }}
-        />
-      )}
-
-      {/* Paste Resume Modal (External requirement) */}
-      <PasteResumeModal
-        open={pasteResumeOpen}
-        onClose={() => setPasteResumeOpen(false)}
-        name={pasteName}
-        onNameChange={setPasteName}
-        email={pasteEmail}
-        onEmailChange={setPasteEmail}
-        resumeText={pasteResumeText}
-        onResumeTextChange={setPasteResumeText}
-        isSaving={isSavingPasteResume}
-        onSubmit={handleSubmitPasteResume}
+    {/* Email Modal */}
+    {selectedCandidateForEmail && (
+      <CandidateMessageModal
+        candidateName={selectedCandidateForEmail.name}
+        candidateEmail={selectedCandidateForEmail.email}
+        isOpen={messageModalOpen}
+        onClose={() => {
+          setMessageModalOpen(false);
+          setSelectedCandidateForEmail(null);
+        }}
       />
+    )}
 
-      {selectedCandidateForDetails && (
-        <CandidateDetailsModal
-          isOpen={detailsModalOpen}
-          candidateName={selectedCandidateForDetails.name}
-          profileUrl={selectedCandidateForDetails.profileUrl}
-          imageUrl={selectedCandidateForDetails.imageUrl}
-          jobTitle={selectedCandidateForDetails.jobTitle}
-          location={selectedCandidateForDetails.location}
-          experienceYears={selectedCandidateForDetails.experienceYears}
-          tags={selectedCandidateForDetails.tags}
-          matchScore={selectedCandidateForDetails.matchScore}
-          missingSkills={selectedCandidateForDetails.missingSkills}
-          matchedSkills={selectedCandidateForDetails.matchedSkills}
-          matchScoreDetails={selectedCandidateForDetails.matchScoreDetails}
-          explainability={selectedCandidateForDetails.explainability}
-          candidateId={selectedCandidateForDetails.candidateId}
-          source={selectedCandidateForDetails.source}
-          onClose={() => {
-            setDetailsModalOpen(false);
-            setSelectedCandidateForDetails(null);
-          }}
-        />
-      )}
-    </div>
-  );
+    {selectedCandidateForResume && (
+      <ResumeModal
+        candidateName={selectedCandidateForResume.name}
+        resumeText={selectedCandidateForResume.resumeText}
+        keywords={selectedCandidateForResume.keywords}
+        similarKeywords={selectedCandidateForResume.similarKeywords}
+        isOpen={resumeModalOpen}
+        onClose={() => {
+          setResumeModalOpen(false);
+          setSelectedCandidateForResume(null);
+        }}
+      />
+    )}
+
+    {/* Paste Resume Modal (External requirement) */}
+    <PasteResumeModal
+      open={pasteResumeOpen}
+      onClose={() => setPasteResumeOpen(false)}
+      name={pasteName}
+      onNameChange={setPasteName}
+      email={pasteEmail}
+      onEmailChange={setPasteEmail}
+      resumeText={pasteResumeText}
+      onResumeTextChange={setPasteResumeText}
+      isSaving={isSavingPasteResume}
+      onSubmit={handleSubmitPasteResume}
+    />
+
+    {selectedCandidateForDetails && (
+      <CandidateDetailsModal
+        isOpen={detailsModalOpen}
+        candidateName={selectedCandidateForDetails.name}
+        profileUrl={selectedCandidateForDetails.profileUrl}
+        imageUrl={selectedCandidateForDetails.imageUrl}
+        jobTitle={selectedCandidateForDetails.jobTitle}
+        location={selectedCandidateForDetails.location}
+        experienceYears={selectedCandidateForDetails.experienceYears}
+        tags={selectedCandidateForDetails.tags}
+        matchScore={selectedCandidateForDetails.matchScore}
+        missingSkills={selectedCandidateForDetails.missingSkills}
+        matchedSkills={selectedCandidateForDetails.matchedSkills}
+        matchScoreDetails={selectedCandidateForDetails.matchScoreDetails}
+        explainability={selectedCandidateForDetails.explainability}
+        candidateId={selectedCandidateForDetails.candidateId}
+        source={selectedCandidateForDetails.source}
+        onClose={() => {
+          setDetailsModalOpen(false);
+          setSelectedCandidateForDetails(null);
+        }}
+      />
+    )}
+  </div>
+);
 };

@@ -34,7 +34,7 @@ interface Job {
   programDuration: string;
   maxAllowedSubmittals: string;
   pairStatus: string;
-  candidatesSourced: number;
+  candidatesLaunched: number;
   resumesShortlisted: number;
   completeSubmissions: number;
   passSubmissions: number;
@@ -103,27 +103,12 @@ export default function DashboardPage() {
         const status = details.status || "Open";
         const procStatus = details.processing_status || "pending";
 
-        let pairStatus = "Unpublished";
-
-        // Check if job is archived first
-        if (details.is_archived) {
-          pairStatus = "Archived";
-        } else if (procStatus === "monitoring_added" || procStatus === "manual_created") {
-          // Setup is finished. Check JobDiva status for Active/Inactive
-          if (status.toLowerCase() === "closed" || status.toLowerCase() === "cancelled") {
-            pairStatus = "Inactive";
-          } else {
-            pairStatus = "Active";
-          }
-        } else {
-          // If pending, step_X_complete, or any other state, wizard is not finished
-          pairStatus = "Unpublished";
-        }
+        const pairStatus = details.pair_status || "Unpublished";
 
         return {
           id,
           jobdiva_id: details.jobdiva_id || "",
-          title: details.title || "—",
+          title: details.enhanced_title || details.title || "—",
           customer_name: details.customer_name || "—",
           status: status || "—",
           location: [
@@ -138,7 +123,7 @@ export default function DashboardPage() {
             ? "—"
             : Number.parseInt(details.max_allowed_submittals, 10).toString(),
           pairStatus: pairStatus,
-          candidatesSourced: details.candidates_sourced || 0,
+          candidatesLaunched: details.candidates_launched || 0,
           resumesShortlisted: details.resumes_shortlisted || 0,
           completeSubmissions: details.complete_submissions || 0,
           passSubmissions: details.pass_submissions || 0,
@@ -208,7 +193,7 @@ export default function DashboardPage() {
       "Max Allowed Submittals",
       "Job Status",
       "Hoonr-Curate Status",
-      "Candidates Sourced",
+      "Candidates Launched",
       "Resumes Shortlisted",
       "Complete Submissions",
       "Pass Submissions",
@@ -232,7 +217,7 @@ export default function DashboardPage() {
       escapeCSV(job.maxAllowedSubmittals),
       escapeCSV(job.status),
       escapeCSV(job.pairStatus),
-      escapeCSV(job.candidatesSourced),
+      escapeCSV(job.candidatesLaunched),
       escapeCSV(job.resumesShortlisted),
       escapeCSV(job.completeSubmissions),
       escapeCSV(job.passSubmissions),
@@ -287,8 +272,8 @@ export default function DashboardPage() {
           <button
             onClick={() => setActiveTab("active")}
             className={`px-4 py-2 rounded-md text-[13px] font-medium transition-all ${activeTab === "active"
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
+              ? "bg-white text-slate-900 shadow-sm"
+              : "text-slate-500 hover:text-slate-700"
               }`}
           >
             Active Jobs
@@ -296,8 +281,8 @@ export default function DashboardPage() {
           <button
             onClick={() => setActiveTab("archived")}
             className={`px-4 py-2 rounded-md text-[13px] font-medium transition-all ${activeTab === "archived"
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
+              ? "bg-white text-slate-900 shadow-sm"
+              : "text-slate-500 hover:text-slate-700"
               }`}
           >
             Archived Jobs
@@ -371,7 +356,7 @@ export default function DashboardPage() {
                 <SortableHeader field="maxAllowedSubmittals">MAX ALLOWED SUBMITTALS</SortableHeader>
                 <SortableHeader field="status">JOB STATUS</SortableHeader>
                 <SortableHeader field="pairStatus">HOONR-CURATE STATUS</SortableHeader>
-                <SortableHeader field="candidatesSourced">CANDIDATES SOURCED</SortableHeader>
+                <SortableHeader field="candidatesLaunched">CANDIDATES LAUNCHED</SortableHeader>
                 <SortableHeader field="resumesShortlisted">RESUMES SHORTLISTED</SortableHeader>
                 <SortableHeader field="completeSubmissions">COMPLETE SUBMISSIONS</SortableHeader>
                 <SortableHeader field="passSubmissions">PASS SUBMISSIONS</SortableHeader>
@@ -430,7 +415,7 @@ export default function DashboardPage() {
                     </div>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
-                    {job.candidatesSourced}
+                    {job.candidatesLaunched}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
                     {job.resumesShortlisted}
