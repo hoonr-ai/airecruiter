@@ -79,16 +79,24 @@ async def get_voice_job_context(job_id: str):
         logging.getLogger(__name__).error(f"Error in unified voice API: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+class TranscriptionItem(BaseModel):
+    question: str
+    answer: str
+    candidate_score: float
+    total_score: float = 10.0
+    hard_filter_status: str  # "passed", "failed", or "not_hard_filter"
+    reason: Optional[str] = None
+
 class VoiceAgentInterviewWebhook(BaseModel):
     interview_id: str
     status: str
     jobdiva_id: Optional[str] = None
     candidate_id: Optional[str] = None
-    hard_filter_status: Optional[str] = None
+    hard_filter_status: Optional[str] = None  # "passed" or "failed"
     total_score: Optional[float] = None
     candidate_score: Optional[float] = None
     completed_at: Optional[str] = None
-    transcriptions: Optional[List[Dict[str, Any]]] = None
+    transcriptions: Optional[List[TranscriptionItem]] = None
 
 @router.post("/interviews/webhook")
 async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
@@ -100,12 +108,13 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
         detail_payload = {
             "interview": {
                 "status": payload.status,
-                "overall_score": payload.candidate_score,  # Map candidate_score internally
+                "overall_score": payload.candidate_score,
                 "candidate_score": payload.candidate_score,
+                "total_score": payload.total_score,
                 "hard_filter_status": payload.hard_filter_status,
                 "completed_at": payload.completed_at
             },
-            "transcriptions": payload.transcriptions or []
+            "transcriptions": [t.dict() for t in payload.transcriptions] if payload.transcriptions else []
         }
 
         target_job_id = payload.jobdiva_id
