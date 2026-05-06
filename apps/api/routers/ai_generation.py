@@ -493,7 +493,7 @@ class ScreeningQuestionsRequest(BaseModel):
     customerName: str = ""
     workArrangement: str = "on-site"    # on-site | onsite | hybrid | remote
     address: str = ""
-    totalYears: int = 0
+    totalYears: Optional[int] = 0
 
 
 @router.post("/jobs/{job_id}/screening-questions/generate")

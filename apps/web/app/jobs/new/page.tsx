@@ -3458,10 +3458,16 @@ function NewJobPageContent() {
           customerName: jobData?.customer_name || "",
           workArrangement: jobData?.location_type || "",
           address: addressStr,
-          totalYears: rubricData?.total_years || null,
+          totalYears: rubricData?.total_years ?? 0,
         }),
       });
-      if (res.ok) {
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        console.warn(
+          `screening-questions/generate ${res.status}; using template fallback`,
+          text.slice(0, 500),
+        );
+      } else {
         const payload = await res.json();
         const raw = Array.isArray(payload?.questions) ? payload.questions : [];
         // Front-matter (intro, arrangement, total-years) is already owned by
@@ -6552,7 +6558,6 @@ function NewJobPageContent() {
                           sourceTitles[0]?.value,
                           sourceSkills[0]?.value ? `${sourceSkills[0]?.value} certified` : null,
                           sourceSkills[1]?.value,
-                          sourceLocations[0]?.value ? `Local to ${sourceLocations[0].value}` : null
                         ].filter(Boolean);
 
                         const displayName = getCandidateDisplayName(candidate);
