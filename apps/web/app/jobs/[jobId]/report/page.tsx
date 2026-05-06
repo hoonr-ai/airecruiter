@@ -627,37 +627,73 @@ export default function CandidateEvaluationReportPage() {
                   // regardless of whether it was a hard filter or not.
                   if (transcriptions.length > 0) {
                     return transcriptions.map((msg: any, i: number) => {
-                      const isBot = msg.speaker_type === "bot" || msg.role === "assistant" || !!msg.question;
+                      const isBot = msg.speaker_type === "bot" || 
+                                    msg.role === "assistant" || 
+                                    msg.role === "agent" || 
+                                    !!msg.question;
                       
                       // If it is an enriched Q&A item, we might need to show both 
                       // the question and the answer in the conversation flow.
                       const q_text = msg.question || msg.question_text;
-                      const a_text = msg.answer || msg.answer_text || msg.message_text || msg.text || msg.content;
+                      const a_text = msg.answer || msg.answer_text;
+                      const single_text = msg.message_text || msg.text || msg.content;
                       
-                      return (
-                        <div key={i} className="space-y-4">
-                          {q_text && (
-                            <div className="flex flex-col gap-2.5 relative items-start pr-12">
-                              <span className="text-[11px] font-black uppercase tracking-widest text-[#4f46e5]">
-                                ASSISTANT (ALEX)
-                              </span>
-                              <div className="p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border bg-[#eef2ff] border-[#e0e7ff] text-[#312e81] rounded-tl-none">
-                                {q_text}
+                      // Handle enriched Q&A items
+                      if (q_text || a_text) {
+                        return (
+                          <div key={i} className="space-y-4">
+                            {q_text && (
+                              <div className="flex flex-col gap-2.5 relative items-start pr-12">
+                                <span className="text-[11px] font-black uppercase tracking-widest text-[#4f46e5]">
+                                  ASSISTANT (ALEX)
+                                </span>
+                                <div className="p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border bg-[#eef2ff] border-[#e0e7ff] text-[#312e81] rounded-tl-none">
+                                  {q_text}
+                                </div>
                               </div>
-                            </div>
-                          )}
-                          {a_text && (
-                            <div className="flex flex-col gap-2.5 relative items-end pl-12">
-                              <span className="text-[11px] font-black uppercase tracking-widest text-[#94a3b8]">
-                                CANDIDATE
-                              </span>
-                              <div className="p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border bg-white border-[#e2e8f0] text-[#1e293b] rounded-tr-none">
-                                {a_text}
+                            )}
+                            {a_text && (
+                              <div className="flex flex-col gap-2.5 relative items-end pl-12">
+                                <span className="text-[11px] font-black uppercase tracking-widest text-[#94a3b8]">
+                                  CANDIDATE
+                                </span>
+                                <div className="p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border bg-white border-[#e2e8f0] text-[#1e293b] rounded-tr-none">
+                                  {a_text}
+                                </div>
                               </div>
-                            </div>
-                          )}
-                        </div>
-                      );
+                            )}
+                          </div>
+                        );
+                      }
+
+                      // Handle single messages (raw transcripts)
+                      if (single_text) {
+                        return (
+                          <div key={i} className="space-y-4">
+                            {isBot ? (
+                              <div className="flex flex-col gap-2.5 relative items-start pr-12">
+                                <span className="text-[11px] font-black uppercase tracking-widest text-[#4f46e5]">
+                                  ASSISTANT (ALEX)
+                                </span>
+                                <div className="p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border bg-[#eef2ff] border-[#e0e7ff] text-[#312e81] rounded-tl-none">
+                                  {single_text}
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="flex flex-col gap-2.5 relative items-end pl-12">
+                                <span className="text-[11px] font-black uppercase tracking-widest text-[#94a3b8]">
+                                  CANDIDATE
+                                </span>
+                                <div className="p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border bg-white border-[#e2e8f0] text-[#1e293b] rounded-tr-none">
+                                  {single_text}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
+
+                      return null;
                     });
                   }
 
