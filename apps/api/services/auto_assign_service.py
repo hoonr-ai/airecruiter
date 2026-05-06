@@ -131,6 +131,32 @@ class AutoAssignService:
 
         return count
 
+    async def _count_feedback_completed(self, target_job_id: str) -> int:
+        """
+        Count candidates with recruiter action (submit/reject with reason)
+        stored locally in sourced_candidates.data.
+        """
+        try:
+            with self._get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Count where feedback_type is set and feedback_reason is not null/empty
+                    cur.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM sourced_candidates
+                        WHERE jobdiva_id = %s
+                          AND data->>'feedback_type' IS NOT NULL
+                          AND data->>'feedback_reason' IS NOT NULL
+                          AND data->>'feedback_reason' != ''
+                        """,
+                        (target_job_id,)
+                    )
+                    row = cur.fetchone()
+                    return row[0] if row else 0
+        except Exception as e:
+            logger.warning(f"[AutoAssignService] Failed to count feedback for job {target_job_id}: {e}")
+            return 0
+
     async def synchronize_job_applicants(self, job_id: str):
         """
         Fetches all JobDiva applicants for a job, scores them,
@@ -317,17 +343,20 @@ class AutoAssignService:
                 from services.jobdiva import jobdiva_service
                 numeric_jd_id = await jobdiva_service._resolve_jobdiva_job_id(str(target_job_id))
                 if numeric_jd_id:
+                    # 5. Count and persist external curate submittals
+                    # 6. Count and persist feedback completed (local actions)
                     ext_subs = await self._count_external_curate_submittals(numeric_jd_id)
-                    # Persist to monitored_jobs
+                    feedback_count = await self._count_feedback_completed(target_job_id)
+
                     with self._get_db_connection() as conn:
                         with conn.cursor() as cur:
                             cur.execute(
-                                "UPDATE monitored_jobs SET pair_external_subs = %s, updated_at = NOW() "
+                                "UPDATE monitored_jobs SET pair_external_subs = %s, feedback_completed = %s, updated_at = NOW() "
                                 "WHERE job_id = %s OR jobdiva_id = %s",
-                                (ext_subs, job_id, job_id)
+                                (ext_subs, feedback_count, job_id, job_id)
                             )
                             conn.commit()
-                    logger.info(f"📊 [AutoAssignService] pair_external_subs={ext_subs} persisted for job {target_job_id}")
+                    logger.info(f"📊 [AutoAssignService] pair_external_subs={ext_subs}, feedback_completed={feedback_count} persisted for job {target_job_id}")
                 else:
                     logger.debug(f"[AutoAssignService] Could not resolve numeric ID for {target_job_id} — skipping external sub count")
             except Exception as e:
