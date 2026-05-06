@@ -755,7 +755,9 @@ class UnifiedCandidateSearch:
                 kept.append(c)
                 continue
 
-            is_match, reason = self._location_match_verdict(c, criteria)
+            is_match, reason, distance = self._location_match_verdict(c, criteria)
+            if distance is not None:
+                c["distance_miles"] = round(float(distance), 1)
             if is_match:
                 kept.append(c)
             else:
@@ -1126,7 +1128,10 @@ class UnifiedCandidateSearch:
         return bool(str(skills or "").strip())
 
     def _location_matches(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> bool:
-        return self._location_match_verdict(candidate, criteria)[0]
+        is_match, _reason, distance = self._location_match_verdict(candidate, criteria)
+        if distance is not None:
+            candidate["distance_miles"] = round(float(distance), 1)
+        return is_match
 
     def _candidate_structured_locations(self, candidate: Dict[str, Any]) -> List[str]:
         enhanced = candidate.get("enhanced_info") or {}
@@ -1219,13 +1224,17 @@ class UnifiedCandidateSearch:
                     return True
         return False
 
-    def _location_match_verdict(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Tuple[bool, str]:
+    def _location_match_verdict(
+        self,
+        candidate: Dict[str, Any],
+        criteria: SearchCriteria,
+    ) -> Tuple[bool, str, Optional[float]]:
         if not criteria.location:
-            return True, "no_location_requirement"
+            return True, "no_location_requirement", None
 
         required = self._parse_location(criteria.location)
         if not required["city"] and not required["state"]:
-            return True, "empty_location_requirement"
+            return True, "empty_location_requirement", None
 
         # B1: opt-out for "open to relocation" candidates whose actual location
         # is unknown or outside the radius. Default keeps them (soft-keep).
@@ -1235,11 +1244,11 @@ class UnifiedCandidateSearch:
         candidate_locs = self._candidate_structured_locations(candidate)
         if not candidate_locs:
             if relocation_flag and not include_relocation:
-                return False, "relocation_excluded_by_filter"
+                return False, "relocation_excluded_by_filter", None
             # Soft-keep: missing structured location is a data-quality
             # issue, not a reason to drop. Downstream LLM enrichment can
             # re-screen with the full resume text.
-            return True, "candidate_location_missing_keep"
+            return True, "candidate_location_missing_keep", None
 
         # If search is state-only, enforce state equality without geocoding.
         if required["state"] and not required["city"]:
@@ -1250,32 +1259,36 @@ class UnifiedCandidateSearch:
                 if state:
                     seen_states.append(state)
                     if state == required["state"]:
-                        return True, "state_match"
+                        return True, "state_match", None
             if not seen_states:
                 # Candidate has location text but no parseable state →
                 # soft-keep and let enrichment decide.
-                return True, "candidate_state_unknown_keep"
-            return False, "state_mismatch"
+                return True, "candidate_state_unknown_keep", None
+            return False, "state_mismatch", None
 
-        # Hard cap 50 mi everywhere (defense-in-depth — UI also caps).
-        miles = min(50, int(getattr(criteria, "within_miles", 25) or 25))
+        # Hard cap 100 mi everywhere (defense-in-depth — UI also caps).
+        miles = min(100, int(getattr(criteria, "within_miles", 25) or 25))
         target = normalize_location_string(criteria.location)
         geocode_failure = False
+        closest_distance: Optional[float] = None
 
         for candidate_loc in candidate_locs:
-            is_within, reason, _distance = within_radius(candidate_loc, target, miles)
+            is_within, reason, distance = within_radius(candidate_loc, target, miles)
+            if isinstance(distance, (int, float)) and distance >= 0:
+                if closest_distance is None or distance < closest_distance:
+                    closest_distance = float(distance)
             if is_within:
-                return True, "within_radius"
+                return True, "within_radius", closest_distance
             if reason in {"candidate_ungeocodable", "target_ungeocodable"}:
                 geocode_failure = True
 
         if geocode_failure:
             # Nominatim is best-effort and rate-limited. A geocode miss is
             # not evidence the candidate is outside the radius — soft-keep.
-            return True, "geocode_unavailable_keep"
+            return True, "geocode_unavailable_keep", closest_distance
         if relocation_flag and not include_relocation:
-            return False, "relocation_excluded_by_filter"
-        return False, "outside_radius"
+            return False, "relocation_excluded_by_filter", closest_distance
+        return False, "outside_radius", closest_distance
 
     def _should_enforce_location(self, criteria: SearchCriteria) -> bool:
         normalized_location = self._normalize_term(criteria.location)
@@ -1764,7 +1777,9 @@ class UnifiedCandidateSearch:
                 }
 
         if self._should_enforce_location(criteria):
-            location_ok, reason = self._location_match_verdict(candidate, criteria)
+            location_ok, reason, distance = self._location_match_verdict(candidate, criteria)
+            if distance is not None:
+                candidate["distance_miles"] = round(float(distance), 1)
             if not location_ok:
                 return {
                     "passes": False,
