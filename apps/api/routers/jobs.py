@@ -123,23 +123,6 @@ def _ensure_monitored_jobs_schema() -> None:
         conn.autocommit = True
         cur = conn.cursor()
         for stmt in (
-            # v21 columns
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS archive_reason TEXT",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS job_requirements JSONB DEFAULT '[]'",
-            # v22: extraction columns (previously ALTER'd per write in
-            # services/monitored_jobs_storage.py).
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS summary TEXT",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS hard_skills JSONB",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS soft_skills JSONB",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS experience_level TEXT",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS extraction_metadata JSONB",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS bot_introduction TEXT",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS sourcing_filters JSONB",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS resume_match_filters JSONB",
-            # v30: keep job rubric screen-question schema changes out of request path.
-            "ALTER TABLE IF EXISTS job_screen_questions ADD COLUMN IF NOT EXISTS is_hard_filter BOOLEAN NOT NULL DEFAULT FALSE",
             # v28: hot-path read optimizations for GET /jobs/monitored
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_active_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS NOT TRUE",
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_archived_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS TRUE",
@@ -1409,6 +1392,20 @@ async def publish_job_draft(job_id: str, publish_request: JobPublishRequest):
         conn.close()
         
         if result == "Draft published successfully":
+            # Update pair_launched_at timestamp in monitored_jobs
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE monitored_jobs SET pair_launched_at = NOW() WHERE jobdiva_id = %s OR id = %s",
+                    (job_id, job_id)
+                )
+                conn.commit()
+                cursor.close()
+                conn.close()
+            except Exception as update_err:
+                logger.warning(f"Failed to set pair_launched_at for job {job_id}: {update_err}")
+
             logger.info(f"🚀 Published draft {publish_request.draft_id} for job {job_id}")
             return {
                 "status": "success",

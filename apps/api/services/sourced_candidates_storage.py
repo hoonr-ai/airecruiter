@@ -91,32 +91,9 @@ def _ensure_sourced_candidates_schema() -> None:
                 )
             """))
 
-            # Legacy migrations (no-op if already applied). Wrapped so a
-            # failure on one doesn't poison the others.
-            for stmt in (
-                "ALTER TABLE sourced_candidates RENAME COLUMN job_id TO jobdiva_id",
-                "ALTER TABLE sourced_candidates RENAME COLUMN jobdiva_resume_id TO resume_id",
-                "ALTER TABLE sourced_candidates DROP COLUMN IF EXISTS jobdiva_candidate_id",
-                "ALTER TABLE sourced_candidates DROP COLUMN IF EXISTS candidate_type",
-            ):
-                try:
-                    conn.execute(text(stmt))
-                except Exception:
-                    pass
-
-            # Idempotent column adds.
-            for stmt in (
-                "ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS email TEXT",
-                "ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS phone TEXT",
-                "ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS resume_id TEXT",
-                "ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS resume_text TEXT",
-                "ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-                "ALTER TABLE sourced_candidates ADD COLUMN IF NOT EXISTS resume_match_percentage NUMERIC",
-            ):
-                try:
-                    conn.execute(text(stmt))
-                except Exception as e:
-                    logger.warning(f"sourced_candidates ALTER skipped: {stmt!r}: {e}")
+            # Idempotent column adds / migrations (ALTER TABLE) removed to prevent
+            # ACCESS EXCLUSIVE lock contention on startup. These should be 
+            # handled via manual migrations.
 
             # candidate_enhanced_info (second DDL site, pre-v22 lived inside
             # save_candidate_enhanced_info and ran per save).
@@ -143,10 +120,8 @@ def _ensure_sourced_candidates_schema() -> None:
                     expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + '30 days'::interval)
                 )
             """))
-            try:
-                conn.execute(text("ALTER TABLE candidate_enhanced_info ADD COLUMN IF NOT EXISTS resume_hash TEXT"))
-            except Exception as e:
-                logger.warning(f"candidate_enhanced_info ALTER resume_hash skipped: {e}")
+            # candidate_enhanced_info: ALTER TABLE for resume_hash removed to 
+            # prevent lock contention. 
             try:
                 conn.execute(text(
                     "CREATE INDEX IF NOT EXISTS idx_candidate_enhanced_info_resume_hash "

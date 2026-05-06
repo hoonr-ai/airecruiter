@@ -1051,6 +1051,25 @@ async def save_candidates(request: CandidatesSaveRequest):
 
         print(f"✅ Resolved jobdiva_id: {request.jobdiva_id!r} → {resolved_jobdiva_id!r}")
 
+        # Update pair_launched_at if it's not set yet. This marks the moment
+        # PAIR was first "launched" for this job, which serves as the start
+        # baseline for the 'Time to First Pass' metric.
+        try:
+            _conn = get_db_connection()
+            try:
+                with _conn.cursor() as _cur:
+                    _cur.execute("""
+                        UPDATE monitored_jobs 
+                        SET pair_launched_at = COALESCE(pair_launched_at, NOW()),
+                            updated_at = NOW()
+                        WHERE job_id = %s OR jobdiva_id = %s
+                    """, (request.jobdiva_id, request.jobdiva_id))
+                    _conn.commit()
+            finally:
+                _conn.close()
+        except Exception as _launch_err:
+            print(f"⚠️ Could not update pair_launched_at: {_launch_err}")
+
         # Filter only selected candidates for saving
         selected_candidates = [c for c in request.candidates if c.is_selected]
         print(f"📝 Saving {len(selected_candidates)} selected candidates out of {len(request.candidates)} total")
