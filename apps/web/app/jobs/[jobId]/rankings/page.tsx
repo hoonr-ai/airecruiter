@@ -70,19 +70,19 @@ const formatDate = (dateStr: string) => {
   }
 };
 
-const ColumnFilterPopup = ({ 
-  field, 
-  label, 
-  onClose, 
-  onApply, 
-  onClear, 
+const ColumnFilterPopup = ({
+  field,
+  label,
+  onClose,
+  onApply,
+  onClear,
   currentFilter,
   align = "left"
-}: { 
-  field: string; 
-  label: string; 
-  onClose: () => void; 
-  onApply: (filter: { condition: any; value: string }) => void; 
+}: {
+  field: string;
+  label: string;
+  onClose: () => void;
+  onApply: (filter: { condition: any; value: string }) => void;
   onClear: () => void;
   currentFilter?: { condition: any; value: string };
   align?: "left" | "right";
@@ -102,7 +102,7 @@ const ColumnFilterPopup = ({
   }, [onClose]);
 
   return (
-    <div 
+    <div
       ref={popupRef}
       className={`absolute top-full ${align === "left" ? "left-0" : "right-0"} mt-1 w-64 bg-white border border-slate-200 rounded-lg shadow-xl z-[100] p-4 text-left normal-case tracking-normal cursor-default`}
     >
@@ -112,7 +112,7 @@ const ColumnFilterPopup = ({
           <X className="w-4 h-4" />
         </button>
       </div>
-      
+
       <div className="space-y-4">
         <div>
           <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1.5">Condition</label>
@@ -1149,10 +1149,10 @@ export default function CandidateRankingsPage() {
               ) : (
                 <>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Total Candidates Sourced: <strong className="text-slate-900 ml-1">{candidates.length}</strong>
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Candidates Launched: <strong className="text-slate-900 ml-1">{candidates.length}</strong>
                   </div>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Resume Shortlisted Candidates: <strong className="text-slate-900 ml-1">{candidates.filter(c => (c.match_score ?? c.resume_match_percentage ?? 0) >= 70).length}</strong>
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Openings: <strong className="text-slate-900 ml-1">{(!job?.openings || job?.openings === "[null]") ? "—" : job.openings}</strong>
                   </div>
                 </>
               )}
@@ -1166,10 +1166,7 @@ export default function CandidateRankingsPage() {
               ) : (
                 <>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Max. Allowed Submittals: <strong className="text-slate-900 ml-1">{job?.max_allowed_submittals ?? 0}</strong>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Openings: <strong className="text-slate-900 ml-1">{job?.openings ?? 0}</strong>
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Max. Allowed Submittals: <strong className="text-slate-900 ml-1">{(!job?.max_allowed_submittals || job?.max_allowed_submittals === "[null]") ? "—" : job.max_allowed_submittals}</strong>
                   </div>
                 </>
               )}
@@ -1731,7 +1728,9 @@ export default function CandidateRankingsPage() {
                                 {screeningScore}/100
                               </span>
                             ) : (
-                              <span className="font-normal opacity-40 italic text-slate-400 text-[13px]">Pending</span>
+                              <span className="font-normal opacity-40 italic text-slate-400 text-[13px]">
+                                {String(candidate.source || "").toLowerCase().includes("applicant") ? "N/A" : "Pending"}
+                              </span>
                             )}
                           </div>
                         </TableCell>

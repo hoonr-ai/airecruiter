@@ -24,6 +24,7 @@ from routers._helpers import get_db_connection
 
 from core.email import notify_pair_launched, notify_job_posting, notify_candidate_passed
 from services.jobdiva import jobdiva_service
+from services.auto_assign_service import auto_assign_service
 from core import (
     JOBDIVA_PAIR_RECRUITER_ID,
     JOBDIVA_PAIR_QUALIFICATION_NAME,
@@ -80,22 +81,8 @@ def _ensure_audit_table():
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
-                # Patch columns that may be missing if table was created before schema updates
-                missing_columns = [
-                    ("jobdiva_id",      "VARCHAR(255)"),
-                    ("interview_id",   "VARCHAR(255)"),
-                    ("candidate_name", "VARCHAR(255)"),
-                    ("candidate_email","VARCHAR(255)"),
-                    ("payload",        "JSONB"),
-                    ("response",       "JSONB"),
-                    ("status",         "VARCHAR(50) DEFAULT 'sent'"),
-                    ("updated_at",     "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
-                ]
-                for col_name, col_def in missing_columns:
-                    cur.execute(f"""
-                        ALTER TABLE engage_interview_audit
-                        ADD COLUMN IF NOT EXISTS {col_name} {col_def};
-                    """)
+                # Idempotent column adds (ALTER TABLE) removed to prevent
+                # lock contention. These should be handled via manual migrations.
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS idx_engage_audit_candidate
                     ON engage_interview_audit(candidate_id);
@@ -744,9 +731,14 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
         if is_success:
             # ── Fire PAIR launch confirmation email (non-blocking) ──────────
             if request.is_initial_launch:
+                # v22: initial launch — immediate sync of existing JobDiva applicants.
+                # Applicants are assigned to rankings with match_score=0 (N/A).
+                logger.info(f"🚀 [Engagement] Initial launch detected for job {job_id_from_payload}. Triggering applicant sync.")
+                asyncio.create_task(auto_assign_service.synchronize_job_applicants(job_id_from_payload))
+                
                 asyncio.create_task(
                     _send_pair_launch_email(
-                        job_id=payload_obj.get("jd", {}).get("job_id", ""),
+                        job_id=job_id_from_payload,
                         candidate_count=len(interview_results),
                     )
                 )
@@ -1209,6 +1201,10 @@ async def _check_and_fire_candidate_passed_notification(
                 WHERE candidate_id = %s AND jobdiva_id = %s
             """, (json.dumps(cand_data), candidate_id, job_row["jobdiva_id"]))
             conn.commit()
+
+            # 6. Refresh Performance Metrics for this job (e.g. Time to First Pass)
+            # We fire this asynchronously so it doesn't block the webhook response
+            asyncio.create_task(auto_assign_service.refresh_job_performance_metrics(job_id))
 
         cur.close()
         conn.close()
