@@ -1690,7 +1690,7 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
                 "COALESCE(metrics.complete_submissions, 0) AS complete_submissions, "
                 "COALESCE(metrics.pass_submissions, 0) AS pass_submissions, "
                 "mj.pair_external_subs, mj.feedback_completed, "
-                "mj.time_to_first_pass, mj.created_at, mj.updated_at "
+                "mj.pair_launched_at, mj.time_to_first_pass, mj.created_at, mj.updated_at "
                 "FROM monitored_jobs mj "
                 "LEFT JOIN ("
                 "    SELECT "
@@ -1726,6 +1726,20 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
                 job_data["created_at"] = job_data["created_at"].isoformat()
             if job_data.get("updated_at") and hasattr(job_data["updated_at"], "isoformat"):
                 job_data["updated_at"] = job_data["updated_at"].isoformat()
+
+            # PAIR Status Logic:
+            # - Unpublished: Job has not been launched (pair_launched_at is NULL)
+            # - Active: Job is launched AND status is OPEN
+            # - Inactive: Job is launched AND status is NOT OPEN (e.g. CLOSED)
+            is_published = job_data.get("pair_launched_at") is not None
+            raw_status = str(job_data.get("status") or "OPEN").strip().upper()
+
+            if not is_published:
+                job_data["pair_status"] = "Unpublished"
+            elif raw_status == "OPEN":
+                job_data["pair_status"] = "Active"
+            else:
+                job_data["pair_status"] = "Inactive"
 
             jobs[jid] = job_data
 
