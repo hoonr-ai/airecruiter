@@ -40,7 +40,7 @@ class AutoAssignService:
                         if row:
                             resume_match_filters = row[0] if isinstance(row[0], list) else (json.loads(row[0]) if row[0] else [])
                             sourcing_filters = row[1] if isinstance(row[1], dict) else (json.loads(row[1]) if row[1] else {})
-                            jobdiva_numeric_id = row[2]
+                            jobdiva_ref_id = row[2]
                             job_status = row[3]
                             
                             # Skip if job is clearly inactive
@@ -50,8 +50,12 @@ class AutoAssignService:
             except Exception as e:
                 logger.warning(f"[AutoAssignService] Could not load filters for job {job_id}: {e}")
 
-            search_job_id = jobdiva_numeric_id if jobdiva_numeric_id else job_id
-            logger.debug(f"🤖 [AutoAssignService] Targeting JobDiva ID {search_job_id}")
+            # Use alphanumeric ID for sourced_candidates.jobdiva_id to match UI expectations
+            target_job_id = jobdiva_ref_id if jobdiva_ref_id else job_id
+            # search_job_id for JobDiva API (can be numeric or ref, resolve_jobdiva_job_id handles it)
+            search_job_id = job_id
+            
+            logger.debug(f"🤖 [AutoAssignService] Targeting JobDiva search for {search_job_id}, persisting to {target_job_id}")
 
             # 2. Build SearchCriteria
             title_criteria = []
@@ -97,7 +101,7 @@ class AutoAssignService:
                     with conn.cursor() as cur:
                         cur.execute(
                             "SELECT candidate_id FROM sourced_candidates WHERE jobdiva_id = %s",
-                            (job_id,)
+                            (target_job_id,)
                         )
                         existing_ids = {str(row[0]) for row in cur.fetchall()}
             except Exception as e:
@@ -108,6 +112,9 @@ class AutoAssignService:
             with self._get_db_connection() as conn:
                 with conn.cursor() as cur:
                     async for event in unified_search_service.search_candidates(criteria):
+                        if event.get("type") == "stage":
+                            logger.debug(f"🤖 [AutoAssignService] Sync Stage for {target_job_id}: {event.get('data')}")
+                        
                         if event.get("type") != "candidate":
                             continue
                         cand = event["data"]
@@ -157,7 +164,7 @@ class AutoAssignService:
                                     resume_match_percentage= EXCLUDED.resume_match_percentage,
                                     updated_at = CURRENT_TIMESTAMP
                             """, (
-                                job_id,
+                                target_job_id,
                                 candidate_id,
                                 cand.get("source", "JobDiva-Applicants"),
                                 cand.get("name") or "",
@@ -174,7 +181,7 @@ class AutoAssignService:
 
                             # Populate normalized tables
                             try:
-                                candidate_profiles_db.upsert_candidate(job_id, cand, cand.get("source", "JobDiva-Applicants"))
+                                candidate_profiles_db.upsert_candidate(target_job_id, cand, cand.get("source", "JobDiva-Applicants"))
                             except Exception as norm_err:
                                 logger.warning(f"[AutoAssignService] Failed normalized upsert for {candidate_id}: {norm_err}")
                         except Exception as row_err:
@@ -183,9 +190,9 @@ class AutoAssignService:
                     # Commit once at the end of the job sync to reduce transaction overhead
                     if total_assigned > 0:
                         conn.commit()
-                        logger.debug(f"🤖 [AutoAssignService] Committed {total_assigned} candidates for job {job_id}")
+                        logger.debug(f"🤖 [AutoAssignService] Committed {total_assigned} candidates for job {target_job_id}")
 
-            logger.info(f"✅ [AutoAssignService] Completed. Total assigned: {total_assigned} for job {job_id}")
+            logger.info(f"✅ [AutoAssignService] Completed. Total assigned: {total_assigned} for job {target_job_id}")
             return total_assigned
 
         except Exception as e:
