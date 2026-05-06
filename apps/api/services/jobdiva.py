@@ -3684,4 +3684,84 @@ class JobDivaService:
                 return True
         return False
 
+    async def get_job_submittals(self, job_id) -> List[Dict[str, Any]]:
+        """
+        Fetch manual candidate submittals for a job from JobDiva BI endpoint.
+        Uses /apiv2/bi/JobSubmittalsDetail. Returns list of submittal records.
+        Each record includes CANDIDATEID, RECIPIENTNAME, SUBMITDATE fields.
+        """
+        token = await self.authenticate()
+        if not token:
+            return []
+
+        # Resolve to numeric JobDiva ID
+        resolved_id = await self._resolve_jobdiva_job_id(str(job_id))
+        safe_job_id = resolved_id if resolved_id else job_id
+
+        try:
+            numeric_id = int(safe_job_id)
+        except (ValueError, TypeError):
+            logger.error(f"❌ get_job_submittals: Invalid job_id '{safe_job_id}'")
+            return []
+
+        url = f"{self.api_url}/apiv2/bi/JobSubmittalsDetail"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json"
+        }
+        params = {"jobIds": [numeric_id]}
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url, params=params, headers=headers)
+                if response.status_code == 200:
+                    data = response.json()
+                    result = data if isinstance(data, list) else (data.get("data") or [])
+                    logger.debug(f"📋 get_job_submittals: {len(result)} records for job {numeric_id}")
+                    return result
+                else:
+                    logger.error(f"❌ get_job_submittals failed: {response.status_code} - {response.text[:300]}")
+        except Exception as e:
+            logger.error(f"❌ get_job_submittals exception: {e}")
+        return []
+
+    async def get_candidate_qualifications(self, candidate_id) -> List[Dict[str, Any]]:
+        """
+        Fetch qualification history for a candidate from JobDiva BI endpoint.
+        Uses /apiv2/bi/CandidatesQualificationsDetail.
+        Each record includes QUALIFICATION, QUALIFICATIONVALUE, DATECREATED fields.
+        """
+        token = await self.authenticate()
+        if not token:
+            return []
+
+        try:
+            numeric_cid = int(candidate_id)
+        except (ValueError, TypeError):
+            logger.error(f"❌ get_candidate_qualifications: Invalid candidate_id '{candidate_id}'")
+            return []
+
+        url = f"{self.api_url}/apiv2/bi/CandidatesQualificationsDetail"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json"
+        }
+        params = {"candidateIds": [numeric_cid]}
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url, params=params, headers=headers)
+                if response.status_code == 200:
+                    data = response.json()
+                    result = data if isinstance(data, list) else (data.get("data") or [])
+                    logger.debug(f"📋 get_candidate_qualifications: {len(result)} records for candidate {numeric_cid}")
+                    return result
+                else:
+                    logger.error(f"❌ get_candidate_qualifications failed: {response.status_code} - {response.text[:300]}")
+        except Exception as e:
+            logger.error(f"❌ get_candidate_qualifications exception: {e}")
+        return []
+
+
 jobdiva_service = JobDivaService()
+
