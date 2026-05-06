@@ -387,10 +387,13 @@ def _build_prompt(
         else "You are an experienced recruiter writing screening questions for a live phone screen."
     )
     rule3 = (
-        "Mix question types across the set: ~50% technical-depth, ~25% architecture/scenario,\n"
-        "   ~25% behavioral/collaboration. For junior seniority: favor factual + debugging\n"
-        "   questions. For senior/staff/principal: favor architecture, scaling, failure-mode, and\n"
-        "   cross-team decisions."
+        "Mix question types across the set: ~70% technical-depth (one per must-have skill where\n"
+        "   possible) and ~30% architecture / scenario / debugging. NO behavioral, observational,\n"
+        "   or 'tell me about a time when' questions. NO 'describe your experience with X'\n"
+        "   phrasing. Every question must require concrete technical knowledge — a tool name,\n"
+        "   syntax detail, algorithm, configuration choice, failure-mode signal, or trade-off\n"
+        "   rationale. For junior seniority: favor factual + debugging questions. For\n"
+        "   senior/staff/principal: favor architecture, scaling, and failure-mode questions."
     ) if is_it else (
         "Mix question types across the set: ~50% process/scenario, ~25% stakeholder/communication,\n"
         "   ~25% behavioral/ownership. For junior seniority: favor concrete-task questions. For\n"
@@ -399,9 +402,19 @@ def _build_prompt(
         "   production systems, release pipelines) — this is not a technical role."
     )
     categories_line = (
-        '"category": "technical-depth" | "architecture" | "behavioral" | "scenario",'
+        '"category": "technical-depth" | "architecture" | "scenario" | "debugging",'
         if is_it
         else '"category": "process" | "stakeholder" | "behavioral" | "scenario",'
+    )
+    rubric_anchor_rule = (
+        "RUBRIC ANCHORING (IT): Allocate one technical-depth question per must-have skill in\n"
+        "   the rubric, in listed order, until you exhaust must-have skills or hit the\n"
+        "   technical-depth budget (~70% of the target count). Each anchored question's\n"
+        "   `related_skill` MUST exactly match the rubric skill name. Remaining slots fill with\n"
+        "   architecture / scenario / debugging questions that combine ≥2 rubric skills."
+    ) if is_it else (
+        "RUBRIC ANCHORING: Where the rubric lists named tools, processes, or frameworks, ground\n"
+        "   each question in one of them and set `related_skill` to the matching rubric value."
     )
 
     return f"""{intro}
@@ -434,16 +447,17 @@ STRICT RULES — FOLLOW EVERY ONE:
    in real work and asks something concrete about HOW they used it. Domain example for
    THIS role ({domain if is_it else family}):
      {shot_block}
-3. {rule3}
-4. Reference specific named concepts, tools, or artifacts where sensible — for THIS
+3. {rubric_anchor_rule}
+4. {rule3}
+5. Reference specific named concepts, tools, or artifacts where sensible — for THIS
    domain that means: {artifacts}. Do not be generic, and do not pull in concepts from
    unrelated domains.
-5. Each question must include a `pass_criteria` — a one-sentence CONCRETE signal the
+6. Each question must include a `pass_criteria` — a one-sentence CONCRETE signal the
     recruiter should listen for in the answer. Never ask for years or use wording like
     "N+ years", "X years of experience", "minimum years", or similar duration thresholds.
-6. Questions must be answerable in under 90 seconds each during a phone screen.
-7. Do not repeat or paraphrase the same question.
-8. Return nothing except the JSON array below.
+7. Questions must be answerable in under 90 seconds each during a phone screen.
+8. Do not repeat or paraphrase the same question.
+9. Return nothing except the JSON array below.
 
 OUTPUT FORMAT — return a STRICT JSON object like this:
 {{
@@ -629,9 +643,12 @@ async def generate_screening_questions(
 
     is_it_role = family == "it"
     system_message = (
-        "You write sharp, specific screening questions that separate real practitioners "
+        "You write sharp, specific TECHNICAL screening questions that separate real practitioners "
         "from surface-level candidates. You avoid generic 'describe your experience' phrasing. "
-        "You always return strict JSON."
+        "You NEVER produce behavioral or 'tell me about a time when' questions for IT roles — "
+        "every question must be answerable only by someone who has hands-on coded, configured, "
+        "or operated the tool, naming a concrete syntax detail, configuration knob, failure "
+        "signal, or trade-off. You always return strict JSON."
     ) if is_it_role else (
         "You write sharp, role-relevant screening questions for non-technical roles. "
         "You avoid software-delivery jargon (CI/CD, deployment, rollback, architecture, "
@@ -671,31 +688,36 @@ async def generate_screening_questions(
             if is_it_role:
                 if level in ("intensive", "deep", "extensive", "high"):
                     q_text = (
-                        f"In a production system using {name}, describe a failure mode you encountered, "
-                        "how you diagnosed root cause, and what design change prevented recurrence."
+                        f"In a production system using {name}, what specific failure-mode signal "
+                        "(metric, log line, or error class) led you to root cause, and which exact "
+                        "configuration or code change prevented recurrence?"
                     )
                     criteria = (
-                        f"Candidate details a real {name} incident with diagnosis steps, trade-offs, "
-                        "and a concrete prevention mechanism."
+                        f"Candidate names a concrete {name} signal, root cause, and the precise "
+                        "configuration knob, code path, or design change that fixed it."
                     )
-                    category = "architecture"
+                    category = "debugging"
                 elif level in ("light", "low", "basic", "quick"):
                     q_text = (
-                        f"What's one concrete task you handled with {name} recently, and what result did it drive?"
+                        f"Name one specific configuration, syntax detail, or API in {name} that "
+                        "you've tuned or used directly, and what observable behavior changed."
                     )
                     criteria = (
-                        f"Candidate gives a specific {name} example with clear ownership and measurable impact."
+                        f"Candidate names a real {name} flag/API/syntax detail and ties it to a "
+                        "concrete, verifiable behavior change — not a generic 'we used it for X'."
                     )
                     category = "technical-depth"
                 else:
                     q_text = (
-                        f"Walk me through a meaningful implementation using {name}: what constraints did you face, "
-                        "what decision did you make, and why?"
+                        f"Walk through one concrete implementation choice you made with {name} — "
+                        "what specific alternative did you reject, and what technical trade-off "
+                        "(latency, consistency, throughput, cost) drove the decision?"
                     )
                     criteria = (
-                        f"Candidate explains a concrete {name} implementation with constraints, rationale, and outcomes."
+                        f"Candidate identifies a specific {name} implementation choice, names the "
+                        "rejected alternative, and articulates a concrete technical trade-off."
                     )
-                    category = "scenario"
+                    category = "technical-depth"
             else:
                 # Non-IT family fallback — stakeholder/process/outcome wording,
                 # no production/architecture jargon.

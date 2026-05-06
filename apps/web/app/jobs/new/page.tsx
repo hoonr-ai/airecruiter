@@ -544,7 +544,7 @@ function NewJobPageContent() {
   const [sourceTitleInput, setSourceTitleInput] = useState("");
   const [sourceSkillInput, setSourceSkillInput] = useState("");
   const [sourceLocationInput, setSourceLocationInput] = useState("");
-  const [sourceLocationRadius, setSourceLocationRadius] = useState("Within 25 mi");
+  const [sourceLocationMiles, setSourceLocationMiles] = useState<number>(25);
   const [sourceCompanyInput, setSourceCompanyInput] = useState("");
   const [sourceKeywordInput, setSourceKeywordInput] = useState("");
   // PR-B: top-level minimum years of experience floor for sourcing.
@@ -3948,7 +3948,7 @@ function NewJobPageContent() {
       {
         id: Date.now(),
         value: cleanValue,
-        radius: sourceLocationRadius.toLowerCase()
+        radius: `within ${sourceLocationMiles} mi`
       }
     ]);
     setSourceLocationInput("");
@@ -3956,7 +3956,7 @@ function NewJobPageContent() {
     trackEvent("job_wizard_step5_source_location_added", {
       step: 5,
       value: truncateForTelemetry(cleanValue),
-      radius: sourceLocationRadius,
+      radius_miles: sourceLocationMiles,
     });
   };
 
@@ -4347,7 +4347,7 @@ function NewJobPageContent() {
     const parsedRadius = primaryLocation?.radius?.match(/(\d+)/)?.[1]
       ? Number(primaryLocation.radius.match(/(\d+)/)?.[1])
       : 25;
-    const withinMiles = Math.min(50, parsedRadius);
+    const withinMiles = Math.min(100, Math.max(1, parsedRadius));
     const activeResumeFilters = (overrides?.resumeMatchFiltersOverride ?? resumeMatchFilters)
       .filter(f => f.active)
       .map(f => ({
@@ -5972,33 +5972,38 @@ function NewJobPageContent() {
                         className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f5f3ff] rounded-xl font-medium"
                       />
                     </div>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <div className="flex items-center justify-between px-4 h-11 min-w-[120px] border border-slate-200 rounded-xl text-slate-800 text-[13px] font-bold cursor-pointer hover:bg-slate-50 transition-colors">
-                          {sourceLocationRadius}
-                          <ChevronDown className="w-4 h-4 text-slate-400" />
-                        </div>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
-                        {["Within 10 mi", "Within 25 mi", "Within 50 mi", "Exact location"].map(radius => (
-                          <DropdownMenuItem
-                            key={radius}
-                            className={`rounded-lg py-2 cursor-pointer font-bold text-[13px] ${sourceLocationRadius === radius ? "bg-slate-50 flex items-center justify-between" : ""}`}
-                            onClick={() => {
-                              setSourceLocationRadius(radius);
-                              setGeneratedBoolean("");
+                    <div className="flex items-center gap-1.5 px-3 h-11 border border-slate-200 rounded-xl bg-white">
+                      <span className="text-[12px] font-bold text-slate-500 uppercase tracking-wider">Within</span>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={100}
+                        step={5}
+                        value={sourceLocationMiles}
+                        onChange={(e) => {
+                          const next = Number(e.target.value);
+                          if (Number.isFinite(next)) {
+                            setSourceLocationMiles(next);
+                          }
+                        }}
+                        onBlur={() => {
+                          setSourceLocationMiles((prev) => {
+                            const clamped = Math.min(100, Math.max(1, Math.round(prev || 25)));
+                            if (clamped !== prev) {
                               trackEvent("job_wizard_step5_location_radius_changed", {
                                 step: 5,
-                                radius,
+                                radius_miles: clamped,
                               });
-                            }}
-                          >
-                            {radius}
-                            {sourceLocationRadius === radius && <Check className="w-3.5 h-3.5 text-[#6366f1]" />}
-                          </DropdownMenuItem>
-                        ))}
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                            }
+                            return clamped;
+                          });
+                          setGeneratedBoolean("");
+                        }}
+                        className="h-7 w-14 px-1 text-center text-[13px] font-bold border-0 focus:ring-0 focus-visible:ring-0 shadow-none p-0"
+                        aria-label="Search radius in miles"
+                      />
+                      <span className="text-[12px] font-bold text-slate-500 uppercase tracking-wider">mi</span>
+                    </div>
                     <Button
                       type="button"
                       onClick={() => addSourceLocation(sourceLocationInput)}
