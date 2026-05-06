@@ -195,7 +195,7 @@ class AutoAssignService:
                         ) AS first_pass_ts
                         FROM sourced_candidates
                         WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                          AND (data->>'engage_status'::text) IN ('pass', 'passed', 'Passed', 'PASS')
+                          AND (data->>'engage_status') IN ('pass', 'passed', 'Passed', 'PASS', 'completed', 'Completed', 'COMPLETED')
                         """,
                         (ref_id, num_id)
                     )
