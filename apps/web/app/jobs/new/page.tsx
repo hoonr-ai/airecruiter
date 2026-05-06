@@ -42,6 +42,7 @@ import {
   ListChecks,
   ChevronUp,
   ChevronDown,
+  GripVertical,
   GraduationCap,
   UserCheck,
   Lightbulb,
@@ -120,6 +121,30 @@ type ScreenQuestion = {
 const AVAILABILITY_RE = /earliest availability|available by|start (a )?new role/i;
 const isAvailabilityQuestion = (q: Pick<ScreenQuestion, "question_text">) =>
   AVAILABILITY_RE.test(q.question_text ?? "");
+
+// Native HTML5 drag-reorder. Each call site gets its own dragIdx ref so two
+// independent reorderable lists on the same screen don't see each other's
+// drags (e.g. Step 3 skills + Step 4 questions when both are visible mid-jump).
+function useDragReorder(onMove: (from: number, to: number) => void) {
+  const dragIdxRef = useRef<number | null>(null);
+  const onDragStart = (idx: number) => (e: React.DragEvent) => {
+    dragIdxRef.current = idx;
+    e.dataTransfer.effectAllowed = "move";
+  };
+  const onDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  };
+  const onDrop = (idx: number) => (e: React.DragEvent) => {
+    e.preventDefault();
+    const from = dragIdxRef.current;
+    dragIdxRef.current = null;
+    if (from === null || from === idx) return;
+    onMove(from, idx);
+  };
+  const onDragEnd = () => { dragIdxRef.current = null; };
+  return { onDragStart, onDragOver, onDrop, onDragEnd };
+}
 
 // Parse an existing `pass_criteria` into either {mode:'asap'} or {mode:'date',iso}.
 // Falls back to 'asap' when the string isn't recognizable so the UI never renders
@@ -877,10 +902,23 @@ function NewJobPageContent() {
           // Only pre-load if it's an actual populated rubric, not an empty shell
           if (rData.titles?.length > 0 || rData.skills?.length > 0) {
             setRubricData(applyTitleRequiredSafetyNet(rData));
-            // Restore screen questions if they exist in the rubric
+            // Seed the rubric-fingerprint refs from the loaded rubric so a
+            // Step 3 → 4 / 4 → 5 transition without edits doesn't think the
+            // rubric "changed since last regeneration" and clobber the saved
+            // questions/sourcing.
+            const seededKey = computeRubricQuestionsKey(rData);
+            lastQuestionsRubricKeyRef.current = seededKey;
+            lastSourcingRubricKeyRef.current = `${seededKey}::[]`;
+            // Restore screen questions if they exist in the rubric. Treat the
+            // saved list as recruiter-curated so the Step-4 sync effect won't
+            // re-add defaults the recruiter explicitly deleted; the regen
+            // escape hatches (level change, explicit Regenerate, or rubric
+            // change on Next) still work.
             if (rData.screen_questions?.length) {
               setScreenQuestions(rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1 })));
               setQuestionIdCounter(rData.screen_questions.length + 1);
+              userHasEditedQuestionsRef.current = true;
+              lastGeneratedLevelRef.current = draft.screening_level ?? screeningLevel;
             }
             if (rData.bot_introduction) {
               setBotIntroduction(rData.bot_introduction);
@@ -917,6 +955,15 @@ function NewJobPageContent() {
         setResumeMatchFilters(normalized);
         const maxId = Math.max(...draft.resume_match_filters.map((f: any) => f.id));
         setFilterIdCounter(maxId + 1);
+        // Refresh sourcing fingerprint now that filters are loaded — pairs
+        // with the rubric-key seed above so Step-4 → Step-5 only triggers
+        // a sourcing refresh when something actually changed since this load.
+        if (lastSourcingRubricKeyRef.current) {
+          const seededKey = lastSourcingRubricKeyRef.current.split("::")[0] || "";
+          lastSourcingRubricKeyRef.current = `${seededKey}::${JSON.stringify(
+            normalized.filter((f: any) => f?.active).map((f: any) => `${f?.category ?? ""}|${f?.value ?? ""}`).sort()
+          )}`;
+        }
         console.log(`✅ Restored ${draft.resume_match_filters.length} resume match filters from database`);
       }
 
@@ -1577,16 +1624,22 @@ function NewJobPageContent() {
           <div key={step} className="flex-1 flex flex-col items-center relative z-10">
             <div
               className={`flex flex-col items-center w-full ${isClickable ? "cursor-pointer" : "cursor-not-allowed"}`}
-              onClick={() => {
+              onClick={async () => {
                 if (!isClickable) return;
                 const fromStep = currentStep;
-                if (stepNumber !== fromStep) {
-                  trackEvent("job_wizard_step_jumped", {
-                    from_step: fromStep,
-                    to_step: stepNumber,
-                    from_step_label: STEP_LABELS[fromStep],
-                    to_step_label: STEP_LABELS[stepNumber],
-                  });
+                if (stepNumber === fromStep) return;
+                trackEvent("job_wizard_step_jumped", {
+                  from_step: fromStep,
+                  to_step: stepNumber,
+                  from_step_label: STEP_LABELS[fromStep],
+                  to_step_label: STEP_LABELS[stepNumber],
+                });
+                // Persist whatever the recruiter changed on the current step
+                // before jumping. The Next button does this; jumping via the
+                // step indicator used to skip the save, so deletions/edits
+                // could silently revert on reload.
+                if (jobData && (numericJobId || jobdivaId)) {
+                  await saveJobDraft({ currentStep: stepNumber, skipToast: true });
                 }
                 setCurrentStep(stepNumber);
               }}
@@ -2444,6 +2497,8 @@ function NewJobPageContent() {
     });
   };
 
+  const skillsDrag = useDragReorder((from, to) => moveRubricItem("skills", from, to));
+
   const establishRubricStep = (
     <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
       <div className="flex flex-row items-start gap-4 px-7 py-6 border-b border-slate-100" style={{ background: "linear-gradient(135deg, #f5f3ff 0%, #ffffff 60%)" }}>
@@ -2624,6 +2679,7 @@ function NewJobPageContent() {
 
             {/* Column Headers */}
             <div className="flex items-center gap-2.5 text-[11px] font-bold uppercase tracking-wider text-slate-500 pb-2 border-b-2 border-slate-200 mb-1">
+              <div className="w-[24px] flex-shrink-0"></div>
               <div className="flex-1 min-w-0">Hard Skill</div>
               <div className="w-[110px] flex-shrink-0 flex items-center justify-center">
                 Min. Years
@@ -2637,13 +2693,30 @@ function NewJobPageContent() {
               <div className="w-[190px] flex-shrink-0 flex items-center justify-center">
                 Required / Preferred
               </div>
-              <div className="w-[106px] flex-shrink-0 flex items-center justify-center">
+              <div className="w-[36px] flex-shrink-0 flex items-center justify-center">
                 Actions
               </div>
             </div>
             <div className="space-y-0">
               {rubricData.skills?.map((skill: any, idx: number) => (
-                <div key={idx} className="flex items-center gap-2.5 py-2 border-b border-slate-200 last:border-b-0">
+                <div
+                  key={idx}
+                  className="flex items-center gap-2.5 py-2 border-b border-slate-200 last:border-b-0"
+                  onDragOver={skillsDrag.onDragOver}
+                  onDrop={skillsDrag.onDrop(idx)}
+                  onDragEnd={skillsDrag.onDragEnd}
+                >
+                  <button
+                    type="button"
+                    draggable
+                    onDragStart={skillsDrag.onDragStart(idx)}
+                    onDragEnd={skillsDrag.onDragEnd}
+                    className="w-[24px] flex-shrink-0 flex items-center justify-center text-slate-300 hover:text-slate-600 cursor-grab active:cursor-grabbing"
+                    title="Drag to reorder"
+                    aria-label="Drag to reorder skill"
+                  >
+                    <GripVertical className="w-4 h-4" />
+                  </button>
                   <div className="flex-1 min-w-0 flex items-center gap-2">
                     <input
                       type="text"
@@ -2677,22 +2750,6 @@ function NewJobPageContent() {
                       <button onClick={() => updateRubricItem('skills', idx, 'required', 'Required')} className={`flex-1 py-[3px] rounded-full transition-all ${skill.required === 'Required' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}>Required</button>
                       <button onClick={() => updateRubricItem('skills', idx, 'required', 'Preferred')} className={`flex-1 py-[3px] rounded-full transition-all ${skill.required === 'Preferred' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}>Preferred</button>
                     </div>
-                  </div>
-                  <div className="w-[70px] flex-shrink-0 flex flex-col gap-1 items-center">
-                    <button
-                      disabled={idx === 0}
-                      onClick={() => moveRubricItem('skills', idx, idx - 1)}
-                      className="w-[22px] h-[22px] flex items-center justify-center border border-slate-200 rounded-[4px] bg-white text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-20 disabled:pointer-events-none"
-                    >
-                      <ChevronUp className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      disabled={idx === (rubricData.skills?.length - 1)}
-                      onClick={() => moveRubricItem('skills', idx, idx + 1)}
-                      className="w-[22px] h-[22px] flex items-center justify-center border border-slate-200 rounded-[4px] bg-white text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-20 disabled:pointer-events-none"
-                    >
-                      <ChevronDown className="w-3.5 h-3.5" />
-                    </button>
                   </div>
                   <div className="w-[36px] flex-shrink-0 text-center">
                     <button
@@ -3589,6 +3646,28 @@ function NewJobPageContent() {
   // unchanged (Step 3 → back → Step 2 → Next without edits), the existing
   // rubric + any recruiter edits to it are preserved.
   const lastRubricJdRef = useRef<string>("");
+
+  // Fingerprint of the rubric (titles+skills) used to generate the current
+  // Step-4 question set. Step-3 → Step-4 Next compares it; if it changed
+  // (skill renamed, added, removed, requirement flipped) we force-regenerate
+  // role-specific questions while preserving recruiter custom questions.
+  // Same fingerprint, plus filter signature, gates Step-4 → Step-5 sourcing
+  // refresh below.
+  const lastQuestionsRubricKeyRef = useRef<string>("");
+  const lastSourcingRubricKeyRef = useRef<string>("");
+  const computeRubricQuestionsKey = (rubric: any): string => {
+    if (!rubric) return "";
+    const titles = (rubric.titles || []).map((t: any) => `${t?.value ?? ""}|${t?.minYears ?? 0}|${t?.required ?? ""}`);
+    const skills = (rubric.skills || []).map((s: any) => `${s?.value ?? ""}|${s?.minYears ?? 0}|${s?.required ?? ""}`);
+    return JSON.stringify({ titles, skills, total_years: rubric.total_years ?? null });
+  };
+  const computeSourcingRubricKey = (rubric: any, filters: any[]): string => {
+    const filterSig = (filters || [])
+      .filter(f => f?.active)
+      .map(f => `${f?.category ?? ""}|${f?.value ?? ""}`)
+      .sort();
+    return `${computeRubricQuestionsKey(rubric)}::${JSON.stringify(filterSig)}`;
+  };
 
   // Inject the Step 1 work-authorization value (e.g. "W2 only", "US Citizen /
   // GC") into Step 3's "Other Requirements" list so recruiters don't have to
@@ -4637,6 +4716,33 @@ function NewJobPageContent() {
     });
   };
 
+  // Reorder among the non-default block (questions 8+). Default rows stay
+  // pinned at the top in their generated order — recruiters move only the
+  // role-specific + custom rows below them.
+  const moveScreenQuestion = (from: number, to: number) => {
+    setScreenQuestions(prev => {
+      if (from === to || from < 0 || to < 0) return prev;
+      if (from >= prev.length || to >= prev.length) return prev;
+      const firstReorderableIdx = prev.findIndex(q => !q.is_default);
+      if (firstReorderableIdx < 0) return prev;
+      if (from < firstReorderableIdx) return prev;
+      const safeTo = Math.max(firstReorderableIdx, to);
+      const next = [...prev];
+      const [moved] = next.splice(from, 1);
+      next.splice(safeTo, 0, moved);
+      return next.map((q, i) => ({ ...q, order_index: i }));
+    });
+    userHasEditedQuestionsRef.current = true;
+    trackEvent("job_wizard_step4_screen_question_reordered", {
+      step: 4,
+      from_index: from,
+      to_index: to,
+    });
+  };
+
+  const questionsDrag = useDragReorder((from, to) => moveScreenQuestion(from, to));
+  const firstReorderableQuestionIdx = screenQuestions.findIndex(q => !q.is_default);
+
   const setFiltersStep = (
     <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
       <div className="flex flex-row items-start gap-4 px-7 py-6 border-b border-slate-100"
@@ -4851,14 +4957,38 @@ function NewJobPageContent() {
 
           {/* Questions Table */}
           <div className="flex items-center gap-3 text-[11px] font-bold uppercase tracking-wider text-slate-500 pb-2 border-b-2 border-slate-200 mb-2">
+            <div className="w-5 flex-shrink-0"></div>
             <div className="w-8 flex-shrink-0">#</div>
             <div className="flex-1">Question</div>
             <div className="flex-1">Pass Criteria <span className="text-[10px] font-normal lowercase">(blank = informational only)</span></div>
             <div className="w-10 flex-shrink-0"></div>
           </div>
 
-          {screenQuestions.map((q, index) => (
-            <div key={q.id} className="flex items-start gap-3 py-3 border-b border-slate-100 last:border-b-0 group">
+          {screenQuestions.map((q, index) => {
+            const isReorderable = firstReorderableQuestionIdx >= 0 && index >= firstReorderableQuestionIdx;
+            return (
+            <div
+              key={q.id}
+              className="flex items-start gap-3 py-3 border-b border-slate-100 last:border-b-0 group"
+              onDragOver={isReorderable ? questionsDrag.onDragOver : undefined}
+              onDrop={isReorderable ? questionsDrag.onDrop(index) : undefined}
+              onDragEnd={questionsDrag.onDragEnd}
+            >
+              {isReorderable ? (
+                <button
+                  type="button"
+                  draggable
+                  onDragStart={questionsDrag.onDragStart(index)}
+                  onDragEnd={questionsDrag.onDragEnd}
+                  className="w-5 flex-shrink-0 flex items-center justify-center text-slate-300 hover:text-slate-600 cursor-grab active:cursor-grabbing mt-1.5"
+                  title="Drag to reorder"
+                  aria-label="Drag to reorder question"
+                >
+                  <GripVertical className="w-4 h-4" />
+                </button>
+              ) : (
+                <div className="w-5 flex-shrink-0" aria-hidden />
+              )}
               <div className="w-8 h-8 rounded-full bg-[#6366f1] text-white flex items-center justify-center text-[12px] font-bold flex-shrink-0 mt-0.5">
                 {index + 1}
               </div>
@@ -4949,7 +5079,8 @@ function NewJobPageContent() {
                 </button>
               </div>
             </div>
-          ))}
+            );
+          })}
 
           {/* Add Question Button */}
           <Button
@@ -6824,6 +6955,16 @@ function NewJobPageContent() {
                   try {
                     const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
                     if (!saved) return;
+                    // If the rubric (titles/skills/total_years) has been
+                    // edited since the current Step-4 question set was
+                    // generated, force-regenerate role-specific questions so
+                    // Step 4 reflects the recruiter's Step-3 changes. Custom
+                    // ("other") questions are preserved by the initializer.
+                    const nextKey = computeRubricQuestionsKey(rubricData);
+                    if (nextKey && nextKey !== lastQuestionsRubricKeyRef.current) {
+                      await initializeScreenQuestionsFromRubric({ force: true });
+                      lastQuestionsRubricKeyRef.current = nextKey;
+                    }
                     trackStepAdvance(3, 4, { via: "next_button" });
                   } finally {
                     setIsAdvancingStep(false);
@@ -6833,12 +6974,19 @@ function NewJobPageContent() {
                   try {
                     const saved = await saveJobDraft({ currentStep: 5, skipToast: true });
                     if (!saved) return;
-                    // Only derive sourcing criteria on first entry (5.3). The
-                    // sync effect below won't override it on subsequent visits.
+                    const nextSourcingKey = computeSourcingRubricKey(rubricData, resumeMatchFilters);
+                    // First entry: derive sourcing criteria from rubric.
+                    // Subsequent entries: only refresh when the rubric or
+                    // active filter set has actually changed since the last
+                    // sourcing init, so recruiter customisations on Step 5
+                    // aren't clobbered by no-op revisits.
                     if (!sourcingCriteriaInitializedRef.current) {
                       initializeSourceFromRubric();
                       sourcingCriteriaInitializedRef.current = true;
+                    } else if (nextSourcingKey && nextSourcingKey !== lastSourcingRubricKeyRef.current) {
+                      initializeSourceFromRubric();
                     }
+                    lastSourcingRubricKeyRef.current = nextSourcingKey;
                     trackStepAdvance(4, 5, { via: "next_button" });
                   } finally {
                     setIsAdvancingStep(false);
