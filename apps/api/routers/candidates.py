@@ -240,13 +240,13 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             digits = "".join(ch for ch in radius_match if ch.isdigit())
             if digits:
                 within_miles = int(digits)
-        # Hard cap 50 mi everywhere — clamp + log if a caller exceeds it.
-        if within_miles > 50:
+        # Hard cap 100 mi everywhere — clamp + log if a caller exceeds it.
+        if within_miles > 100:
             logger.warning(
-                "within_miles=%s exceeds 50mi cap; clamping to 50",
+                "within_miles=%s exceeds 100mi cap; clamping to 100",
                 within_miles,
             )
-            within_miles = 50
+            within_miles = 100
 
         companies = request.companies or []
 
