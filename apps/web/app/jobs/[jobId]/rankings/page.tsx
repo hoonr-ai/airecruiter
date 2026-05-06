@@ -1152,7 +1152,7 @@ export default function CandidateRankingsPage() {
                     <div className="w-2 h-2 rounded-full bg-slate-300"></div> Candidates Launched: <strong className="text-slate-900 ml-1">{candidates.length}</strong>
                   </div>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Openings: <strong className="text-slate-900 ml-1">{(!job?.openings || job?.openings === "[null]") ? "—" : job.openings}</strong>
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Openings: <strong className="text-slate-900 ml-1">{!job?.openings ? "—" : job.openings}</strong>
                   </div>
                 </>
               )}
@@ -1166,7 +1166,7 @@ export default function CandidateRankingsPage() {
               ) : (
                 <>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Max. Allowed Submittals: <strong className="text-slate-900 ml-1">{(!job?.max_allowed_submittals || job?.max_allowed_submittals === "[null]") ? "—" : job.max_allowed_submittals}</strong>
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Max. Allowed Submittals: <strong className="text-slate-900 ml-1">{!job?.max_allowed_submittals ? "—" : job.max_allowed_submittals}</strong>
                   </div>
                 </>
               )}
