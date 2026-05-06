@@ -180,6 +180,38 @@ function formatAvailabilityCriteria(v: { mode: "asap" | "date"; iso?: string }):
   return `Must be available by ${formatted}`;
 }
 
+// Minimal client-side mirror of `detect_role_family` in
+// apps/api/services/screening_question_generator.py. Used only to pick the
+// right Step-4 fallback templates when the backend generator can't be
+// reached — the API itself remains the source of truth for normal flows.
+const _IT_TITLE_KEYWORDS = [
+  "engineer", "developer", "architect", "devops", "sre", "site reliability",
+  "data engineer", "data scientist", "machine learning", "ai engineer",
+  "cloud", "programmer", "full stack", "backend", "frontend", "qa automation",
+  "platform", "security engineer", "database", "etl", "analytics engineer",
+  "ios", "android", "sdet",
+];
+const _IT_SKILL_KEYWORDS = [
+  "react", "angular", "vue", "next.js", "tailwind", "typescript", "javascript",
+  "html5", "css3", "java", "spring", "kotlin", "swift", "node", ".net", "c#",
+  "golang", "go ", "ruby", "microservice", "fastapi", "django", "flask",
+  "kubernetes", "k8s", "terraform", "helm", "jenkins", "github actions",
+  "kafka", "airflow", "snowflake", "databricks", "spark", "dbt", "redshift",
+  "bigquery", "python", "selenium", "cypress", "playwright",
+];
+function isLikelyItRole(
+  title: string,
+  skills: Array<{ value?: string; name?: string }> = []
+): boolean {
+  const t = (title || "").toLowerCase();
+  const skillBlob = skills
+    .map(s => (s.value || s.name || "").toLowerCase())
+    .join(" ");
+  const haystack = ` ${t} ${skillBlob} `;
+  if (_IT_TITLE_KEYWORDS.some(k => t.includes(k))) return true;
+  return _IT_SKILL_KEYWORDS.some(k => haystack.includes(k));
+}
+
 const STEP_LABELS = {
   1: "Intake",
   2: "Publish",
@@ -3364,6 +3396,10 @@ function NewJobPageContent() {
     const customQuestions = screenQuestions.filter(
       question => question.category !== "default" && question.category !== "role-specific"
     );
+    const isIt = isLikelyItRole(
+      enhancedTitle || jobTitle || "",
+      (rubricData?.skills as Array<{ value?: string; name?: string }>) || []
+    );
 
     // 1. Bot Introduction
     const introTitle = (enhancedTitle || jobTitle || "role").trim();
@@ -3459,13 +3495,27 @@ function NewJobPageContent() {
     if (roleSpecific.length === 0 && rubricData?.skills) {
       rubricData.skills.forEach((skill: any) => {
         if (roleSpecific.length >= targetRoleSpecificCount) return;
-        const skillName = skill.value || "this responsibility";
+        const skillName = skill.value || (isIt ? "this technology" : "this responsibility");
         const promptVariant = roleSpecific.length % 4;
 
         let questionText = "";
         let passCriteria = "";
 
-        if (promptVariant === 0) {
+        if (isIt) {
+          if (promptVariant === 0) {
+            questionText = `Walk through one concrete implementation choice you made with ${skillName} — what specific alternative did you reject, and what technical trade-off (latency, consistency, throughput, cost) drove the decision?`;
+            passCriteria = `Candidate identifies a specific ${skillName} implementation choice, names the rejected alternative, and articulates a concrete technical trade-off.`;
+          } else if (promptVariant === 1) {
+            questionText = `In a ${skillName}-based system, what specific failure signal — a metric, log line, or error class — has actually led you to a root cause, and which exact configuration or code change prevented recurrence?`;
+            passCriteria = `Candidate names a concrete ${skillName} signal, root cause, and the precise configuration knob, code path, or design change that fixed it.`;
+          } else if (promptVariant === 2) {
+            questionText = `Name one specific configuration knob, API method, or version-pinned behavior in ${skillName} you've personally tuned, and what observable behavior changed as a result.`;
+            passCriteria = `Candidate names a real ${skillName} flag/API/syntax detail and ties it to a concrete, verifiable behavior change — not a generic 'we used it for X'.`;
+          } else {
+            questionText = `Pick one place where ${skillName} interacts with another part of your stack — what concrete contract, schema, or interface did you design or change, and what failure mode were you guarding against?`;
+            passCriteria = `Candidate points to a specific ${skillName} integration boundary, names the contract/schema, and identifies the concrete failure mode the design defends against.`;
+          }
+        } else if (promptVariant === 0) {
           questionText = `Tell me about a recent situation where ${skillName} directly influenced the final outcome. What decision mattered most?`;
           passCriteria = `Candidate provides a concrete ${skillName} example, explains the decision made, and ties it to a measurable outcome.`;
         } else if (promptVariant === 1) {
@@ -3493,11 +3543,14 @@ function NewJobPageContent() {
       // If we still don't have enough questions (few rubric skills), top up
       // to the exact level target with generic but concrete prompts.
       while (roleSpecific.length < targetRoleSpecificCount) {
-        const idx = roleSpecific.length + 1;
         roleSpecific.push({
           id: idCounter++,
-          question_text: `Share a recent project example where you solved a non-trivial problem under constraints. What factors shaped your decision?`,
-          pass_criteria: `Candidate gives a concrete situation, explains constraints and decision rationale, and describes the result.`,
+          question_text: isIt
+            ? `Name one specific configuration knob, API method, or version-pinned behavior in your stack you've personally tuned, and what observable behavior changed as a result.`
+            : `Share a recent project example where you solved a non-trivial problem under constraints. What factors shaped your decision?`,
+          pass_criteria: isIt
+            ? `Candidate names a real flag/API/syntax detail and ties it to a concrete, verifiable behavior change — not a generic 'we used it for X'.`
+            : `Candidate gives a concrete situation, explains constraints and decision rationale, and describes the result.`,
           is_default: false,
           category: "role-specific",
           order_index: questions.length + roleSpecific.length,
@@ -3513,8 +3566,12 @@ function NewJobPageContent() {
     while (roleSpecific.length < targetRoleSpecificCount) {
       roleSpecific.push({
         id: idCounter++,
-        question_text: "Share a recent project example where you solved a non-trivial problem under constraints. What factors shaped your decision?",
-        pass_criteria: "Candidate gives a concrete situation, explains constraints and decision rationale, and describes the result.",
+        question_text: isIt
+          ? "Name one specific configuration knob, API method, or version-pinned behavior in your stack you've personally tuned, and what observable behavior changed as a result."
+          : "Share a recent project example where you solved a non-trivial problem under constraints. What factors shaped your decision?",
+        pass_criteria: isIt
+          ? "Candidate names a real flag/API/syntax detail and ties it to a concrete, verifiable behavior change — not a generic 'we used it for X'."
+          : "Candidate gives a concrete situation, explains constraints and decision rationale, and describes the result.",
         is_default: false,
         category: "role-specific",
         order_index: questions.length + roleSpecific.length,
