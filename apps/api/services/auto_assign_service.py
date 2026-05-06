@@ -157,6 +157,68 @@ class AutoAssignService:
             logger.warning(f"[AutoAssignService] Failed to count feedback for job {target_job_id}: {e}")
             return 0
 
+    async def _calculate_time_to_first_pass(self, target_job_id: str) -> float:
+        """
+        Calculate minutes between first PAIR interview send and first candidate PASS.
+        PAIRLaunched  = MIN(created_at)  from engage_interview_audit for this job.
+        FirstPAIRPass = MIN(data->>'engage_updated_at') from sourced_candidates
+                        where engage_status IN ('pass', 'passed').
+        Returns the difference in minutes, or None if data is insufficient.
+        """
+        try:
+            with self._get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Get job activation and canonical IDs from monitored_jobs table
+                    cur.execute(
+                        """
+                        SELECT pair_launched_at, jobdiva_id, job_id
+                        FROM monitored_jobs
+                        WHERE (jobdiva_id = %s OR job_id = %s)
+                        """,
+                        (target_job_id, target_job_id)
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return None
+                    
+                    pair_launched, ref_id, num_id = row
+
+                    if not pair_launched:
+                        return None
+
+                    # Get earliest pass timestamp from sourced_candidates. We check both 
+                    # possible ID formats (alphanumeric ref and numeric PK) to be safe.
+                    cur.execute(
+                        """
+                        SELECT MIN(
+                            NULLIF(data->>'engage_updated_at', '')::timestamptz
+                        ) AS first_pass_ts
+                        FROM sourced_candidates
+                        WHERE (jobdiva_id = %s OR jobdiva_id = %s)
+                          AND (data->>'engage_status'::text) IN ('pass', 'passed', 'Passed', 'PASS')
+                        """,
+                        (ref_id, num_id)
+                    )
+                    row2 = cur.fetchone()
+                    first_pass_ts = row2[0] if row2 else None
+
+                    if not first_pass_ts:
+                        return None
+
+                    # Ensure both are timezone-aware before subtracting
+                    from datetime import timezone
+                    if hasattr(pair_launched, 'tzinfo') and pair_launched.tzinfo is None:
+                        pair_launched = pair_launched.replace(tzinfo=timezone.utc)
+                    if hasattr(first_pass_ts, 'tzinfo') and first_pass_ts.tzinfo is None:
+                        first_pass_ts = first_pass_ts.replace(tzinfo=timezone.utc)
+
+                    delta_minutes = (first_pass_ts - pair_launched).total_seconds() / 60.0
+                    return round(delta_minutes, 1) if delta_minutes >= 0 else None
+
+        except Exception as e:
+            logger.warning(f"[AutoAssignService] Failed to calculate time_to_first_pass for job {target_job_id}: {e}")
+            return None
+
     async def synchronize_job_applicants(self, job_id: str):
         """
         Fetches all JobDiva applicants for a job, scores them,
@@ -337,35 +399,48 @@ class AutoAssignService:
 
             logger.info(f"✅ [AutoAssignService] Completed. Total assigned: {total_assigned} for job {target_job_id}")
 
-            # 5. Count and persist external curate submittals
-            #    Resolve to numeric JobDiva ID for BI API calls
-            try:
-                from services.jobdiva import jobdiva_service
-                numeric_jd_id = await jobdiva_service._resolve_jobdiva_job_id(str(target_job_id))
-                if numeric_jd_id:
-                    # 5. Count and persist external curate submittals
-                    # 6. Count and persist feedback completed (local actions)
-                    ext_subs = await self._count_external_curate_submittals(numeric_jd_id)
-                    feedback_count = await self._count_feedback_completed(target_job_id)
-
-                    with self._get_db_connection() as conn:
-                        with conn.cursor() as cur:
-                            cur.execute(
-                                "UPDATE monitored_jobs SET pair_external_subs = %s, feedback_completed = %s, updated_at = NOW() "
-                                "WHERE job_id = %s OR jobdiva_id = %s",
-                                (ext_subs, feedback_count, job_id, job_id)
-                            )
-                            conn.commit()
-                    logger.info(f"📊 [AutoAssignService] pair_external_subs={ext_subs}, feedback_completed={feedback_count} persisted for job {target_job_id}")
-                else:
-                    logger.debug(f"[AutoAssignService] Could not resolve numeric ID for {target_job_id} — skipping external sub count")
-            except Exception as e:
-                logger.warning(f"[AutoAssignService] External sub count failed for job {job_id}: {e}", exc_info=True)
+            # 5. Update performance metrics (Time to First Pass, External Subs, etc.)
+            await self.refresh_job_performance_metrics(target_job_id)
 
             return total_assigned
 
         except Exception as e:
             logger.error(f"❌ [AutoAssignService] Sync failed for job {job_id}: {e}", exc_info=True)
             return 0
+
+    async def refresh_job_performance_metrics(self, target_job_id: str):
+        """
+        Recalculates and persists performance metrics for a specific job:
+        - Time to First Pass (minutes)
+        - External Curate Submittals (from JobDiva)
+        - Feedback Completed (local actions)
+        """
+        try:
+            from services.jobdiva import jobdiva_service
+            numeric_jd_id = await jobdiva_service._resolve_jobdiva_job_id(str(target_job_id))
+            if not numeric_jd_id:
+                logger.debug(f"[AutoAssignService] Could not resolve numeric ID for {target_job_id} — skipping metrics refresh")
+                return
+
+            # 1. Count and persist external curate submittals
+            ext_subs = await self._count_external_curate_submittals(numeric_jd_id)
+            # 2. Count and persist feedback completed (local actions)
+            feedback_count = await self._count_feedback_completed(target_job_id)
+            # 3. Calculate time to first PASS candidate (in minutes)
+            time_to_pass = await self._calculate_time_to_first_pass(target_job_id)
+
+            with self._get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE monitored_jobs SET pair_external_subs = %s, feedback_completed = %s, "
+                        "time_to_first_pass = %s, updated_at = NOW() "
+                        "WHERE job_id = %s OR jobdiva_id = %s",
+                        (ext_subs, feedback_count, time_to_pass, str(target_job_id), str(target_job_id))
+                    )
+                    conn.commit()
+            logger.info(f"📊 [AutoAssignService] Metrics refreshed for {target_job_id}: pass_time={time_to_pass}min, ext_subs={ext_subs}, feedback={feedback_count}")
+        except Exception as e:
+            logger.warning(f"[AutoAssignService] Metrics refresh failed for job {target_job_id}: {e}")
+
 
 auto_assign_service = AutoAssignService()

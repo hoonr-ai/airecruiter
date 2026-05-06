@@ -81,22 +81,8 @@ def _ensure_audit_table():
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 """)
-                # Patch columns that may be missing if table was created before schema updates
-                missing_columns = [
-                    ("jobdiva_id",      "VARCHAR(255)"),
-                    ("interview_id",   "VARCHAR(255)"),
-                    ("candidate_name", "VARCHAR(255)"),
-                    ("candidate_email","VARCHAR(255)"),
-                    ("payload",        "JSONB"),
-                    ("response",       "JSONB"),
-                    ("status",         "VARCHAR(50) DEFAULT 'sent'"),
-                    ("updated_at",     "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
-                ]
-                for col_name, col_def in missing_columns:
-                    cur.execute(f"""
-                        ALTER TABLE engage_interview_audit
-                        ADD COLUMN IF NOT EXISTS {col_name} {col_def};
-                    """)
+                # Idempotent column adds (ALTER TABLE) removed to prevent
+                # lock contention. These should be handled via manual migrations.
                 cur.execute("""
                     CREATE INDEX IF NOT EXISTS idx_engage_audit_candidate
                     ON engage_interview_audit(candidate_id);
@@ -1215,6 +1201,10 @@ async def _check_and_fire_candidate_passed_notification(
                 WHERE candidate_id = %s AND jobdiva_id = %s
             """, (json.dumps(cand_data), candidate_id, job_row["jobdiva_id"]))
             conn.commit()
+
+            # 6. Refresh Performance Metrics for this job (e.g. Time to First Pass)
+            # We fire this asynchronously so it doesn't block the webhook response
+            asyncio.create_task(auto_assign_service.refresh_job_performance_metrics(job_id))
 
         cur.close()
         conn.close()

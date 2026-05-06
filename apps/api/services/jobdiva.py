@@ -2685,7 +2685,8 @@ class JobDivaService:
                         
                         # Metrics fields for UI display
                         "candidates_sourced", "resumes_shortlisted", "complete_submissions", 
-                        "pass_submissions", "pair_external_subs", "feedback_completed", "time_to_first_pass"
+                        "pass_submissions", "pair_external_subs", "feedback_completed", "time_to_first_pass",
+                        "pair_launched_at"
                     ]
                     
                     # Fields where an empty string IS a valid intentional value (cleared UDFs or optional fields)
