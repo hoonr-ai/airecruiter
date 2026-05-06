@@ -287,8 +287,8 @@ export default function DashboardPage() {
           <button
             onClick={() => setActiveTab("active")}
             className={`px-4 py-2 rounded-md text-[13px] font-medium transition-all ${activeTab === "active"
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
+              ? "bg-white text-slate-900 shadow-sm"
+              : "text-slate-500 hover:text-slate-700"
               }`}
           >
             Active Jobs
@@ -296,8 +296,8 @@ export default function DashboardPage() {
           <button
             onClick={() => setActiveTab("archived")}
             className={`px-4 py-2 rounded-md text-[13px] font-medium transition-all ${activeTab === "archived"
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
+              ? "bg-white text-slate-900 shadow-sm"
+              : "text-slate-500 hover:text-slate-700"
               }`}
           >
             Archived Jobs
