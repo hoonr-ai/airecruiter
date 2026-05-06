@@ -11,7 +11,8 @@ import sqlalchemy
 from sqlalchemy import text
 from core import (
     JOBDIVA_API_URL, JOBDIVA_CLIENT_ID, JOBDIVA_USERNAME, 
-    JOBDIVA_PASSWORD, DATABASE_URL, DEBUG_LOG_PATH
+    JOBDIVA_PASSWORD, DATABASE_URL, DEBUG_LOG_PATH,
+    JOBDIVA_PAIR_RECRUITER_ID
 )
 
 logger = logging.getLogger(__name__)
@@ -766,7 +767,12 @@ class JobDivaService:
         emails fill in via the CandidatesDetail enrichment merge below.
         """
         url = f"{self.api_url}/apiv2/jobdiva/JobAgentSearch"
-        params = {"jobId": int(job_id), "resumeCount": int(resume_count)}
+        try:
+            params = {"jobId": int(job_id), "resumeCount": int(resume_count)}
+        except (ValueError, TypeError):
+            # If job_id is still a string with hyphen, try to clean it
+            safe_id = "".join(filter(str.isdigit, str(job_id)))
+            params = {"jobId": int(safe_id) if safe_id else 0, "resumeCount": int(resume_count)}
         headers = {"Authorization": f"Bearer {token}"}
 
         jd_results: List[Dict[str, Any]] = []
@@ -2679,7 +2685,8 @@ class JobDivaService:
                         
                         # Metrics fields for UI display
                         "candidates_sourced", "resumes_shortlisted", "complete_submissions", 
-                        "pass_submissions", "pair_external_subs", "feedback_completed", "time_to_first_pass"
+                        "pass_submissions", "pair_external_subs", "feedback_completed", "time_to_first_pass",
+                        "pair_launched_at"
                     ]
                     
                     # Fields where an empty string IS a valid intentional value (cleared UDFs or optional fields)
@@ -2698,9 +2705,9 @@ class JobDivaService:
                             if k == "customer_name" and (str(v or "").lower() == "unknown" or not v):
                                 # Skip this key to preserve the existing valid name in DB
                                 continue
-                            # Store [null] marker for new fields that have no JobDiva value
+                            # Store empty string for fields that have no JobDiva value
                             if v == "" and k in {"priority", "program_duration", "max_allowed_submittals"}:
-                                v = "[null]"
+                                v = ""
                             # Clean location fields before storing
                             if k in ["city", "state", "zip"]:
                                 v = _clean_location_field(v)
@@ -2759,10 +2766,10 @@ class JobDivaService:
                         "posted_date": data.get("posted_date") or "",
                         "start_date": data.get("start_date") or "",
                         
-                        # Extended JobDiva fields — store [null] if not provided by JobDiva
-                        "priority": data.get("priority") or "[null]",
-                        "program_duration": data.get("program_duration") or "[null]",
-                        "max_allowed_submittals": data.get("max_allowed_submittals") or "[null]",
+                        # Extended JobDiva fields — store empty if not provided by JobDiva
+                        "priority": data.get("priority") or "",
+                        "program_duration": data.get("program_duration") or "",
+                        "max_allowed_submittals": data.get("max_allowed_submittals") or "",
                         
                         # Configuration and processing
                         "recruiter_emails": json.dumps(recruiter_emails) if recruiter_emails else '[]',
@@ -3179,7 +3186,7 @@ class JobDivaService:
             logger.warning(f"Could not resolve JobDiva Job ID for {job_id}")
             # Try to use it directly if it's numeric
             try:
-                jdiva_job_id = int(job_id)
+                jdiva_job_id = int("".join(filter(str.isdigit, str(job_id)))) if job_id else 0
             except:
                 pass
 
@@ -3454,4 +3461,308 @@ class JobDivaService:
         unique_companies = list(dict.fromkeys(companies))[:10]
         return unique_companies
 
+    async def search_candidate_profile(self, email: str, first_name: str = None, last_name: str = None) -> Optional[int]:
+        """
+        Search for an existing candidate using POST (more fields).
+        """
+        token = await self.authenticate()
+        if not token:
+            return None
+
+        url = f"{self.api_url}/apiv2/jobdiva/searchCandidateProfile"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {"email": email}
+        if first_name: payload["firstName"] = first_name
+        if last_name: payload["lastName"] = last_name
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(url, json=payload, headers=headers)
+                if response.status_code == 200:
+                    data = response.json()
+                    if data and isinstance(data, list) and len(data) > 0:
+                        # Return the first match's ID
+                        return data[0].get("candidateId") or data[0].get("CANDIDATEID")
+                else:
+                    # Fallback to GET if POST is not available or fails with 405
+                    if response.status_code == 405:
+                        res_get = await client.get(url, params={"email": email}, headers=headers)
+                        if res_get.status_code == 200:
+                            data_get = res_get.json()
+                            if data_get and isinstance(data_get, list) and len(data_get) > 0:
+                                return data_get[0].get("candidateId")
+        except Exception as e:
+            logger.error(f"❌ searchCandidateProfile failed: {e}")
+        return None
+
+    async def create_candidate(self, first_name: str, last_name: str, email: str, phone: str = "") -> Optional[int]:
+        """
+        Create a new candidate in JobDiva.
+        """
+        token = await self.authenticate()
+        if not token:
+            return None
+
+        url = f"{self.api_url}/apiv2/jobdiva/createCandidate"
+        headers = {"Authorization": f"Bearer {token}"}
+        payload = {
+            "firstName": first_name,
+            "lastName": last_name,
+            "email": email,
+            "phone": phone,
+            "candidateSource": "PAIR-Sourced"
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(url, json=payload, headers=headers)
+                logger.info(f"🔎 createCandidate response: {response.status_code} — {response.text[:300]}")
+                if response.status_code in [200, 201]:
+                    data = response.json()
+                    if isinstance(data, dict):
+                        cid = data.get("candidateId") or data.get("id") or data.get("CANDIDATEID")
+                        logger.info(f"✅ createCandidate: created candidateId={cid}, response keys={list(data.keys())}")
+                        return cid
+                    logger.info(f"✅ createCandidate: returned raw ID={data}")
+                    return data  # If it's directly the ID
+                else:
+                    logger.error(f"❌ createCandidate failed: {response.status_code} - {response.text}")
+        except Exception as e:
+            logger.error(f"❌ createCandidate exception: {e}")
+        return None
+
+    async def create_job_application_with_resume(
+        self,
+        candidate_id: Any,
+        job_id: Any,
+        resume_text: str = "",
+        filename: str = "candidate_resume.txt",
+        first_name: str = "",
+        last_name: str = "",
+        email: str = ""
+    ) -> tuple:
+        """
+        Creates a job application via JSON (application/json).
+        After creation, updates the candidate's name since the JSON endpoint
+        cannot parse names from textfile (that only works with multipart which is
+        blocked by a proxy adding charset=UTF-8).
+        Returns (success: bool, new_candidateId: int|None).
+        """
+        token = await self.authenticate()
+        if not token:
+            return False, None
+
+        from datetime import datetime
+        resume_date = datetime.now().strftime("%m/%d/%Y 12:00:00")
+
+        url = f"{self.api_url}/apiv2/jobdiva/CreateJobApplicationWithResume"
+        json_payload = {
+            "filename": filename,
+            "textfile": resume_text,
+            "filecontent": "",
+            "jobid": int("".join(filter(str.isdigit, str(job_id)))) if job_id else 0,
+            "recruiterid": int(JOBDIVA_PAIR_RECRUITER_ID or 0),
+            "resumeDate": resume_date,
+            "resumesource": 0
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    url,
+                    json=json_payload,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    }
+                )
+            status, res_body = response.status_code, response.text
+            logger.info(f"🔎 CreateJobApplicationWithResume: {status} — {res_body[:200]}")
+
+            if status in [200, 201]:
+                try:
+                    new_cid = int(res_body.strip())
+                except (ValueError, TypeError):
+                    new_cid = None
+
+                logger.info(f"✅ JobDiva application created → candidateId={new_cid}, job={job_id}")
+
+                # The JSON endpoint creates "Unknown Unknown" since it can't parse names
+                # from textfile. Fix the name immediately using editCandidate.
+                if new_cid and (first_name or last_name):
+                    await self._update_candidate_name(token, new_cid, first_name, last_name, email)
+
+                return True, new_cid
+            else:
+                logger.error(f"❌ CreateJobApplicationWithResume failed: {status} - {res_body}")
+        except Exception as e:
+            logger.error(f"❌ CreateJobApplicationWithResume exception: {e}")
+        return False, None
+
+    async def _update_candidate_name(self, token: str, candidate_id: int, first_name: str, last_name: str, email: str = "") -> bool:
+        """
+        Updates a JobDiva candidate's first/last name after creation.
+        Used to fix 'Unknown Unknown' created by CreateJobApplicationWithResume JSON mode.
+        Endpoint: POST /apiv2/jobdiva/updateCandidateProfile
+        """
+        url = f"{self.api_url}/apiv2/jobdiva/updateCandidateProfile"
+        payload = {
+            "candidateid": candidate_id,
+            "firstName": first_name,
+            "lastName": last_name,
+        }
+            
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    url,
+                    json=payload,
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json"
+                    }
+                )
+            logger.info(f"🔎 updateCandidateProfile response: {response.status_code} — {response.text[:300]}")
+            if response.status_code in [200, 201]:
+                logger.info(f"✅ Name updated for candidateId={candidate_id}: {first_name} {last_name}")
+                return True
+            else:
+                logger.warning(f"⚠️ updateCandidateProfile failed: {response.status_code} - {response.text[:300]}")
+        except Exception as e:
+            logger.warning(f"⚠️ updateCandidateProfile exception: {e}")
+        return False
+
+
+
+
+    async def get_job_applicants_detail(self, job_id: int) -> List[Dict[str, Any]]:
+        """
+        Fetch the list of applicants for a job from JobDiva (apiv2/bi/JobsApplicantsDetail).
+        """
+        token = await self.authenticate()
+        if not token:
+            return []
+
+        url = f"{self.api_url}/apiv2/bi/JobsApplicantsDetail"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json"
+        }
+        # Resolve to numeric ID if reference ID (hyphenated) is provided
+        resolved_id = await self._resolve_jobdiva_job_id(str(job_id))
+        safe_job_id = resolved_id if resolved_id else job_id
+        
+        try:
+            params = {"jobIds": [int(safe_job_id)]}
+        except (ValueError, TypeError):
+            logger.error(f"❌ get_job_applicants_detail: Invalid job_id {safe_job_id}")
+            return []
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url, params=params, headers=headers)
+                if response.status_code == 200:
+                    data = response.json()
+                    return data if isinstance(data, list) else (data.get("data") or [])
+                else:
+                    logger.error(f"❌ getJobApplicantsDetail failed: {response.status_code} - {response.text}")
+        except Exception as e:
+            logger.error(f"❌ getJobApplicantsDetail exception: {e}")
+        return []
+
+    async def is_candidate_applied_to_job(self, job_id: int, candidate_id: int) -> bool:
+        """
+        Check if a candidate is already applied to a job.
+        """
+        applicants = await self.get_job_applicants_detail(job_id)
+        for app in applicants:
+            cid = get_field(app, ["candidateId", "CANDIDATEID", "ID", "id"])
+            if cid and int(cid) == int(candidate_id):
+                return True
+        return False
+
+    async def get_job_submittals(self, job_id) -> List[Dict[str, Any]]:
+        """
+        Fetch manual candidate submittals for a job from JobDiva BI endpoint.
+        Uses /apiv2/bi/JobSubmittalsDetail. Returns list of submittal records.
+        Each record includes CANDIDATEID, RECIPIENTNAME, SUBMITDATE fields.
+        """
+        token = await self.authenticate()
+        if not token:
+            return []
+
+        # Resolve to numeric JobDiva ID
+        resolved_id = await self._resolve_jobdiva_job_id(str(job_id))
+        safe_job_id = resolved_id if resolved_id else job_id
+
+        try:
+            numeric_id = int(safe_job_id)
+        except (ValueError, TypeError):
+            logger.error(f"❌ get_job_submittals: Invalid job_id '{safe_job_id}'")
+            return []
+
+        url = f"{self.api_url}/apiv2/bi/JobSubmittalsDetail"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json"
+        }
+        params = {"jobIds": [numeric_id]}
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url, params=params, headers=headers)
+                if response.status_code == 200:
+                    data = response.json()
+                    result = data if isinstance(data, list) else (data.get("data") or [])
+                    logger.debug(f"📋 get_job_submittals: {len(result)} records for job {numeric_id}")
+                    return result
+                else:
+                    logger.error(f"❌ get_job_submittals failed: {response.status_code} - {response.text[:300]}")
+        except Exception as e:
+            logger.error(f"❌ get_job_submittals exception: {e}")
+        return []
+
+    async def get_candidate_qualifications(self, candidate_id) -> List[Dict[str, Any]]:
+        """
+        Fetch qualification history for a candidate from JobDiva BI endpoint.
+        Uses /apiv2/bi/CandidatesQualificationsDetail.
+        Each record includes QUALIFICATION, QUALIFICATIONVALUE, DATECREATED fields.
+        """
+        token = await self.authenticate()
+        if not token:
+            return []
+
+        try:
+            numeric_cid = int(candidate_id)
+        except (ValueError, TypeError):
+            logger.error(f"❌ get_candidate_qualifications: Invalid candidate_id '{candidate_id}'")
+            return []
+
+        url = f"{self.api_url}/apiv2/bi/CandidatesQualificationsDetail"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json"
+        }
+        params = {"candidateIds": [numeric_cid]}
+
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(url, params=params, headers=headers)
+                if response.status_code == 200:
+                    data = response.json()
+                    result = data if isinstance(data, list) else (data.get("data") or [])
+                    logger.debug(f"📋 get_candidate_qualifications: {len(result)} records for candidate {numeric_cid}")
+                    return result
+                else:
+                    logger.error(f"❌ get_candidate_qualifications failed: {response.status_code} - {response.text[:300]}")
+        except Exception as e:
+            logger.error(f"❌ get_candidate_qualifications exception: {e}")
+        return []
+
+
 jobdiva_service = JobDivaService()
+

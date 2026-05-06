@@ -123,23 +123,6 @@ def _ensure_monitored_jobs_schema() -> None:
         conn.autocommit = True
         cur = conn.cursor()
         for stmt in (
-            # v21 columns
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS archive_reason TEXT",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS job_requirements JSONB DEFAULT '[]'",
-            # v22: extraction columns (previously ALTER'd per write in
-            # services/monitored_jobs_storage.py).
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS summary TEXT",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS hard_skills JSONB",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS soft_skills JSONB",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS experience_level TEXT",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS extraction_metadata JSONB",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS bot_introduction TEXT",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS sourcing_filters JSONB",
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS resume_match_filters JSONB",
-            # v30: keep job rubric screen-question schema changes out of request path.
-            "ALTER TABLE IF EXISTS job_screen_questions ADD COLUMN IF NOT EXISTS is_hard_filter BOOLEAN NOT NULL DEFAULT FALSE",
             # v28: hot-path read optimizations for GET /jobs/monitored
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_active_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS NOT TRUE",
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_archived_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS TRUE",
@@ -222,15 +205,13 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
             or (search_id_str.lstrip("-").isdigit() and search_id_str.startswith("-"))
         )
         if is_external_fetch:
-            conn = get_db_connection()
-            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            if search_id_str.startswith("EXT-"):
-                cursor.execute("SELECT * FROM monitored_jobs WHERE jobdiva_id = %s", (search_id_str,))
-            else:
-                cursor.execute("SELECT * FROM monitored_jobs WHERE job_id = %s", (search_id_str,))
-            row = cursor.fetchone()
-            cursor.close()
-            conn.close()
+            with get_db_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                    if search_id_str.startswith("EXT-"):
+                        cursor.execute("SELECT * FROM monitored_jobs WHERE jobdiva_id = %s", (search_id_str,))
+                    else:
+                        cursor.execute("SELECT * FROM monitored_jobs WHERE job_id = %s", (search_id_str,))
+                    row = cursor.fetchone()
             if not row:
                 raise HTTPException(status_code=404, detail=f"External job {search_id} not found")
             job = dict(row)
@@ -257,13 +238,11 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
             job["jobdiva_id"] = ref_code
             
         # 2. Check local DB using the NUMERIC ID as the primary key
-        conn = get_db_connection()
-        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        query = "SELECT * FROM monitored_jobs WHERE job_id = %s"
-        cursor.execute(query, (numeric_id,))
-        local_data = cursor.fetchone()
-        cursor.close()
-        conn.close()
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                query = "SELECT * FROM monitored_jobs WHERE job_id = %s"
+                cursor.execute(query, (numeric_id,))
+                local_data = cursor.fetchone()
         
         if local_data:
             logger.info(f"📍 Found local data for Job {numeric_id} (Ref: {ref_code})")
@@ -333,12 +312,10 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
         # This ensures the UI respects local manual imports and clears
         # Re-fetch local_data after save, or use the one from before if it existed
         if not local_data: # If it was a new job or incomplete, refetch after save
-            conn = get_db_connection()
-            cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            cursor.execute(query, (numeric_id,))
-            local_data = cursor.fetchone()
-            cursor.close()
-            conn.close()
+            with get_db_connection() as conn:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                    cursor.execute(query, (numeric_id,))
+                    local_data = cursor.fetchone()
 
         if local_data:
             # If recruiter_notes is explicitly empty string in DB, we want to return ""
@@ -713,22 +690,18 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
             # Prefer the numeric PK already known; otherwise resolve from body/DB.
             if job_id_str.lstrip("-").isdigit():
                 db_job_id = job_id_str
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s", (db_job_id,))
-                row = cursor.fetchone()
+                with get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s", (db_job_id,))
+                        row = cursor.fetchone()
                 ref_code = (row[0] if row and row[0] else body_ref) or f"EXT-{abs(int(db_job_id))}"
-                cursor.close()
-                conn.close()
             else:
                 ref_code = body_ref or job_id_str
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute("SELECT job_id FROM monitored_jobs WHERE jobdiva_id = %s", (ref_code,))
-                row = cursor.fetchone()
+                with get_db_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("SELECT job_id FROM monitored_jobs WHERE jobdiva_id = %s", (ref_code,))
+                        row = cursor.fetchone()
                 db_job_id = row[0] if row else ref_code
-                cursor.close()
-                conn.close()
         elif "-" in job_id_str:
             # JobDiva reference code flow
             job_info = await jobdiva_service.get_job_by_id(job_id)
@@ -736,98 +709,92 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
             ref_code = job_id
         else:
             db_job_id = job_id
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s", (db_job_id,))
-            row = cursor.fetchone()
+            with get_db_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s", (db_job_id,))
+                    row = cursor.fetchone()
             ref_code = row[0] if row else db_job_id
-            cursor.close()
-            conn.close()
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # 1. Update monitored_jobs using the NUMERIC ID as key (job_id)
-        logger.info(f"🔄 Updating monitored_jobs for Job {db_job_id} (Ref: {ref_code})...")
-        cursor.execute("""
-            UPDATE monitored_jobs 
-            SET 
-                title = COALESCE(%s, title),
-                enhanced_title = %s,
-                ai_description = %s,
-                selected_job_boards = %s,
-                recruiter_notes = %s,
-                recruiter_emails = %s,
-                selected_employment_types = %s,
-                work_authorization = %s,
-                bot_introduction = %s,
-                screening_level = %s,
-                processing_status = %s,
-                current_step = %s,
-                customer_name = CASE 
-                    WHEN %s IS NOT NULL AND %s NOT ILIKE 'Unknown%%' AND %s != '' THEN %s 
-                    ELSE customer_name 
-                END,
-                jobdiva_id = %s, -- This is the reference string
-                sourcing_filters = %s,
-                resume_match_filters = %s,
-                updated_at = NOW()
-            WHERE job_id = %s -- This is the numeric ID
-        """, (
-            draft_data.title,                                    # title
-            draft_data.enhanced_title or draft_data.title,       # enhanced_title
-            draft_data.ai_description,                           # ai_description
-            json.dumps(draft_data.selected_job_boards or []),    # selected_job_boards
-            draft_data.recruiter_notes,                          # recruiter_notes
-            json.dumps(draft_data.recruiter_emails or []),       # recruiter_emails
-            json.dumps(draft_data.selected_employment_types or []), # selected_employment_types
-            draft_data.work_authorization,                       # work_authorization
-            draft_data.bot_introduction,                        # bot_introduction
-            draft_data.screening_level,                         # screening_level
-            f"step_{draft_data.current_step}_complete",         # processing_status
-            draft_data.current_step,                            # current_step
-            draft_data.customer_name, draft_data.customer_name,  # for CASE customer_name
-            draft_data.customer_name, draft_data.customer_name,  # for CASE customer_name
-            ref_code,                                           # 26-06182 (swapped)
-            json.dumps(draft_data.sourcing_filters or {}),      # sourcing_filters
-            json.dumps(draft_data.resume_match_filters or []),  # resume_match_filters
-            db_job_id                                           # 31920032 (PK)
-        ))
-        
-        if cursor.rowcount == 0:
-            logger.warning(f"⚠️ No monitored_jobs record found for {db_job_id}, creating row...")
-            cursor.execute("""
-                INSERT INTO monitored_jobs (
-                    job_id, title, enhanced_title, ai_description, 
-                    selected_job_boards, recruiter_notes, recruiter_emails, 
-                    selected_employment_types, work_authorization, bot_introduction,
-                    screening_level,
-                    processing_status, current_step, customer_name, jobdiva_id, sourcing_filters, resume_match_filters, created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
-            """, (
-                db_job_id,                                           # 31920032 (Numeric PK)
-                draft_data.title,
-                draft_data.enhanced_title or draft_data.title,
-                draft_data.ai_description,
-                json.dumps(draft_data.selected_job_boards or []),
-                draft_data.recruiter_notes,
-                json.dumps(draft_data.recruiter_emails or []),
-                json.dumps(draft_data.selected_employment_types or []),
-                draft_data.work_authorization,
-                draft_data.bot_introduction,
-                draft_data.screening_level,
-                f"step_{draft_data.current_step}_complete",
-                draft_data.current_step,
-                draft_data.customer_name,                            # NEW: customer_name
-                ref_code,                                            # 26-06182 (Ref)
-                json.dumps(draft_data.sourcing_filters or {}),      # sourcing_filters
-                json.dumps(draft_data.resume_match_filters or [])   # resume_match_filters
-            ))
-            logger.info(f"✅ Created new monitored_jobs record for job {db_job_id}")
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                # 1. Update monitored_jobs using the NUMERIC ID as key (job_id)
+                logger.info(f"🔄 Updating monitored_jobs for Job {db_job_id} (Ref: {ref_code})...")
+                cursor.execute("""
+                    UPDATE monitored_jobs 
+                    SET 
+                        title = COALESCE(%s, title),
+                        enhanced_title = %s,
+                        ai_description = %s,
+                        selected_job_boards = %s,
+                        recruiter_notes = %s,
+                        recruiter_emails = %s,
+                        selected_employment_types = %s,
+                        work_authorization = %s,
+                        bot_introduction = %s,
+                        screening_level = %s,
+                        processing_status = %s,
+                        current_step = %s,
+                        customer_name = CASE 
+                            WHEN %s IS NOT NULL AND %s NOT ILIKE 'Unknown%%' AND %s != '' THEN %s 
+                            ELSE customer_name 
+                        END,
+                        jobdiva_id = %s, -- This is the reference string
+                        sourcing_filters = %s,
+                        resume_match_filters = %s,
+                        updated_at = NOW()
+                    WHERE job_id = %s -- This is the numeric ID
+                """, (
+                    draft_data.title,                                    # title
+                    draft_data.enhanced_title or draft_data.title,       # enhanced_title
+                    draft_data.ai_description,                           # ai_description
+                    json.dumps(draft_data.selected_job_boards or []),    # selected_job_boards
+                    draft_data.recruiter_notes,                          # recruiter_notes
+                    json.dumps(draft_data.recruiter_emails or []),       # recruiter_emails
+                    json.dumps(draft_data.selected_employment_types or []), # selected_employment_types
+                    draft_data.work_authorization,                       # work_authorization
+                    draft_data.bot_introduction,                        # bot_introduction
+                    draft_data.screening_level,                         # screening_level
+                    f"step_{draft_data.current_step}_complete",         # processing_status
+                    draft_data.current_step,                            # current_step
+                    draft_data.customer_name, draft_data.customer_name,  # for CASE customer_name
+                    draft_data.customer_name, draft_data.customer_name,  # for CASE customer_name
+                    ref_code,                                           # 26-06182 (swapped)
+                    json.dumps(draft_data.sourcing_filters or {}),      # sourcing_filters
+                    json.dumps(draft_data.resume_match_filters or []),  # resume_match_filters
+                    db_job_id                                           # 31920032 (PK)
+                ))
+                
+                if cursor.rowcount == 0:
+                    logger.warning(f"⚠️ No monitored_jobs record found for {db_job_id}, creating row...")
+                    cursor.execute("""
+                        INSERT INTO monitored_jobs (
+                            job_id, title, enhanced_title, ai_description, 
+                            selected_job_boards, recruiter_notes, recruiter_emails, 
+                            selected_employment_types, work_authorization, bot_introduction,
+                            screening_level,
+                            processing_status, current_step, customer_name, jobdiva_id, sourcing_filters, resume_match_filters, created_at, updated_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                    """, (
+                        db_job_id,                                           # 31920032 (Numeric PK)
+                        draft_data.title,
+                        draft_data.enhanced_title or draft_data.title,
+                        draft_data.ai_description,
+                        json.dumps(draft_data.selected_job_boards or []),
+                        draft_data.recruiter_notes,
+                        json.dumps(draft_data.recruiter_emails or []),
+                        json.dumps(draft_data.selected_employment_types or []),
+                        draft_data.work_authorization,
+                        draft_data.bot_introduction,
+                        draft_data.screening_level,
+                        f"step_{draft_data.current_step}_complete",
+                        draft_data.current_step,
+                        draft_data.customer_name,                            # NEW: customer_name
+                        ref_code,                                            # 26-06182 (Ref)
+                        json.dumps(draft_data.sourcing_filters or {}),      # sourcing_filters
+                        json.dumps(draft_data.resume_match_filters or [])   # resume_match_filters
+                    ))
+                    logger.info(f"✅ Created new monitored_jobs record for job {db_job_id}")
+                conn.commit()
         
         # 2. Persist Structured Rubric (Titles, Skills, etc.) via Background Task
         # to ensure the main record is UNLOCKED before the rubric update starts.
@@ -1425,6 +1392,20 @@ async def publish_job_draft(job_id: str, publish_request: JobPublishRequest):
         conn.close()
         
         if result == "Draft published successfully":
+            # Update pair_launched_at timestamp in monitored_jobs
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "UPDATE monitored_jobs SET pair_launched_at = NOW() WHERE jobdiva_id = %s OR id = %s",
+                    (job_id, job_id)
+                )
+                conn.commit()
+                cursor.close()
+                conn.close()
+            except Exception as update_err:
+                logger.warning(f"Failed to set pair_launched_at for job {job_id}: {update_err}")
+
             logger.info(f"🚀 Published draft {publish_request.draft_id} for job {job_id}")
             return {
                 "status": "success",
@@ -1700,13 +1681,28 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
             # blobs (jobdiva_description, ai_description, notes, filters, etc.) when
             # only list-level metadata is needed.
             select_sql = (
-                "SELECT job_id, jobdiva_id, title, customer_name, status, "
-                "city, state, zip_code, priority, program_duration, max_allowed_submittals, "
-                "processing_status, is_archived, "
-                "candidates_sourced, resumes_shortlisted, complete_submissions, "
-                "pass_submissions, pair_external_subs, feedback_completed, "
-                "time_to_first_pass, created_at, updated_at "
-                "FROM monitored_jobs"
+                "SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name, mj.status, "
+                "mj.city, mj.state, mj.zip_code, mj.location_type, mj.priority, mj.program_duration, mj.max_allowed_submittals, "
+                "mj.processing_status, mj.is_archived, "
+                "COALESCE(metrics.candidates_sourced, 0) AS candidates_sourced, "
+                "COALESCE(metrics.candidates_launched, 0) AS candidates_launched, "
+                "mj.resumes_shortlisted, "
+                "COALESCE(metrics.complete_submissions, 0) AS complete_submissions, "
+                "COALESCE(metrics.pass_submissions, 0) AS pass_submissions, "
+                "mj.pair_external_subs, mj.feedback_completed, "
+                "mj.pair_launched_at, mj.time_to_first_pass, mj.created_at, mj.updated_at "
+                "FROM monitored_jobs mj "
+                "LEFT JOIN ("
+                "    SELECT "
+                "        mj2.job_id AS mj_job_id, "
+                "        COUNT(*) AS candidates_sourced, "
+                "        COUNT(*) AS candidates_launched, "
+                "        COUNT(*) FILTER (WHERE sc.data->>'engage_status' IN ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')) AS complete_submissions, "
+                "        COUNT(*) FILTER (WHERE (sc.data->>'engage_status' IN ('passed', 'pass', 'completed')) OR (LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed') AND (NULLIF(sc.data->>'engage_score', '')::float >= 70))) AS pass_submissions "
+                "    FROM sourced_candidates sc "
+                "    JOIN monitored_jobs mj2 ON sc.jobdiva_id = mj2.jobdiva_id OR sc.jobdiva_id = mj2.job_id::text "
+                "    GROUP BY mj2.job_id "
+                ") metrics ON metrics.mj_job_id = mj.job_id"
             )
 
         if include_archived:
@@ -1730,6 +1726,20 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
                 job_data["created_at"] = job_data["created_at"].isoformat()
             if job_data.get("updated_at") and hasattr(job_data["updated_at"], "isoformat"):
                 job_data["updated_at"] = job_data["updated_at"].isoformat()
+
+            # PAIR Status Logic:
+            # - Unpublished: Job has not been launched (pair_launched_at is NULL)
+            # - Active: Job is launched AND status is OPEN
+            # - Inactive: Job is launched AND status is NOT OPEN (e.g. CLOSED)
+            is_published = job_data.get("pair_launched_at") is not None
+            raw_status = str(job_data.get("status") or "OPEN").strip().upper()
+
+            if not is_published:
+                job_data["pair_status"] = "Unpublished"
+            elif raw_status == "OPEN":
+                job_data["pair_status"] = "Active"
+            else:
+                job_data["pair_status"] = "Inactive"
 
             jobs[jid] = job_data
 

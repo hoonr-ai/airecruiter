@@ -52,7 +52,11 @@ import {
   Mail,
   MessageSquare,
   ExternalLink,
-  Loader2
+  Loader2,
+  Briefcase,
+  Clock,
+  Phone,
+  Calendar
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -387,14 +391,56 @@ function NewJobPageContent() {
 
     // Only proceed with real resume content
     if (resumeText && resumeText.trim().length > 50) {
+      const { primary, similar } = collectResumeHighlightKeywords(candidate);
       setSelectedCandidateForResume({
         name: `${candidate.firstName} ${candidate.lastName}`,
-        resumeText: resumeText
+        resumeText: resumeText,
+        keywords: primary,
+        similarKeywords: similar,
       });
       setResumeModalOpen(true);
     } else {
       alert("This candidate's resume is not available from JobDiva. Only real resumes from JobDiva are displayed.");
     }
+  };
+
+  // Build keyword lists for the resume highlight overlay. Returns two
+  // tiers: 'primary' (yellow) for direct matches the user typed and the
+  // rubric confirmed; 'similar' (light blue) for the auto-suggested
+  // similar titles/skills the recruiter selected. Excludes any criteria
+  // flagged as 'exclude'.
+  const collectResumeHighlightKeywords = (candidate: any): { primary: string[]; similar: string[] } => {
+    const primary = new Set<string>();
+    const similar = new Set<string>();
+    const addTo = (set: Set<string>, val: unknown) => {
+      if (typeof val !== "string") return;
+      const trimmed = val.trim();
+      if (trimmed.length >= 2 && trimmed.length <= 60) set.add(trimmed);
+    };
+
+    if (Array.isArray(candidate?.matched_skills)) {
+      candidate.matched_skills.forEach((s: any) => addTo(primary, typeof s === "string" ? s : s?.name));
+    }
+    if (Array.isArray(candidate?.matched_titles)) {
+      candidate.matched_titles.forEach((s: any) => addTo(primary, typeof s === "string" ? s : s?.name));
+    }
+
+    sourceTitles.forEach((t) => {
+      if (t.matchType === "exclude") return;
+      addTo(primary, t.value);
+      (t.selectedSimilarTitles || []).forEach((s) => addTo(similar, s));
+    });
+    sourceSkills.forEach((s) => {
+      if (s.matchType === "exclude") return;
+      addTo(primary, s.value);
+      (s.selectedSimilarSkills || []).forEach((sim) => addTo(similar, sim));
+    });
+    sourceKeywords.forEach((k) => addTo(primary, k));
+
+    // If a term ended up in both buckets, primary wins.
+    primary.forEach((p) => similar.delete(p));
+
+    return { primary: Array.from(primary), similar: Array.from(similar) };
   };
   const [selectedCandidateForResume, setSelectedCandidateForResume] = useState<any>(null);
   const [resumeModalOpen, setResumeModalOpen] = useState(false);
@@ -501,6 +547,11 @@ function NewJobPageContent() {
   const [sourceLocationRadius, setSourceLocationRadius] = useState("Within 25 mi");
   const [sourceCompanyInput, setSourceCompanyInput] = useState("");
   const [sourceKeywordInput, setSourceKeywordInput] = useState("");
+  // PR-B: top-level minimum years of experience floor for sourcing.
+  // null = no floor; an integer 0..40 enforces a hard minimum that the
+  // backend applies pre-LLM (cheap regex over headline / resume snippet)
+  // and post-LLM (parsed years_of_experience).
+  const [minExperienceYears, setMinExperienceYears] = useState<number | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [isEnrichingContacts, setIsEnrichingContacts] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
@@ -682,6 +733,23 @@ function NewJobPageContent() {
   const sortedCandidates = [...candidates]
     .filter(matchesSourceFilter)
     .sort((a, b) => {
+      // Priority 1: JobDiva Applicants
+      // Priority 2: LinkedIn
+      // Priority 3: TalentSearch / Others
+      const getPriority = (c: any) => {
+        const source = String(c.source || "").toLowerCase();
+        if (source.includes("applicant")) return 1;
+        if (source.includes("linkedin")) return 2;
+        if (source.includes("talentsearch")) return 3;
+        return 4;
+      };
+
+      const prioA = getPriority(a);
+      const prioB = getPriority(b);
+
+      if (prioA !== prioB) return prioA - prioB;
+
+      // Secondary sort: Match Score
       const scoreA = a.match_score || 0;
       const scoreB = b.match_score || 0;
       return scoreB - scoreA;
@@ -4035,75 +4103,53 @@ function NewJobPageContent() {
     return () => window.clearTimeout(timeoutId);
   }, [sourceTitles, sourceSkills, sourceLocations, sourceCompanies, sourceKeywords, resumeMatchFilters, jobTitle, booleanUserEdited]);
 
-  // Lenient retries should not widen location radius. Instead, progressively
-  // relax MUST constraints based on criterion importance inferred from rubric
-  // origin + years requirement. This keeps locality stable while recovering
-  // candidates by loosening lower-signal skill/title constraints first.
   const relaxStructuralOverrides = (
     tier: number,
     currentFilters: typeof resumeMatchFilters,
     currentTitles: typeof sourceTitles,
     currentSkills: typeof sourceSkills,
+    currentCompanies: typeof sourceCompanies
   ): {
+    resumeMatchFiltersOverride?: typeof resumeMatchFilters;
     titleCriteriaOverride?: typeof sourceTitles;
     skillCriteriaOverride?: typeof sourceSkills;
-    resumeMatchFiltersOverride?: typeof resumeMatchFilters;
+    companiesOverride?: typeof sourceCompanies;
   } => {
-    const rank = (item: { matchType: string; years?: number; fromRubric?: boolean }) => {
-      const mustScore = item.matchType === "must" ? 100 : 0;
-      const rubricScore = item.fromRubric ? 20 : 0;
-      const yearsScore = Math.min(30, Number(item.years || 0));
-      return mustScore + rubricScore + yearsScore;
-    };
-
-    const demoteLowerPriorityMust = <T extends { matchType: string; years?: number; fromRubric?: boolean }>(
-      items: T[],
-      keepStrictMustCount: number,
-    ): T[] => {
-      const mustItems = items
-        .map((item, idx) => ({ item, idx, score: rank(item) }))
-        .filter(x => x.item.matchType === "must")
-        .sort((a, b) => b.score - a.score);
-
-      if (mustItems.length <= keepStrictMustCount) return items;
-
-      const keep = new Set(mustItems.slice(0, keepStrictMustCount).map(x => x.idx));
-      return items.map((item, idx) => {
-        if (item.matchType !== "must") return item;
-        if (keep.has(idx)) return item;
-        return { ...item, matchType: "can" };
-      });
-    };
+    const zeroedTitles = currentTitles.map(t => ({ ...t, years: 0, recent: false }));
+    const zeroedSkills = currentSkills.map(s => ({ ...s, years: 0, recent: false }));
 
     if (tier === 1) {
-      // Keep one strongest MUST skill; relax remaining MUST skills to CAN.
+      const skillsRelaxed = (() => {
+        const mustIdxs = zeroedSkills
+          .map((s, i) => (s.matchType === "must" ? i : -1))
+          .filter(i => i >= 0);
+        const demoteCount = Math.ceil(mustIdxs.length / 2);
+        const demoteSet = new Set(mustIdxs.slice(0, demoteCount));
+        return zeroedSkills.map((s, i) =>
+          demoteSet.has(i) ? { ...s, matchType: "can" as const } : s
+        );
+      })();
       return {
-        skillCriteriaOverride: demoteLowerPriorityMust(currentSkills, 1),
+        titleCriteriaOverride: zeroedTitles,
+        skillCriteriaOverride: skillsRelaxed,
       };
     }
 
-    if (tier === 2) {
-      // Keep only top MUST title and top MUST skill strict.
-      return {
-        titleCriteriaOverride: demoteLowerPriorityMust(currentTitles, 1),
-        skillCriteriaOverride: demoteLowerPriorityMust(currentSkills, 1),
-      };
-    }
+    const titlesAllCan = zeroedTitles.map(t =>
+      t.matchType === "must" ? { ...t, matchType: "can" as const } : t
+    );
+    const skillsAllCan = zeroedSkills.map(s =>
+      s.matchType === "must" ? { ...s, matchType: "can" as const } : s
+    );
+    const filtersDeactivated = currentFilters.map(f =>
+      (f.category || "").toLowerCase().includes("exclude") ? { ...f, active: false } : f
+    );
 
-    // tier >= 3: keep locality, relax all MUSTs to CAN and deactivate
-    // Exclude-category resume filters so recoverable candidates can surface.
     return {
-      titleCriteriaOverride: currentTitles.map(t =>
-        t.matchType === "must" ? { ...t, matchType: "can" } : t
-      ),
-      skillCriteriaOverride: currentSkills.map(s =>
-        s.matchType === "must" ? { ...s, matchType: "can" } : s
-      ),
-      resumeMatchFiltersOverride: currentFilters.map(f =>
-        (f.category || "").toLowerCase().includes("exclude")
-          ? { ...f, active: false }
-          : f
-      ),
+      titleCriteriaOverride: titlesAllCan,
+      skillCriteriaOverride: skillsAllCan,
+      companiesOverride: [],
+      resumeMatchFiltersOverride: filtersDeactivated,
     };
   };
 
@@ -4122,7 +4168,6 @@ function NewJobPageContent() {
 
     if (tier === 1) {
       query = query.replace(/\s+AND\s+"\d+\+\s*years?"/gi, "");
-      // JobDiva dialect uses: "TERM" OVER N YRS
       query = query.replace(/\s+OVER\s+\d+\s+YRS\b/gi, "");
       const parts = splitByAnd(query);
       const locationParts = parts.filter(isLocationClause);
@@ -4137,8 +4182,8 @@ function NewJobPageContent() {
         return parts.length > 1 ? `(${parts.join(" OR ")})` : `(${inner})`;
       });
       query = query.replace(/\s+AND\s+recent/gi, "");
-      // If JobDiva year clauses remain outside parentheses, drop them.
       query = query.replace(/\s+OVER\s+\d+\s+YRS\b/gi, "");
+      query = query.replace(/\s+AND\s+"\d+\+\s*years?"/gi, "");
       label = "Further relaxed required clauses · kept location radius";
     } else {
       query = query.replace(/\s+NOT\s+\([^)]*\)/gi, "");
@@ -4262,9 +4307,10 @@ function NewJobPageContent() {
   const buildSearchPayload = (
     booleanString: string,
     overrides?: {
+      resumeMatchFiltersOverride?: typeof resumeMatchFilters;
       titleCriteriaOverride?: typeof sourceTitles;
       skillCriteriaOverride?: typeof sourceSkills;
-      resumeMatchFiltersOverride?: typeof resumeMatchFilters;
+      companiesOverride?: typeof sourceCompanies;
     }
   ) => {
     const effectiveTitles = overrides?.titleCriteriaOverride ?? sourceTitles;
@@ -4301,7 +4347,7 @@ function NewJobPageContent() {
     const parsedRadius = primaryLocation?.radius?.match(/(\d+)/)?.[1]
       ? Number(primaryLocation.radius.match(/(\d+)/)?.[1])
       : 25;
-    const withinMiles = parsedRadius;
+    const withinMiles = Math.min(50, parsedRadius);
     const activeResumeFilters = (overrides?.resumeMatchFiltersOverride ?? resumeMatchFilters)
       .filter(f => f.active)
       .map(f => ({
@@ -4327,7 +4373,7 @@ function NewJobPageContent() {
       title_criteria: titleCriteria,
       skill_criteria: skillCriteria,
       keywords: sourceKeywords,
-      companies: sourceCompanies,
+      companies: overrides?.companiesOverride ?? sourceCompanies,
       resume_match_filters: activeResumeFilters,
       location: primaryLocation?.value || "",
       within_miles: withinMiles,
@@ -4337,6 +4383,13 @@ function NewJobPageContent() {
       // jobdiva_service.search_candidates. `recent_days: 0` means Any.
       recent_days: recentDaysFilter > 0 ? recentDaysFilter : null,
       require_resume: !includeNoResume,
+      // PR-B: top-level YOE floor. `undefined` means no constraint;
+      // backend applies as both pre-LLM regex gate and post-LLM hard
+      // filter against the parsed years_of_experience.
+      min_experience_years:
+        typeof minExperienceYears === "number" && minExperienceYears > 0
+          ? minExperienceYears
+          : undefined,
       page: 1,
       page_size: 100
     };
@@ -4346,9 +4399,10 @@ function NewJobPageContent() {
     booleanString: string,
     mode: "replace" | "append",
     overrides?: {
+      resumeMatchFiltersOverride?: typeof resumeMatchFilters;
       titleCriteriaOverride?: typeof sourceTitles;
       skillCriteriaOverride?: typeof sourceSkills;
-      resumeMatchFiltersOverride?: typeof resumeMatchFilters;
+      companiesOverride?: typeof sourceCompanies;
     }
   ): Promise<any[]> => {
     const apiUrl = API_BASE;
@@ -4576,7 +4630,13 @@ function NewJobPageContent() {
         const tier = currentAttempts.length; // 1, 2, 3 as attempts grow
         const relaxed = relaxBooleanString(currentAttempts[currentAttempts.length - 1].query, tier);
         if (relaxed.query === currentAttempts[currentAttempts.length - 1].query) break;
-        const structuralOverrides = relaxStructuralOverrides(tier, resumeMatchFilters, sourceTitles, sourceSkills);
+        const structuralOverrides = relaxStructuralOverrides(
+          tier,
+          resumeMatchFilters,
+          sourceTitles,
+          sourceSkills,
+          sourceCompanies
+        );
         currentAttempts = [...currentAttempts, { query: relaxed.query, label: relaxed.label }];
         setBooleanAttempts(currentAttempts);
         setGeneratedBoolean(relaxed.query);
@@ -4649,7 +4709,13 @@ function NewJobPageContent() {
       attempt: nextAttempts.length,
     });
     try {
-      const structuralOverrides = relaxStructuralOverrides(tier, resumeMatchFilters, sourceTitles, sourceSkills);
+      const structuralOverrides = relaxStructuralOverrides(
+        tier,
+        resumeMatchFilters,
+        sourceTitles,
+        sourceSkills,
+        sourceCompanies
+      );
       setSearchStatus(`Extending search with more lenient boolean (attempt ${nextAttempts.length}/${MAX_BOOLEAN_ATTEMPTS})...`);
       runResults = await runSearchStream(relaxed.query, "append", structuralOverrides);
     } finally {
@@ -5450,6 +5516,31 @@ function NewJobPageContent() {
                       <option value={0}>Any</option>
                     </select>
                   </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-bold uppercase tracking-widest text-slate-400">Min YOE:</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={40}
+                      step={1}
+                      value={minExperienceYears ?? ""}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        if (raw === "") {
+                          setMinExperienceYears(null);
+                          return;
+                        }
+                        const parsed = parseInt(raw, 10);
+                        const clamped = Number.isFinite(parsed)
+                          ? Math.max(0, Math.min(40, parsed))
+                          : null;
+                        setMinExperienceYears(clamped);
+                      }}
+                      placeholder="any"
+                      className="w-20 h-8 px-2 text-[12px] font-medium text-slate-700 bg-white border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30"
+                      title="Drops candidates whose resume confidently shows fewer years of experience. Leave blank for no floor."
+                    />
+                  </div>
                   <label className="flex items-center gap-2 cursor-pointer">
                     <Checkbox
                       checked={includeNoResume}
@@ -5889,7 +5980,7 @@ function NewJobPageContent() {
                         </div>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
-                        {["Within 10 mi", "Within 25 mi", "Within 50 mi", "Within 100 mi", "Exact location"].map(radius => (
+                        {["Within 10 mi", "Within 25 mi", "Within 50 mi", "Exact location"].map(radius => (
                           <DropdownMenuItem
                             key={radius}
                             className={`rounded-lg py-2 cursor-pointer font-bold text-[13px] ${sourceLocationRadius === radius ? "bg-slate-50 flex items-center justify-between" : ""}`}
@@ -6402,10 +6493,96 @@ function NewJobPageContent() {
                           sourceLocations[0]?.value ? `Local to ${sourceLocations[0].value}` : null
                         ].filter(Boolean);
 
+                        const displayName = getCandidateDisplayName(candidate);
+                        const isLinkedIn = !!candidate.source?.startsWith('LinkedIn');
+                        const isJobDivaTalent = candidate.source === 'JobDiva-TalentSearch';
+                        const enhanced = (candidate.enhanced_info || {}) as Record<string, any>;
+                        const titleStr = String(candidate.title || candidate.current_title || candidate.headline || "").trim();
+                        const companyExp =
+                          (Array.isArray(candidate.company_experience) && candidate.company_experience.length > 0
+                            ? candidate.company_experience
+                            : Array.isArray(enhanced.company_experience)
+                              ? enhanced.company_experience
+                              : []) as Array<{ company?: string }>;
+                        const companyStr = String(companyExp[0]?.company || "").trim();
+                        const titleAtCompany = titleStr && companyStr
+                          ? `${titleStr} @ ${companyStr}`
+                          : titleStr || companyStr;
+                        const yearsRaw =
+                          candidate.experience_years ??
+                          candidate.years_experience ??
+                          enhanced.years_of_experience;
+                        const yearsNum = typeof yearsRaw === "number" ? yearsRaw : Number(yearsRaw);
+                        const yearsStr = Number.isFinite(yearsNum) && yearsNum > 0 ? `${yearsNum}+ yrs exp` : "";
+                        const skillsRaw = Array.isArray(candidate.matched_skills) ? candidate.matched_skills : [];
+                        const topSkills = skillsRaw
+                          .map((s: any) => (typeof s === "string" ? s : s?.name))
+                          .filter((s: any) => typeof s === "string" && s.trim().length > 0)
+                          .slice(0, 3) as string[];
+                        const matchScore = typeof candidate.match_score === "number" ? candidate.match_score : null;
+                        const matchTone = matchScore == null
+                          ? null
+                          : matchScore >= 80
+                            ? { ring: "#2563eb", bg: "#dbeafe", text: "#1d4ed8" }
+                            : matchScore >= 60
+                              ? { ring: "#d97706", bg: "#fef3c7", text: "#b45309" }
+                              : { ring: "#e11d48", bg: "#ffe4e6", text: "#be123c" };
+                        const recentAvailabilityRaw = String(
+                          candidate.recent_availability ||
+                          candidate.recentAvailability ||
+                          candidate.availability_status ||
+                          candidate.available ||
+                          ""
+                        ).trim();
+                        const availabilityLower = recentAvailabilityRaw.toLowerCase();
+                        const availabilityChip = recentAvailabilityRaw
+                          ? availabilityLower.includes("available") || availabilityLower.includes("open")
+                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                            : availabilityLower.includes("placed") || availabilityLower.includes("assignment") || availabilityLower.includes("employed")
+                              ? "bg-slate-100 text-slate-600 border-slate-200"
+                              : "bg-amber-50 text-amber-700 border-amber-200"
+                          : "";
+                        const locationStr = candidate.location || (candidate.city || candidate.state
+                          ? `${candidate.city || ""}${candidate.city && candidate.state ? ", " : ""}${candidate.state || ""}`
+                          : "");
+                        const receivedRaw = candidate.received || candidate.received_date || candidate.receivedDate || candidate.last_modified || candidate.lastModified;
+                        let receivedStr = "";
+                        if (receivedRaw) {
+                          const d = new Date(receivedRaw);
+                          if (!Number.isNaN(d.getTime())) {
+                            receivedStr = d.toISOString().slice(0, 19);
+                          } else if (typeof receivedRaw === "string") {
+                            receivedStr = receivedRaw;
+                          }
+                        }
+                        const sourceBadgeColor = isLinkedIn
+                          ? 'bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]'
+                          : isJobDivaTalent
+                            ? 'bg-[#fff7ed] text-[#c2410c] border-[#fed7aa]'
+                            : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]';
+                        const handleOpenDetails = () => {
+                          setSelectedCandidateForDetails({
+                            name: displayName,
+                            profileUrl: candidate.profile_url,
+                            imageUrl: candidate.image_url,
+                            jobTitle: candidate.title || candidate.headline || "",
+                            location: candidate.location || (candidate.city ? `${candidate.city}, ${candidate.state}` : ""),
+                            experienceYears: candidate.experience_years || candidate.yearsExtracted || candidate.enhanced_info?.years_of_experience || null,
+                            tags: badgeOptions,
+                            matchScore: candidate.match_score,
+                            missingSkills: candidate.missing_skills,
+                            explainability: candidate.explainability,
+                            matchScoreDetails: candidate.match_score_details,
+                            matchedSkills: candidate.matched_skills,
+                            candidateId: candidate.candidate_id || candidate.jobdiva_candidate_id || candidate.id,
+                            source: candidate.source,
+                          });
+                          setDetailsModalOpen(true);
+                        };
                         return (
-                          <div key={`${candidate.candidate_id || candidate.id}-${idx}`} className="p-5 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-purple-200 hover:shadow-md transition-all flex items-center gap-4">
+                          <div key={`${candidate.candidate_id || candidate.id}-${idx}`} className="p-5 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-purple-200 hover:shadow-md transition-all flex items-start gap-4">
                             <Checkbox
-                              className="w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600"
+                              className="w-4.5 h-4.5 mt-1.5 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600 shrink-0"
                               checked={selectedCandidates.has(candidate.candidate_id || candidate.id)}
                               onCheckedChange={(checked) => {
                                 setSelectedCandidates(prev => {
@@ -6418,320 +6595,273 @@ function NewJobPageContent() {
                               }}
                             />
                             <div className="flex-1 min-w-0">
-                              {(() => {
-                                const displayName = getCandidateDisplayName(candidate);
-                                return (
-                                  <div className="flex items-center justify-between gap-4">
-                                    <div className="flex items-center gap-3 min-w-0">
-                                      <a
-                                        href={candidate.source?.startsWith('LinkedIn') ? candidate.profile_url || '#' : '#'}
-                                        target={candidate.source?.startsWith('LinkedIn') ? "_blank" : undefined}
-                                        rel={candidate.source?.startsWith('LinkedIn') ? "noopener noreferrer" : undefined}
-                                        className={`text-[17px] font-bold text-slate-900 flex items-center gap-3 transition-colors group/name ${candidate.source?.startsWith('LinkedIn') ? 'hover:text-[#1d4ed8]' :
-                                          candidate.source === 'JobDiva-TalentSearch' ? 'hover:text-[#c2410c]' :
-                                            'hover:text-[#6366f1]'
-                                          }`}
-                                        onClick={async (e) => {
-                                          if (candidate.source?.startsWith('LinkedIn')) return;
-                                          e.preventDefault();
-                                          // 5.8: prefer JobDiva profile URL when
-                                          // available (opens in new tab); fall back
-                                          // to the resume modal so the name is
-                                          // never a dead click.
-                                          const opened = await fetchAndOpenProfileUrl(candidate);
-                                          if (!opened) handleViewResume(candidate);
-                                        }}
-                                      >
-                                        <span className="flex items-center gap-2">
-                                          <span className={`text-[17px] font-bold text-slate-900 transition-colors ${candidate.source?.startsWith('LinkedIn') ? 'group-hover/name:text-[#1d4ed8]' :
-                                            candidate.source === 'JobDiva-TalentSearch' ? 'group-hover/name:text-[#c2410c]' :
-                                              'group-hover/name:text-[#6366f1]'
-                                            }`}>
-                                            {displayName}
-                                          </span>
-                                          <span
-                                            className={`h-7 w-7 flex items-center justify-center border border-slate-200 bg-white text-slate-400 rounded-lg shadow-sm transition-all ${candidate.source?.startsWith('LinkedIn')
-                                              ? 'group-hover/name:border-[#bfdbfe] group-hover/name:bg-[#eff6ff] group-hover/name:text-[#1d4ed8]' :
-                                              candidate.source === 'JobDiva-TalentSearch'
-                                                ? 'group-hover/name:border-[#fed7aa] group-hover/name:bg-[#fff7ed] group-hover/name:text-[#c2410c]' :
-                                                'group-hover/name:border-[#c7d2fe] group-hover/name:bg-[#f5f3ff] group-hover/name:text-[#6366f1]'
-                                              }`}
-                                            title={candidate.source?.startsWith('LinkedIn') ? "View LinkedIn Profile" : "Click to view resume"}
-                                          >
-                                            <ExternalLink className="w-3.5 h-3.5" />
-                                          </span>
-                                        </span>
-                                      </a>
-                                      <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow-sm h-fit border ${candidate.source?.startsWith('LinkedIn')
-                                        ? 'bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]'
-                                        : candidate.source === 'JobDiva-TalentSearch'
-                                          ? 'bg-[#fff7ed] text-[#c2410c] border-[#fed7aa]'
-                                          : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]'
-                                        }`}>
-                                        {candidate.source?.startsWith('LinkedIn') ? <Linkedin className="w-3 h-3 fill-current" /> : candidate.source === 'JobDiva-TalentSearch' ? <Zap className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
-                                        {candidate.source || "JobDiva"}
-                                      </span>
-                                      <PhoneIndicator
-                                        candidateId={String(candidate.candidate_id || candidate.id || "")}
-                                        jobdivaId={jobdivaId || jobData?.jobdiva_id || String(numericJobId || "")}
-                                        phone={candidate.phone}
-                                        persist={false}
-                                        onSaved={(normalised) => {
-                                          const cid = candidate.candidate_id || candidate.id;
-                                          setCandidates(prev =>
-                                            prev.map(c =>
-                                              (c.candidate_id || c.id) === cid
-                                                ? { ...c, phone: normalised }
-                                                : c
-                                            )
-                                          );
-                                        }}
-                                      />
-                                      {(() => {
-                                        const recentAvailability = String(
-                                          candidate.recent_availability ||
-                                          candidate.recentAvailability ||
-                                          candidate.availability_status ||
-                                          candidate.available ||
-                                          ""
-                                        ).trim();
-                                        if (!recentAvailability) return null;
-
-                                        const low = recentAvailability.toLowerCase();
-                                        const chipClass =
-                                          low.includes("available") || low.includes("open")
-                                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                                            : low.includes("placed") || low.includes("assignment") || low.includes("employed")
-                                              ? "bg-slate-100 text-slate-600 border-slate-200"
-                                              : "bg-amber-50 text-amber-700 border-amber-200";
-
-                                        return (
-                                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${chipClass}`} title="Recent availability from JobDiva">
-                                            {recentAvailability}
-                                          </span>
+                              {/* Top: name+meta on the left, action buttons on the right */}
+                              <div className="flex items-start justify-between gap-4">
+                                <div className="flex-1 min-w-0">
+                                  {/* Name row */}
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <a
+                                      href={isLinkedIn ? candidate.profile_url || '#' : '#'}
+                                      target={isLinkedIn ? "_blank" : undefined}
+                                      rel={isLinkedIn ? "noopener noreferrer" : undefined}
+                                      className={`text-[18px] font-bold text-slate-900 transition-colors ${isLinkedIn ? 'hover:text-[#1d4ed8]' : isJobDivaTalent ? 'hover:text-[#c2410c]' : 'hover:text-[#6366f1]'}`}
+                                      onClick={async (e) => {
+                                        if (isLinkedIn) return;
+                                        e.preventDefault();
+                                        const opened = await fetchAndOpenProfileUrl(candidate);
+                                        if (!opened) handleViewResume(candidate);
+                                      }}
+                                      title={isLinkedIn ? "View LinkedIn Profile" : "Click to view resume"}
+                                    >
+                                      {displayName}
+                                    </a>
+                                    <span className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center gap-1 border ${sourceBadgeColor}`}>
+                                      {isLinkedIn ? <Linkedin className="w-2.5 h-2.5 fill-current" /> : isJobDivaTalent ? <Zap className="w-2.5 h-2.5 fill-current" /> : <ShieldCheck className="w-2.5 h-2.5" />}
+                                      {candidate.source || "JobDiva"}
+                                    </span>
+                                    <PhoneIndicator
+                                      candidateId={String(candidate.candidate_id || candidate.id || "")}
+                                      jobdivaId={jobdivaId || jobData?.jobdiva_id || String(numericJobId || "")}
+                                      phone={candidate.phone}
+                                      persist={false}
+                                      onSaved={(normalised) => {
+                                        const cid = candidate.candidate_id || candidate.id;
+                                        setCandidates(prev =>
+                                          prev.map(c =>
+                                            (c.candidate_id || c.id) === cid
+                                              ? { ...c, phone: normalised }
+                                              : c
+                                          )
                                         );
-                                      })()}
-                                    </div>
+                                      }}
+                                    />
+                                  </div>
+                                  {/* Subtitle: title @ company */}
+                                  {titleAtCompany && (
+                                    <p className="text-[13.5px] text-slate-600 mt-1 truncate" title={titleAtCompany}>
+                                      {titleAtCompany}
+                                    </p>
+                                  )}
 
-                                    <div className="flex items-center gap-3 shrink-0">
-                                      {candidate.match_score !== undefined && (
-                                        <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center shadow-sm h-fit border ${candidate.match_score >= 80 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
-                                          candidate.match_score >= 60 ? 'bg-amber-50 text-amber-700 border-amber-200' :
-                                            'bg-rose-50 text-rose-700 border-rose-200'
-                                          }`}>
-                                          {candidate.match_score}% Match
+                                  {/* Contact row */}
+                                  {(candidate.phone || candidate.email || yearsStr) && (
+                                    <div className="flex items-center gap-x-5 gap-y-1 mt-2 flex-wrap text-[12.5px] text-slate-600">
+                                      {candidate.phone && (
+                                        <span className="inline-flex items-center gap-1.5">
+                                          <Phone className="w-3.5 h-3.5 text-slate-400" />
+                                          {candidate.phone}
                                         </span>
                                       )}
-                                      {!candidate.source?.startsWith('LinkedIn') && (
-                                        <Button
-                                          size="sm"
-                                          className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2"
-                                          onClick={() => handleViewResume({ ...candidate, firstName: displayName.split(" ")[0] || displayName, lastName: displayName.split(" ").slice(1).join(" ") })}
-                                          title="Open candidate resume"
-                                        >
-                                          <FileText className="w-3.5 h-3.5" />
-                                          Resume
-                                          <ExternalLink className="w-3 h-3 opacity-70" />
-                                        </Button>
+                                      {candidate.email && (
+                                        <span className="inline-flex items-center gap-1.5 truncate max-w-[28ch]" title={candidate.email}>
+                                          <Mail className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                          <span className="truncate">{candidate.email}</span>
+                                        </span>
                                       )}
-                                      <Button
-                                        size="sm"
-                                        className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 min-w-[70px]"
-                                        onClick={() => {
-                                          setSelectedCandidateForDetails({
-                                            name: displayName,
-                                            profileUrl: candidate.profile_url,
-                                            imageUrl: candidate.image_url,
-                                            jobTitle: candidate.title || candidate.headline || "",
-                                            location: candidate.location || (candidate.city ? `${candidate.city}, ${candidate.state}` : ""),
-                                            experienceYears: candidate.experience_years || candidate.yearsExtracted || candidate.enhanced_info?.years_of_experience || null,
-                                            tags: badgeOptions,
-                                            matchScore: candidate.match_score,
-                                            missingSkills: candidate.missing_skills,
-                                            explainability: candidate.explainability,
-                                            matchScoreDetails: candidate.match_score_details,
-                                            matchedSkills: candidate.matched_skills,
-                                          });
-                                          setDetailsModalOpen(true);
-                                        }}
-                                      >
-                                        <Eye className="w-3.5 h-3.5" />
-                                        View
-                                      </Button>
+                                      {yearsStr && (
+                                        <span className="inline-flex items-center gap-1.5">
+                                          <Clock className="w-3.5 h-3.5 text-slate-400" />
+                                          {yearsStr}
+                                        </span>
+                                      )}
                                     </div>
-                                  </div>
-                                );
-                              })()}
-                              {(candidate.phone || candidate.email) && (
-                                <div className="mt-2 flex items-center gap-2 flex-wrap text-[11.5px]">
-                                  {candidate.phone && (
-                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
-                                      Mobile: {candidate.phone}
-                                    </span>
-                                  )}
-                                  {candidate.email && (
-                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200 font-semibold">
-                                      <Mail className="w-3 h-3" />
-                                      {candidate.email}
-                                    </span>
                                   )}
                                 </div>
-                              )}
-                              {/* 5.7: availability pill + abstract + location row.
-                              Fields populated by jobdiva.py Talent Search
-                              mapper. All three are optional — only render the
-                              strip if at least one is present. */}
-                              {(() => {
-                                const availability =
-                                  candidate.recent_availability ||
-                                  candidate.recentAvailability ||
-                                  candidate.availability_status ||
-                                  candidate.available;
-                                const abstract = candidate.abstract || "";
-                                const locationStr = candidate.location || (candidate.city || candidate.state ? `${candidate.city || ""}${candidate.city && candidate.state ? ", " : ""}${candidate.state || ""}` : "");
-                                if (!availability && !abstract && !locationStr) return null;
-                                const availabilityColor =
-                                  String(availability || "").toLowerCase().includes("available") ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
-                                    String(availability || "").toLowerCase().includes("placed") ? "bg-slate-100 text-slate-600 border-slate-200" :
-                                      "bg-amber-50 text-amber-700 border-amber-200";
-                                return (
-                                  <div className="flex items-center gap-3 mt-2 text-[12px] text-slate-600">
-                                    {availability && (
-                                      <span className={`px-2 py-0.5 rounded-full text-[10.5px] font-bold uppercase tracking-wider border ${availabilityColor}`}>
-                                        {availability}
-                                      </span>
-                                    )}
-                                    {locationStr && (
-                                      <span className="inline-flex items-center gap-1 text-slate-500">
-                                        <MapPin className="w-3 h-3" />
-                                        {locationStr}
-                                      </span>
-                                    )}
-                                    {abstract && (
-                                      <span className="text-slate-500 truncate" title={abstract}>
-                                        {abstract.length > 90 ? `${abstract.slice(0, 90).trimEnd()}…` : abstract}
-                                      </span>
-                                    )}
-                                  </div>
-                                );
-                              })()}
-                            </div>
+                              </div>
+
+                                {/* Match circle + skill chips + buttons (right cluster) */}
+        <div className="flex items-start gap-3 shrink-0">
+          {matchScore !== null && matchTone && (
+            <div
+              className="w-14 h-14 rounded-full flex flex-col items-center justify-center shrink-0"
+              style={{ backgroundColor: matchTone.bg, color: matchTone.text, border: `2px solid ${matchTone.ring}` }}
+              title="Match score"
+            >
+              <span className="text-[15px] font-extrabold leading-none">{matchScore}%</span>
+              <span className="text-[9px] font-bold uppercase tracking-wider mt-0.5">Match</span>
+            </div>
+          )}
+
+          {topSkills.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 max-w-[260px] items-center self-center">
+              {topSkills.map((skill, i) => (
+                <span
+                  key={`${skill}-${i}`}
+                  className="px-2.5 py-1 rounded-md bg-slate-100 text-slate-700 text-[11px] font-semibold border border-slate-200"
+                  title={`Matched skill: ${skill}`}
+                >
+                  {skill}
+                </span>
+              ))}
+            </div>
+          )}
+
+          <div className="flex flex-col gap-1.5 shrink-0 ml-1">
+            <Button
+              size="sm"
+              className="h-8 px-3 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300 font-semibold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-1.5 min-w-[150px]"
+              onClick={handleOpenDetails}
+            >
+              <Eye className="w-3.5 h-3.5" />
+              View Full Profile
+            </Button>
+            {!isLinkedIn && (
+              <Button
+                size="sm"
+                className="h-8 px-3 bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300 font-semibold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-1.5 min-w-[150px]"
+                onClick={() => handleViewResume({ ...candidate, firstName: displayName.split(" ")[0] || displayName, lastName: displayName.split(" ").slice(1).join(" ") })}
+                title="Open candidate resume"
+              >
+                <FileText className="w-3.5 h-3.5" />
+                View Resume
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+
+                              {/* Footer strip: date | location | availability */ }
+    {
+      (receivedStr || locationStr || recentAvailabilityRaw) && (
+        <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center gap-3 flex-wrap text-[11.5px] text-slate-500">
+          {receivedStr && (
+            <span className="inline-flex items-center gap-1.5">
+              <Calendar className="w-3 h-3 text-slate-400" />
+              {receivedStr}
+            </span>
+          )}
+          {receivedStr && locationStr && <span className="text-slate-300">|</span>}
+          {locationStr && (
+            <span className="inline-flex items-center gap-1.5">
+              <MapPin className="w-3 h-3 text-slate-400" />
+              {locationStr}
+            </span>
+          )}
+          {recentAvailabilityRaw && (
+            <span className={`ml-auto px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${availabilityChip}`} title="Recent availability from JobDiva">
+              {recentAvailabilityRaw}
+            </span>
+          )}
+        </div>
+                                  )}
+                                </div>
+                              );
+                            })}
                           </div>
-                        )
-                      })}
-                    </div>
-                  ) : isSearching ? (
-                    <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-pulse mt-4">
-                      <div className="flex flex-col items-center gap-3">
-                        <div className="w-12 h-12 border-4 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-2" />
-                        <p className="text-slate-600 text-sm font-bold animate-pulse">{searchStatus}</p>
-                        <p className="text-slate-400 text-[12px] font-medium italic">Retrieving candidate records associated with Job ID {numericJobId || jobdivaId}...</p>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
-                      <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-6 shadow-inner">
-                        <Users className="w-8 h-8 text-slate-300" />
-                      </div>
-                      <p className="text-slate-600 text-base font-bold">No candidates found with the current filters.</p>
-                      <p className="text-slate-400 text-[13px] mt-2 font-medium">Try broadening your criteria or adding more titles/skills.</p>
-                    </div>
-                  )}
+                        ) : isSearching ? (
+  <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-pulse mt-4">
+    <div className="flex flex-col items-center gap-3">
+      <div className="w-12 h-12 border-4 border-slate-200 border-t-[#6366f1] rounded-full animate-spin mb-2" />
+      <p className="text-slate-600 text-sm font-bold animate-pulse">{searchStatus}</p>
+      <p className="text-slate-400 text-[12px] font-medium italic">Retrieving candidate records associated with Job ID {numericJobId || jobdivaId}...</p>
+    </div>
+  </div>
+) : (
+  <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-in fade-in zoom-in duration-500">
+    <div className="w-16 h-16 rounded-full bg-slate-100 flex items-center justify-center mb-6 shadow-inner">
+      <Users className="w-8 h-8 text-slate-300" />
+    </div>
+    <p className="text-slate-600 text-base font-bold">No candidates found with the current filters.</p>
+    <p className="text-slate-400 text-[13px] mt-2 font-medium">Try broadening your criteria or adding more titles/skills.</p>
+  </div>
+)}
 
-                  {/* Pagination Controls */}
-                  {/* Pagination Controls */}
-                  {candidates.length > 0 && (
-                    <div className="mt-8 flex items-center justify-between bg-white/70 backdrop-blur-xl p-3.5 px-5 rounded-2xl border border-slate-200/60 shadow-[0_8px_30px_rgb(0,0,0,0.04)] animate-in fade-in slide-in-from-bottom-2 duration-500 sticky bottom-6 z-10">
+{/* Pagination Controls */ }
+{/* Pagination Controls */ }
+{
+  candidates.length > 0 && (
+    <div className="mt-8 flex items-center justify-between bg-white/70 backdrop-blur-xl p-3.5 px-5 rounded-2xl border border-slate-200/60 shadow-[0_8px_30px_rgb(0,0,0,0.04)] animate-in fade-in slide-in-from-bottom-2 duration-500 sticky bottom-6 z-10">
 
-                      {/* Context & Rows Selection */}
-                      <div className="flex items-center gap-4">
-                        <div className="flex items-center gap-2 text-[13px]">
-                          <span className="text-slate-500 font-medium">Showing</span>
-                          <span className="font-bold text-slate-800">
-                            {(currentPage - 1) * candidatesPerPage + 1}-{Math.min(currentPage * candidatesPerPage, candidates.length)}
-                          </span>
-                          <span className="text-slate-500 font-medium">
-                            of {candidates.length} {isSearching ? <span className="italic text-slate-400 font-normal ml-0.5">(sourcing...)</span> : 'candidates'}
-                          </span>
-                        </div>
+      {/* Context & Rows Selection */}
+      <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2 text-[13px]">
+          <span className="text-slate-500 font-medium">Showing</span>
+          <span className="font-bold text-slate-800">
+            {(currentPage - 1) * candidatesPerPage + 1}-{Math.min(currentPage * candidatesPerPage, candidates.length)}
+          </span>
+          <span className="text-slate-500 font-medium">
+            of {candidates.length} {isSearching ? <span className="italic text-slate-400 font-normal ml-0.5">(sourcing...)</span> : 'candidates'}
+          </span>
+        </div>
 
-                        <div className="h-4 w-[1px] bg-slate-200/80"></div>
+        <div className="h-4 w-[1px] bg-slate-200/80"></div>
 
-                        <select
-                          value={candidatesPerPage}
-                          onChange={(e) => {
-                            setCandidatesPerPage(Number(e.target.value));
-                            setCurrentPage(1);
-                          }}
-                          className="bg-transparent text-[13px] font-bold text-slate-600 outline-none cursor-pointer border hover:bg-white/50 border-transparent hover:border-slate-200 rounded-md py-1 px-2 transition-all appearance-none pr-6 relative"
-                          style={{ backgroundImage: `url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 6px center', backgroundSize: '12px' }}
-                        >
-                          <option value={10}>10 / page</option>
-                          <option value={20}>20 / page</option>
-                          <option value={50}>50 / page</option>
-                        </select>
-                      </div>
+        <select
+          value={candidatesPerPage}
+          onChange={(e) => {
+            setCandidatesPerPage(Number(e.target.value));
+            setCurrentPage(1);
+          }}
+          className="bg-transparent text-[13px] font-bold text-slate-600 outline-none cursor-pointer border hover:bg-white/50 border-transparent hover:border-slate-200 rounded-md py-1 px-2 transition-all appearance-none pr-6 relative"
+          style={{ backgroundImage: `url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 6px center', backgroundSize: '12px' }}
+        >
+          <option value={10}>10 / page</option>
+          <option value={20}>20 / page</option>
+          <option value={50}>50 / page</option>
+        </select>
+      </div>
 
-                      {/* Numbered Pagination & Prev/Next */}
-                      <div className="flex items-center gap-1.5" key={`pagination-${currentPage}-${totalPages}`}>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={currentPage === 1}
-                          onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-                          className="h-8 px-2.5 rounded-lg text-slate-500 font-bold hover:bg-slate-100 disabled:opacity-30 transition-all flex items-center justify-center"
-                        >
-                          <ChevronLeft className="w-4 h-4 shrink-0" />
-                          <span className="sr-only">Previous</span>
-                        </Button>
+      {/* Numbered Pagination & Prev/Next */}
+      <div className="flex items-center gap-1.5" key={`pagination-${currentPage}-${totalPages}`}>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={currentPage === 1}
+          onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+          className="h-8 px-2.5 rounded-lg text-slate-500 font-bold hover:bg-slate-100 disabled:opacity-30 transition-all flex items-center justify-center"
+        >
+          <ChevronLeft className="w-4 h-4 shrink-0" />
+          <span className="sr-only">Previous</span>
+        </Button>
 
-                        <div className="flex items-center gap-1 mx-0.5">
-                          {visiblePages.map((pageNum, idx) => (
-                            pageNum === "..." ? (
-                              <span key={`ellipsis-${idx}`} className="w-8 h-8 flex items-center justify-center text-slate-400 font-bold text-[14px]">
-                                ...
-                              </span>
-                            ) : (
-                              <button
-                                key={`page-${pageNum}`}
-                                disabled={currentPage === pageNum}
-                                onClick={() => setCurrentPage(pageNum as number)}
-                                className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[13px] transition-all duration-200 ${currentPage === pageNum
-                                  ? 'bg-[#6366f1] text-white shadow-md transform scale-105 cursor-default'
-                                  : 'text-slate-600 hover:bg-slate-100/80 cursor-pointer'
-                                  }`}
-                              >
-                                {pageNum}
-                              </button>
-                            )
-                          ))}
-                        </div>
+        <div className="flex items-center gap-1 mx-0.5">
+          {visiblePages.map((pageNum, idx) => (
+            pageNum === "..." ? (
+              <span key={`ellipsis-${idx}`} className="w-8 h-8 flex items-center justify-center text-slate-400 font-bold text-[14px]">
+                ...
+              </span>
+            ) : (
+              <button
+                key={`page-${pageNum}`}
+                disabled={currentPage === pageNum}
+                onClick={() => setCurrentPage(pageNum as number)}
+                className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[13px] transition-all duration-200 ${currentPage === pageNum
+                  ? 'bg-[#6366f1] text-white shadow-md transform scale-105 cursor-default'
+                  : 'text-slate-600 hover:bg-slate-100/80 cursor-pointer'
+                  }`}
+              >
+                {pageNum}
+              </button>
+            )
+          ))}
+        </div>
 
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={currentPage === totalPages}
-                          onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
-                          className="h-8 px-2.5 rounded-lg text-slate-500 font-bold hover:bg-slate-100 disabled:opacity-30 transition-all flex items-center justify-center"
-                        >
-                          <ChevronRight className="w-4 h-4 shrink-0" />
-                          <span className="sr-only">Next</span>
-                        </Button>
-                      </div>
-                    </div>
-                  )}
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={currentPage === totalPages}
+          onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+          className="h-8 px-2.5 rounded-lg text-slate-500 font-bold hover:bg-slate-100 disabled:opacity-30 transition-all flex items-center justify-center"
+        >
+          <ChevronRight className="w-4 h-4 shrink-0" />
+          <span className="sr-only">Next</span>
+        </Button>
+      </div>
+    </div>
+  )
+}
                 </>
               ) : (
-                <div className="h-4 flex items-center justify-center opacity-0 mt-4">
-                </div>
-              )}
+  <div className="h-4 flex items-center justify-center opacity-0 mt-4">
+  </div>
+)}
 
-              {/* Bulk resume upload lives in the Tira chatbot now — removed from
+{/* Bulk resume upload lives in the Tira chatbot now — removed from
                 Step 5 to keep sourcing focused on the boolean-string workflow. */}
             </div>
 
-            {/* Launch Footer */}
-            <div className="border-t border-slate-200 pt-6 mt-2 flex items-center justify-between">
+  {/* Launch Footer */ }
+  < div className = "border-t border-slate-200 pt-6 mt-2 flex items-center justify-between" >
               <span className="text-[13px] font-medium text-slate-400">
                 {hasSearched && !isSearching ? `${selectedCandidates.size} candidates selected` : ''}
               </span>
@@ -6754,417 +6884,421 @@ function NewJobPageContent() {
     </div>
   );
 
-  const renderStepContent = () => {
-    switch (currentStep) {
-      case 1: return intakeStep;
-      case 2: return publishStep;
-      case 3: return establishRubricStep;
-      case 4: return setFiltersStep;
-      case 5: return sourceStep;
-      default: return null;
-    }
-  };
-
-  // Full-page loader while we hydrate a saved draft. Prevents the flash-of-
-  // empty-form that recruiters see on Resume Setup while /jobs/{id}/draft
-  // (plus rubric / screen questions) resolve.
-  if (isLoadingDraft) {
-    return (
-      <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center">
-        <div className="flex flex-col items-center gap-3 text-slate-500">
-          <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
-          <div className="text-[15px] font-medium">Loading draft…</div>
-        </div>
-      </div>
-    );
+const renderStepContent = () => {
+  switch (currentStep) {
+    case 1: return intakeStep;
+    case 2: return publishStep;
+    case 3: return establishRubricStep;
+    case 4: return setFiltersStep;
+    case 5: return sourceStep;
+    default: return null;
   }
+};
 
+// Full-page loader while we hydrate a saved draft. Prevents the flash-of-
+// empty-form that recruiters see on Resume Setup while /jobs/{id}/draft
+// (plus rubric / screen questions) resolve.
+if (isLoadingDraft) {
   return (
-    <div className="p-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
-      {/* Breadcrumb */}
-      <div className="mb-5">
-        <Link href="/jobs" className="text-slate-500 hover:text-slate-700 text-[15px] flex items-center gap-2 transition-colors font-medium">
-          <ArrowLeft className="w-4 h-4" />
-          Back to Jobs
-        </Link>
+    <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center">
+      <div className="flex flex-col items-center gap-3 text-slate-500">
+        <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
+        <div className="text-[15px] font-medium">Loading draft…</div>
       </div>
+    </div>
+  );
+}
 
-      {/* Page Header */}
-      <div className="mb-7">
-        <h1 className="text-[32px] font-bold text-slate-900 leading-tight">New Job</h1>
-        <p className="text-slate-500 text-[16px] font-medium mt-1">
-          {(() => {
-            const title = jobData?.title || jobTitle;
-            const customer = jobData?.customer_name || jobData?.customer || "";
-            if (!title && !customer) return "Enter a JobDiva Job ID to get started.";
-            if (title && customer) return `${title} · ${customer}`;
-            return title || customer;
-          })()}
-        </p>
-      </div>
+return (
+  <div className="p-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
+    {/* Breadcrumb */}
+    <div className="mb-5">
+      <Link href="/jobs" className="text-slate-500 hover:text-slate-700 text-[15px] flex items-center gap-2 transition-colors font-medium">
+        <ArrowLeft className="w-4 h-4" />
+        Back to Jobs
+      </Link>
+    </div>
 
-      {/* Step Indicator */}
-      <StepIndicator />
+    {/* Page Header */}
+    <div className="mb-7">
+      <h1 className="text-[32px] font-bold text-slate-900 leading-tight">New Job</h1>
+      <p className="text-slate-500 text-[16px] font-medium mt-1">
+        {(() => {
+          const title = jobData?.title || jobTitle;
+          const customer = jobData?.customer_name || jobData?.customer || "";
+          if (!title && !customer) return "Enter a JobDiva Job ID to get started.";
+          if (title && customer) return `${title} · ${customer}`;
+          return title || customer;
+        })()}
+      </p>
+    </div>
 
-      {/* Step Content */}
-      <div className="mt-8">
-        {renderStepContent()}
-      </div>
+    {/* Step Indicator */}
+    <StepIndicator />
 
-      {/* Wizard Navigation — Back | Save & Exit … Next */}
-      <div className="flex items-center justify-between pt-10 border-t border-slate-200 mt-12 mb-20 px-4">
-        <div className="flex items-center gap-4">
-          {currentStep > 1 && (
-            <button
-              onClick={() => {
-                const toStep = (currentStep - 1) as Step;
-                trackEvent("job_wizard_step_back_clicked", {
-                  from_step: currentStep,
-                  to_step: toStep,
-                  from_step_label: STEP_LABELS[currentStep],
-                  to_step_label: STEP_LABELS[toStep],
-                });
-                setCurrentStep(toStep);
-              }}
-              className="flex items-center gap-2.5 px-6 py-2.5 bg-white border border-slate-200 rounded-xl font-bold text-slate-700 hover:bg-slate-50 transition-all active:scale-95 shadow-sm"
-            >
-              <ArrowLeft className="w-4.5 h-4.5" />
-              Back
-            </button>
-          )}
+    {/* Step Content */}
+    <div className="mt-8">
+      {renderStepContent()}
+    </div>
 
-          <Button
-            variant="outline"
-            className="h-[44px] px-6 bg-white border-slate-200 flex items-center gap-2.5 shadow-sm text-[15px] font-bold text-slate-700 transition-all rounded-xl active:scale-95 hover:bg-slate-50"
-            onClick={async () => {
-              const saved = await saveJobDraft({ currentStep, saveType: "manual" });
-              if (saved) {
-                router.push("/");
-              }
+    {/* Wizard Navigation — Back | Save & Exit … Next */}
+    <div className="flex items-center justify-between pt-10 border-t border-slate-200 mt-12 mb-20 px-4">
+      <div className="flex items-center gap-4">
+        {currentStep > 1 && (
+          <button
+            onClick={() => {
+              const toStep = (currentStep - 1) as Step;
+              trackEvent("job_wizard_step_back_clicked", {
+                from_step: currentStep,
+                to_step: toStep,
+                from_step_label: STEP_LABELS[currentStep],
+                to_step_label: STEP_LABELS[toStep],
+              });
+              setCurrentStep(toStep);
             }}
+            className="flex items-center gap-2.5 px-6 py-2.5 bg-white border border-slate-200 rounded-xl font-bold text-slate-700 hover:bg-slate-50 transition-all active:scale-95 shadow-sm"
           >
-            <Save className="w-4.5 h-4.5 text-slate-400" />
-            Save & Exit
-          </Button>
-        </div>
+            <ArrowLeft className="w-4.5 h-4.5" />
+            Back
+          </button>
+        )}
 
-        <div className="flex items-center gap-3">
-          {currentStep < 5 && (
-            <Button
-              className="h-[44px] px-8 bg-[#6366f1] hover:bg-[#4f46e5] flex items-center gap-2 shadow-lg shadow-indigo-100 text-[15px] font-bold text-white transition-all rounded-xl active:scale-95"
-              onClick={async () => {
-                // Per-step loading: every Next click flips isAdvancingStep on
-                // for the duration of its own save (+ rubric fetch on step 2),
-                // so the button shows "Preparing..." while something is
-                // actually in flight. Passing currentStep+1 to saveJobDraft
-                // records the step the user is navigating TO, so Resume Setup
-                // lands them back where they were — not one step behind.
-                if (currentStep === 1) {
-                  if (!jobData) {
-                    showToast("Fetch a job first before saving.", "info");
-                    return;
-                  }
-                  if (recruiterEmails.length === 0) {
-                    setEmailError(true);
-                    showToast("Recruiter Email is required.", "info");
-                    return;
-                  }
-                  if (selectedEmpTypes.length === 0) {
-                    showToast("Employment Type is required.", "info");
-                    return;
-                  }
+        <Button
+          variant="outline"
+          className="h-[44px] px-6 bg-white border-slate-200 flex items-center gap-2.5 shadow-sm text-[15px] font-bold text-slate-700 transition-all rounded-xl active:scale-95 hover:bg-slate-50"
+          onClick={async () => {
+            const saved = await saveJobDraft({ currentStep, saveType: "manual" });
+            if (saved) {
+              router.push("/");
+            }
+          }}
+        >
+          <Save className="w-4.5 h-4.5 text-slate-400" />
+          Save & Exit
+        </Button>
+      </div>
 
-                  setIsAdvancingStep(true);
-                  try {
-                    const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
-                    if (!saved) {
-                      showToast("Failed to save Step 1 data. Please try again.", "info");
-                      return;
-                    }
-                    trackStepAdvance(1, 2, { via: "next_button" });
-                    setCurrentStep(2);
-                  } finally {
-                    setIsAdvancingStep(false);
-                  }
+      <div className="flex items-center gap-3">
+        {currentStep < 5 && (
+          <Button
+            className="h-[44px] px-8 bg-[#6366f1] hover:bg-[#4f46e5] flex items-center gap-2 shadow-lg shadow-indigo-100 text-[15px] font-bold text-white transition-all rounded-xl active:scale-95"
+            onClick={async () => {
+              // Per-step loading: every Next click flips isAdvancingStep on
+              // for the duration of its own save (+ rubric fetch on step 2),
+              // so the button shows "Preparing..." while something is
+              // actually in flight. Passing currentStep+1 to saveJobDraft
+              // records the step the user is navigating TO, so Resume Setup
+              // lands them back where they were — not one step behind.
+              if (currentStep === 1) {
+                if (!jobData) {
+                  showToast("Fetch a job first before saving.", "info");
                   return;
-                } else if (currentStep === 2) {
-                  setIsAdvancingStep(true);
-                  try {
-                    const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
-                    if (!saved) {
-                      showToast("Failed to save Step 2 data. Please try again.", "info");
-                      return;
-                    }
-
-                    // Regenerate rubric when (a) none exists yet, or (b) the
-                    // JD text has been edited since the last rubric was
-                    // generated. Otherwise preserve the existing rubric +
-                    // recruiter edits on Step 3.
-                    const jdFingerprint = (jobPosting || "").trim();
-                    const rubricIsEmpty = !rubricData || (rubricData.titles?.length === 0 && rubricData.skills?.length === 0);
-                    const jdChanged = jdFingerprint !== "" && jdFingerprint !== lastRubricJdRef.current;
-                    if (rubricIsEmpty || jdChanged) {
-                      setIsGeneratingRubric(true);
-                      try {
-                        const apiUrl = API_BASE;
-                        const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
-                            jobId: numericJobId || jobdivaId,
-                            jobdivaId: jobdivaId,
-                            jobTitle: jobData?.title || jobTitle,
-                            enhancedJobTitle: enhancedTitle || "",
-                            jobDescription: jobPosting,
-                            jobNotes: recruiterNotes,
-                            originalDescription: jobData?.description || "",
-                            customerName: jobData?.customer_name || jobData?.customer || "",
-                            requiredDegree: jobData?.required_degree || "",
-                            jobCity: jobData?.city || "",
-                            jobState: jobData?.state || "",
-                            locationType: jobData?.location_type || ""
-                          })
-                        });
-                        if (res.ok) {
-                          const data = await res.json();
-                          setRubricData(applyTitleRequiredSafetyNet(data));
-                          lastRubricJdRef.current = jdFingerprint;
-                          showToast("Step 2 saved and rubric generated!", "success");
-                        } else {
-                          throw new Error("API failed");
-                        }
-                      } catch (e) {
-                        console.error(e);
-                        showToast("Failed to generate rubric.", "info");
-                        setRubricData(null);
-                      } finally {
-                        setIsGeneratingRubric(false);
-                      }
-                    }
-                    trackStepAdvance(2, 3, {
-                      via: "next_button",
-                      rubric_regenerated: rubricIsEmpty || jdChanged,
-                    });
-                    setCurrentStep(3);
-                    return;
-                  } finally {
-                    setIsAdvancingStep(false);
-                  }
-                } else if (currentStep === 3) {
-                  setIsAdvancingStep(true);
-                  try {
-                    const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
-                    if (!saved) return;
-                    // If the rubric (titles/skills/total_years) has been
-                    // edited since the current Step-4 question set was
-                    // generated, force-regenerate role-specific questions so
-                    // Step 4 reflects the recruiter's Step-3 changes. Custom
-                    // ("other") questions are preserved by the initializer.
-                    const nextKey = computeRubricQuestionsKey(rubricData);
-                    if (nextKey && nextKey !== lastQuestionsRubricKeyRef.current) {
-                      await initializeScreenQuestionsFromRubric({ force: true });
-                      lastQuestionsRubricKeyRef.current = nextKey;
-                    }
-                    trackStepAdvance(3, 4, { via: "next_button" });
-                  } finally {
-                    setIsAdvancingStep(false);
-                  }
-                } else if (currentStep === 4) {
-                  setIsAdvancingStep(true);
-                  try {
-                    const saved = await saveJobDraft({ currentStep: 5, skipToast: true });
-                    if (!saved) return;
-                    const nextSourcingKey = computeSourcingRubricKey(rubricData, resumeMatchFilters);
-                    // First entry: derive sourcing criteria from rubric.
-                    // Subsequent entries: only refresh when the rubric or
-                    // active filter set has actually changed since the last
-                    // sourcing init, so recruiter customisations on Step 5
-                    // aren't clobbered by no-op revisits.
-                    if (!sourcingCriteriaInitializedRef.current) {
-                      initializeSourceFromRubric();
-                      sourcingCriteriaInitializedRef.current = true;
-                    } else if (nextSourcingKey && nextSourcingKey !== lastSourcingRubricKeyRef.current) {
-                      initializeSourceFromRubric();
-                    }
-                    lastSourcingRubricKeyRef.current = nextSourcingKey;
-                    trackStepAdvance(4, 5, { via: "next_button" });
-                  } finally {
-                    setIsAdvancingStep(false);
-                  }
+                }
+                if (recruiterEmails.length === 0) {
+                  setEmailError(true);
+                  showToast("Recruiter Email is required.", "info");
+                  return;
+                }
+                if (selectedEmpTypes.length === 0) {
+                  showToast("Employment Type is required.", "info");
+                  return;
                 }
 
-                if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
-              }}
-              disabled={(currentStep === 1 && !jobData) || isGeneratingJD || isSearching || isAdvancingStep || isGeneratingRubric}
-            >
-              {isGeneratingJD ? (
-                <>
-                  <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
-                  Enriching...
-                </>
-              ) : (isAdvancingStep || isGeneratingRubric) ? (
-                <>
-                  <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
-                  Preparing...
-                </>
-              ) : (
-                <>
-                  Next
-                  <ArrowRight className="w-5 h-5 ml-1.5" />
-                </>
-              )}
-            </Button>
-          )}
-        </div>
-      </div>
+                setIsAdvancingStep(true);
+                try {
+                  const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
+                  if (!saved) {
+                    showToast("Failed to save Step 1 data. Please try again.", "info");
+                    return;
+                  }
+                  trackStepAdvance(1, 2, { via: "next_button" });
+                  setCurrentStep(2);
+                } finally {
+                  setIsAdvancingStep(false);
+                }
+                return;
+              } else if (currentStep === 2) {
+                setIsAdvancingStep(true);
+                try {
+                  const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
+                  if (!saved) {
+                    showToast("Failed to save Step 2 data. Please try again.", "info");
+                    return;
+                  }
 
-      {/* Toast Notification */}
-      {toast && (
-        <div
-          className={`fixed bottom-8 right-8 flex items-center gap-2.5 px-5 py-3 rounded-lg text-[14px] font-medium text-white shadow-xl z-50 transition-all duration-300 transform translate-y-0 opacity-100 ${toast.type === "success" ? "bg-[#166534]" : "bg-primary"}`}
-        >
-          {toast.type === "success" ? (
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
-          ) : (
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" /></svg>
-          )}
-          {toast.message}
-        </div>
-      )}
-
-      {showJobdivaSkillsModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
-          <div className="w-full max-w-2xl rounded-xl bg-white border border-slate-200 shadow-2xl overflow-hidden">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
-              <div>
-                <h3 className="text-[16px] font-bold text-slate-900">JobDiva Search Agent string</h3>
-                <p className="text-[12px] text-slate-500 mt-0.5">Use this Boolean-ready string in JobDiva Search Agent, including location format.</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowJobdivaSkillsModal(false)}
-                className="w-8 h-8 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center"
-                aria-label="Close skills modal"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="px-5 py-4 space-y-3">
-              <div className={`text-[12px] rounded-lg px-3 py-2 border ${jobdivaCriteriaUnconfigured ? "text-amber-800 bg-amber-50 border-amber-200" : "text-indigo-800 bg-indigo-50 border-indigo-200"}`}>
-                {jobdivaCriteriaUnconfigured
-                  ? "JobDiva AI matcher isn’t configured for this job yet. We’ll still search, but quality improves once criteria are saved in JobDiva."
-                  : "Tip: copy this string into JobDiva Search Agent criteria for stronger portal-side matching."}
-              </div>
-              <div className="text-[12px] text-slate-600">
-                {jobdivaSkillsToUse.length} skill{jobdivaSkillsToUse.length === 1 ? "" : "s"} formatted in Boolean form with location suffix: <span className="font-semibold">(HADOOP) AND (SPARK OR PYSPARK), IN (NC-US)</span>
-              </div>
-              <textarea
-                value={jobdivaSkillsCopyText}
-                readOnly
-                rows={8}
-                className="w-full rounded-lg border border-slate-200 bg-slate-50 text-[13px] text-slate-800 font-medium px-3 py-2 outline-none resize-y"
-              />
-              <div className="flex items-center justify-end gap-2">
-                {jobdivaJobEditUrl ? (
-                  <a
-                    href={jobdivaJobEditUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="h-9 px-3 border border-slate-200 rounded-md inline-flex items-center gap-1.5 text-[12.5px] font-bold text-slate-700 hover:bg-slate-50"
-                  >
-                    Open JobDiva Job
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
-                ) : null}
-                <Button
-                  variant="outline"
-                  className="h-9 px-3 text-[12.5px] font-bold"
-                  onClick={() => setShowJobdivaSkillsModal(false)}
-                >
-                  Close
-                </Button>
-                <Button
-                  className="h-9 px-3 bg-[#6366f1] hover:bg-[#4f46e5] text-white text-[12.5px] font-bold flex items-center gap-1.5"
-                  onClick={async () => {
+                  // Regenerate rubric when (a) none exists yet, or (b) the
+                  // JD text has been edited since the last rubric was
+                  // generated. Otherwise preserve the existing rubric +
+                  // recruiter edits on Step 3.
+                  const jdFingerprint = (jobPosting || "").trim();
+                  const rubricIsEmpty = !rubricData || (rubricData.titles?.length === 0 && rubricData.skills?.length === 0);
+                  const jdChanged = jdFingerprint !== "" && jdFingerprint !== lastRubricJdRef.current;
+                  if (rubricIsEmpty || jdChanged) {
+                    setIsGeneratingRubric(true);
                     try {
-                      await navigator.clipboard.writeText(jobdivaSkillsCopyText);
-                      setSkillsCopied(true);
-                      setTimeout(() => setSkillsCopied(false), 1800);
-                    } catch {
-                      showToast("Copy failed. Please copy manually.", "info");
+                      const apiUrl = API_BASE;
+                      const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          jobId: numericJobId || jobdivaId,
+                          jobdivaId: jobdivaId,
+                          jobTitle: jobData?.title || jobTitle,
+                          enhancedJobTitle: enhancedTitle || "",
+                          jobDescription: jobPosting,
+                          jobNotes: recruiterNotes,
+                          originalDescription: jobData?.description || "",
+                          customerName: jobData?.customer_name || jobData?.customer || "",
+                          requiredDegree: jobData?.required_degree || "",
+                          jobCity: jobData?.city || "",
+                          jobState: jobData?.state || "",
+                          locationType: jobData?.location_type || ""
+                        })
+                      });
+                      if (res.ok) {
+                        const data = await res.json();
+                        setRubricData(applyTitleRequiredSafetyNet(data));
+                        lastRubricJdRef.current = jdFingerprint;
+                        showToast("Step 2 saved and rubric generated!", "success");
+                      } else {
+                        throw new Error("API failed");
+                      }
+                    } catch (e) {
+                      console.error(e);
+                      showToast("Failed to generate rubric.", "info");
+                      setRubricData(null);
+                    } finally {
+                      setIsGeneratingRubric(false);
                     }
-                  }}
+                  }
+                  trackStepAdvance(2, 3, {
+                    via: "next_button",
+                    rubric_regenerated: rubricIsEmpty || jdChanged,
+                  });
+                  setCurrentStep(3);
+                  return;
+                } finally {
+                  setIsAdvancingStep(false);
+                }
+              } else if (currentStep === 3) {
+                setIsAdvancingStep(true);
+                try {
+                  const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
+                  if (!saved) return;
+                  // If the rubric (titles/skills/total_years) has been
+                  // edited since the current Step-4 question set was
+                  // generated, force-regenerate role-specific questions so
+                  // Step 4 reflects the recruiter's Step-3 changes. Custom
+                  // ("other") questions are preserved by the initializer.
+                  const nextKey = computeRubricQuestionsKey(rubricData);
+                  if (nextKey && nextKey !== lastQuestionsRubricKeyRef.current) {
+                    await initializeScreenQuestionsFromRubric({ force: true });
+                    lastQuestionsRubricKeyRef.current = nextKey;
+                  }
+                  trackStepAdvance(3, 4, { via: "next_button" });
+                } finally {
+                  setIsAdvancingStep(false);
+                }
+              } else if (currentStep === 4) {
+                setIsAdvancingStep(true);
+                try {
+                  const saved = await saveJobDraft({ currentStep: 5, skipToast: true });
+                  if (!saved) return;
+                  const nextSourcingKey = computeSourcingRubricKey(rubricData, resumeMatchFilters);
+                  // First entry: derive sourcing criteria from rubric.
+                  // Subsequent entries: only refresh when the rubric or
+                  // active filter set has actually changed since the last
+                  // sourcing init, so recruiter customisations on Step 5
+                  // aren't clobbered by no-op revisits.
+                  if (!sourcingCriteriaInitializedRef.current) {
+                    initializeSourceFromRubric();
+                    sourcingCriteriaInitializedRef.current = true;
+                  } else if (nextSourcingKey && nextSourcingKey !== lastSourcingRubricKeyRef.current) {
+                    initializeSourceFromRubric();
+                  }
+                  lastSourcingRubricKeyRef.current = nextSourcingKey;
+                  trackStepAdvance(4, 5, { via: "next_button" });
+                } finally {
+                  setIsAdvancingStep(false);
+                }
+              }
+
+              if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
+            }}
+            disabled={(currentStep === 1 && !jobData) || isGeneratingJD || isSearching || isAdvancingStep || isGeneratingRubric}
+          >
+            {isGeneratingJD ? (
+              <>
+                <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
+                Enriching...
+              </>
+            ) : (isAdvancingStep || isGeneratingRubric) ? (
+              <>
+                <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
+                Preparing...
+              </>
+            ) : (
+              <>
+                Next
+                <ArrowRight className="w-5 h-5 ml-1.5" />
+              </>
+            )}
+          </Button>
+        )}
+      </div>
+    </div>
+
+    {/* Toast Notification */}
+    {toast && (
+      <div
+        className={`fixed bottom-8 right-8 flex items-center gap-2.5 px-5 py-3 rounded-lg text-[14px] font-medium text-white shadow-xl z-50 transition-all duration-300 transform translate-y-0 opacity-100 ${toast.type === "success" ? "bg-[#166534]" : "bg-primary"}`}
+      >
+        {toast.type === "success" ? (
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
+        ) : (
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" /></svg>
+        )}
+        {toast.message}
+      </div>
+    )}
+
+    {showJobdivaSkillsModal && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+        <div className="w-full max-w-2xl rounded-xl bg-white border border-slate-200 shadow-2xl overflow-hidden">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+            <div>
+              <h3 className="text-[16px] font-bold text-slate-900">JobDiva Search Agent string</h3>
+              <p className="text-[12px] text-slate-500 mt-0.5">Use this Boolean-ready string in JobDiva Search Agent, including location format.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowJobdivaSkillsModal(false)}
+              className="w-8 h-8 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center"
+              aria-label="Close skills modal"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="px-5 py-4 space-y-3">
+            <div className={`text-[12px] rounded-lg px-3 py-2 border ${jobdivaCriteriaUnconfigured ? "text-amber-800 bg-amber-50 border-amber-200" : "text-indigo-800 bg-indigo-50 border-indigo-200"}`}>
+              {jobdivaCriteriaUnconfigured
+                ? "JobDiva AI matcher isn’t configured for this job yet. We’ll still search, but quality improves once criteria are saved in JobDiva."
+                : "Tip: copy this string into JobDiva Search Agent criteria for stronger portal-side matching."}
+            </div>
+            <div className="text-[12px] text-slate-600">
+              {jobdivaSkillsToUse.length} skill{jobdivaSkillsToUse.length === 1 ? "" : "s"} formatted in Boolean form with location suffix: <span className="font-semibold">(HADOOP) AND (SPARK OR PYSPARK), IN (NC-US)</span>
+            </div>
+            <textarea
+              value={jobdivaSkillsCopyText}
+              readOnly
+              rows={8}
+              className="w-full rounded-lg border border-slate-200 bg-slate-50 text-[13px] text-slate-800 font-medium px-3 py-2 outline-none resize-y"
+            />
+            <div className="flex items-center justify-end gap-2">
+              {jobdivaJobEditUrl ? (
+                <a
+                  href={jobdivaJobEditUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="h-9 px-3 border border-slate-200 rounded-md inline-flex items-center gap-1.5 text-[12.5px] font-bold text-slate-700 hover:bg-slate-50"
                 >
-                  <Clipboard className="w-3.5 h-3.5" />
-                  {skillsCopied ? "Copied" : "Copy agent string"}
-                </Button>
-              </div>
+                  Open JobDiva Job
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              ) : null}
+              <Button
+                variant="outline"
+                className="h-9 px-3 text-[12.5px] font-bold"
+                onClick={() => setShowJobdivaSkillsModal(false)}
+              >
+                Close
+              </Button>
+              <Button
+                className="h-9 px-3 bg-[#6366f1] hover:bg-[#4f46e5] text-white text-[12.5px] font-bold flex items-center gap-1.5"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(jobdivaSkillsCopyText);
+                    setSkillsCopied(true);
+                    setTimeout(() => setSkillsCopied(false), 1800);
+                  } catch {
+                    showToast("Copy failed. Please copy manually.", "info");
+                  }
+                }}
+              >
+                <Clipboard className="w-3.5 h-3.5" />
+                {skillsCopied ? "Copied" : "Copy agent string"}
+              </Button>
             </div>
           </div>
         </div>
-      )}
+      </div>
+    )}
 
-      {/* Email Modal */}
-      {selectedCandidateForEmail && (
-        <CandidateMessageModal
-          candidateName={selectedCandidateForEmail.name}
-          candidateEmail={selectedCandidateForEmail.email}
-          isOpen={messageModalOpen}
-          onClose={() => {
-            setMessageModalOpen(false);
-            setSelectedCandidateForEmail(null);
-          }}
-        />
-      )}
-
-      {selectedCandidateForResume && (
-        <ResumeModal
-          candidateName={selectedCandidateForResume.name}
-          resumeText={selectedCandidateForResume.resumeText}
-          isOpen={resumeModalOpen}
-          onClose={() => {
-            setResumeModalOpen(false);
-            setSelectedCandidateForResume(null);
-          }}
-        />
-      )}
-
-      {/* Paste Resume Modal (External requirement) */}
-      <PasteResumeModal
-        open={pasteResumeOpen}
-        onClose={() => setPasteResumeOpen(false)}
-        name={pasteName}
-        onNameChange={setPasteName}
-        email={pasteEmail}
-        onEmailChange={setPasteEmail}
-        resumeText={pasteResumeText}
-        onResumeTextChange={setPasteResumeText}
-        isSaving={isSavingPasteResume}
-        onSubmit={handleSubmitPasteResume}
+    {/* Email Modal */}
+    {selectedCandidateForEmail && (
+      <CandidateMessageModal
+        candidateName={selectedCandidateForEmail.name}
+        candidateEmail={selectedCandidateForEmail.email}
+        isOpen={messageModalOpen}
+        onClose={() => {
+          setMessageModalOpen(false);
+          setSelectedCandidateForEmail(null);
+        }}
       />
+    )}
 
-      {selectedCandidateForDetails && (
-        <CandidateDetailsModal
-          isOpen={detailsModalOpen}
-          candidateName={selectedCandidateForDetails.name}
-          profileUrl={selectedCandidateForDetails.profileUrl}
-          imageUrl={selectedCandidateForDetails.imageUrl}
-          jobTitle={selectedCandidateForDetails.jobTitle}
-          location={selectedCandidateForDetails.location}
-          experienceYears={selectedCandidateForDetails.experienceYears}
-          tags={selectedCandidateForDetails.tags}
-          matchScore={selectedCandidateForDetails.matchScore}
-          missingSkills={selectedCandidateForDetails.missingSkills}
-          matchedSkills={selectedCandidateForDetails.matchedSkills}
-          matchScoreDetails={selectedCandidateForDetails.matchScoreDetails}
-          explainability={selectedCandidateForDetails.explainability}
-          onClose={() => {
-            setDetailsModalOpen(false);
-            setSelectedCandidateForDetails(null);
-          }}
-        />
-      )}
-    </div>
-  );
+    {selectedCandidateForResume && (
+      <ResumeModal
+        candidateName={selectedCandidateForResume.name}
+        resumeText={selectedCandidateForResume.resumeText}
+        keywords={selectedCandidateForResume.keywords}
+        similarKeywords={selectedCandidateForResume.similarKeywords}
+        isOpen={resumeModalOpen}
+        onClose={() => {
+          setResumeModalOpen(false);
+          setSelectedCandidateForResume(null);
+        }}
+      />
+    )}
+
+    {/* Paste Resume Modal (External requirement) */}
+    <PasteResumeModal
+      open={pasteResumeOpen}
+      onClose={() => setPasteResumeOpen(false)}
+      name={pasteName}
+      onNameChange={setPasteName}
+      email={pasteEmail}
+      onEmailChange={setPasteEmail}
+      resumeText={pasteResumeText}
+      onResumeTextChange={setPasteResumeText}
+      isSaving={isSavingPasteResume}
+      onSubmit={handleSubmitPasteResume}
+    />
+
+    {selectedCandidateForDetails && (
+      <CandidateDetailsModal
+        isOpen={detailsModalOpen}
+        candidateName={selectedCandidateForDetails.name}
+        profileUrl={selectedCandidateForDetails.profileUrl}
+        imageUrl={selectedCandidateForDetails.imageUrl}
+        jobTitle={selectedCandidateForDetails.jobTitle}
+        location={selectedCandidateForDetails.location}
+        experienceYears={selectedCandidateForDetails.experienceYears}
+        tags={selectedCandidateForDetails.tags}
+        matchScore={selectedCandidateForDetails.matchScore}
+        missingSkills={selectedCandidateForDetails.missingSkills}
+        matchedSkills={selectedCandidateForDetails.matchedSkills}
+        matchScoreDetails={selectedCandidateForDetails.matchScoreDetails}
+        explainability={selectedCandidateForDetails.explainability}
+        candidateId={selectedCandidateForDetails.candidateId}
+        source={selectedCandidateForDetails.source}
+        onClose={() => {
+          setDetailsModalOpen(false);
+          setSelectedCandidateForDetails(null);
+        }}
+      />
+    )}
+  </div>
+);
 };

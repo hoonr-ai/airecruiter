@@ -100,10 +100,13 @@ class _PooledConnection:
 
     def __exit__(self, exc_type, exc, tb):
         # psycopg2 connection __exit__ commits on success / rolls back on
-        # failure but does NOT close — that matches what we want before
-        # returning to the pool. Caller still needs to call .close() (or use
-        # this in a contextlib.closing) to actually return the connection.
-        return self._conn.__exit__(exc_type, exc, tb)
+        # failure but does NOT close. By calling self.close() here, we
+        # ensure the connection is returned to the pool at the end of the
+        # 'with' block.
+        try:
+            self._conn.__exit__(exc_type, exc, tb)
+        finally:
+            self.close()
 
 
 def get_db_connection():

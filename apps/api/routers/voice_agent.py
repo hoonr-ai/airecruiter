@@ -79,16 +79,24 @@ async def get_voice_job_context(job_id: str):
         logging.getLogger(__name__).error(f"Error in unified voice API: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+class TranscriptionItem(BaseModel):
+    question: str
+    answer: str
+    candidate_score: float
+    total_score: float = 10.0
+    hard_filter_status: str  # "passed", "failed", or "not_hard_filter"
+    reason: Optional[str] = None
+
 class VoiceAgentInterviewWebhook(BaseModel):
     interview_id: str
-    jobdiva_id: str
-    candidate_id: str
     status: str
-    hard_filter_status: Optional[str] = None
+    jobdiva_id: Optional[str] = None
+    candidate_id: Optional[str] = None
+    hard_filter_status: Optional[str] = None  # "passed" or "failed"
     total_score: Optional[float] = None
     candidate_score: Optional[float] = None
     completed_at: Optional[str] = None
-    transcriptions: Optional[List[Dict[str, Any]]] = None
+    transcriptions: Optional[List[TranscriptionItem]] = None
 
 @router.post("/interviews/webhook")
 async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
@@ -100,35 +108,32 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
         detail_payload = {
             "interview": {
                 "status": payload.status,
-                "overall_score": payload.total_score,  # Map total_score internally
+                "overall_score": payload.candidate_score,
                 "candidate_score": payload.candidate_score,
+                "total_score": payload.total_score,
                 "hard_filter_status": payload.hard_filter_status,
                 "completed_at": payload.completed_at
             },
-            "transcriptions": payload.transcriptions or []
+            "transcriptions": [t.dict() for t in payload.transcriptions] if payload.transcriptions else []
         }
 
         target_job_id = payload.jobdiva_id
+        target_candidate_id = payload.candidate_id
         
         # Update DB - similar to sync_interview_details
         with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
             with conn.cursor() as cur:
                 # 0. Lookup the real candidate_id and job_id from our audit logs using interview_id
-                # This handles the case where LiveKit sends back its own interview_id as candidate_id
+                # This ensures we don't need LiveKit to send candidate_id or jobdiva_id
                 cur.execute(
-                    "SELECT candidate_id, job_id FROM engage_interview_audit WHERE interview_id = %s LIMIT 1",
+                    "SELECT candidate_id, jobdiva_id FROM engage_interview_audit WHERE interview_id = %s LIMIT 1",
                     (str(payload.interview_id),)
                 )
                 audit_row = cur.fetchone()
                 
-                target_candidate_id = payload.candidate_id
-                target_job_id = payload.jobdiva_id
-                
                 if audit_row:
                     target_candidate_id = audit_row[0]
-                    # Only override jobdiva_id if it's missing from payload
-                    if not target_job_id or target_job_id == "unknown":
-                        target_job_id = audit_row[1]
+                    target_job_id = audit_row[1]
                     logger.info(f"Webhook: Matched interview {payload.interview_id} to candidate {target_candidate_id} for job {target_job_id}")
                 else:
                     logger.warning(f"Webhook: No audit log found for interview {payload.interview_id}")
@@ -155,9 +160,9 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     "engage_last_response": detail_payload,
                 }
                 if payload.total_score is not None:
-                    candidate_blob["engage_score"] = payload.total_score
                     candidate_blob["engage_total_score"] = payload.total_score
                 if payload.candidate_score is not None:
+                    candidate_blob["engage_score"] = payload.candidate_score
                     candidate_blob["engage_candidate_score"] = payload.candidate_score
                 if payload.completed_at:
                     candidate_blob["engage_completed_at"] = payload.completed_at
@@ -201,21 +206,22 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
             ENGAGE_PASSED_STATUSES = ["passed", "completed", "hired"]
             
         if check_status in [s.lower() for s in ENGAGE_PASSED_STATUSES] and payload.total_score is not None:
-            try:
-                from routers.engagement import _check_and_fire_candidate_passed_notification
-                # interview_id should be parsed to int if it's digit
-                int_id = int(payload.interview_id) if str(payload.interview_id).isdigit() else payload.interview_id
-                asyncio.create_task(
-                    _check_and_fire_candidate_passed_notification(
-                        interview_id=int_id,
-                        detail_payload=detail_payload,
-                        job_id=target_job_id,
-                        candidate_id=payload.candidate_id,
+            if target_job_id and target_candidate_id:
+                try:
+                    from routers.engagement import _check_and_fire_candidate_passed_notification
+                    # interview_id should be parsed to int if it's digit
+                    int_id = int(payload.interview_id) if str(payload.interview_id).isdigit() else payload.interview_id
+                    asyncio.create_task(
+                        _check_and_fire_candidate_passed_notification(
+                            interview_id=int_id,
+                            detail_payload=detail_payload,
+                            job_id=target_job_id,
+                            candidate_id=target_candidate_id,
+                        )
                     )
-                )
-            except (ImportError, AttributeError):
-                import logging
-                logging.getLogger(__name__).warning("Candidate passed but _check_and_fire_candidate_passed_notification is not available in engagement.py. Skipping email.")
+                except (ImportError, AttributeError):
+                    import logging
+                    logging.getLogger(__name__).warning("Candidate passed but _check_and_fire_candidate_passed_notification is not available in engagement.py. Skipping email.")
             
         return {"success": True, "message": "Interview results processed successfully"}
 
