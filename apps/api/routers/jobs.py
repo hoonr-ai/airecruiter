@@ -1698,7 +1698,7 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
                 "        COUNT(*) AS candidates_sourced, "
                 "        COUNT(*) AS candidates_launched, "
                 "        COUNT(*) FILTER (WHERE sc.data->>'engage_status' IN ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')) AS complete_submissions, "
-                "        COUNT(*) FILTER (WHERE (sc.data->>'engage_status' IN ('passed', 'pass')) OR (LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed') AND (NULLIF(sc.data->>'engage_score', '')::float >= 70))) AS pass_submissions "
+                "        COUNT(*) FILTER (WHERE (sc.data->>'engage_status' IN ('passed', 'pass', 'completed')) OR (LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed') AND (NULLIF(sc.data->>'engage_score', '')::float >= 70))) AS pass_submissions "
                 "    FROM sourced_candidates sc "
                 "    JOIN monitored_jobs mj2 ON sc.jobdiva_id = mj2.jobdiva_id OR sc.jobdiva_id = mj2.job_id::text "
                 "    GROUP BY mj2.job_id "
