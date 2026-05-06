@@ -27,6 +27,7 @@ interface Job {
   id: string;
   jobdiva_id?: string;
   title: string;
+  enhancedTitle: string;
   customer_name: string;
   status: string;
   location: string;
@@ -103,22 +104,7 @@ export default function DashboardPage() {
         const status = details.status || "Open";
         const procStatus = details.processing_status || "pending";
 
-        let pairStatus = "Unpublished";
-
-        // Check if job is archived first
-        if (details.is_archived) {
-          pairStatus = "Archived";
-        } else if (procStatus === "monitoring_added" || procStatus === "manual_created") {
-          // Setup is finished. Check JobDiva status for Active/Inactive
-          if (status.toLowerCase() === "closed" || status.toLowerCase() === "cancelled") {
-            pairStatus = "Inactive";
-          } else {
-            pairStatus = "Active";
-          }
-        } else {
-          // If pending, step_X_complete, or any other state, wizard is not finished
-          pairStatus = "Unpublished";
-        }
+        const pairStatus = details.pair_status || "Unpublished";
 
         return {
           id,
@@ -208,7 +194,7 @@ export default function DashboardPage() {
       "Max Allowed Submittals",
       "Job Status",
       "Hoonr-Curate Status",
-      "Candidates Sourced",
+      "Candidates Launched",
       "Resumes Shortlisted",
       "Complete Submissions",
       "Pass Submissions",
@@ -232,7 +218,7 @@ export default function DashboardPage() {
       escapeCSV(job.maxAllowedSubmittals),
       escapeCSV(job.status),
       escapeCSV(job.pairStatus),
-      escapeCSV(job.candidatesSourced),
+      escapeCSV(job.candidatesLaunched),
       escapeCSV(job.resumesShortlisted),
       escapeCSV(job.completeSubmissions),
       escapeCSV(job.passSubmissions),
