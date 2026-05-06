@@ -24,6 +24,7 @@ from routers._helpers import get_db_connection
 
 from core.email import notify_pair_launched, notify_job_posting, notify_candidate_passed
 from services.jobdiva import jobdiva_service
+from services.auto_assign_service import auto_assign_service
 from core import (
     JOBDIVA_PAIR_RECRUITER_ID,
     JOBDIVA_PAIR_QUALIFICATION_NAME,
@@ -744,9 +745,14 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
         if is_success:
             # ── Fire PAIR launch confirmation email (non-blocking) ──────────
             if request.is_initial_launch:
+                # v22: initial launch — immediate sync of existing JobDiva applicants.
+                # Applicants are assigned to rankings with match_score=0 (N/A).
+                logger.info(f"🚀 [Engagement] Initial launch detected for job {job_id_from_payload}. Triggering applicant sync.")
+                asyncio.create_task(auto_assign_service.synchronize_job_applicants(job_id_from_payload))
+                
                 asyncio.create_task(
                     _send_pair_launch_email(
-                        job_id=payload_obj.get("jd", {}).get("job_id", ""),
+                        job_id=job_id_from_payload,
                         candidate_count=len(interview_results),
                     )
                 )

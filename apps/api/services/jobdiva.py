@@ -767,7 +767,12 @@ class JobDivaService:
         emails fill in via the CandidatesDetail enrichment merge below.
         """
         url = f"{self.api_url}/apiv2/jobdiva/JobAgentSearch"
-        params = {"jobId": int(job_id), "resumeCount": int(resume_count)}
+        try:
+            params = {"jobId": int(job_id), "resumeCount": int(resume_count)}
+        except (ValueError, TypeError):
+            # If job_id is still a string with hyphen, try to clean it
+            safe_id = "".join(filter(str.isdigit, str(job_id)))
+            params = {"jobId": int(safe_id) if safe_id else 0, "resumeCount": int(resume_count)}
         headers = {"Authorization": f"Bearer {token}"}
 
         jd_results: List[Dict[str, Any]] = []
@@ -2699,9 +2704,9 @@ class JobDivaService:
                             if k == "customer_name" and (str(v or "").lower() == "unknown" or not v):
                                 # Skip this key to preserve the existing valid name in DB
                                 continue
-                            # Store [null] marker for new fields that have no JobDiva value
+                            # Store empty string for fields that have no JobDiva value
                             if v == "" and k in {"priority", "program_duration", "max_allowed_submittals"}:
-                                v = "[null]"
+                                v = ""
                             # Clean location fields before storing
                             if k in ["city", "state", "zip"]:
                                 v = _clean_location_field(v)
@@ -2760,10 +2765,10 @@ class JobDivaService:
                         "posted_date": data.get("posted_date") or "",
                         "start_date": data.get("start_date") or "",
                         
-                        # Extended JobDiva fields — store [null] if not provided by JobDiva
-                        "priority": data.get("priority") or "[null]",
-                        "program_duration": data.get("program_duration") or "[null]",
-                        "max_allowed_submittals": data.get("max_allowed_submittals") or "[null]",
+                        # Extended JobDiva fields — store empty if not provided by JobDiva
+                        "priority": data.get("priority") or "",
+                        "program_duration": data.get("program_duration") or "",
+                        "max_allowed_submittals": data.get("max_allowed_submittals") or "",
                         
                         # Configuration and processing
                         "recruiter_emails": json.dumps(recruiter_emails) if recruiter_emails else '[]',
@@ -3180,7 +3185,7 @@ class JobDivaService:
             logger.warning(f"Could not resolve JobDiva Job ID for {job_id}")
             # Try to use it directly if it's numeric
             try:
-                jdiva_job_id = int(job_id)
+                jdiva_job_id = int("".join(filter(str.isdigit, str(job_id)))) if job_id else 0
             except:
                 pass
 
@@ -3558,7 +3563,7 @@ class JobDivaService:
             "filename": filename,
             "textfile": resume_text,
             "filecontent": "",
-            "jobid": int(job_id),
+            "jobid": int("".join(filter(str.isdigit, str(job_id)))) if job_id else 0,
             "recruiterid": int(JOBDIVA_PAIR_RECRUITER_ID or 0),
             "resumeDate": resume_date,
             "resumesource": 0
@@ -3646,7 +3651,15 @@ class JobDivaService:
             "Authorization": f"Bearer {token}",
             "Accept": "application/json"
         }
-        params = {"jobIds": [int(job_id)]}
+        # Resolve to numeric ID if reference ID (hyphenated) is provided
+        resolved_id = await self._resolve_jobdiva_job_id(str(job_id))
+        safe_job_id = resolved_id if resolved_id else job_id
+        
+        try:
+            params = {"jobIds": [int(safe_job_id)]}
+        except (ValueError, TypeError):
+            logger.error(f"❌ get_job_applicants_detail: Invalid job_id {safe_job_id}")
+            return []
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
