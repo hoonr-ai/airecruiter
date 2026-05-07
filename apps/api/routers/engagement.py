@@ -1064,7 +1064,7 @@ async def _check_and_fire_candidate_passed_notification(
 
         # 4. Fetch Job & Candidate metadata for email
         cur.execute("""
-            SELECT title, city, state, pay_rate, recruiter_emails, jobdiva_id
+            SELECT job_id, title, city, state, pay_rate, recruiter_emails, jobdiva_id
             FROM monitored_jobs
             WHERE job_id = %s OR jobdiva_id = %s
             ORDER BY (job_id ~ '^[0-9]+$') DESC, created_at DESC
@@ -1174,6 +1174,9 @@ async def _check_and_fire_candidate_passed_notification(
             safe_name = "".join(c for c in (cand_row["name"] or "Candidate") if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
             resume_filename = f"Resume_{safe_name}_{job_id}.doc"
         
+        app_job_id = str(job_row.get("job_id") or job_id)
+        jd_job_id = str(job_row.get("jobdiva_id") or job_id)
+
         # 7. Fire the email & Update JobDiva Qualification
         recruiter_emails = _parse_json_list(job_row.get("recruiter_emails", []))
         
@@ -1199,13 +1202,13 @@ async def _check_and_fire_candidate_passed_notification(
         # Note: We use the job title from job_row for the message
         from core.email import APP_BASE_URL
         pair_job_title = job_row.get("title") or "the"
-        report_link = f"{APP_BASE_URL}/jobs/{job_id}/report?candidateId={candidate_id}"
+        report_link = f"{APP_BASE_URL}/jobs/{app_job_id}/report?candidateId={candidate_id}"
         note_text = f"Candidate completed Phone Screen for {pair_job_title} position. <a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report."
         
         async def create_and_pin_note():
             note_res = await jobdiva_service.create_candidate_note(
                 candidate_id=jd_candidate_id,
-                job_id=job_id,
+                job_id=jd_job_id,
                 action=JOBDIVA_PASS_ACTION_NAME,
                 note_text=note_text,
                 recruiter_id=JOBDIVA_PAIR_RECRUITER_ID
@@ -1233,7 +1236,7 @@ async def _check_and_fire_candidate_passed_notification(
             resume_bytes=resume_bytes,
             resume_filename=resume_filename,
             candidate_id=candidate_id,
-            job_id=job_id
+            job_id=app_job_id
         )
 
         if success:
