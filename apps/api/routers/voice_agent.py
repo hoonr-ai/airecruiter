@@ -3,6 +3,7 @@ from services.job_rubric_db import JobRubricDB
 from services.jobdiva import jobdiva_service
 import psycopg2
 import psycopg2.extras
+import re
 from core.config import DATABASE_URL
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
@@ -14,6 +15,23 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Voice Agent Integration"])
+
+# Questions stored verbatim often begin with "You ..." (declarative). When
+# spoken aloud by the screener, prepending a soft hedge — "Let's say you ..." —
+# lands as a natural lead-in rather than an interrogation. Applied only at the
+# voice-agent boundary; the editor and DB keep the original text.
+_LEADING_YOU_RE = re.compile(r"^You\b", re.IGNORECASE)
+
+
+def _humanize_question_text(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return text
+    leading = len(text) - len(text.lstrip())
+    body = text[leading:]
+    match = _LEADING_YOU_RE.match(body)
+    if not match:
+        return text
+    return f"{text[:leading]}Let's say you{body[match.end():]}"
 
 @router.get("/jobs/{job_id}")
 async def get_voice_job_context(job_id: str):
@@ -64,6 +82,8 @@ async def get_voice_job_context(job_id: str):
         pre_screen_questions = rubric.pop('screen_questions', [])
         for q in pre_screen_questions:
             q.pop('order_index', None)
+            if 'question_text' in q:
+                q['question_text'] = _humanize_question_text(q.get('question_text'))
         rubric.pop('bot_introduction', None)
         
         return {
@@ -79,16 +99,24 @@ async def get_voice_job_context(job_id: str):
         logging.getLogger(__name__).error(f"Error in unified voice API: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+class TranscriptionItem(BaseModel):
+    question: str
+    answer: str
+    candidate_score: float
+    total_score: float = 10.0
+    hard_filter_status: str  # "passed", "failed", or "not_hard_filter"
+    reason: Optional[str] = None
+
 class VoiceAgentInterviewWebhook(BaseModel):
     interview_id: str
     status: str
     jobdiva_id: Optional[str] = None
     candidate_id: Optional[str] = None
-    hard_filter_status: Optional[str] = None
+    hard_filter_status: Optional[str] = None  # "passed" or "failed"
     total_score: Optional[float] = None
     candidate_score: Optional[float] = None
     completed_at: Optional[str] = None
-    transcriptions: Optional[List[Dict[str, Any]]] = None
+    transcriptions: Optional[List[TranscriptionItem]] = None
 
 @router.post("/interviews/webhook")
 async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
@@ -100,12 +128,13 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
         detail_payload = {
             "interview": {
                 "status": payload.status,
-                "overall_score": payload.candidate_score,  # Map candidate_score internally
+                "overall_score": payload.candidate_score,
                 "candidate_score": payload.candidate_score,
+                "total_score": payload.total_score,
                 "hard_filter_status": payload.hard_filter_status,
                 "completed_at": payload.completed_at
             },
-            "transcriptions": payload.transcriptions or []
+            "transcriptions": [t.dict() for t in payload.transcriptions] if payload.transcriptions else []
         }
 
         target_job_id = payload.jobdiva_id

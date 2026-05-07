@@ -13,7 +13,9 @@ from services.ai_service import ai_service
 from services.jobdiva import jobdiva_service
 from services.unipile import unipile_service
 from services.sourced_candidates_storage import sourced_candidates_storage
+from services.dnc_storage import load_dnc_phone_set
 from services.unified_candidate_search import SearchCriteria, unified_search_service
+from utils.phone import normalize_phone
 from models import (
     CandidateSearchRequest, CandidateMessageRequest, CandidatesSaveRequest,
     CandidateAnalysisRequest, CandidateAnalysisResponse, CandidateFeedbackRequest,
@@ -36,6 +38,71 @@ def _json_load_safe(value: Any, default: Any):
         except Exception:
             return default
     return default
+
+
+def _extract_rankings_hard_filter_details(
+    data_blob: Dict[str, Any],
+    audit_response: Any,
+    audit_payload: Any,
+) -> List[Dict[str, Any]]:
+    """Return compact hard-filter rows derived from webhook/audit data."""
+    resp = audit_response if isinstance(audit_response, dict) else _json_load_safe(audit_response, {})
+    payload = audit_payload if isinstance(audit_payload, dict) else _json_load_safe(audit_payload, {})
+
+    details: List[Dict[str, Any]] = []
+
+    transcriptions = []
+    if isinstance(resp, dict):
+        transcriptions = resp.get("transcriptions") or []
+
+    if not transcriptions and isinstance(data_blob, dict):
+        last_response = data_blob.get("engage_last_response")
+        last_response = last_response if isinstance(last_response, dict) else _json_load_safe(last_response, {})
+        if isinstance(last_response, dict):
+            wp_data = last_response.get("data", last_response)
+            if isinstance(wp_data, dict):
+                transcriptions = wp_data.get("transcriptions") or []
+
+    if isinstance(transcriptions, list):
+        for item in transcriptions:
+            hf_status = str(item.get("hard_filter_status") or "").lower()
+            if hf_status not in {"passed", "failed", "pass", "fail"}:
+                continue
+            details.append({
+                "question": item.get("question") or item.get("question_text") or "Question",
+                "status": "Pass" if hf_status in {"passed", "pass"} else "Fail",
+                "score": item.get("candidate_score"),
+                "total_score": item.get("total_score"),
+                "reason": item.get("reason") or "",
+            })
+        if details:
+            return details
+
+    audit_questions = payload.get("questions") if isinstance(payload, dict) else []
+    audit_responses = resp.get("questions") if isinstance(resp, dict) else []
+    if isinstance(audit_questions, list) and audit_questions:
+        for question in audit_questions:
+            if not question.get("pass_criteria"):
+                continue
+            response = next(
+                (
+                    row for row in (audit_responses or [])
+                    if row.get("question_text") == question.get("question_text") or row.get("id") == question.get("id")
+                ),
+                {},
+            )
+            status = str(response.get("status") or "pending").lower()
+            details.append({
+                "question": question.get("question_text") or question.get("question") or question.get("name") or "Question",
+                "status": "Pass" if status == "pass" else "Fail" if status == "fail" else "Pending",
+                "score": response.get("candidate_score"),
+                "total_score": response.get("total_score"),
+                "reason": response.get("reason") or "",
+            })
+        if details:
+            return details
+
+    return details
 
 
 def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
@@ -240,13 +307,13 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             digits = "".join(ch for ch in radius_match if ch.isdigit())
             if digits:
                 within_miles = int(digits)
-        # Hard cap 50 mi everywhere — clamp + log if a caller exceeds it.
-        if within_miles > 50:
+        # Hard cap 100 mi everywhere — clamp + log if a caller exceeds it.
+        if within_miles > 100:
             logger.warning(
-                "within_miles=%s exceeds 50mi cap; clamping to 50",
+                "within_miles=%s exceeds 100mi cap; clamping to 100",
                 within_miles,
             )
-            within_miles = 50
+            within_miles = 100
 
         companies = request.companies or []
 
@@ -763,7 +830,9 @@ async def get_job_candidates(job_id_or_ref: str):
                             candidate_id,
                             status,
                             interview_id,
-                            created_at
+                            created_at,
+                            payload,
+                            response
                         FROM engage_interview_audit
                         WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                         ORDER BY candidate_id, id DESC
@@ -785,7 +854,9 @@ async def get_job_candidates(job_id_or_ref: str):
                         sc.data,
                         la.status as audit_status,
                         la.interview_id as audit_interview_id,
-                        la.created_at as audit_created_at
+                        la.created_at as audit_created_at,
+                        la.payload as audit_payload,
+                        la.response as audit_response
                     FROM sourced_candidates sc
                     LEFT JOIN latest_audit la
                         ON la.candidate_id = sc.candidate_id
@@ -840,6 +911,12 @@ async def get_job_candidates(job_id_or_ref: str):
             if not cand.get("engage_created_at") and cand.get("audit_created_at"):
                 cand["engage_created_at"] = cand.get("audit_created_at")
 
+            cand["engage_hard_filter_details"] = _extract_rankings_hard_filter_details(
+                data_blob if isinstance(data_blob, dict) else {},
+                cand.get("audit_response"),
+                cand.get("audit_payload"),
+            )
+
             # read-side normalization for consistency across views
             norm_engage_score = None
             raw_score = cand.get("engage_score") or cand.get("engage_candidate_score")
@@ -886,10 +963,53 @@ async def get_job_candidates(job_id_or_ref: str):
             cand.pop("audit_status", None)
             cand.pop("audit_interview_id", None)
             cand.pop("audit_created_at", None)
+            cand.pop("audit_payload", None)
+            cand.pop("audit_response", None)
 
         return {"status": "success", "candidates": candidates}
     except Exception as e:
         logger.error(f"Error fetching job candidates: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/jobs/{job_id_or_ref}/launched-candidate-keys")
+async def get_launched_candidate_keys(job_id_or_ref: str):
+    """
+    Lightweight endpoint returning just (candidate_id, source) tuples for
+    every candidate already in sourced_candidates for this job. The Step 5
+    UI uses this to mark already-launched rows as disabled with an
+    "Already Launched" badge, preventing duplicate Launch PAIR clicks.
+    """
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT jobdiva_id, job_id FROM monitored_jobs
+                    WHERE job_id = %s OR jobdiva_id = %s
+                    LIMIT 1
+                """, (job_id_or_ref, job_id_or_ref))
+                row = cur.fetchone()
+                resolved_jobdiva_id = row[0] if row and row[0] else (row[1] if row else job_id_or_ref)
+        finally:
+            conn.close()
+
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT candidate_id, source
+                    FROM sourced_candidates
+                    WHERE jobdiva_id = %s
+                """, (str(resolved_jobdiva_id),))
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+
+        launched = [{"candidate_id": r[0], "source": r[1]} for r in rows]
+        return {"status": "success", "launched": launched}
+    except Exception as e:
+        logger.error(f"Error fetching launched candidate keys for {job_id_or_ref}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1051,9 +1171,81 @@ async def save_candidates(request: CandidatesSaveRequest):
 
         print(f"✅ Resolved jobdiva_id: {request.jobdiva_id!r} → {resolved_jobdiva_id!r}")
 
+        # Reject if outreach has been stopped for this job. This is the
+        # main gate for "Stop Job Activity" — blocks all future launches.
+        try:
+            _conn = get_db_connection()
+            try:
+                with _conn.cursor() as _cur:
+                    _cur.execute("""
+                        SELECT outreach_stopped_at FROM monitored_jobs
+                        WHERE job_id = %s OR jobdiva_id = %s
+                        LIMIT 1
+                    """, (request.jobdiva_id, request.jobdiva_id))
+                    _stopped_row = _cur.fetchone()
+                    if _stopped_row and _stopped_row[0] is not None:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Job activity has been stopped. Cannot launch new candidates.",
+                        )
+            finally:
+                _conn.close()
+        except HTTPException:
+            raise
+        except Exception as _stop_check_err:
+            print(f"⚠️ Could not check outreach_stopped_at: {_stop_check_err}")
+
+        # Update pair_launched_at if it's not set yet. This marks the moment
+        # PAIR was first "launched" for this job, which serves as the start
+        # baseline for the 'Time to First Pass' metric.
+        try:
+            _conn = get_db_connection()
+            try:
+                with _conn.cursor() as _cur:
+                    _cur.execute("""
+                        UPDATE monitored_jobs
+                        SET pair_launched_at = COALESCE(pair_launched_at, NOW()),
+                            updated_at = NOW()
+                        WHERE job_id = %s OR jobdiva_id = %s
+                    """, (request.jobdiva_id, request.jobdiva_id))
+                    _conn.commit()
+            finally:
+                _conn.close()
+        except Exception as _launch_err:
+            print(f"⚠️ Could not update pair_launched_at: {_launch_err}")
+
         # Filter only selected candidates for saving
         selected_candidates = [c for c in request.candidates if c.is_selected]
         print(f"📝 Saving {len(selected_candidates)} selected candidates out of {len(request.candidates)} total")
+
+        # DNC enforcement: drop any selected candidate whose phone matches the
+        # Do-Not-Contact list. Frontend already filters them out, but we
+        # re-check here so a stale browser session or direct API call cannot
+        # bypass the gate. Failing open (empty set) on a DB error is intentional
+        # — the importer is the source of truth, and a transient lookup failure
+        # shouldn't block a launch.
+        dnc_phones = load_dnc_phone_set()
+        dnc_skipped: List[Dict[str, Any]] = []
+        if dnc_phones:
+            allowed: List[Any] = []
+            for c in selected_candidates:
+                normalized = normalize_phone(getattr(c, "phone", None))
+                if normalized and normalized in dnc_phones:
+                    dnc_skipped.append({
+                        "candidate_id": getattr(c, "candidate_id", None),
+                        "name": getattr(c, "name", None),
+                        "phone": getattr(c, "phone", None),
+                        "source": getattr(c, "source", None),
+                    })
+                else:
+                    allowed.append(c)
+            if dnc_skipped:
+                logger.info(
+                    "dnc_skip count=%s ids=%s",
+                    len(dnc_skipped),
+                    [s["candidate_id"] for s in dnc_skipped],
+                )
+            selected_candidates = allowed
 
         for idx, c in enumerate(selected_candidates):
             print(f"   Selected Candidate {idx+1}: {c.name} (ID: {c.candidate_id}, Source: {c.source})")
@@ -1294,9 +1486,13 @@ async def save_candidates(request: CandidatesSaveRequest):
             "status": "success",
             "detail": f"Saved {saved_count} sourced candidates",
             "saved_count": saved_count,
-            "enhanced_count": enhanced_count
+            "enhanced_count": enhanced_count,
+            "dnc_skipped_count": len(dnc_skipped),
+            "dnc_skipped": dnc_skipped,
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         import logging
         logging.getLogger(__name__).error(f"Error saving candidates: {e}")
@@ -2961,6 +3157,7 @@ async def save_candidate_feedback(
     #    (sourced_candidates.candidate_id) and the numeric job ID (monitored_jobs.jobdiva_id).
     jd_candidate_id = candidate_id   # fallback: use whatever was passed
     jd_job_ref = job_id_or_ref       # fallback: use the raw job ref
+    app_job_ref = job_id_or_ref      # canonical app job route segment for report links
     sc_row_id = None                 # sourced_candidates.id (PK) once resolved
 
     try:
@@ -2971,7 +3168,15 @@ async def save_candidate_feedback(
                 try:
                     pk_int = int(candidate_id)
                     _cur.execute(
-                        "SELECT id, candidate_id, jobdiva_id, data FROM sourced_candidates WHERE id = %s LIMIT 1",
+                        """
+                        SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id
+                        FROM sourced_candidates sc
+                        LEFT JOIN monitored_jobs mj
+                          ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
+                        WHERE sc.id = %s
+                        ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
+                        LIMIT 1
+                        """,
                         (pk_int,)
                     )
                     row = _cur.fetchone()
@@ -2979,6 +3184,7 @@ async def save_candidate_feedback(
                         sc_row_id      = row[0]
                         sc_candidate_id = str(row[1])   # real candidate ID string (JobDiva ID or LinkedIn ID)
                         jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
+                        app_job_ref    = str(row[4]) if row[4] else app_job_ref
                         
                         # Use JobDiva candidate ID if available in data blob (for auto-provisioned candidates)
                         data_blob = row[3] if isinstance(row[3], dict) else _json_load_safe(row[3], {})
@@ -2990,14 +3196,19 @@ async def save_candidate_feedback(
                 except (ValueError, TypeError):
                     # candidate_id is not an integer PK – try matching as a candidate_id string
                     _cur.execute(
-                        """SELECT id, candidate_id, jobdiva_id, data
-                             FROM sourced_candidates
-                            WHERE candidate_id = %s
-                              AND (jobdiva_id = %s
-                                   OR jobdiva_id IN (
-                                         SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s
-                                   ))
-                            LIMIT 1""",
+                        """
+                        SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id
+                        FROM sourced_candidates sc
+                        LEFT JOIN monitored_jobs mj
+                          ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
+                        WHERE sc.candidate_id = %s
+                          AND (sc.jobdiva_id = %s
+                               OR sc.jobdiva_id IN (
+                                     SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s
+                               ))
+                        ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
+                        LIMIT 1
+                        """,
                         (candidate_id, job_id_or_ref, job_id_or_ref)
                     )
                     row = _cur.fetchone()
@@ -3005,6 +3216,7 @@ async def save_candidate_feedback(
                         sc_row_id      = row[0]
                         sc_candidate_id = str(row[1])
                         jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
+                        app_job_ref    = str(row[4]) if row[4] else app_job_ref
                         
                         # Use JobDiva candidate ID if available in data blob
                         data_blob = row[3] if isinstance(row[3], dict) else _json_load_safe(row[3], {})
@@ -3018,14 +3230,14 @@ async def save_candidate_feedback(
         logger.warning(f"⚠️ Could not resolve JobDiva IDs from DB for feedback "
                        f"(candidate_id={candidate_id}, job={job_id_or_ref}): {e}")
 
-    logger.info(f"📝 Resolved → jd_candidate_id={jd_candidate_id}, jd_job_ref={jd_job_ref}, sc_row_id={sc_row_id}")
+    logger.info(f"📝 Resolved → jd_candidate_id={jd_candidate_id}, jd_job_ref={jd_job_ref}, app_job_ref={app_job_ref}, sc_row_id={sc_row_id}")
 
     # 3. Push to JobDiva — POST /apiv2/jobdiva/createCandidateNote
     #    Recruiter = PAIR (configured via JOBDIVA_PAIR_RECRUITER_ID env var)
     from core import JOBDIVA_PAIR_RECRUITER_ID
     from core.email import APP_BASE_URL
     
-    report_link = f"{APP_BASE_URL}/jobs/{jd_job_ref}/report?candidateId={jd_candidate_id}"
+    report_link = f"{APP_BASE_URL}/jobs/{app_job_ref}/report?candidateId={jd_candidate_id}"
 
     jobdiva_result = await jobdiva_service.create_candidate_note(
         candidate_id=jd_candidate_id,

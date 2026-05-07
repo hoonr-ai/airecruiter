@@ -32,6 +32,20 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { API_BASE } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
+interface TranscriptionItem {
+  question: string;
+  answer: string;
+  candidate_score?: number;
+  total_score?: number;
+  hard_filter_status?: string;
+  reason?: string;
+  speaker_type?: string;
+  role?: string;
+  message_text?: string;
+  text?: string;
+  content?: string;
+}
+
 interface EvaluationReport {
   status: string;
   candidate: {
@@ -69,7 +83,7 @@ interface EvaluationReport {
   pair: {
     interview: any;
     evaluation: any;
-    transcriptions: any[];
+    transcriptions: TranscriptionItem[];
     questions_answers: any[];
     audit_payload?: any;
     audit_response?: any;
@@ -499,15 +513,67 @@ export default function CandidateEvaluationReportPage() {
               <h4 className="text-[14px] font-bold text-[#0f172a]">Screening Hard Filters Result</h4>
               <div className="space-y-2">
                 {(() => {
+                  const auditResponse = pair.audit_response || {};
+                  const transcriptions = auditResponse.transcriptions || pair.transcriptions || [];
+                  
+                  // 1. Filter for items that are EXPLICITLY hard filters
+                  const hardFilterItems = transcriptions.filter((t: any) => 
+                    t.hard_filter_status === 'passed' || t.hard_filter_status === 'failed'
+                  );
+
+                  if (hardFilterItems.length > 0) {
+                    return hardFilterItems.map((item: any, i: number) => {
+                      const q_text = item.question || item.question_text || "Question";
+                      const a_text = item.answer || item.answer_text || "—";
+                      const score = item.candidate_score;
+                      const total = item.total_score || 10.0;
+                      const hf_status = item.hard_filter_status;
+                      const reason = item.reason;
+
+                      return (
+                        <div key={i} className="flex flex-col gap-4 p-6 bg-white border border-[#e2e8f0] rounded-xl hover:border-slate-300 transition-all shadow-sm">
+                          <div className="flex items-start justify-between gap-6">
+                            <div className="space-y-1 flex-1">
+                              <span className="text-[12px] font-bold text-[#94a3b8] uppercase tracking-wider">Hard Filter Question</span>
+                              <h5 className="text-[15px] font-bold text-[#0f172a] leading-snug">{q_text}</h5>
+                            </div>
+                            <div className="flex flex-col items-end gap-2 shrink-0">
+                              <StatusPill 
+                                status={hf_status === 'passed' ? 'Pass' : 'Fail'} 
+                                type={hf_status === 'passed' ? 'success' : 'danger'} 
+                              />
+                              {score !== undefined && (
+                                <div className="px-3 py-1 bg-slate-100 rounded-lg border border-slate-200">
+                                  <span className="text-[13px] font-bold text-slate-700">{score}/{total}</span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                          
+                          <div className="bg-[#f8fafc] rounded-lg p-4 border border-[#f1f5f9] space-y-3">
+                            <div className="space-y-1">
+                              <span className="text-[11px] font-bold text-[#94a3b8] uppercase tracking-widest">Candidate Answer</span>
+                              <p className="text-[14px] text-[#334155] leading-relaxed italic">"{a_text}"</p>
+                            </div>
+                            {reason && (
+                              <div className="space-y-1 pt-2 border-t border-slate-200/60">
+                                <span className="text-[11px] font-bold text-[#6366f1] uppercase tracking-widest">AI Evaluation</span>
+                                <p className="text-[13px] text-[#475569] leading-relaxed font-medium">{reason}</p>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    });
+                  }
+
+                  // 2. Legacy Logic Fallback (Keep for backward compatibility)
                   const auditQuestions = pair.audit_payload?.questions || [];
                   const auditResponses = pair.audit_response?.questions || [];
+                  const legacyHardFilters = auditQuestions.filter((q: any) => q.pass_criteria);
                   
-                  // Filter questions that have pass_criteria (these are the hard filters)
-                  const hardFilters = auditQuestions.filter((q: any) => q.pass_criteria);
-                  
-                  if (hardFilters.length > 0) {
-                    return hardFilters.map((q: any, i: number) => {
-                      // Find the corresponding answer/status in the response
+                  if (legacyHardFilters.length > 0) {
+                    return legacyHardFilters.map((q: any, i: number) => {
                       const response = auditResponses.find((r: any) => 
                         r.question_text === q.question_text || r.id === q.id
                       );
@@ -525,9 +591,7 @@ export default function CandidateEvaluationReportPage() {
                     });
                   }
 
-                  // Fallback to existing logic if audit data is missing
                   const fallbackFilters = pair.evaluation?.hard_filters || pair.questions_answers || job.screen_questions || [];
-                  
                   if (fallbackFilters.length > 0) {
                     return fallbackFilters.map((q: any, i: number) => {
                       const status = (q.pass_fail || q.status || "PENDING").toUpperCase();
@@ -556,30 +620,89 @@ export default function CandidateEvaluationReportPage() {
             <div className="space-y-6 pt-4">
               <h4 className="text-[14px] font-bold text-[#0f172a]">Conversations:</h4>
               <div className="space-y-8 bg-[#f8fafc] rounded-2xl p-8 border border-[#f1f5f9] max-h-[600px] overflow-y-auto scrollbar-thin scrollbar-thumb-[#e2e8f0] scroll-smooth">
-                {pair.transcriptions?.length > 0 ? (
-                  pair.transcriptions.map((msg: any, i: number) => {
-                    const isBot = msg.speaker_type === "bot" || msg.role === "assistant";
-                    return (
-                      <div key={i} className={cn("flex flex-col gap-2.5 relative", isBot ? "items-start pr-12" : "items-end pl-12")}>
-                        <span className={cn("text-[11px] font-black uppercase tracking-widest", isBot ? "text-[#4f46e5]" : "text-[#94a3b8]")}>
-                          {isBot ? "ASSISTANT (ALEX)" : "CANDIDATE"}
-                        </span>
-                        <div className={cn(
-                          "p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border",
-                          isBot 
-                            ? "bg-[#eef2ff] border-[#e0e7ff] text-[#312e81] rounded-tl-none" 
-                            : "bg-white border-[#e2e8f0] text-[#1e293b] rounded-tr-none"
-                        )}>
-                          {msg.message_text || msg.text || msg.content}
-                        </div>
-                      </div>
-                    );
-                  })
-                ) : (
-                  <div className="text-center py-12 bg-[#f8fafc] rounded-xl border border-dashed border-[#e2e8f0] text-[#94a3b8] italic text-[14px]">
-                    No conversation transcript available.
-                  </div>
-                )}
+                {(() => {
+                  const transcriptions = pair.transcriptions || [];
+
+                  // In the conversations section, we show the full history
+                  // regardless of whether it was a hard filter or not.
+                  if (transcriptions.length > 0) {
+                    return transcriptions.map((msg: any, i: number) => {
+                      const isBot = msg.speaker_type === "bot" || 
+                                    msg.role === "assistant" || 
+                                    msg.role === "agent" || 
+                                    !!msg.question;
+                      
+                      // If it is an enriched Q&A item, we might need to show both 
+                      // the question and the answer in the conversation flow.
+                      const q_text = msg.question || msg.question_text;
+                      const a_text = msg.answer || msg.answer_text;
+                      const single_text = msg.message_text || msg.text || msg.content;
+                      
+                      // Handle enriched Q&A items
+                      if (q_text || a_text) {
+                        return (
+                          <div key={i} className="space-y-4">
+                            {q_text && (
+                              <div className="flex flex-col gap-2.5 relative items-start pr-12">
+                                <span className="text-[11px] font-black uppercase tracking-widest text-[#4f46e5]">
+                                  ASSISTANT (ALEX)
+                                </span>
+                                <div className="p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border bg-[#eef2ff] border-[#e0e7ff] text-[#312e81] rounded-tl-none">
+                                  {q_text}
+                                </div>
+                              </div>
+                            )}
+                            {a_text && (
+                              <div className="flex flex-col gap-2.5 relative items-end pl-12">
+                                <span className="text-[11px] font-black uppercase tracking-widest text-[#94a3b8]">
+                                  CANDIDATE
+                                </span>
+                                <div className="p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border bg-white border-[#e2e8f0] text-[#1e293b] rounded-tr-none">
+                                  {a_text}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
+
+                      // Handle single messages (raw transcripts)
+                      if (single_text) {
+                        return (
+                          <div key={i} className="space-y-4">
+                            {isBot ? (
+                              <div className="flex flex-col gap-2.5 relative items-start pr-12">
+                                <span className="text-[11px] font-black uppercase tracking-widest text-[#4f46e5]">
+                                  ASSISTANT (ALEX)
+                                </span>
+                                <div className="p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border bg-[#eef2ff] border-[#e0e7ff] text-[#312e81] rounded-tl-none">
+                                  {single_text}
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="flex flex-col gap-2.5 relative items-end pl-12">
+                                <span className="text-[11px] font-black uppercase tracking-widest text-[#94a3b8]">
+                                  CANDIDATE
+                                </span>
+                                <div className="p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border bg-white border-[#e2e8f0] text-[#1e293b] rounded-tr-none">
+                                  {single_text}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      }
+
+                      return null;
+                    });
+                  }
+
+                  return (
+                    <div className="text-center py-12 bg-[#f8fafc] rounded-xl border border-dashed border-[#e2e8f0] text-[#94a3b8] italic text-[14px]">
+                      No conversation transcript available.
+                    </div>
+                  );
+                })()}
               </div>
             </div>
 
