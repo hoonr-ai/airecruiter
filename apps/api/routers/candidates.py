@@ -3047,6 +3047,7 @@ async def save_candidate_feedback(
     #    (sourced_candidates.candidate_id) and the numeric job ID (monitored_jobs.jobdiva_id).
     jd_candidate_id = candidate_id   # fallback: use whatever was passed
     jd_job_ref = job_id_or_ref       # fallback: use the raw job ref
+    app_job_ref = job_id_or_ref      # canonical app job route segment for report links
     sc_row_id = None                 # sourced_candidates.id (PK) once resolved
 
     try:
@@ -3057,7 +3058,15 @@ async def save_candidate_feedback(
                 try:
                     pk_int = int(candidate_id)
                     _cur.execute(
-                        "SELECT id, candidate_id, jobdiva_id, data FROM sourced_candidates WHERE id = %s LIMIT 1",
+                        """
+                        SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id
+                        FROM sourced_candidates sc
+                        LEFT JOIN monitored_jobs mj
+                          ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
+                        WHERE sc.id = %s
+                        ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
+                        LIMIT 1
+                        """,
                         (pk_int,)
                     )
                     row = _cur.fetchone()
@@ -3065,6 +3074,7 @@ async def save_candidate_feedback(
                         sc_row_id      = row[0]
                         sc_candidate_id = str(row[1])   # real candidate ID string (JobDiva ID or LinkedIn ID)
                         jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
+                        app_job_ref    = str(row[4]) if row[4] else app_job_ref
                         
                         # Use JobDiva candidate ID if available in data blob (for auto-provisioned candidates)
                         data_blob = row[3] if isinstance(row[3], dict) else _json_load_safe(row[3], {})
@@ -3076,14 +3086,19 @@ async def save_candidate_feedback(
                 except (ValueError, TypeError):
                     # candidate_id is not an integer PK – try matching as a candidate_id string
                     _cur.execute(
-                        """SELECT id, candidate_id, jobdiva_id, data
-                             FROM sourced_candidates
-                            WHERE candidate_id = %s
-                              AND (jobdiva_id = %s
-                                   OR jobdiva_id IN (
-                                         SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s
-                                   ))
-                            LIMIT 1""",
+                        """
+                        SELECT sc.id, sc.candidate_id, sc.jobdiva_id, sc.data, mj.job_id
+                        FROM sourced_candidates sc
+                        LEFT JOIN monitored_jobs mj
+                          ON mj.jobdiva_id = sc.jobdiva_id OR mj.job_id = sc.jobdiva_id
+                        WHERE sc.candidate_id = %s
+                          AND (sc.jobdiva_id = %s
+                               OR sc.jobdiva_id IN (
+                                     SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s
+                               ))
+                        ORDER BY (mj.job_id ~ '^[0-9]+$') DESC NULLS LAST, mj.created_at DESC NULLS LAST
+                        LIMIT 1
+                        """,
                         (candidate_id, job_id_or_ref, job_id_or_ref)
                     )
                     row = _cur.fetchone()
@@ -3091,6 +3106,7 @@ async def save_candidate_feedback(
                         sc_row_id      = row[0]
                         sc_candidate_id = str(row[1])
                         jd_job_ref     = str(row[2]) if row[2] else job_id_or_ref
+                        app_job_ref    = str(row[4]) if row[4] else app_job_ref
                         
                         # Use JobDiva candidate ID if available in data blob
                         data_blob = row[3] if isinstance(row[3], dict) else _json_load_safe(row[3], {})
@@ -3104,14 +3120,14 @@ async def save_candidate_feedback(
         logger.warning(f"⚠️ Could not resolve JobDiva IDs from DB for feedback "
                        f"(candidate_id={candidate_id}, job={job_id_or_ref}): {e}")
 
-    logger.info(f"📝 Resolved → jd_candidate_id={jd_candidate_id}, jd_job_ref={jd_job_ref}, sc_row_id={sc_row_id}")
+    logger.info(f"📝 Resolved → jd_candidate_id={jd_candidate_id}, jd_job_ref={jd_job_ref}, app_job_ref={app_job_ref}, sc_row_id={sc_row_id}")
 
     # 3. Push to JobDiva — POST /apiv2/jobdiva/createCandidateNote
     #    Recruiter = PAIR (configured via JOBDIVA_PAIR_RECRUITER_ID env var)
     from core import JOBDIVA_PAIR_RECRUITER_ID
     from core.email import APP_BASE_URL
     
-    report_link = f"{APP_BASE_URL}/jobs/{jd_job_ref}/report?candidateId={jd_candidate_id}"
+    report_link = f"{APP_BASE_URL}/jobs/{app_job_ref}/report?candidateId={jd_candidate_id}"
 
     jobdiva_result = await jobdiva_service.create_candidate_note(
         candidate_id=jd_candidate_id,
