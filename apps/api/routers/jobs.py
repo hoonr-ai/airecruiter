@@ -1697,15 +1697,22 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
                 "FROM monitored_jobs mj "
                 "LEFT JOIN ("
                 "    SELECT "
-                "        mj2.job_id AS mj_job_id, "
-                "        COUNT(*) AS candidates_sourced, "
-                "        COUNT(*) AS candidates_launched, "
-                "        COUNT(*) FILTER (WHERE sc.data->>'engage_status' IN ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')) AS complete_submissions, "
-                "        COUNT(*) FILTER (WHERE (sc.data->>'engage_status' IN ('passed', 'pass', 'completed')) OR (LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed') AND (NULLIF(sc.data->>'engage_score', '')::float >= 70))) AS pass_submissions "
+                "        sc.jobdiva_id AS sc_jobdiva_id, "
+                "        COUNT(DISTINCT sc.candidate_id) AS candidates_sourced, "
+                "        COUNT(DISTINCT sc.candidate_id) AS candidates_launched, "
+                "        COUNT(DISTINCT CASE "
+                "            WHEN sc.data->>'engage_status' IN ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail') "
+                "            THEN sc.candidate_id "
+                "        END) AS complete_submissions, "
+                "        COUNT(DISTINCT CASE "
+                "            WHEN (sc.data->>'engage_status' IN ('passed', 'pass', 'completed')) "
+                "              OR (LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed') "
+                "                  AND (NULLIF(sc.data->>'engage_score', '')::float >= 70)) "
+                "            THEN sc.candidate_id "
+                "        END) AS pass_submissions "
                 "    FROM sourced_candidates sc "
-                "    JOIN monitored_jobs mj2 ON sc.jobdiva_id = mj2.jobdiva_id OR sc.jobdiva_id = mj2.job_id::text "
-                "    GROUP BY mj2.job_id "
-                ") metrics ON metrics.mj_job_id = mj.job_id"
+                "    GROUP BY sc.jobdiva_id "
+                ") metrics ON metrics.sc_jobdiva_id = mj.jobdiva_id OR metrics.sc_jobdiva_id = mj.job_id::text"
             )
 
         if include_archived:
@@ -1999,4 +2006,3 @@ async def update_job_basic_info(job_id: str, update: JobBasicInfoUpdate):
     except Exception as e:
         logger.error(f"Error updating basic info for job {job_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update job: {str(e)}")
-
