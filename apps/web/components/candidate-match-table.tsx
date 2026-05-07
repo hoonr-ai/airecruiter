@@ -47,6 +47,10 @@ interface Props {
   // on this job. Rows matching are rendered disabled with a badge so the
   // recruiter can't re-launch them.
   disabledLaunchedKeys?: Set<string>;
+  // Set of "${source}:${candidate_id}" keys for candidates whose phone is on
+  // the Do-Not-Contact list. Rows matching are rendered red and locked out
+  // of selection so they cannot be launched.
+  dncKeys?: Set<string>;
 }
 
 const POPOVER_WIDTH = 420;
@@ -207,6 +211,7 @@ export function CandidateMatchTable({
   sortDir,
   onSortChange,
   disabledLaunchedKeys,
+  dncKeys,
 }: Props) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [hoverPos, setHoverPos] = useState<{ top: number; left: number; placement: "below" | "above" } | null>(null);
@@ -327,6 +332,7 @@ export function CandidateMatchTable({
               const checked = selectedIds.has(id);
               const launchedKey = `${candidate.source ?? ''}:${id}`;
               const isAlreadyLaunched = !!disabledLaunchedKeys?.has(launchedKey);
+              const isDnc = !!dncKeys?.has(launchedKey);
 
               return (
                 <TableRow
@@ -336,9 +342,11 @@ export function CandidateMatchTable({
                     else rowRefs.current.delete(id);
                   }}
                   className={`cursor-default transition-colors ${
-                    isAlreadyLaunched
-                      ? "bg-slate-50 opacity-60"
-                      : "hover:bg-indigo-50/30"
+                    isDnc
+                      ? "bg-rose-50 opacity-80"
+                      : isAlreadyLaunched
+                        ? "bg-slate-50 opacity-60"
+                        : "hover:bg-indigo-50/30"
                   }`}
                   onMouseEnter={(e) => {
                     setHoveredId(id);
@@ -351,13 +359,19 @@ export function CandidateMatchTable({
                   <TableCell className="pl-4">
                     <Checkbox
                       className="w-4 h-4 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600"
-                      checked={checked}
-                      disabled={isAlreadyLaunched}
+                      checked={checked && !isDnc}
+                      disabled={isAlreadyLaunched || isDnc}
                       onCheckedChange={(v) => {
-                        if (isAlreadyLaunched) return;
+                        if (isAlreadyLaunched || isDnc) return;
                         onToggleSelect(id, !!v);
                       }}
-                      title={isAlreadyLaunched ? "Already launched on this job" : undefined}
+                      title={
+                        isDnc
+                          ? "Phone is on the Do Not Contact list"
+                          : isAlreadyLaunched
+                            ? "Already launched on this job"
+                            : undefined
+                      }
                     />
                   </TableCell>
                   <TableCell className="max-w-[280px]">
@@ -450,6 +464,14 @@ export function CandidateMatchTable({
                         <sourceBadge.Icon className="w-2.5 h-2.5" />
                         {sourceBadge.label}
                       </span>
+                      {isDnc && (
+                        <span
+                          className="px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center border bg-rose-100 text-rose-700 border-rose-300"
+                          title="Phone is on the Do Not Contact list — candidate will be skipped at Launch PAIR"
+                        >
+                          DNC
+                        </span>
+                      )}
                       {isAlreadyLaunched && (
                         <span
                           className="px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center border bg-amber-50 text-amber-700 border-amber-200"

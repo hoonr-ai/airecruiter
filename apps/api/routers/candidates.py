@@ -13,7 +13,9 @@ from services.ai_service import ai_service
 from services.jobdiva import jobdiva_service
 from services.unipile import unipile_service
 from services.sourced_candidates_storage import sourced_candidates_storage
+from services.dnc_storage import load_dnc_phone_set
 from services.unified_candidate_search import SearchCriteria, unified_search_service
+from utils.phone import normalize_phone
 from models import (
     CandidateSearchRequest, CandidateMessageRequest, CandidatesSaveRequest,
     CandidateAnalysisRequest, CandidateAnalysisResponse, CandidateFeedbackRequest,
@@ -1139,6 +1141,35 @@ async def save_candidates(request: CandidatesSaveRequest):
         selected_candidates = [c for c in request.candidates if c.is_selected]
         print(f"📝 Saving {len(selected_candidates)} selected candidates out of {len(request.candidates)} total")
 
+        # DNC enforcement: drop any selected candidate whose phone matches the
+        # Do-Not-Contact list. Frontend already filters them out, but we
+        # re-check here so a stale browser session or direct API call cannot
+        # bypass the gate. Failing open (empty set) on a DB error is intentional
+        # — the importer is the source of truth, and a transient lookup failure
+        # shouldn't block a launch.
+        dnc_phones = load_dnc_phone_set()
+        dnc_skipped: List[Dict[str, Any]] = []
+        if dnc_phones:
+            allowed: List[Any] = []
+            for c in selected_candidates:
+                normalized = normalize_phone(getattr(c, "phone", None))
+                if normalized and normalized in dnc_phones:
+                    dnc_skipped.append({
+                        "candidate_id": getattr(c, "candidate_id", None),
+                        "name": getattr(c, "name", None),
+                        "phone": getattr(c, "phone", None),
+                        "source": getattr(c, "source", None),
+                    })
+                else:
+                    allowed.append(c)
+            if dnc_skipped:
+                logger.info(
+                    "dnc_skip count=%s ids=%s",
+                    len(dnc_skipped),
+                    [s["candidate_id"] for s in dnc_skipped],
+                )
+            selected_candidates = allowed
+
         for idx, c in enumerate(selected_candidates):
             print(f"   Selected Candidate {idx+1}: {c.name} (ID: {c.candidate_id}, Source: {c.source})")
 
@@ -1378,7 +1409,9 @@ async def save_candidates(request: CandidatesSaveRequest):
             "status": "success",
             "detail": f"Saved {saved_count} sourced candidates",
             "saved_count": saved_count,
-            "enhanced_count": enhanced_count
+            "enhanced_count": enhanced_count,
+            "dnc_skipped_count": len(dnc_skipped),
+            "dnc_skipped": dnc_skipped,
         }
 
     except HTTPException:
