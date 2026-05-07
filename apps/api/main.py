@@ -182,6 +182,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.error(f"sourced_candidates_schema_init_failed: {e}; continuing")
 
+    # 6. Provision dnc_list table + sourced_candidates.dnc_stopped_at column.
+    # Runs after sourced_candidates so the ALTER TABLE finds an existing
+    # parent table. Idempotent — safe across redeploys.
+    try:
+        from services import dnc_storage as _dnc
+        await asyncio.wait_for(_dnc.init_dnc_schema(), timeout=10)
+    except asyncio.TimeoutError:
+        logger.error("dnc_schema_init_timeout (10s); continuing")
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"dnc_schema_init_failed: {e}; continuing")
+
     # Delay first auto-sync 60s. Previously the sync ran immediately and held
     # the DB pool for minutes, while fresh user requests queued behind it —
     # manifesting as site-wide slowness right after every deploy. The 15-min
@@ -230,6 +241,7 @@ job_criteria_router = _safe_import("job_criteria")
 manual_candidates_router = _safe_import("manual_candidates")
 candidates_router = _safe_import("candidates")
 jobs_router = _safe_import("jobs")
+dnc_router = _safe_import("dnc")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
 # prod reverse proxy a 307 with the wrong scheme (when uvicorn isn't running
@@ -267,6 +279,7 @@ _mount(job_criteria_router, "job_criteria")
 _mount(manual_candidates_router, "manual_candidates")
 _mount(candidates_router, "candidates")
 _mount(jobs_router, "jobs")
+_mount(dnc_router, "dnc")
 _mount(engagement, "engagement", prefix="/api/v1/engagement")
 
 app.add_middleware(

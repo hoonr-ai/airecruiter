@@ -77,6 +77,7 @@ import { PasteResumeModal } from "@/components/jobs/PasteResumeModal";
 import { BulkUploadSection } from "@/components/jobs/BulkUploadSection";
 import { PhoneIndicator } from "@/components/phone-indicator";
 import { CandidateMatchTable, type CandidateMatchSortKey } from "@/components/candidate-match-table";
+import { normalizePhone } from "@/lib/phone";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { API_BASE } from "@/lib/api";
 import { trackEvent } from "@/lib/analytics";
@@ -335,6 +336,9 @@ function NewJobPageContent() {
   const isViewOnly = wizardMode === 'view';
   // Already-launched candidate keys for Step 5 (only fetched in source/view modes).
   const [launchedCandidateKeys, setLaunchedCandidateKeys] = useState<Set<string>>(new Set());
+  // DNC (Do Not Contact) phone set, fetched once at mount. Used to flag and
+  // skip candidates whose phone matches a Zoom DNC entry.
+  const [dncPhones, setDncPhones] = useState<Set<string>>(new Set());
   const setCurrentStep = (next: Step | ((prev: Step) => Step)) => {
     setCurrentStepState(prev => {
       const resolved = typeof next === "function" ? (next as (p: Step) => Step)(prev) : next;
@@ -1100,6 +1104,42 @@ function NewJobPageContent() {
     })();
     return () => { cancelled = true; };
   }, [wizardMode, jobdivaId, numericJobId]);
+
+  // Fetch the DNC phone list once. Cached server-side; the small payload
+  // (~95 phones) is fine to ship in full.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/dnc/keys`);
+        if (!res.ok) return;
+        const json = await res.json();
+        if (cancelled) return;
+        const phones = new Set<string>(Array.isArray(json?.phones) ? json.phones : []);
+        setDncPhones(phones);
+      } catch (err) {
+        console.warn("Failed to load DNC keys", err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Compute "${source}:${candidate_id}" keys for any candidate whose phone
+  // is on the DNC list. Recomputed whenever candidates load, phones get
+  // enriched, or the DNC list arrives.
+  const dncCandidateKeys = useMemo(() => {
+    if (dncPhones.size === 0) return new Set<string>();
+    const keys = new Set<string>();
+    for (const c of candidates) {
+      const id = c.candidate_id || c.id;
+      if (!id) continue;
+      const np = normalizePhone(c.phone);
+      if (np && dncPhones.has(np)) {
+        keys.add(`${c.source ?? ''}:${id}`);
+      }
+    }
+    return keys;
+  }, [candidates, dncPhones]);
 
   useEffect(() => {
     trackStepStart(currentStep);
@@ -5422,8 +5462,17 @@ function NewJobPageContent() {
         setCandidates(effective);
       }
 
+      // Final DNC safety net: drop any selected candidate whose normalized
+      // phone is on the DNC list, even if React state hasn't yet flushed
+      // the auto-deselect from handleLaunchPairClick. The backend repeats
+      // this check at /candidates/save — defense in depth.
       const candidatesPayload = effective
         .filter(c => selectedCandidates.has(c.candidate_id || c.id))
+        .filter(c => {
+          if (dncPhones.size === 0) return true;
+          const np = normalizePhone(c.phone);
+          return !(np && dncPhones.has(np));
+        })
         .map(c => {
           const displayName = getCandidateDisplayName(c);
           let skillList: any[] = [];
@@ -5478,6 +5527,17 @@ function NewJobPageContent() {
       if (response.ok && result.status === 'success') {
         const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
         const selectedIds = candidatesPayload.map(c => c.candidate_id);
+
+        // Surface backend-side DNC skips. Frontend filters first, so this
+        // should typically be 0; if non-zero it usually means the user's
+        // browser cache of /dnc/keys is stale relative to the DB.
+        const backendDncSkipped = Number(result?.dnc_skipped_count || 0);
+        if (backendDncSkipped > 0) {
+          showToast(
+            `${backendDncSkipped} candidate${backendDncSkipped === 1 ? "" : "s"} blocked at save (Do Not Contact)`,
+            "info",
+          );
+        }
 
         // ── Fire Emails Immediately ──────────────────────────────────────────
         try {
@@ -5652,6 +5712,35 @@ function NewJobPageContent() {
           enrichFailedCount > 0 ? `${enrichFailedCount} enrichment call failed` : "",
         ].filter(Boolean);
         showToast(`Enrichment summary: ${bits.join(" · ")}`, "info");
+      }
+
+      // DNC re-check after enrichment: a candidate without a phone in search
+      // results may now have one via ZoomInfo, and that phone may match the
+      // DNC list. Auto-deselect any matches and surface a toast so the user
+      // sees why the count dropped before the POST fires.
+      if (dncPhones.size > 0) {
+        const dncSelectedIds = new Set<string>();
+        for (const c of candidates) {
+          const id = String(c.candidate_id || c.id || "").trim();
+          if (!id || !selectedCandidates.has(id)) continue;
+          const overridePhone = contactOverrides[id]?.phone;
+          const phoneToCheck = overridePhone || c.phone;
+          const np = normalizePhone(phoneToCheck);
+          if (np && dncPhones.has(np)) {
+            dncSelectedIds.add(id);
+          }
+        }
+        if (dncSelectedIds.size > 0) {
+          setSelectedCandidates(prev => {
+            const next = new Set(prev);
+            for (const id of dncSelectedIds) next.delete(id);
+            return next;
+          });
+          showToast(
+            `${dncSelectedIds.size} candidate${dncSelectedIds.size === 1 ? "" : "s"} skipped — Do Not Contact list match`,
+            "info",
+          );
+        }
       }
 
       await runLaunchPair(contactOverrides);
@@ -6636,7 +6725,10 @@ function NewJobPageContent() {
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50"
                       onClick={() => {
                         const first150 = candidates
-                          .filter(c => !launchedCandidateKeys.has(`${c.source ?? ''}:${c.candidate_id || c.id}`))
+                          .filter(c => {
+                            const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
+                            return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
+                          })
                           .slice(0, 150);
 
                         // Check if all first 150 are already selected
@@ -6668,7 +6760,10 @@ function NewJobPageContent() {
                       <Star className="w-3.5 h-3.5 fill-slate-700" />
                       {(() => {
                         const first150 = candidates
-                          .filter(c => !launchedCandidateKeys.has(`${c.source ?? ''}:${c.candidate_id || c.id}`))
+                          .filter(c => {
+                            const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
+                            return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
+                          })
                           .slice(0, 150);
                         const allFirst150Selected = first150.length > 0 && first150.every(c => selectedCandidates.has(c.candidate_id || c.id));
                         return allFirst150Selected ? 'Deselect Best 150' : 'Select Best 150';
@@ -6679,7 +6774,10 @@ function NewJobPageContent() {
                       variant="outline"
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white"
                       onClick={() => {
-                        const eligible = candidates.filter(c => !launchedCandidateKeys.has(`${c.source ?? ''}:${c.candidate_id || c.id}`));
+                        const eligible = candidates.filter(c => {
+                          const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
+                          return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
+                        });
                         const allIds = eligible.map(c => c.candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
 
@@ -6687,13 +6785,16 @@ function NewJobPageContent() {
                           // Deselect all
                           setSelectedCandidates(new Set());
                         } else {
-                          // Select all (skipping already-launched)
+                          // Select all (skipping already-launched and DNC)
                           setSelectedCandidates(new Set(allIds));
                         }
                       }}
                     >
                       {(() => {
-                        const eligible = candidates.filter(c => !launchedCandidateKeys.has(`${c.source ?? ''}:${c.candidate_id || c.id}`));
+                        const eligible = candidates.filter(c => {
+                          const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
+                          return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
+                        });
                         const allIds = eligible.map(c => c.candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
                         return allSelected ? 'Deselect All' : 'Select All';
@@ -6878,6 +6979,7 @@ function NewJobPageContent() {
                       candidates={paginatedCandidates}
                       selectedIds={selectedCandidates}
                       disabledLaunchedKeys={launchedCandidateKeys}
+                      dncKeys={dncCandidateKeys}
                       onToggleSelect={(id, checked) => {
                         setSelectedCandidates((prev) => {
                           const next = new Set(prev);
