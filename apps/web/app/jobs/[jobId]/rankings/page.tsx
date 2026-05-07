@@ -239,6 +239,100 @@ interface Candidate {
 type EnrichStatus = { type: "info" | "error" | "success"; message: string };
 type ToastState = { type: "info" | "error" | "success"; message: string } | null;
 
+function ResumeScreeningHoverCard({
+  candidate,
+}: {
+  candidate: Candidate;
+}) {
+  const dataBlob = candidate.data || {};
+  const titleStr = String(candidate.job_title || candidate.headline || dataBlob?.headline || "").trim();
+  const companyExp = Array.isArray(dataBlob?.company_experience) ? dataBlob.company_experience : [];
+  const companyStr = String(companyExp[0]?.company || "").trim();
+  const titleAtCompany = titleStr && companyStr ? `${titleStr} @ ${companyStr}` : titleStr || companyStr;
+
+  const yearsRaw = dataBlob?.experience_years;
+  const yearsNum = typeof yearsRaw === "number" ? yearsRaw : Number(yearsRaw);
+  const yearsStr = Number.isFinite(yearsNum) && yearsNum > 0 ? `${yearsNum}+ yrs experience` : "";
+
+  const matched = Array.isArray(dataBlob?.matched_skills)
+    ? dataBlob.matched_skills.filter((s: unknown) => typeof s === "string" && s.trim().length > 0)
+    : [];
+  const missing = Array.isArray(dataBlob?.missing_skills)
+    ? dataBlob.missing_skills.filter((s: unknown) => typeof s === "string" && s.trim().length > 0).slice(0, 5)
+    : [];
+  const explainability = Array.isArray(dataBlob?.explainability) ? dataBlob.explainability : [];
+  const firstExplain =
+    typeof explainability[0] === "string"
+      ? explainability[0]
+      : explainability[0]?.text || "";
+
+  return (
+    <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 hidden w-[420px] -translate-x-1/2 rounded-xl border border-slate-200 bg-white p-4 text-left shadow-2xl group-hover:block">
+      {titleAtCompany && (
+        <div className="mb-1.5 truncate text-[12.5px] font-semibold text-slate-800" title={titleAtCompany}>
+          {titleAtCompany}
+        </div>
+      )}
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-[11.5px] text-slate-600">
+        {yearsStr && (
+          <span className="inline-flex items-center gap-1">
+            <Calendar className="h-3 w-3 text-slate-400" />
+            {yearsStr}
+          </span>
+        )}
+        {candidate.email && (
+          <span className="inline-flex max-w-[200px] items-center gap-1 truncate" title={candidate.email}>
+            <Mail className="h-3 w-3 shrink-0 text-slate-400" />
+            <span className="truncate">{candidate.email}</span>
+          </span>
+        )}
+      </div>
+
+      {matched.length > 0 && (
+        <div className="mb-3">
+          <div className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Matched Skills
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {matched.map((skill: string, i: number) => (
+              <span
+                key={`${skill}-${i}`}
+                className="rounded-md border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700"
+              >
+                {skill}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {missing.length > 0 && (
+        <div className="mb-3">
+          <div className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Top Missing Skills
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {missing.map((skill: string, i: number) => (
+              <span
+                key={`${skill}-${i}`}
+                className="rounded-md border border-rose-100 bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-700"
+              >
+                {skill}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {firstExplain && (
+        <div className="border-t border-slate-100 pt-2 text-[11.5px] leading-snug text-slate-600">
+          {firstExplain}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function HardFilterHoverCard({
   details,
 }: {
@@ -1783,10 +1877,10 @@ export default function CandidateRankingsPage() {
 
 
                         <TableCell className="text-center align-middle py-2 px-2 font-medium text-slate-900 text-[13px] border-l border-slate-200">
-                          <div className="flex items-center justify-center gap-1 w-full text-center">
+                          <div className="group relative flex items-center justify-center gap-1 w-full text-center">
 
                             {screeningScore > 0 ? (
-                              <span className="font-bold text-slate-900 text-[14px]">
+                              <span className="font-bold text-slate-900 text-[14px] underline decoration-dotted underline-offset-4">
                                 {screeningScore}/100
                               </span>
                             ) : (
@@ -1794,6 +1888,9 @@ export default function CandidateRankingsPage() {
                                 {String(candidate.source || "").toLowerCase().includes("applicant") ? "N/A" : "Pending"}
                               </span>
                             )}
+                            {screeningScore > 0 ? (
+                              <ResumeScreeningHoverCard candidate={candidate} />
+                            ) : null}
                           </div>
                         </TableCell>
 
