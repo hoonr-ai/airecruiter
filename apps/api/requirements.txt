@@ -15,3 +15,4 @@ exa_py
 pypdf
 python-docx
 python-multipart
+openpyxl

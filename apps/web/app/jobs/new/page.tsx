@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useEffectEvent, useRef, Suspense } from "react";
+import { useState, useEffect, useEffectEvent, useMemo, useRef, Suspense, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -42,6 +42,7 @@ import {
   ListChecks,
   ChevronUp,
   ChevronDown,
+  GripVertical,
   GraduationCap,
   UserCheck,
   Lightbulb,
@@ -51,7 +52,11 @@ import {
   Mail,
   MessageSquare,
   ExternalLink,
-  Loader2
+  Loader2,
+  Briefcase,
+  Clock,
+  Phone,
+  Calendar
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -71,6 +76,8 @@ import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { PasteResumeModal } from "@/components/jobs/PasteResumeModal";
 import { BulkUploadSection } from "@/components/jobs/BulkUploadSection";
 import { PhoneIndicator } from "@/components/phone-indicator";
+import { CandidateMatchTable, type CandidateMatchSortKey } from "@/components/candidate-match-table";
+import { normalizePhone } from "@/lib/phone";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { API_BASE } from "@/lib/api";
 import { trackEvent } from "@/lib/analytics";
@@ -121,6 +128,30 @@ const AVAILABILITY_RE = /earliest availability|available by|start (a )?new role/
 const isAvailabilityQuestion = (q: Pick<ScreenQuestion, "question_text">) =>
   AVAILABILITY_RE.test(q.question_text ?? "");
 
+// Native HTML5 drag-reorder. Each call site gets its own dragIdx ref so two
+// independent reorderable lists on the same screen don't see each other's
+// drags (e.g. Step 3 skills + Step 4 questions when both are visible mid-jump).
+function useDragReorder(onMove: (from: number, to: number) => void) {
+  const dragIdxRef = useRef<number | null>(null);
+  const onDragStart = (idx: number) => (e: React.DragEvent) => {
+    dragIdxRef.current = idx;
+    e.dataTransfer.effectAllowed = "move";
+  };
+  const onDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+  };
+  const onDrop = (idx: number) => (e: React.DragEvent) => {
+    e.preventDefault();
+    const from = dragIdxRef.current;
+    dragIdxRef.current = null;
+    if (from === null || from === idx) return;
+    onMove(from, idx);
+  };
+  const onDragEnd = () => { dragIdxRef.current = null; };
+  return { onDragStart, onDragOver, onDrop, onDragEnd };
+}
+
 // Parse an existing `pass_criteria` into either {mode:'asap'} or {mode:'date',iso}.
 // Falls back to 'asap' when the string isn't recognizable so the UI never renders
 // an invalid date.
@@ -149,6 +180,38 @@ function formatAvailabilityCriteria(v: { mode: "asap" | "date"; iso?: string }):
     timeZone: "UTC",
   });
   return `Must be available by ${formatted}`;
+}
+
+// Minimal client-side mirror of `detect_role_family` in
+// apps/api/services/screening_question_generator.py. Used only to pick the
+// right Step-4 fallback templates when the backend generator can't be
+// reached — the API itself remains the source of truth for normal flows.
+const _IT_TITLE_KEYWORDS = [
+  "engineer", "developer", "architect", "devops", "sre", "site reliability",
+  "data engineer", "data scientist", "machine learning", "ai engineer",
+  "cloud", "programmer", "full stack", "backend", "frontend", "qa automation",
+  "platform", "security engineer", "database", "etl", "analytics engineer",
+  "ios", "android", "sdet",
+];
+const _IT_SKILL_KEYWORDS = [
+  "react", "angular", "vue", "next.js", "tailwind", "typescript", "javascript",
+  "html5", "css3", "java", "spring", "kotlin", "swift", "node", ".net", "c#",
+  "golang", "go ", "ruby", "microservice", "fastapi", "django", "flask",
+  "kubernetes", "k8s", "terraform", "helm", "jenkins", "github actions",
+  "kafka", "airflow", "snowflake", "databricks", "spark", "dbt", "redshift",
+  "bigquery", "python", "selenium", "cypress", "playwright",
+];
+function isLikelyItRole(
+  title: string,
+  skills: Array<{ value?: string; name?: string }> = []
+): boolean {
+  const t = (title || "").toLowerCase();
+  const skillBlob = skills
+    .map(s => (s.value || s.name || "").toLowerCase())
+    .join(" ");
+  const haystack = ` ${t} ${skillBlob} `;
+  if (_IT_TITLE_KEYWORDS.some(k => t.includes(k))) return true;
+  return _IT_SKILL_KEYWORDS.some(k => haystack.includes(k));
 }
 
 const STEP_LABELS = {
@@ -252,6 +315,8 @@ export default function NewJobPage() {
   );
 }
 
+type WizardMode = 'edit' | 'source' | 'view';
+
 function NewJobPageContent() {
   const router = useRouter();
   const engagement = useEngagementFlow();
@@ -262,6 +327,18 @@ function NewJobPageContent() {
   // current-1 and current+1. Without this, stepping backward from step 4 to
   // step 1 forced the user to click Next three more times to return.
   const [maxStepReached, setMaxStepReached] = useState<Step>(1);
+  // Mode controls whether Steps 1-4 are editable. 'edit' (default) for
+  // Unpublished resume; 'source' for Active jobs sourcing another batch
+  // (Steps 1-4 read-only, Step 5 actionable); 'view' for Inactive jobs
+  // (everything read-only, Launch PAIR disabled).
+  const [wizardMode, setWizardMode] = useState<WizardMode>('edit');
+  const isReadOnly = wizardMode !== 'edit';
+  const isViewOnly = wizardMode === 'view';
+  // Already-launched candidate keys for Step 5 (only fetched in source/view modes).
+  const [launchedCandidateKeys, setLaunchedCandidateKeys] = useState<Set<string>>(new Set());
+  // DNC (Do Not Contact) phone set, fetched once at mount. Used to flag and
+  // skip candidates whose phone matches a Zoom DNC entry.
+  const [dncPhones, setDncPhones] = useState<Set<string>>(new Set());
   const setCurrentStep = (next: Step | ((prev: Step) => Step)) => {
     setCurrentStepState(prev => {
       const resolved = typeof next === "function" ? (next as (p: Step) => Step)(prev) : next;
@@ -362,14 +439,56 @@ function NewJobPageContent() {
 
     // Only proceed with real resume content
     if (resumeText && resumeText.trim().length > 50) {
+      const { primary, similar } = collectResumeHighlightKeywords(candidate);
       setSelectedCandidateForResume({
         name: `${candidate.firstName} ${candidate.lastName}`,
-        resumeText: resumeText
+        resumeText: resumeText,
+        keywords: primary,
+        similarKeywords: similar,
       });
       setResumeModalOpen(true);
     } else {
       alert("This candidate's resume is not available from JobDiva. Only real resumes from JobDiva are displayed.");
     }
+  };
+
+  // Build keyword lists for the resume highlight overlay. Returns two
+  // tiers: 'primary' (yellow) for direct matches the user typed and the
+  // rubric confirmed; 'similar' (light blue) for the auto-suggested
+  // similar titles/skills the recruiter selected. Excludes any criteria
+  // flagged as 'exclude'.
+  const collectResumeHighlightKeywords = (candidate: any): { primary: string[]; similar: string[] } => {
+    const primary = new Set<string>();
+    const similar = new Set<string>();
+    const addTo = (set: Set<string>, val: unknown) => {
+      if (typeof val !== "string") return;
+      const trimmed = val.trim();
+      if (trimmed.length >= 2 && trimmed.length <= 60) set.add(trimmed);
+    };
+
+    if (Array.isArray(candidate?.matched_skills)) {
+      candidate.matched_skills.forEach((s: any) => addTo(primary, typeof s === "string" ? s : s?.name));
+    }
+    if (Array.isArray(candidate?.matched_titles)) {
+      candidate.matched_titles.forEach((s: any) => addTo(primary, typeof s === "string" ? s : s?.name));
+    }
+
+    sourceTitles.forEach((t) => {
+      if (t.matchType === "exclude") return;
+      addTo(primary, t.value);
+      (t.selectedSimilarTitles || []).forEach((s) => addTo(similar, s));
+    });
+    sourceSkills.forEach((s) => {
+      if (s.matchType === "exclude") return;
+      addTo(primary, s.value);
+      (s.selectedSimilarSkills || []).forEach((sim) => addTo(similar, sim));
+    });
+    sourceKeywords.forEach((k) => addTo(primary, k));
+
+    // If a term ended up in both buckets, primary wins.
+    primary.forEach((p) => similar.delete(p));
+
+    return { primary: Array.from(primary), similar: Array.from(similar) };
   };
   const [selectedCandidateForResume, setSelectedCandidateForResume] = useState<any>(null);
   const [resumeModalOpen, setResumeModalOpen] = useState(false);
@@ -473,7 +592,7 @@ function NewJobPageContent() {
   const [sourceTitleInput, setSourceTitleInput] = useState("");
   const [sourceSkillInput, setSourceSkillInput] = useState("");
   const [sourceLocationInput, setSourceLocationInput] = useState("");
-  const [sourceLocationRadius, setSourceLocationRadius] = useState("Within 25 mi");
+  const [sourceLocationMiles, setSourceLocationMiles] = useState<number>(25);
   const [sourceCompanyInput, setSourceCompanyInput] = useState("");
   const [sourceKeywordInput, setSourceKeywordInput] = useState("");
   // PR-B: top-level minimum years of experience floor for sourcing.
@@ -548,11 +667,44 @@ function NewJobPageContent() {
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
-  const [candidatesPerPage, setCandidatesPerPage] = useState(10);
-  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "linkedin-unipile" | "linkedin-exa" | "dice" | "upload-resume">("all");
+  const [candidatesPerPage, setCandidatesPerPage] = useState(20);
+  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "linkedin-unipile" | "linkedin-exa" | "dice" | "upload-resume" | "beyond">("all");
+  const [locationFilter, setLocationFilter] = useState<Set<string>>(new Set());
+  const [minScore, setMinScore] = useState<number>(0);
+  const [candidateSearchQuery, setCandidateSearchQuery] = useState<string>("");
+  const [sortKey, setSortKey] = useState<CandidateMatchSortKey>("match");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [locationFilterOpen, setLocationFilterOpen] = useState(false);
+  const locationFilterRef = useRef<HTMLDivElement | null>(null);
+  const [locationOptionSearch, setLocationOptionSearch] = useState("");
+
+  useEffect(() => {
+    if (!locationFilterOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (locationFilterRef.current && !locationFilterRef.current.contains(e.target as Node)) {
+        setLocationFilterOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [locationFilterOpen]);
+
+  const currentWithinMiles = useMemo(() => {
+    const radius = sourceLocations[0]?.radius;
+    const parsed = typeof radius === "string" ? Number(radius.match(/(\d+)/)?.[1] ?? 25) : 25;
+    return Math.min(100, Math.max(1, parsed));
+  }, [sourceLocations]);
+
+  const isBeyondRadius = (cand: any): boolean => {
+    const d = cand?.distance_miles;
+    if (typeof d !== "number" || !Number.isFinite(d)) return false;
+    return d > currentWithinMiles;
+  };
 
   const matchesSourceFilter = (cand: any) => {
     const src = String(cand.source || "").toLowerCase();
+    if (sourceFilter === "beyond") return isBeyondRadius(cand);
+    if (isBeyondRadius(cand)) return false;
     switch (sourceFilter) {
       case "all": return true;
       case "jobdiva": return src.startsWith("jobdiva");
@@ -564,6 +716,10 @@ function NewJobPageContent() {
     }
   };
   const sourceCounts = candidates.reduce((acc: Record<string, number>, c) => {
+    if (isBeyondRadius(c)) {
+      acc["beyond"] = (acc["beyond"] || 0) + 1;
+      return acc;
+    }
     const s = String(c.source || "").toLowerCase();
     if (s.startsWith("jobdiva")) acc["jobdiva"] = (acc["jobdiva"] || 0) + 1;
     else if (s === "linkedin-unipile" || s === "linkedin") acc["linkedin-unipile"] = (acc["linkedin-unipile"] || 0) + 1;
@@ -572,6 +728,8 @@ function NewJobPageContent() {
     else if (s === "upload-resume") acc["upload-resume"] = (acc["upload-resume"] || 0) + 1;
     return acc;
   }, {});
+
+  const inRadiusCount = candidates.length - (sourceCounts["beyond"] || 0);
 
   const getJobdivaSkills = () => {
     const seen = new Set<string>();
@@ -659,13 +817,111 @@ function NewJobPageContent() {
     ? `https://www1.jobdiva.com/employers/myjobs/vieweditjobform.jsp?lstjobs=1&jobid=${encodeURIComponent(jobdivaId || numericJobId)}`
     : "";
 
-  const sortedCandidates = [...candidates]
-    .filter(matchesSourceFilter)
-    .sort((a, b) => {
-      const scoreA = a.match_score || 0;
-      const scoreB = b.match_score || 0;
-      return scoreB - scoreA;
+  const candidateLocationOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const c of candidates) {
+      const loc =
+        (c as any).location ||
+        ((c as any).city
+          ? `${(c as any).city}${(c as any).state ? `, ${(c as any).state}` : ""}`
+          : "");
+      if (!loc) continue;
+      counts.set(loc, (counts.get(loc) ?? 0) + 1);
+    }
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+  }, [candidates]);
+
+  const getCandidateLocationStr = (c: any): string => {
+    if (c.location) return String(c.location);
+    if (c.city || c.state) {
+      return `${c.city || ""}${c.city && c.state ? ", " : ""}${c.state || ""}`;
+    }
+    return "";
+  };
+
+  const getCandidateReceivedDate = (c: any): Date | null => {
+    const raw =
+      c.received || c.received_date || c.receivedDate || c.last_modified || c.lastModified;
+    if (!raw) return null;
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? null : d;
+  };
+
+  const sortedCandidates = useMemo(() => {
+    const trimmedQuery = candidateSearchQuery.trim().toLowerCase();
+    const sourcePriority = (c: any) => {
+      const source = String(c.source || "").toLowerCase();
+      if (source.includes("applicant")) return 1;
+      if (source.includes("linkedin")) return 2;
+      if (source.includes("talentsearch")) return 3;
+      return 4;
+    };
+
+    const filtered = candidates.filter((c: any) => {
+      if (!matchesSourceFilter(c)) return false;
+      if (minScore > 0) {
+        const score = typeof c.match_score === "number" ? c.match_score : 0;
+        if (score < minScore) return false;
+      }
+      if (locationFilter.size > 0) {
+        const loc = getCandidateLocationStr(c);
+        if (!loc || !locationFilter.has(loc)) return false;
+      }
+      if (trimmedQuery) {
+        const haystack = [
+          c.name,
+          c.firstName,
+          c.lastName,
+          c.email,
+          c.phone,
+          c.title,
+          c.headline,
+        ]
+          .map((v) => String(v || "").toLowerCase())
+          .join(" ");
+        if (!haystack.includes(trimmedQuery)) return false;
+      }
+      return true;
     });
+
+    const dirMul = sortDir === "asc" ? 1 : -1;
+    const cmp = (a: any, b: any) => {
+      switch (sortKey) {
+        case "match": {
+          const prioA = sourcePriority(a);
+          const prioB = sourcePriority(b);
+          if (prioA !== prioB) return prioA - prioB;
+          const scoreA = typeof a.match_score === "number" ? a.match_score : 0;
+          const scoreB = typeof b.match_score === "number" ? b.match_score : 0;
+          return (scoreA - scoreB) * dirMul;
+        }
+        case "name": {
+          const nameA = String(a.name || `${a.firstName || ""} ${a.lastName || ""}`).trim().toLowerCase();
+          const nameB = String(b.name || `${b.firstName || ""} ${b.lastName || ""}`).trim().toLowerCase();
+          return nameA.localeCompare(nameB) * dirMul;
+        }
+        case "lastActive": {
+          const dA = getCandidateReceivedDate(a)?.getTime() ?? 0;
+          const dB = getCandidateReceivedDate(b)?.getTime() ?? 0;
+          return (dA - dB) * dirMul;
+        }
+        case "location": {
+          const locA = getCandidateLocationStr(a).toLowerCase();
+          const locB = getCandidateLocationStr(b).toLowerCase();
+          return locA.localeCompare(locB) * dirMul;
+        }
+        case "source": {
+          const srcA = String(a.source || "").toLowerCase();
+          const srcB = String(b.source || "").toLowerCase();
+          return srcA.localeCompare(srcB) * dirMul;
+        }
+        default:
+          return 0;
+      }
+    };
+
+    return [...filtered].sort(cmp);
+  }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, sortKey, sortDir]);
 
   const totalPages = Math.max(1, Math.ceil(sortedCandidates.length / candidatesPerPage));
   const paginatedCandidates = sortedCandidates.slice(
@@ -790,6 +1046,22 @@ function NewJobPageContent() {
 
   useEffect(() => {
     const jobIdFromUrl = searchParams.get("jobId");
+    const modeParam = searchParams.get("mode");
+    const stepParam = searchParams.get("step");
+
+    if (modeParam === 'source') {
+      setWizardMode('source');
+    } else if (modeParam === 'view') {
+      setWizardMode('view');
+    }
+
+    if (stepParam) {
+      const parsed = parseInt(stepParam, 10);
+      if (!Number.isNaN(parsed) && parsed >= 1 && parsed <= 5) {
+        setCurrentStep(parsed as Step);
+      }
+    }
+
     if (jobIdFromUrl) {
       if (jobIdFromUrl.includes("-")) {
         setJobdivaId(jobIdFromUrl);
@@ -804,6 +1076,70 @@ function NewJobPageContent() {
   useEffect(() => {
     setHasSeededSourceLocation(false);
   }, [numericJobId, jobdivaId]);
+
+  // In source/view mode, pull the (candidate_id, source) keys for everyone
+  // already launched so Step 5 can disable those rows.
+  useEffect(() => {
+    if (wizardMode === 'edit') return;
+    const ref = jobdivaId || numericJobId;
+    if (!ref) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/jobs/${ref}/launched-candidate-keys`);
+        if (!res.ok) return;
+        const json = await res.json();
+        if (cancelled) return;
+        const keys = new Set<string>();
+        for (const item of json?.launched ?? []) {
+          if (item?.candidate_id) {
+            keys.add(`${item.source ?? ''}:${item.candidate_id}`);
+          }
+        }
+        setLaunchedCandidateKeys(keys);
+      } catch (err) {
+        console.warn('Failed to load launched candidate keys', err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [wizardMode, jobdivaId, numericJobId]);
+
+  // Fetch the DNC phone list once. Cached server-side; the small payload
+  // (~95 phones) is fine to ship in full.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/dnc/keys`);
+        if (!res.ok) return;
+        const json = await res.json();
+        if (cancelled) return;
+        const phones = new Set<string>(Array.isArray(json?.phones) ? json.phones : []);
+        setDncPhones(phones);
+      } catch (err) {
+        console.warn("Failed to load DNC keys", err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Compute "${source}:${candidate_id}" keys for any candidate whose phone
+  // is on the DNC list. Recomputed whenever candidates load, phones get
+  // enriched, or the DNC list arrives.
+  const dncCandidateKeys = useMemo(() => {
+    if (dncPhones.size === 0) return new Set<string>();
+    const keys = new Set<string>();
+    for (const c of candidates) {
+      const id = c.candidate_id || c.id;
+      if (!id) continue;
+      const np = normalizePhone(c.phone);
+      if (np && dncPhones.has(np)) {
+        keys.add(`${c.source ?? ''}:${id}`);
+      }
+    }
+    return keys;
+  }, [candidates, dncPhones]);
 
   useEffect(() => {
     trackStepStart(currentStep);
@@ -882,10 +1218,23 @@ function NewJobPageContent() {
           // Only pre-load if it's an actual populated rubric, not an empty shell
           if (rData.titles?.length > 0 || rData.skills?.length > 0) {
             setRubricData(applyTitleRequiredSafetyNet(rData));
-            // Restore screen questions if they exist in the rubric
+            // Seed the rubric-fingerprint refs from the loaded rubric so a
+            // Step 3 → 4 / 4 → 5 transition without edits doesn't think the
+            // rubric "changed since last regeneration" and clobber the saved
+            // questions/sourcing.
+            const seededKey = computeRubricQuestionsKey(rData);
+            lastQuestionsRubricKeyRef.current = seededKey;
+            lastSourcingRubricKeyRef.current = `${seededKey}::[]`;
+            // Restore screen questions if they exist in the rubric. Treat the
+            // saved list as recruiter-curated so the Step-4 sync effect won't
+            // re-add defaults the recruiter explicitly deleted; the regen
+            // escape hatches (level change, explicit Regenerate, or rubric
+            // change on Next) still work.
             if (rData.screen_questions?.length) {
               setScreenQuestions(rData.screen_questions.map((q: any, i: number) => ({ ...q, id: i + 1 })));
               setQuestionIdCounter(rData.screen_questions.length + 1);
+              userHasEditedQuestionsRef.current = true;
+              lastGeneratedLevelRef.current = draft.screening_level ?? screeningLevel;
             }
             if (rData.bot_introduction) {
               setBotIntroduction(rData.bot_introduction);
@@ -922,6 +1271,15 @@ function NewJobPageContent() {
         setResumeMatchFilters(normalized);
         const maxId = Math.max(...draft.resume_match_filters.map((f: any) => f.id));
         setFilterIdCounter(maxId + 1);
+        // Refresh sourcing fingerprint now that filters are loaded — pairs
+        // with the rubric-key seed above so Step-4 → Step-5 only triggers
+        // a sourcing refresh when something actually changed since this load.
+        if (lastSourcingRubricKeyRef.current) {
+          const seededKey = lastSourcingRubricKeyRef.current.split("::")[0] || "";
+          lastSourcingRubricKeyRef.current = `${seededKey}::${JSON.stringify(
+            normalized.filter((f: any) => f?.active).map((f: any) => `${f?.category ?? ""}|${f?.value ?? ""}`).sort()
+          )}`;
+        }
         console.log(`✅ Restored ${draft.resume_match_filters.length} resume match filters from database`);
       }
 
@@ -1486,6 +1844,13 @@ function NewJobPageContent() {
     saveType?: string,
     skipToast?: boolean
   }) => {
+    if (isReadOnly) {
+      // Source / view mode: Steps 1-4 are read-only, so skip the draft save
+      // entirely. Falsely returning true keeps the Next button flow intact
+      // (it gates step transitions on save success) without mutating the
+      // saved job.
+      return true;
+    }
     if (!jobData || (!numericJobId && !jobdivaId)) {
       showToast("Job data not available for saving.", "info");
       return false;
@@ -1582,16 +1947,22 @@ function NewJobPageContent() {
           <div key={step} className="flex-1 flex flex-col items-center relative z-10">
             <div
               className={`flex flex-col items-center w-full ${isClickable ? "cursor-pointer" : "cursor-not-allowed"}`}
-              onClick={() => {
+              onClick={async () => {
                 if (!isClickable) return;
                 const fromStep = currentStep;
-                if (stepNumber !== fromStep) {
-                  trackEvent("job_wizard_step_jumped", {
-                    from_step: fromStep,
-                    to_step: stepNumber,
-                    from_step_label: STEP_LABELS[fromStep],
-                    to_step_label: STEP_LABELS[stepNumber],
-                  });
+                if (stepNumber === fromStep) return;
+                trackEvent("job_wizard_step_jumped", {
+                  from_step: fromStep,
+                  to_step: stepNumber,
+                  from_step_label: STEP_LABELS[fromStep],
+                  to_step_label: STEP_LABELS[stepNumber],
+                });
+                // Persist whatever the recruiter changed on the current step
+                // before jumping. The Next button does this; jumping via the
+                // step indicator used to skip the save, so deletions/edits
+                // could silently revert on reload.
+                if (jobData && (numericJobId || jobdivaId)) {
+                  await saveJobDraft({ currentStep: stepNumber, skipToast: true });
                 }
                 setCurrentStep(stepNumber);
               }}
@@ -2449,6 +2820,8 @@ function NewJobPageContent() {
     });
   };
 
+  const skillsDrag = useDragReorder((from, to) => moveRubricItem("skills", from, to));
+
   const establishRubricStep = (
     <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
       <div className="flex flex-row items-start gap-4 px-7 py-6 border-b border-slate-100" style={{ background: "linear-gradient(135deg, #f5f3ff 0%, #ffffff 60%)" }}>
@@ -2629,6 +3002,7 @@ function NewJobPageContent() {
 
             {/* Column Headers */}
             <div className="flex items-center gap-2.5 text-[11px] font-bold uppercase tracking-wider text-slate-500 pb-2 border-b-2 border-slate-200 mb-1">
+              <div className="w-[24px] flex-shrink-0"></div>
               <div className="flex-1 min-w-0">Hard Skill</div>
               <div className="w-[110px] flex-shrink-0 flex items-center justify-center">
                 Min. Years
@@ -2642,13 +3016,30 @@ function NewJobPageContent() {
               <div className="w-[190px] flex-shrink-0 flex items-center justify-center">
                 Required / Preferred
               </div>
-              <div className="w-[106px] flex-shrink-0 flex items-center justify-center">
+              <div className="w-[36px] flex-shrink-0 flex items-center justify-center">
                 Actions
               </div>
             </div>
             <div className="space-y-0">
               {rubricData.skills?.map((skill: any, idx: number) => (
-                <div key={idx} className="flex items-center gap-2.5 py-2 border-b border-slate-200 last:border-b-0">
+                <div
+                  key={idx}
+                  className="flex items-center gap-2.5 py-2 border-b border-slate-200 last:border-b-0"
+                  onDragOver={skillsDrag.onDragOver}
+                  onDrop={skillsDrag.onDrop(idx)}
+                  onDragEnd={skillsDrag.onDragEnd}
+                >
+                  <button
+                    type="button"
+                    draggable
+                    onDragStart={skillsDrag.onDragStart(idx)}
+                    onDragEnd={skillsDrag.onDragEnd}
+                    className="w-[24px] flex-shrink-0 flex items-center justify-center text-slate-300 hover:text-slate-600 cursor-grab active:cursor-grabbing"
+                    title="Drag to reorder"
+                    aria-label="Drag to reorder skill"
+                  >
+                    <GripVertical className="w-4 h-4" />
+                  </button>
                   <div className="flex-1 min-w-0 flex items-center gap-2">
                     <input
                       type="text"
@@ -2682,22 +3073,6 @@ function NewJobPageContent() {
                       <button onClick={() => updateRubricItem('skills', idx, 'required', 'Required')} className={`flex-1 py-[3px] rounded-full transition-all ${skill.required === 'Required' ? 'bg-[#dcfce7] text-[#166534]' : 'text-slate-400'}`}>Required</button>
                       <button onClick={() => updateRubricItem('skills', idx, 'required', 'Preferred')} className={`flex-1 py-[3px] rounded-full transition-all ${skill.required === 'Preferred' ? 'bg-[#ede9fe] text-[#6d28d9]' : 'text-slate-400'}`}>Preferred</button>
                     </div>
-                  </div>
-                  <div className="w-[70px] flex-shrink-0 flex flex-col gap-1 items-center">
-                    <button
-                      disabled={idx === 0}
-                      onClick={() => moveRubricItem('skills', idx, idx - 1)}
-                      className="w-[22px] h-[22px] flex items-center justify-center border border-slate-200 rounded-[4px] bg-white text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-20 disabled:pointer-events-none"
-                    >
-                      <ChevronUp className="w-3.5 h-3.5" />
-                    </button>
-                    <button
-                      disabled={idx === (rubricData.skills?.length - 1)}
-                      onClick={() => moveRubricItem('skills', idx, idx + 1)}
-                      className="w-[22px] h-[22px] flex items-center justify-center border border-slate-200 rounded-[4px] bg-white text-slate-400 hover:text-slate-600 hover:bg-slate-50 transition-all disabled:opacity-20 disabled:pointer-events-none"
-                    >
-                      <ChevronDown className="w-3.5 h-3.5" />
-                    </button>
                   </div>
                   <div className="w-[36px] flex-shrink-0 text-center">
                     <button
@@ -3244,6 +3619,10 @@ function NewJobPageContent() {
     const customQuestions = screenQuestions.filter(
       question => question.category !== "default" && question.category !== "role-specific"
     );
+    const isIt = isLikelyItRole(
+      enhancedTitle || jobTitle || "",
+      (rubricData?.skills as Array<{ value?: string; name?: string }>) || []
+    );
 
     // 1. Bot Introduction
     const introTitle = (enhancedTitle || jobTitle || "role").trim();
@@ -3302,10 +3681,16 @@ function NewJobPageContent() {
           customerName: jobData?.customer_name || "",
           workArrangement: jobData?.location_type || "",
           address: addressStr,
-          totalYears: rubricData?.total_years || null,
+          totalYears: rubricData?.total_years ?? 0,
         }),
       });
-      if (res.ok) {
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        console.warn(
+          `screening-questions/generate ${res.status}; using template fallback`,
+          text.slice(0, 500),
+        );
+      } else {
         const payload = await res.json();
         const raw = Array.isArray(payload?.questions) ? payload.questions : [];
         // Front-matter (intro, arrangement, total-years) is already owned by
@@ -3339,13 +3724,27 @@ function NewJobPageContent() {
     if (roleSpecific.length === 0 && rubricData?.skills) {
       rubricData.skills.forEach((skill: any) => {
         if (roleSpecific.length >= targetRoleSpecificCount) return;
-        const skillName = skill.value || "this responsibility";
+        const skillName = skill.value || (isIt ? "this technology" : "this responsibility");
         const promptVariant = roleSpecific.length % 4;
 
         let questionText = "";
         let passCriteria = "";
 
-        if (promptVariant === 0) {
+        if (isIt) {
+          if (promptVariant === 0) {
+            questionText = `Walk through one concrete implementation choice you made with ${skillName} — what specific alternative did you reject, and what technical trade-off (latency, consistency, throughput, cost) drove the decision?`;
+            passCriteria = `Candidate identifies a specific ${skillName} implementation choice, names the rejected alternative, and articulates a concrete technical trade-off.`;
+          } else if (promptVariant === 1) {
+            questionText = `In a ${skillName}-based system, what specific failure signal — a metric, log line, or error class — has actually led you to a root cause, and which exact configuration or code change prevented recurrence?`;
+            passCriteria = `Candidate names a concrete ${skillName} signal, root cause, and the precise configuration knob, code path, or design change that fixed it.`;
+          } else if (promptVariant === 2) {
+            questionText = `Name one specific configuration knob, API method, or version-pinned behavior in ${skillName} you've personally tuned, and what observable behavior changed as a result.`;
+            passCriteria = `Candidate names a real ${skillName} flag/API/syntax detail and ties it to a concrete, verifiable behavior change — not a generic 'we used it for X'.`;
+          } else {
+            questionText = `Pick one place where ${skillName} interacts with another part of your stack — what concrete contract, schema, or interface did you design or change, and what failure mode were you guarding against?`;
+            passCriteria = `Candidate points to a specific ${skillName} integration boundary, names the contract/schema, and identifies the concrete failure mode the design defends against.`;
+          }
+        } else if (promptVariant === 0) {
           questionText = `Tell me about a recent situation where ${skillName} directly influenced the final outcome. What decision mattered most?`;
           passCriteria = `Candidate provides a concrete ${skillName} example, explains the decision made, and ties it to a measurable outcome.`;
         } else if (promptVariant === 1) {
@@ -3373,11 +3772,14 @@ function NewJobPageContent() {
       // If we still don't have enough questions (few rubric skills), top up
       // to the exact level target with generic but concrete prompts.
       while (roleSpecific.length < targetRoleSpecificCount) {
-        const idx = roleSpecific.length + 1;
         roleSpecific.push({
           id: idCounter++,
-          question_text: `Share a recent project example where you solved a non-trivial problem under constraints. What factors shaped your decision?`,
-          pass_criteria: `Candidate gives a concrete situation, explains constraints and decision rationale, and describes the result.`,
+          question_text: isIt
+            ? `Name one specific configuration knob, API method, or version-pinned behavior in your stack you've personally tuned, and what observable behavior changed as a result.`
+            : `Share a recent project example where you solved a non-trivial problem under constraints. What factors shaped your decision?`,
+          pass_criteria: isIt
+            ? `Candidate names a real flag/API/syntax detail and ties it to a concrete, verifiable behavior change — not a generic 'we used it for X'.`
+            : `Candidate gives a concrete situation, explains constraints and decision rationale, and describes the result.`,
           is_default: false,
           category: "role-specific",
           order_index: questions.length + roleSpecific.length,
@@ -3393,8 +3795,12 @@ function NewJobPageContent() {
     while (roleSpecific.length < targetRoleSpecificCount) {
       roleSpecific.push({
         id: idCounter++,
-        question_text: "Share a recent project example where you solved a non-trivial problem under constraints. What factors shaped your decision?",
-        pass_criteria: "Candidate gives a concrete situation, explains constraints and decision rationale, and describes the result.",
+        question_text: isIt
+          ? "Name one specific configuration knob, API method, or version-pinned behavior in your stack you've personally tuned, and what observable behavior changed as a result."
+          : "Share a recent project example where you solved a non-trivial problem under constraints. What factors shaped your decision?",
+        pass_criteria: isIt
+          ? "Candidate names a real flag/API/syntax detail and ties it to a concrete, verifiable behavior change — not a generic 'we used it for X'."
+          : "Candidate gives a concrete situation, explains constraints and decision rationale, and describes the result.",
         is_default: false,
         category: "role-specific",
         order_index: questions.length + roleSpecific.length,
@@ -3594,6 +4000,28 @@ function NewJobPageContent() {
   // unchanged (Step 3 → back → Step 2 → Next without edits), the existing
   // rubric + any recruiter edits to it are preserved.
   const lastRubricJdRef = useRef<string>("");
+
+  // Fingerprint of the rubric (titles+skills) used to generate the current
+  // Step-4 question set. Step-3 → Step-4 Next compares it; if it changed
+  // (skill renamed, added, removed, requirement flipped) we force-regenerate
+  // role-specific questions while preserving recruiter custom questions.
+  // Same fingerprint, plus filter signature, gates Step-4 → Step-5 sourcing
+  // refresh below.
+  const lastQuestionsRubricKeyRef = useRef<string>("");
+  const lastSourcingRubricKeyRef = useRef<string>("");
+  const computeRubricQuestionsKey = (rubric: any): string => {
+    if (!rubric) return "";
+    const titles = (rubric.titles || []).map((t: any) => `${t?.value ?? ""}|${t?.minYears ?? 0}|${t?.required ?? ""}`);
+    const skills = (rubric.skills || []).map((s: any) => `${s?.value ?? ""}|${s?.minYears ?? 0}|${s?.required ?? ""}`);
+    return JSON.stringify({ titles, skills, total_years: rubric.total_years ?? null });
+  };
+  const computeSourcingRubricKey = (rubric: any, filters: any[]): string => {
+    const filterSig = (filters || [])
+      .filter(f => f?.active)
+      .map(f => `${f?.category ?? ""}|${f?.value ?? ""}`)
+      .sort();
+    return `${computeRubricQuestionsKey(rubric)}::${JSON.stringify(filterSig)}`;
+  };
 
   // Inject the Step 1 work-authorization value (e.g. "W2 only", "US Citizen /
   // GC") into Step 3's "Other Requirements" list so recruiters don't have to
@@ -3806,7 +4234,7 @@ function NewJobPageContent() {
       {
         id: Date.now(),
         value: cleanValue,
-        radius: sourceLocationRadius.toLowerCase()
+        radius: `within ${sourceLocationMiles} mi`
       }
     ]);
     setSourceLocationInput("");
@@ -3814,7 +4242,7 @@ function NewJobPageContent() {
     trackEvent("job_wizard_step5_source_location_added", {
       step: 5,
       value: truncateForTelemetry(cleanValue),
-      radius: sourceLocationRadius,
+      radius_miles: sourceLocationMiles,
     });
   };
 
@@ -4205,7 +4633,7 @@ function NewJobPageContent() {
     const parsedRadius = primaryLocation?.radius?.match(/(\d+)/)?.[1]
       ? Number(primaryLocation.radius.match(/(\d+)/)?.[1])
       : 25;
-    const withinMiles = Math.min(50, parsedRadius);
+    const withinMiles = Math.min(100, Math.max(1, parsedRadius));
     const activeResumeFilters = (overrides?.resumeMatchFiltersOverride ?? resumeMatchFilters)
       .filter(f => f.active)
       .map(f => ({
@@ -4640,6 +5068,28 @@ function NewJobPageContent() {
     });
   };
 
+  // Reorder among the non-default block (questions 8+). Default rows stay
+  // pinned at the top in their generated order — recruiters move only the
+  // role-specific + custom rows below them.
+  const moveScreenQuestion = (from: number, to: number) => {
+    setScreenQuestions(prev => {
+      if (from === to || from < 0 || to < 0) return prev;
+      if (from >= prev.length || to >= prev.length) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next.map((q, i) => ({ ...q, order_index: i }));
+    });
+    userHasEditedQuestionsRef.current = true;
+    trackEvent("job_wizard_step4_screen_question_reordered", {
+      step: 4,
+      from_index: from,
+      to_index: to,
+    });
+  };
+
+  const questionsDrag = useDragReorder((from, to) => moveScreenQuestion(from, to));
+
   const setFiltersStep = (
     <div className="border border-slate-200 rounded-xl shadow-md overflow-hidden bg-white mb-6">
       <div className="flex flex-row items-start gap-4 px-7 py-6 border-b border-slate-100"
@@ -4854,14 +5304,33 @@ function NewJobPageContent() {
 
           {/* Questions Table */}
           <div className="flex items-center gap-3 text-[11px] font-bold uppercase tracking-wider text-slate-500 pb-2 border-b-2 border-slate-200 mb-2">
+            <div className="w-5 flex-shrink-0"></div>
             <div className="w-8 flex-shrink-0">#</div>
             <div className="flex-1">Question</div>
             <div className="flex-1">Pass Criteria <span className="text-[10px] font-normal lowercase">(blank = informational only)</span></div>
             <div className="w-10 flex-shrink-0"></div>
           </div>
 
-          {screenQuestions.map((q, index) => (
-            <div key={q.id} className="flex items-start gap-3 py-3 border-b border-slate-100 last:border-b-0 group">
+          {screenQuestions.map((q, index) => {
+            return (
+            <div
+              key={q.id}
+              className="flex items-start gap-3 py-3 border-b border-slate-100 last:border-b-0 group"
+              onDragOver={questionsDrag.onDragOver}
+              onDrop={questionsDrag.onDrop(index)}
+              onDragEnd={questionsDrag.onDragEnd}
+            >
+              <button
+                type="button"
+                draggable
+                onDragStart={questionsDrag.onDragStart(index)}
+                onDragEnd={questionsDrag.onDragEnd}
+                className="w-5 flex-shrink-0 flex items-center justify-center text-slate-300 hover:text-slate-600 cursor-grab active:cursor-grabbing mt-1.5"
+                title="Drag to reorder"
+                aria-label="Drag to reorder question"
+              >
+                <GripVertical className="w-4 h-4" />
+              </button>
               <div className="w-8 h-8 rounded-full bg-[#6366f1] text-white flex items-center justify-center text-[12px] font-bold flex-shrink-0 mt-0.5">
                 {index + 1}
               </div>
@@ -4875,8 +5344,8 @@ function NewJobPageContent() {
                 <textarea
                   value={q.question_text}
                   onChange={(e) => updateScreenQuestion(q.id, 'question_text', e.target.value)}
-                  className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium resize-none"
-                  rows={2}
+                  className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium resize-none whitespace-pre-wrap break-words"
+                  rows={3}
                 />
               </div>
 
@@ -4927,11 +5396,11 @@ function NewJobPageContent() {
                     </div>
                   );
                 })() : (
-                  <input
-                    type="text"
+                  <textarea
                     value={q.pass_criteria}
                     onChange={(e) => updateScreenQuestion(q.id, 'pass_criteria', e.target.value)}
-                    className={`w-full text-[13px] bg-transparent border-none outline-none font-medium ${q.pass_criteria ? 'text-[#4f46e5]' : 'text-slate-300 italic'}`}
+                    rows={2}
+                    className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${q.pass_criteria ? 'text-[#4f46e5]' : 'text-slate-300 italic'}`}
                     placeholder="No hard filter"
                   />
                 )}
@@ -4952,7 +5421,8 @@ function NewJobPageContent() {
                 </button>
               </div>
             </div>
-          ))}
+            );
+          })}
 
           {/* Add Question Button */}
           <Button
@@ -4992,8 +5462,17 @@ function NewJobPageContent() {
         setCandidates(effective);
       }
 
+      // Final DNC safety net: drop any selected candidate whose normalized
+      // phone is on the DNC list, even if React state hasn't yet flushed
+      // the auto-deselect from handleLaunchPairClick. The backend repeats
+      // this check at /candidates/save — defense in depth.
       const candidatesPayload = effective
         .filter(c => selectedCandidates.has(c.candidate_id || c.id))
+        .filter(c => {
+          if (dncPhones.size === 0) return true;
+          const np = normalizePhone(c.phone);
+          return !(np && dncPhones.has(np));
+        })
         .map(c => {
           const displayName = getCandidateDisplayName(c);
           let skillList: any[] = [];
@@ -5049,6 +5528,17 @@ function NewJobPageContent() {
         const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
         const selectedIds = candidatesPayload.map(c => c.candidate_id);
 
+        // Surface backend-side DNC skips. Frontend filters first, so this
+        // should typically be 0; if non-zero it usually means the user's
+        // browser cache of /dnc/keys is stale relative to the DB.
+        const backendDncSkipped = Number(result?.dnc_skipped_count || 0);
+        if (backendDncSkipped > 0) {
+          showToast(
+            `${backendDncSkipped} candidate${backendDncSkipped === 1 ? "" : "s"} blocked at save (Do Not Contact)`,
+            "info",
+          );
+        }
+
         // ── Fire Emails Immediately ──────────────────────────────────────────
         try {
           const engageData = await engagement.generatePayload({
@@ -5060,7 +5550,9 @@ function NewJobPageContent() {
             await engagement.sendBulkInterview({
               payload: engageData.payload,
               realCandidateIds: selectedIds,
-              isInitialLaunch: true,
+              // Source mode = re-launch on an Active job; backend gates the
+              // job-posting team email + applicant sync on this flag.
+              isInitialLaunch: wizardMode !== 'source',
               dryRun: true, // Disables phone calls but keeps recruiter notification emails
             });
           }
@@ -5220,6 +5712,35 @@ function NewJobPageContent() {
           enrichFailedCount > 0 ? `${enrichFailedCount} enrichment call failed` : "",
         ].filter(Boolean);
         showToast(`Enrichment summary: ${bits.join(" · ")}`, "info");
+      }
+
+      // DNC re-check after enrichment: a candidate without a phone in search
+      // results may now have one via ZoomInfo, and that phone may match the
+      // DNC list. Auto-deselect any matches and surface a toast so the user
+      // sees why the count dropped before the POST fires.
+      if (dncPhones.size > 0) {
+        const dncSelectedIds = new Set<string>();
+        for (const c of candidates) {
+          const id = String(c.candidate_id || c.id || "").trim();
+          if (!id || !selectedCandidates.has(id)) continue;
+          const overridePhone = contactOverrides[id]?.phone;
+          const phoneToCheck = overridePhone || c.phone;
+          const np = normalizePhone(phoneToCheck);
+          if (np && dncPhones.has(np)) {
+            dncSelectedIds.add(id);
+          }
+        }
+        if (dncSelectedIds.size > 0) {
+          setSelectedCandidates(prev => {
+            const next = new Set(prev);
+            for (const id of dncSelectedIds) next.delete(id);
+            return next;
+          });
+          showToast(
+            `${dncSelectedIds.size} candidate${dncSelectedIds.size === 1 ? "" : "s"} skipped — Do Not Contact list match`,
+            "info",
+          );
+        }
       }
 
       await runLaunchPair(contactOverrides);
@@ -5778,33 +6299,38 @@ function NewJobPageContent() {
                         className="h-11 pl-11 text-[13px] border-slate-200 focus:border-[#6366f1]/30 focus:ring-0 bg-[#f5f3ff] rounded-xl font-medium"
                       />
                     </div>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <div className="flex items-center justify-between px-4 h-11 min-w-[120px] border border-slate-200 rounded-xl text-slate-800 text-[13px] font-bold cursor-pointer hover:bg-slate-50 transition-colors">
-                          {sourceLocationRadius}
-                          <ChevronDown className="w-4 h-4 text-slate-400" />
-                        </div>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
-                        {["Within 10 mi", "Within 25 mi", "Within 50 mi", "Exact location"].map(radius => (
-                          <DropdownMenuItem
-                            key={radius}
-                            className={`rounded-lg py-2 cursor-pointer font-bold text-[13px] ${sourceLocationRadius === radius ? "bg-slate-50 flex items-center justify-between" : ""}`}
-                            onClick={() => {
-                              setSourceLocationRadius(radius);
-                              setGeneratedBoolean("");
+                    <div className="flex items-center gap-1.5 px-3 h-11 border border-slate-200 rounded-xl bg-white">
+                      <span className="text-[12px] font-bold text-slate-500 uppercase tracking-wider">Within</span>
+                      <Input
+                        type="number"
+                        min={1}
+                        max={100}
+                        step={5}
+                        value={sourceLocationMiles}
+                        onChange={(e) => {
+                          const next = Number(e.target.value);
+                          if (Number.isFinite(next)) {
+                            setSourceLocationMiles(next);
+                          }
+                        }}
+                        onBlur={() => {
+                          setSourceLocationMiles((prev) => {
+                            const clamped = Math.min(100, Math.max(1, Math.round(prev || 25)));
+                            if (clamped !== prev) {
                               trackEvent("job_wizard_step5_location_radius_changed", {
                                 step: 5,
-                                radius,
+                                radius_miles: clamped,
                               });
-                            }}
-                          >
-                            {radius}
-                            {sourceLocationRadius === radius && <Check className="w-3.5 h-3.5 text-[#6366f1]" />}
-                          </DropdownMenuItem>
-                        ))}
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                            }
+                            return clamped;
+                          });
+                          setGeneratedBoolean("");
+                        }}
+                        className="h-7 w-14 px-1 text-center text-[13px] font-bold border-0 focus:ring-0 focus-visible:ring-0 shadow-none p-0"
+                        aria-label="Search radius in miles"
+                      />
+                      <span className="text-[12px] font-bold text-slate-500 uppercase tracking-wider">mi</span>
+                    </div>
                     <Button
                       type="button"
                       onClick={() => addSourceLocation(sourceLocationInput)}
@@ -6166,22 +6692,26 @@ function NewJobPageContent() {
                   {candidates.length > 0 && (
                     <div className="flex items-center gap-1.5 mt-3 flex-wrap">
                       {([
-                        { id: "all", label: "All", count: candidates.length },
+                        { id: "all", label: "All", count: inRadiusCount },
                         { id: "jobdiva", label: "JobDiva", count: sourceCounts["jobdiva"] || 0 },
                         { id: "linkedin-unipile", label: "LinkedIn-Unipile", count: sourceCounts["linkedin-unipile"] || 0 },
                         { id: "linkedin-exa", label: "LinkedIn-Exa", count: sourceCounts["linkedin-exa"] || 0 },
                         { id: "dice", label: "Dice", count: sourceCounts["dice"] || 0 },
-                        { id: "upload-resume", label: "Upload-Resume", count: sourceCounts["upload-resume"] || 0 }
+                        { id: "upload-resume", label: "Upload-Resume", count: sourceCounts["upload-resume"] || 0 },
+                        { id: "beyond", label: `Beyond ${currentWithinMiles}mi`, count: sourceCounts["beyond"] || 0 }
                       ] as const).map(pill => {
                         if (pill.id !== "all" && pill.count === 0) return null;
                         const active = sourceFilter === pill.id;
+                        const isBeyond = pill.id === "beyond";
                         return (
                           <button
                             key={pill.id}
                             onClick={() => { setSourceFilter(pill.id as any); setCurrentPage(1); }}
-                            className={`px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider border transition-colors ${active ? 'bg-[#6366f1] text-white border-[#6366f1]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
+                            className={`px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider border transition-colors ${active
+                              ? (isBeyond ? 'bg-amber-500 text-white border-amber-500' : 'bg-[#6366f1] text-white border-[#6366f1]')
+                              : (isBeyond ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50')}`}
                           >
-                            {pill.label} <span className={`ml-1 font-medium ${active ? 'text-white/80' : 'text-slate-400'}`}>{pill.count}</span>
+                            {pill.label} <span className={`ml-1 font-medium ${active ? 'text-white/80' : isBeyond ? 'text-amber-500' : 'text-slate-400'}`}>{pill.count}</span>
                           </button>
                         );
                       })}
@@ -6194,11 +6724,15 @@ function NewJobPageContent() {
                       variant="outline"
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50"
                       onClick={() => {
-                        const first150 = candidates.slice(0, 150);
-                        const first150Ids = new Set(first150.map(c => c.candidate_id || c.id));
+                        const first150 = candidates
+                          .filter(c => {
+                            const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
+                            return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
+                          })
+                          .slice(0, 150);
 
                         // Check if all first 150 are already selected
-                        const allFirst150Selected = first150.every(c => selectedCandidates.has(c.candidate_id || c.id));
+                        const allFirst150Selected = first150.length > 0 && first150.every(c => selectedCandidates.has(c.candidate_id || c.id));
 
                         if (allFirst150Selected) {
                           // Deselect all first 150
@@ -6225,8 +6759,13 @@ function NewJobPageContent() {
                     >
                       <Star className="w-3.5 h-3.5 fill-slate-700" />
                       {(() => {
-                        const first150 = candidates.slice(0, 150);
-                        const allFirst150Selected = first150.every(c => selectedCandidates.has(c.candidate_id || c.id));
+                        const first150 = candidates
+                          .filter(c => {
+                            const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
+                            return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
+                          })
+                          .slice(0, 150);
+                        const allFirst150Selected = first150.length > 0 && first150.every(c => selectedCandidates.has(c.candidate_id || c.id));
                         return allFirst150Selected ? 'Deselect Best 150' : 'Select Best 150';
                       })()
                       }
@@ -6235,21 +6774,29 @@ function NewJobPageContent() {
                       variant="outline"
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white"
                       onClick={() => {
-                        const allIds = candidates.map(c => c.candidate_id || c.id);
-                        const allSelected = allIds.every(id => selectedCandidates.has(id));
+                        const eligible = candidates.filter(c => {
+                          const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
+                          return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
+                        });
+                        const allIds = eligible.map(c => c.candidate_id || c.id);
+                        const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
 
                         if (allSelected) {
                           // Deselect all
                           setSelectedCandidates(new Set());
                         } else {
-                          // Select all
+                          // Select all (skipping already-launched and DNC)
                           setSelectedCandidates(new Set(allIds));
                         }
                       }}
                     >
                       {(() => {
-                        const allIds = candidates.map(c => c.candidate_id || c.id);
-                        const allSelected = allIds.every(id => selectedCandidates.has(id));
+                        const eligible = candidates.filter(c => {
+                          const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
+                          return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
+                        });
+                        const allIds = eligible.map(c => c.candidate_id || c.id);
+                        const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
                         return allSelected ? 'Deselect All' : 'Select All';
                       })()
                       }
@@ -6288,235 +6835,221 @@ function NewJobPageContent() {
                     </div>
                   )}
 
-                  {candidates.length > 0 ? (
-                    <div className="space-y-4">
-                      {paginatedCandidates.map((candidate, idx) => {
-                        // Select random badges to show matching elements
-                        const badgeOptions = [
-                          sourceTitles[0]?.value,
-                          sourceSkills[0]?.value ? `${sourceSkills[0]?.value} certified` : null,
-                          sourceSkills[1]?.value,
-                          sourceLocations[0]?.value ? `Local to ${sourceLocations[0].value}` : null
-                        ].filter(Boolean);
+                  {candidates.length > 0 && (
+                    <div className="mb-4 flex flex-wrap items-center gap-2 bg-white p-3 rounded-xl border border-slate-200 shadow-sm">
+                      <div className="relative w-[280px] shrink-0">
+                        <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
+                          <Search className="h-4 w-4 text-slate-400" />
+                        </div>
+                        <Input
+                          placeholder="Search name, email, phone..."
+                          value={candidateSearchQuery}
+                          onChange={(e) => { setCandidateSearchQuery(e.target.value); setCurrentPage(1); }}
+                          className="h-9 pl-9 pr-3 w-full bg-slate-50 border-transparent focus:bg-white rounded-lg text-[13px]"
+                        />
+                      </div>
 
-                        return (
-                          <div key={`${candidate.candidate_id || candidate.id}-${idx}`} className="p-5 border border-slate-200 rounded-xl bg-white shadow-sm hover:border-purple-200 hover:shadow-md transition-all flex items-center gap-4">
-                            <Checkbox
-                              className="w-4.5 h-4.5 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600"
-                              checked={selectedCandidates.has(candidate.candidate_id || candidate.id)}
-                              onCheckedChange={(checked) => {
-                                setSelectedCandidates(prev => {
-                                  const next = new Set(prev);
-                                  const id = candidate.candidate_id || candidate.id;
-                                  if (checked) next.add(id);
-                                  else next.delete(id);
-                                  return next;
-                                });
-                              }}
-                            />
-                            <div className="flex-1 min-w-0">
-                              {(() => {
-                                const displayName = getCandidateDisplayName(candidate);
-                                return (
-                                  <div className="flex items-center justify-between gap-4">
-                                    <div className="flex items-center gap-3 min-w-0">
-                                      <a
-                                        href={candidate.source?.startsWith('LinkedIn') ? candidate.profile_url || '#' : '#'}
-                                        target={candidate.source?.startsWith('LinkedIn') ? "_blank" : undefined}
-                                        rel={candidate.source?.startsWith('LinkedIn') ? "noopener noreferrer" : undefined}
-                                        className={`text-[17px] font-bold text-slate-900 flex items-center gap-3 transition-colors group/name ${candidate.source?.startsWith('LinkedIn') ? 'hover:text-[#1d4ed8]' :
-                                          candidate.source === 'JobDiva-TalentSearch' ? 'hover:text-[#c2410c]' :
-                                            'hover:text-[#6366f1]'
-                                          }`}
-                                        onClick={async (e) => {
-                                          if (candidate.source?.startsWith('LinkedIn')) return;
-                                          e.preventDefault();
-                                          // 5.8: prefer JobDiva profile URL when
-                                          // available (opens in new tab); fall back
-                                          // to the resume modal so the name is
-                                          // never a dead click.
-                                          const opened = await fetchAndOpenProfileUrl(candidate);
-                                          if (!opened) handleViewResume(candidate);
-                                        }}
-                                      >
-                                        <span className="flex items-center gap-2">
-                                          <span className={`text-[17px] font-bold text-slate-900 transition-colors ${candidate.source?.startsWith('LinkedIn') ? 'group-hover/name:text-[#1d4ed8]' :
-                                            candidate.source === 'JobDiva-TalentSearch' ? 'group-hover/name:text-[#c2410c]' :
-                                              'group-hover/name:text-[#6366f1]'
-                                            }`}>
-                                            {displayName}
-                                          </span>
-                                          <span
-                                            className={`h-7 w-7 flex items-center justify-center border border-slate-200 bg-white text-slate-400 rounded-lg shadow-sm transition-all ${candidate.source?.startsWith('LinkedIn')
-                                              ? 'group-hover/name:border-[#bfdbfe] group-hover/name:bg-[#eff6ff] group-hover/name:text-[#1d4ed8]' :
-                                              candidate.source === 'JobDiva-TalentSearch'
-                                                ? 'group-hover/name:border-[#fed7aa] group-hover/name:bg-[#fff7ed] group-hover/name:text-[#c2410c]' :
-                                                'group-hover/name:border-[#c7d2fe] group-hover/name:bg-[#f5f3ff] group-hover/name:text-[#6366f1]'
-                                              }`}
-                                            title={candidate.source?.startsWith('LinkedIn') ? "View LinkedIn Profile" : "Click to view resume"}
-                                          >
-                                            <ExternalLink className="w-3.5 h-3.5" />
-                                          </span>
-                                        </span>
-                                      </a>
-                                      <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow-sm h-fit border ${candidate.source?.startsWith('LinkedIn')
-                                        ? 'bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]'
-                                        : candidate.source === 'JobDiva-TalentSearch'
-                                          ? 'bg-[#fff7ed] text-[#c2410c] border-[#fed7aa]'
-                                          : 'bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]'
-                                        }`}>
-                                        {candidate.source?.startsWith('LinkedIn') ? <Linkedin className="w-3 h-3 fill-current" /> : candidate.source === 'JobDiva-TalentSearch' ? <Zap className="w-3 h-3 fill-current" /> : <ShieldCheck className="w-3 h-3" />}
-                                        {candidate.source || "JobDiva"}
-                                      </span>
-                                      <PhoneIndicator
-                                        candidateId={String(candidate.candidate_id || candidate.id || "")}
-                                        jobdivaId={jobdivaId || jobData?.jobdiva_id || String(numericJobId || "")}
-                                        phone={candidate.phone}
-                                        persist={false}
-                                        onSaved={(normalised) => {
-                                          const cid = candidate.candidate_id || candidate.id;
-                                          setCandidates(prev =>
-                                            prev.map(c =>
-                                              (c.candidate_id || c.id) === cid
-                                                ? { ...c, phone: normalised }
-                                                : c
-                                            )
-                                          );
-                                        }}
-                                      />
-                                      {(() => {
-                                        const recentAvailability = String(
-                                          candidate.recent_availability ||
-                                          candidate.recentAvailability ||
-                                          candidate.availability_status ||
-                                          candidate.available ||
-                                          ""
-                                        ).trim();
-                                        if (!recentAvailability) return null;
-
-                                        const low = recentAvailability.toLowerCase();
-                                        const chipClass =
-                                          low.includes("available") || low.includes("open")
-                                            ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-                                            : low.includes("placed") || low.includes("assignment") || low.includes("employed")
-                                              ? "bg-slate-100 text-slate-600 border-slate-200"
-                                              : "bg-amber-50 text-amber-700 border-amber-200";
-
-                                        return (
-                                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${chipClass}`} title="Recent availability from JobDiva">
-                                            {recentAvailability}
-                                          </span>
-                                        );
-                                      })()}
-                                    </div>
-
-                                    <div className="flex items-center gap-3 shrink-0">
-                                      {candidate.match_score !== undefined && (
-                                        <span className={`px-2.5 py-0.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wider flex items-center shadow-sm h-fit border ${candidate.match_score >= 80 ? 'bg-emerald-50 text-emerald-700 border-emerald-200' :
-                                          candidate.match_score >= 60 ? 'bg-amber-50 text-amber-700 border-amber-200' :
-                                            'bg-rose-50 text-rose-700 border-rose-200'
-                                          }`}>
-                                          {candidate.match_score}% Match
-                                        </span>
-                                      )}
-                                      {!candidate.source?.startsWith('LinkedIn') && (
-                                        <Button
-                                          size="sm"
-                                          className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2"
-                                          onClick={() => handleViewResume({ ...candidate, firstName: displayName.split(" ")[0] || displayName, lastName: displayName.split(" ").slice(1).join(" ") })}
-                                          title="Open candidate resume"
-                                        >
-                                          <FileText className="w-3.5 h-3.5" />
-                                          Resume
-                                          <ExternalLink className="w-3 h-3 opacity-70" />
-                                        </Button>
-                                      )}
-                                      <Button
-                                        size="sm"
-                                        className="h-8 px-3.5 bg-white border border-[#6366f1]/20 text-[#6366f1] hover:bg-[#6366f1] hover:text-white font-bold text-[12px] rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 min-w-[70px]"
-                                        onClick={() => {
-                                          setSelectedCandidateForDetails({
-                                            name: displayName,
-                                            profileUrl: candidate.profile_url,
-                                            imageUrl: candidate.image_url,
-                                            jobTitle: candidate.title || candidate.headline || "",
-                                            location: candidate.location || (candidate.city ? `${candidate.city}, ${candidate.state}` : ""),
-                                            experienceYears: candidate.experience_years || candidate.yearsExtracted || candidate.enhanced_info?.years_of_experience || null,
-                                            tags: badgeOptions,
-                                            matchScore: candidate.match_score,
-                                            missingSkills: candidate.missing_skills,
-                                            explainability: candidate.explainability,
-                                            matchScoreDetails: candidate.match_score_details,
-                                            matchedSkills: candidate.matched_skills,
-                                          });
-                                          setDetailsModalOpen(true);
-                                        }}
-                                      >
-                                        <Eye className="w-3.5 h-3.5" />
-                                        View
-                                      </Button>
-                                    </div>
-                                  </div>
-                                );
-                              })()}
-                              {(candidate.phone || candidate.email) && (
-                                <div className="mt-2 flex items-center gap-2 flex-wrap text-[11.5px]">
-                                  {candidate.phone && (
-                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 font-semibold">
-                                      Mobile: {candidate.phone}
-                                    </span>
-                                  )}
-                                  {candidate.email && (
-                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-sky-50 text-sky-700 border border-sky-200 font-semibold">
-                                      <Mail className="w-3 h-3" />
-                                      {candidate.email}
-                                    </span>
-                                  )}
-                                </div>
-                              )}
-                              {/* 5.7: availability pill + abstract + location row.
-                              Fields populated by jobdiva.py Talent Search
-                              mapper. All three are optional — only render the
-                              strip if at least one is present. */}
-                              {(() => {
-                                const availability =
-                                  candidate.recent_availability ||
-                                  candidate.recentAvailability ||
-                                  candidate.availability_status ||
-                                  candidate.available;
-                                const abstract = candidate.abstract || "";
-                                const locationStr = candidate.location || (candidate.city || candidate.state ? `${candidate.city || ""}${candidate.city && candidate.state ? ", " : ""}${candidate.state || ""}` : "");
-                                if (!availability && !abstract && !locationStr) return null;
-                                const availabilityColor =
-                                  String(availability || "").toLowerCase().includes("available") ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
-                                    String(availability || "").toLowerCase().includes("placed") ? "bg-slate-100 text-slate-600 border-slate-200" :
-                                      "bg-amber-50 text-amber-700 border-amber-200";
-                                return (
-                                  <div className="flex items-center gap-3 mt-2 text-[12px] text-slate-600">
-                                    {availability && (
-                                      <span className={`px-2 py-0.5 rounded-full text-[10.5px] font-bold uppercase tracking-wider border ${availabilityColor}`}>
-                                        {availability}
-                                      </span>
-                                    )}
-                                    {locationStr && (
-                                      <span className="inline-flex items-center gap-1 text-slate-500">
-                                        <MapPin className="w-3 h-3" />
-                                        {locationStr}
-                                      </span>
-                                    )}
-                                    {abstract && (
-                                      <span className="text-slate-500 truncate" title={abstract}>
-                                        {abstract.length > 90 ? `${abstract.slice(0, 90).trimEnd()}…` : abstract}
-                                      </span>
-                                    )}
-                                  </div>
-                                );
-                              })()}
+                      <div className="relative" ref={locationFilterRef}>
+                        <button
+                          type="button"
+                          onClick={() => setLocationFilterOpen((v) => !v)}
+                          className={`h-9 px-3 inline-flex items-center gap-2 rounded-lg border text-[13px] font-medium transition-colors ${
+                            locationFilter.size > 0
+                              ? "bg-indigo-50 border-indigo-200 text-indigo-700"
+                              : "bg-slate-50 border-transparent text-slate-700 hover:bg-white hover:border-slate-200"
+                          }`}
+                        >
+                          <MapPin className="w-3.5 h-3.5" />
+                          Location
+                          {locationFilter.size > 0 && (
+                            <span className="px-1.5 py-0.5 rounded-full bg-indigo-600 text-white text-[10px] font-bold">
+                              {locationFilter.size}
+                            </span>
+                          )}
+                          <ChevronDown className="w-3.5 h-3.5 opacity-60" />
+                        </button>
+                        {locationFilterOpen && (
+                          <div className="absolute z-30 mt-1 left-0 w-[300px] max-h-[340px] flex flex-col bg-white rounded-lg border border-slate-200 shadow-lg">
+                            <div className="p-2 border-b border-slate-100">
+                              <Input
+                                placeholder="Filter locations..."
+                                value={locationOptionSearch}
+                                onChange={(e) => setLocationOptionSearch(e.target.value)}
+                                className="h-8 text-[12.5px]"
+                              />
                             </div>
+                            <div className="overflow-y-auto p-1">
+                              {candidateLocationOptions.length === 0 ? (
+                                <div className="px-3 py-4 text-[12px] text-slate-400 text-center">No locations found.</div>
+                              ) : (
+                                candidateLocationOptions
+                                  .filter(([loc]) =>
+                                    loc.toLowerCase().includes(locationOptionSearch.trim().toLowerCase())
+                                  )
+                                  .map(([loc, count]) => {
+                                    const checked = locationFilter.has(loc);
+                                    return (
+                                      <label
+                                        key={loc}
+                                        className="flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-slate-50 cursor-pointer text-[12.5px]"
+                                      >
+                                        <Checkbox
+                                          checked={checked}
+                                          onCheckedChange={(v) => {
+                                            setLocationFilter((prev) => {
+                                              const next = new Set(prev);
+                                              if (v) next.add(loc);
+                                              else next.delete(loc);
+                                              return next;
+                                            });
+                                            setCurrentPage(1);
+                                          }}
+                                          className="w-3.5 h-3.5"
+                                        />
+                                        <span className="flex-1 truncate text-slate-700" title={loc}>{loc}</span>
+                                        <span className="text-[11px] text-slate-400">{count}</span>
+                                      </label>
+                                    );
+                                  })
+                              )}
+                            </div>
+                            {locationFilter.size > 0 && (
+                              <div className="border-t border-slate-100 p-2">
+                                <button
+                                  type="button"
+                                  onClick={() => { setLocationFilter(new Set()); setCurrentPage(1); }}
+                                  className="text-[12px] font-semibold text-indigo-600 hover:text-indigo-800"
+                                >
+                                  Clear selection
+                                </button>
+                              </div>
+                            )}
                           </div>
-                        )
-                      })}
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-1.5 h-9 px-3 rounded-lg bg-slate-50 border border-transparent">
+                        <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Min match</label>
+                        <input
+                          type="number"
+                          min={0}
+                          max={100}
+                          value={minScore}
+                          onChange={(e) => {
+                            const n = Math.max(0, Math.min(100, Number(e.target.value) || 0));
+                            setMinScore(n);
+                            setCurrentPage(1);
+                          }}
+                          className="w-14 bg-transparent text-[13px] font-semibold text-slate-800 focus:outline-none"
+                        />
+                        <span className="text-[11px] text-slate-400">%</span>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 h-9 px-3 rounded-lg bg-slate-50 border border-transparent">
+                        <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider">Sort</label>
+                        <select
+                          value={`${sortKey}:${sortDir}`}
+                          onChange={(e) => {
+                            const [k, d] = e.target.value.split(":") as [CandidateMatchSortKey, "asc" | "desc"];
+                            setSortKey(k);
+                            setSortDir(d);
+                            setCurrentPage(1);
+                          }}
+                          className="bg-transparent text-[13px] font-semibold text-slate-700 focus:outline-none cursor-pointer"
+                        >
+                          <option value="match:desc">Match score (high → low)</option>
+                          <option value="match:asc">Match score (low → high)</option>
+                          <option value="name:asc">Name (A → Z)</option>
+                          <option value="name:desc">Name (Z → A)</option>
+                          <option value="lastActive:desc">Last active (newest)</option>
+                          <option value="lastActive:asc">Last active (oldest)</option>
+                          <option value="location:asc">Location (A → Z)</option>
+                          <option value="source:asc">Source (A → Z)</option>
+                        </select>
+                      </div>
+
+                      <div className="ml-auto text-[12px] text-slate-500">
+                        {sortedCandidates.length} of {candidates.length}
+                      </div>
                     </div>
+                  )}
+
+                  {candidates.length > 0 ? (
+                    <CandidateMatchTable
+                      candidates={paginatedCandidates}
+                      selectedIds={selectedCandidates}
+                      disabledLaunchedKeys={launchedCandidateKeys}
+                      dncKeys={dncCandidateKeys}
+                      onToggleSelect={(id, checked) => {
+                        setSelectedCandidates((prev) => {
+                          const next = new Set(prev);
+                          if (checked) next.add(id);
+                          else next.delete(id);
+                          return next;
+                        });
+                      }}
+                      onOpenDetails={(candidate) => {
+                        setSelectedCandidateForDetails({
+                          name: getCandidateDisplayName(candidate),
+                          profileUrl: candidate.profile_url,
+                          imageUrl: candidate.image_url,
+                          jobTitle: candidate.title || candidate.headline || "",
+                          location:
+                            candidate.location ||
+                            (candidate.city ? `${candidate.city}, ${candidate.state}` : ""),
+                          experienceYears:
+                            candidate.experience_years ||
+                            candidate.yearsExtracted ||
+                            candidate.enhanced_info?.years_of_experience ||
+                            null,
+                          tags: [
+                            sourceTitles[0]?.value,
+                            sourceSkills[0]?.value ? `${sourceSkills[0]?.value} certified` : null,
+                            sourceSkills[1]?.value,
+                          ].filter(Boolean),
+                          matchScore: candidate.match_score,
+                          missingSkills: candidate.missing_skills,
+                          explainability: candidate.explainability,
+                          matchScoreDetails: candidate.match_score_details,
+                          matchedSkills: candidate.matched_skills,
+                          candidateId:
+                            candidate.candidate_id || candidate.jobdiva_candidate_id || candidate.id,
+                          source: candidate.source,
+                        });
+                        setDetailsModalOpen(true);
+                      }}
+                      onOpenResume={async (candidate) => {
+                        const isLinkedIn = !!candidate.source?.startsWith("LinkedIn");
+                        if (isLinkedIn && candidate.profile_url) {
+                          window.open(candidate.profile_url, "_blank", "noopener,noreferrer");
+                          return;
+                        }
+                        const opened = await fetchAndOpenProfileUrl(candidate);
+                        if (!opened) {
+                          const displayName = getCandidateDisplayName(candidate);
+                          handleViewResume({
+                            ...candidate,
+                            firstName: displayName.split(" ")[0] || displayName,
+                            lastName: displayName.split(" ").slice(1).join(" "),
+                          });
+                        }
+                      }}
+                      onPhoneSaved={(id, normalised) => {
+                        setCandidates((prev) =>
+                          prev.map((c) =>
+                            (c.candidate_id || c.id) === id ? { ...c, phone: normalised } : c
+                          )
+                        );
+                      }}
+                      jobdivaId={jobdivaId || jobData?.jobdiva_id || String(numericJobId || "")}
+                      sortKey={sortKey}
+                      sortDir={sortDir}
+                      onSortChange={(k, d) => {
+                        setSortKey(k);
+                        setSortDir(d);
+                        setCurrentPage(1);
+                      }}
+                    />
                   ) : isSearching ? (
                     <div className="flex flex-col items-center justify-center p-20 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200 animate-pulse mt-4">
                       <div className="flex flex-col items-center gap-3">
@@ -6535,107 +7068,110 @@ function NewJobPageContent() {
                     </div>
                   )}
 
-                  {/* Pagination Controls */}
-                  {/* Pagination Controls */}
-                  {candidates.length > 0 && (
-                    <div className="mt-8 flex items-center justify-between bg-white/70 backdrop-blur-xl p-3.5 px-5 rounded-2xl border border-slate-200/60 shadow-[0_8px_30px_rgb(0,0,0,0.04)] animate-in fade-in slide-in-from-bottom-2 duration-500 sticky bottom-6 z-10">
+{/* Pagination Controls */ }
+{/* Pagination Controls */ }
+{
+  candidates.length > 0 && (
+    <div className="mt-8 flex items-center justify-between bg-white/70 backdrop-blur-xl p-3.5 px-5 rounded-2xl border border-slate-200/60 shadow-[0_8px_30px_rgb(0,0,0,0.04)] animate-in fade-in slide-in-from-bottom-2 duration-500 sticky bottom-6 z-10">
 
-                      {/* Context & Rows Selection */}
-                      <div className="flex items-center gap-4">
-                        <div className="flex items-center gap-2 text-[13px]">
-                          <span className="text-slate-500 font-medium">Showing</span>
-                          <span className="font-bold text-slate-800">
-                            {(currentPage - 1) * candidatesPerPage + 1}-{Math.min(currentPage * candidatesPerPage, candidates.length)}
-                          </span>
-                          <span className="text-slate-500 font-medium">
-                            of {candidates.length} {isSearching ? <span className="italic text-slate-400 font-normal ml-0.5">(sourcing...)</span> : 'candidates'}
-                          </span>
-                        </div>
+      {/* Context & Rows Selection */}
+      <div className="flex items-center gap-4">
+        <div className="flex items-center gap-2 text-[13px]">
+          <span className="text-slate-500 font-medium">Showing</span>
+          <span className="font-bold text-slate-800">
+            {(currentPage - 1) * candidatesPerPage + 1}-{Math.min(currentPage * candidatesPerPage, candidates.length)}
+          </span>
+          <span className="text-slate-500 font-medium">
+            of {candidates.length} {isSearching ? <span className="italic text-slate-400 font-normal ml-0.5">(sourcing...)</span> : 'candidates'}
+          </span>
+        </div>
 
-                        <div className="h-4 w-[1px] bg-slate-200/80"></div>
+        <div className="h-4 w-[1px] bg-slate-200/80"></div>
 
-                        <select
-                          value={candidatesPerPage}
-                          onChange={(e) => {
-                            setCandidatesPerPage(Number(e.target.value));
-                            setCurrentPage(1);
-                          }}
-                          className="bg-transparent text-[13px] font-bold text-slate-600 outline-none cursor-pointer border hover:bg-white/50 border-transparent hover:border-slate-200 rounded-md py-1 px-2 transition-all appearance-none pr-6 relative"
-                          style={{ backgroundImage: `url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 6px center', backgroundSize: '12px' }}
-                        >
-                          <option value={10}>10 / page</option>
-                          <option value={20}>20 / page</option>
-                          <option value={50}>50 / page</option>
-                        </select>
-                      </div>
+        <select
+          value={candidatesPerPage}
+          onChange={(e) => {
+            setCandidatesPerPage(Number(e.target.value));
+            setCurrentPage(1);
+          }}
+          className="bg-transparent text-[13px] font-bold text-slate-600 outline-none cursor-pointer border hover:bg-white/50 border-transparent hover:border-slate-200 rounded-md py-1 px-2 transition-all appearance-none pr-6 relative"
+          style={{ backgroundImage: `url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 6px center', backgroundSize: '12px' }}
+        >
+          <option value={10}>10 / page</option>
+          <option value={20}>20 / page</option>
+          <option value={50}>50 / page</option>
+        </select>
+      </div>
 
-                      {/* Numbered Pagination & Prev/Next */}
-                      <div className="flex items-center gap-1.5" key={`pagination-${currentPage}-${totalPages}`}>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={currentPage === 1}
-                          onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-                          className="h-8 px-2.5 rounded-lg text-slate-500 font-bold hover:bg-slate-100 disabled:opacity-30 transition-all flex items-center justify-center"
-                        >
-                          <ChevronLeft className="w-4 h-4 shrink-0" />
-                          <span className="sr-only">Previous</span>
-                        </Button>
+      {/* Numbered Pagination & Prev/Next */}
+      <div className="flex items-center gap-1.5" key={`pagination-${currentPage}-${totalPages}`}>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={currentPage === 1}
+          onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+          className="h-8 px-2.5 rounded-lg text-slate-500 font-bold hover:bg-slate-100 disabled:opacity-30 transition-all flex items-center justify-center"
+        >
+          <ChevronLeft className="w-4 h-4 shrink-0" />
+          <span className="sr-only">Previous</span>
+        </Button>
 
-                        <div className="flex items-center gap-1 mx-0.5">
-                          {visiblePages.map((pageNum, idx) => (
-                            pageNum === "..." ? (
-                              <span key={`ellipsis-${idx}`} className="w-8 h-8 flex items-center justify-center text-slate-400 font-bold text-[14px]">
-                                ...
-                              </span>
-                            ) : (
-                              <button
-                                key={`page-${pageNum}`}
-                                disabled={currentPage === pageNum}
-                                onClick={() => setCurrentPage(pageNum as number)}
-                                className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[13px] transition-all duration-200 ${currentPage === pageNum
-                                  ? 'bg-[#6366f1] text-white shadow-md transform scale-105 cursor-default'
-                                  : 'text-slate-600 hover:bg-slate-100/80 cursor-pointer'
-                                  }`}
-                              >
-                                {pageNum}
-                              </button>
-                            )
-                          ))}
-                        </div>
+        <div className="flex items-center gap-1 mx-0.5">
+          {visiblePages.map((pageNum, idx) => (
+            pageNum === "..." ? (
+              <span key={`ellipsis-${idx}`} className="w-8 h-8 flex items-center justify-center text-slate-400 font-bold text-[14px]">
+                ...
+              </span>
+            ) : (
+              <button
+                key={`page-${pageNum}`}
+                disabled={currentPage === pageNum}
+                onClick={() => setCurrentPage(pageNum as number)}
+                className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-[13px] transition-all duration-200 ${currentPage === pageNum
+                  ? 'bg-[#6366f1] text-white shadow-md transform scale-105 cursor-default'
+                  : 'text-slate-600 hover:bg-slate-100/80 cursor-pointer'
+                  }`}
+              >
+                {pageNum}
+              </button>
+            )
+          ))}
+        </div>
 
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={currentPage === totalPages}
-                          onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
-                          className="h-8 px-2.5 rounded-lg text-slate-500 font-bold hover:bg-slate-100 disabled:opacity-30 transition-all flex items-center justify-center"
-                        >
-                          <ChevronRight className="w-4 h-4 shrink-0" />
-                          <span className="sr-only">Next</span>
-                        </Button>
-                      </div>
-                    </div>
-                  )}
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={currentPage === totalPages}
+          onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+          className="h-8 px-2.5 rounded-lg text-slate-500 font-bold hover:bg-slate-100 disabled:opacity-30 transition-all flex items-center justify-center"
+        >
+          <ChevronRight className="w-4 h-4 shrink-0" />
+          <span className="sr-only">Next</span>
+        </Button>
+      </div>
+    </div>
+  )
+}
                 </>
               ) : (
-                <div className="h-4 flex items-center justify-center opacity-0 mt-4">
-                </div>
-              )}
+  <div className="h-4 flex items-center justify-center opacity-0 mt-4">
+  </div>
+)}
 
-              {/* Bulk resume upload lives in the Tira chatbot now — removed from
+{/* Bulk resume upload lives in the Tira chatbot now — removed from
                 Step 5 to keep sourcing focused on the boolean-string workflow. */}
             </div>
 
-            {/* Launch Footer */}
-            <div className="border-t border-slate-200 pt-6 mt-2 flex items-center justify-between">
+  {/* Launch Footer */ }
+  < div className = "border-t border-slate-200 pt-6 mt-2 flex items-center justify-between" >
               <span className="text-[13px] font-medium text-slate-400">
                 {hasSearched && !isSearching ? `${selectedCandidates.size} candidates selected` : ''}
               </span>
               <Button
-                className="h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98]"
+                className="h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98] disabled:bg-slate-300 disabled:cursor-not-allowed disabled:hover:translate-y-0"
                 onClick={handleLaunchPairClick}
-                disabled={isSearching || isEnrichingContacts}
+                disabled={isSearching || isEnrichingContacts || isViewOnly}
+                title={isViewOnly ? "Job activity has been stopped" : undefined}
               >
                 {isEnrichingContacts ? (
                   <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -6651,400 +7187,435 @@ function NewJobPageContent() {
     </div>
   );
 
-  const renderStepContent = () => {
-    switch (currentStep) {
-      case 1: return intakeStep;
-      case 2: return publishStep;
-      case 3: return establishRubricStep;
-      case 4: return setFiltersStep;
-      case 5: return sourceStep;
-      default: return null;
-    }
-  };
-
-  // Full-page loader while we hydrate a saved draft. Prevents the flash-of-
-  // empty-form that recruiters see on Resume Setup while /jobs/{id}/draft
-  // (plus rubric / screen questions) resolve.
-  if (isLoadingDraft) {
+const renderStepContent = () => {
+  let content: ReactNode = null;
+  switch (currentStep) {
+    case 1: content = intakeStep; break;
+    case 2: content = publishStep; break;
+    case 3: content = establishRubricStep; break;
+    case 4: content = setFiltersStep; break;
+    case 5: content = sourceStep; break;
+    default: content = null;
+  }
+  // Steps 1-4 lock down to read-only when the wizard is opened in source
+  // (Active job, re-launching) or view (Inactive job) mode. Step 5 stays
+  // interactive in source mode; in view mode the Launch PAIR button itself
+  // is gated so we still wrap the step to also freeze its filters/search.
+  const shouldFreeze = isReadOnly && (currentStep !== 5 || isViewOnly);
+  if (shouldFreeze) {
     return (
-      <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center">
-        <div className="flex flex-col items-center gap-3 text-slate-500">
-          <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
-          <div className="text-[15px] font-medium">Loading draft…</div>
-        </div>
-      </div>
+      <fieldset disabled className="contents">
+        {content}
+      </fieldset>
     );
   }
+  return content;
+};
 
+// Full-page loader while we hydrate a saved draft. Prevents the flash-of-
+// empty-form that recruiters see on Resume Setup while /jobs/{id}/draft
+// (plus rubric / screen questions) resolve.
+if (isLoadingDraft) {
   return (
-    <div className="p-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
-      {/* Breadcrumb */}
-      <div className="mb-5">
-        <Link href="/jobs" className="text-slate-500 hover:text-slate-700 text-[15px] flex items-center gap-2 transition-colors font-medium">
-          <ArrowLeft className="w-4 h-4" />
-          Back to Jobs
-        </Link>
+    <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center">
+      <div className="flex flex-col items-center gap-3 text-slate-500">
+        <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
+        <div className="text-[15px] font-medium">Loading draft…</div>
       </div>
+    </div>
+  );
+}
 
-      {/* Page Header */}
-      <div className="mb-7">
-        <h1 className="text-[32px] font-bold text-slate-900 leading-tight">New Job</h1>
-        <p className="text-slate-500 text-[16px] font-medium mt-1">
-          {(() => {
-            const title = jobData?.title || jobTitle;
-            const customer = jobData?.customer_name || jobData?.customer || "";
-            if (!title && !customer) return "Enter a JobDiva Job ID to get started.";
-            if (title && customer) return `${title} · ${customer}`;
-            return title || customer;
-          })()}
-        </p>
-      </div>
+return (
+  <div className="p-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
+    {/* Breadcrumb */}
+    <div className="mb-5">
+      <Link href="/jobs" className="text-slate-500 hover:text-slate-700 text-[15px] flex items-center gap-2 transition-colors font-medium">
+        <ArrowLeft className="w-4 h-4" />
+        Back to Jobs
+      </Link>
+    </div>
 
-      {/* Step Indicator */}
-      <StepIndicator />
+    {/* Page Header */}
+    <div className="mb-7">
+      <h1 className="text-[32px] font-bold text-slate-900 leading-tight">New Job</h1>
+      <p className="text-slate-500 text-[16px] font-medium mt-1">
+        {(() => {
+          const title = jobData?.title || jobTitle;
+          const customer = jobData?.customer_name || jobData?.customer || "";
+          if (!title && !customer) return "Enter a JobDiva Job ID to get started.";
+          if (title && customer) return `${title} · ${customer}`;
+          return title || customer;
+        })()}
+      </p>
+    </div>
 
-      {/* Step Content */}
-      <div className="mt-8">
-        {renderStepContent()}
-      </div>
+    {/* Step Indicator */}
+    <StepIndicator />
 
-      {/* Wizard Navigation — Back | Save & Exit … Next */}
-      <div className="flex items-center justify-between pt-10 border-t border-slate-200 mt-12 mb-20 px-4">
-        <div className="flex items-center gap-4">
-          {currentStep > 1 && (
-            <button
-              onClick={() => {
-                const toStep = (currentStep - 1) as Step;
-                trackEvent("job_wizard_step_back_clicked", {
-                  from_step: currentStep,
-                  to_step: toStep,
-                  from_step_label: STEP_LABELS[currentStep],
-                  to_step_label: STEP_LABELS[toStep],
-                });
-                setCurrentStep(toStep);
-              }}
-              className="flex items-center gap-2.5 px-6 py-2.5 bg-white border border-slate-200 rounded-xl font-bold text-slate-700 hover:bg-slate-50 transition-all active:scale-95 shadow-sm"
-            >
-              <ArrowLeft className="w-4.5 h-4.5" />
-              Back
-            </button>
-          )}
+    {/* Step Content */}
+    <div className="mt-8">
+      {renderStepContent()}
+    </div>
 
-          <Button
-            variant="outline"
-            className="h-[44px] px-6 bg-white border-slate-200 flex items-center gap-2.5 shadow-sm text-[15px] font-bold text-slate-700 transition-all rounded-xl active:scale-95 hover:bg-slate-50"
-            onClick={async () => {
-              const saved = await saveJobDraft({ currentStep, saveType: "manual" });
-              if (saved) {
-                router.push("/");
-              }
+    {/* Wizard Navigation — Back | Save & Exit … Next */}
+    <div className="flex items-center justify-between pt-10 border-t border-slate-200 mt-12 mb-20 px-4">
+      <div className="flex items-center gap-4">
+        {currentStep > 1 && (
+          <button
+            onClick={() => {
+              const toStep = (currentStep - 1) as Step;
+              trackEvent("job_wizard_step_back_clicked", {
+                from_step: currentStep,
+                to_step: toStep,
+                from_step_label: STEP_LABELS[currentStep],
+                to_step_label: STEP_LABELS[toStep],
+              });
+              setCurrentStep(toStep);
             }}
+            className="flex items-center gap-2.5 px-6 py-2.5 bg-white border border-slate-200 rounded-xl font-bold text-slate-700 hover:bg-slate-50 transition-all active:scale-95 shadow-sm"
           >
-            <Save className="w-4.5 h-4.5 text-slate-400" />
-            Save & Exit
-          </Button>
-        </div>
+            <ArrowLeft className="w-4.5 h-4.5" />
+            Back
+          </button>
+        )}
 
-        <div className="flex items-center gap-3">
-          {currentStep < 5 && (
-            <Button
-              className="h-[44px] px-8 bg-[#6366f1] hover:bg-[#4f46e5] flex items-center gap-2 shadow-lg shadow-indigo-100 text-[15px] font-bold text-white transition-all rounded-xl active:scale-95"
-              onClick={async () => {
-                // Per-step loading: every Next click flips isAdvancingStep on
-                // for the duration of its own save (+ rubric fetch on step 2),
-                // so the button shows "Preparing..." while something is
-                // actually in flight. Passing currentStep+1 to saveJobDraft
-                // records the step the user is navigating TO, so Resume Setup
-                // lands them back where they were — not one step behind.
-                if (currentStep === 1) {
-                  if (!jobData) {
-                    showToast("Fetch a job first before saving.", "info");
-                    return;
-                  }
-                  if (recruiterEmails.length === 0) {
-                    setEmailError(true);
-                    showToast("Recruiter Email is required.", "info");
-                    return;
-                  }
-                  if (selectedEmpTypes.length === 0) {
-                    showToast("Employment Type is required.", "info");
-                    return;
-                  }
+        <Button
+          variant="outline"
+          className="h-[44px] px-6 bg-white border-slate-200 flex items-center gap-2.5 shadow-sm text-[15px] font-bold text-slate-700 transition-all rounded-xl active:scale-95 hover:bg-slate-50"
+          onClick={async () => {
+            const saved = await saveJobDraft({ currentStep, saveType: "manual" });
+            if (saved) {
+              router.push("/");
+            }
+          }}
+        >
+          <Save className="w-4.5 h-4.5 text-slate-400" />
+          Save & Exit
+        </Button>
+      </div>
 
-                  setIsAdvancingStep(true);
-                  try {
-                    const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
-                    if (!saved) {
-                      showToast("Failed to save Step 1 data. Please try again.", "info");
-                      return;
-                    }
-                    trackStepAdvance(1, 2, { via: "next_button" });
-                    setCurrentStep(2);
-                  } finally {
-                    setIsAdvancingStep(false);
-                  }
+      <div className="flex items-center gap-3">
+        {currentStep < 5 && (
+          <Button
+            className="h-[44px] px-8 bg-[#6366f1] hover:bg-[#4f46e5] flex items-center gap-2 shadow-lg shadow-indigo-100 text-[15px] font-bold text-white transition-all rounded-xl active:scale-95"
+            onClick={async () => {
+              // Per-step loading: every Next click flips isAdvancingStep on
+              // for the duration of its own save (+ rubric fetch on step 2),
+              // so the button shows "Preparing..." while something is
+              // actually in flight. Passing currentStep+1 to saveJobDraft
+              // records the step the user is navigating TO, so Resume Setup
+              // lands them back where they were — not one step behind.
+              if (currentStep === 1) {
+                if (!jobData) {
+                  showToast("Fetch a job first before saving.", "info");
                   return;
-                } else if (currentStep === 2) {
-                  setIsAdvancingStep(true);
-                  try {
-                    const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
-                    if (!saved) {
-                      showToast("Failed to save Step 2 data. Please try again.", "info");
-                      return;
-                    }
-
-                    // Regenerate rubric when (a) none exists yet, or (b) the
-                    // JD text has been edited since the last rubric was
-                    // generated. Otherwise preserve the existing rubric +
-                    // recruiter edits on Step 3.
-                    const jdFingerprint = (jobPosting || "").trim();
-                    const rubricIsEmpty = !rubricData || (rubricData.titles?.length === 0 && rubricData.skills?.length === 0);
-                    const jdChanged = jdFingerprint !== "" && jdFingerprint !== lastRubricJdRef.current;
-                    if (rubricIsEmpty || jdChanged) {
-                      setIsGeneratingRubric(true);
-                      try {
-                        const apiUrl = API_BASE;
-                        const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
-                          method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
-                            jobId: numericJobId || jobdivaId,
-                            jobdivaId: jobdivaId,
-                            jobTitle: jobData?.title || jobTitle,
-                            enhancedJobTitle: enhancedTitle || "",
-                            jobDescription: jobPosting,
-                            jobNotes: recruiterNotes,
-                            originalDescription: jobData?.description || "",
-                            customerName: jobData?.customer_name || jobData?.customer || "",
-                            requiredDegree: jobData?.required_degree || "",
-                            jobCity: jobData?.city || "",
-                            jobState: jobData?.state || "",
-                            locationType: jobData?.location_type || ""
-                          })
-                        });
-                        if (res.ok) {
-                          const data = await res.json();
-                          setRubricData(applyTitleRequiredSafetyNet(data));
-                          lastRubricJdRef.current = jdFingerprint;
-                          showToast("Step 2 saved and rubric generated!", "success");
-                        } else {
-                          throw new Error("API failed");
-                        }
-                      } catch (e) {
-                        console.error(e);
-                        showToast("Failed to generate rubric.", "info");
-                        setRubricData(null);
-                      } finally {
-                        setIsGeneratingRubric(false);
-                      }
-                    }
-                    trackStepAdvance(2, 3, {
-                      via: "next_button",
-                      rubric_regenerated: rubricIsEmpty || jdChanged,
-                    });
-                    setCurrentStep(3);
-                    return;
-                  } finally {
-                    setIsAdvancingStep(false);
-                  }
-                } else if (currentStep === 3) {
-                  setIsAdvancingStep(true);
-                  try {
-                    const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
-                    if (!saved) return;
-                    trackStepAdvance(3, 4, { via: "next_button" });
-                  } finally {
-                    setIsAdvancingStep(false);
-                  }
-                } else if (currentStep === 4) {
-                  setIsAdvancingStep(true);
-                  try {
-                    const saved = await saveJobDraft({ currentStep: 5, skipToast: true });
-                    if (!saved) return;
-                    // Only derive sourcing criteria on first entry (5.3). The
-                    // sync effect below won't override it on subsequent visits.
-                    if (!sourcingCriteriaInitializedRef.current) {
-                      initializeSourceFromRubric();
-                      sourcingCriteriaInitializedRef.current = true;
-                    }
-                    trackStepAdvance(4, 5, { via: "next_button" });
-                  } finally {
-                    setIsAdvancingStep(false);
-                  }
+                }
+                if (recruiterEmails.length === 0) {
+                  setEmailError(true);
+                  showToast("Recruiter Email is required.", "info");
+                  return;
+                }
+                if (selectedEmpTypes.length === 0) {
+                  showToast("Employment Type is required.", "info");
+                  return;
                 }
 
-                if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
-              }}
-              disabled={(currentStep === 1 && !jobData) || isGeneratingJD || isSearching || isAdvancingStep || isGeneratingRubric}
-            >
-              {isGeneratingJD ? (
-                <>
-                  <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
-                  Enriching...
-                </>
-              ) : (isAdvancingStep || isGeneratingRubric) ? (
-                <>
-                  <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
-                  Preparing...
-                </>
-              ) : (
-                <>
-                  Next
-                  <ArrowRight className="w-5 h-5 ml-1.5" />
-                </>
-              )}
-            </Button>
-          )}
-        </div>
-      </div>
+                setIsAdvancingStep(true);
+                try {
+                  const saved = await saveJobDraft({ currentStep: 2, skipToast: true });
+                  if (!saved) {
+                    showToast("Failed to save Step 1 data. Please try again.", "info");
+                    return;
+                  }
+                  trackStepAdvance(1, 2, { via: "next_button" });
+                  setCurrentStep(2);
+                } finally {
+                  setIsAdvancingStep(false);
+                }
+                return;
+              } else if (currentStep === 2) {
+                setIsAdvancingStep(true);
+                try {
+                  const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
+                  if (!saved) {
+                    showToast("Failed to save Step 2 data. Please try again.", "info");
+                    return;
+                  }
 
-      {/* Toast Notification */}
-      {toast && (
-        <div
-          className={`fixed bottom-8 right-8 flex items-center gap-2.5 px-5 py-3 rounded-lg text-[14px] font-medium text-white shadow-xl z-50 transition-all duration-300 transform translate-y-0 opacity-100 ${toast.type === "success" ? "bg-[#166534]" : "bg-primary"}`}
-        >
-          {toast.type === "success" ? (
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
-          ) : (
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" /></svg>
-          )}
-          {toast.message}
-        </div>
-      )}
-
-      {showJobdivaSkillsModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
-          <div className="w-full max-w-2xl rounded-xl bg-white border border-slate-200 shadow-2xl overflow-hidden">
-            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
-              <div>
-                <h3 className="text-[16px] font-bold text-slate-900">JobDiva Search Agent string</h3>
-                <p className="text-[12px] text-slate-500 mt-0.5">Use this Boolean-ready string in JobDiva Search Agent, including location format.</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowJobdivaSkillsModal(false)}
-                className="w-8 h-8 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center"
-                aria-label="Close skills modal"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="px-5 py-4 space-y-3">
-              <div className={`text-[12px] rounded-lg px-3 py-2 border ${jobdivaCriteriaUnconfigured ? "text-amber-800 bg-amber-50 border-amber-200" : "text-indigo-800 bg-indigo-50 border-indigo-200"}`}>
-                {jobdivaCriteriaUnconfigured
-                  ? "JobDiva AI matcher isn’t configured for this job yet. We’ll still search, but quality improves once criteria are saved in JobDiva."
-                  : "Tip: copy this string into JobDiva Search Agent criteria for stronger portal-side matching."}
-              </div>
-              <div className="text-[12px] text-slate-600">
-                {jobdivaSkillsToUse.length} skill{jobdivaSkillsToUse.length === 1 ? "" : "s"} formatted in Boolean form with location suffix: <span className="font-semibold">(HADOOP) AND (SPARK OR PYSPARK), IN (NC-US)</span>
-              </div>
-              <textarea
-                value={jobdivaSkillsCopyText}
-                readOnly
-                rows={8}
-                className="w-full rounded-lg border border-slate-200 bg-slate-50 text-[13px] text-slate-800 font-medium px-3 py-2 outline-none resize-y"
-              />
-              <div className="flex items-center justify-end gap-2">
-                {jobdivaJobEditUrl ? (
-                  <a
-                    href={jobdivaJobEditUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="h-9 px-3 border border-slate-200 rounded-md inline-flex items-center gap-1.5 text-[12.5px] font-bold text-slate-700 hover:bg-slate-50"
-                  >
-                    Open JobDiva Job
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
-                ) : null}
-                <Button
-                  variant="outline"
-                  className="h-9 px-3 text-[12.5px] font-bold"
-                  onClick={() => setShowJobdivaSkillsModal(false)}
-                >
-                  Close
-                </Button>
-                <Button
-                  className="h-9 px-3 bg-[#6366f1] hover:bg-[#4f46e5] text-white text-[12.5px] font-bold flex items-center gap-1.5"
-                  onClick={async () => {
+                  // Regenerate rubric when (a) none exists yet, or (b) the
+                  // JD text has been edited since the last rubric was
+                  // generated. Otherwise preserve the existing rubric +
+                  // recruiter edits on Step 3.
+                  const jdFingerprint = (jobPosting || "").trim();
+                  const rubricIsEmpty = !rubricData || (rubricData.titles?.length === 0 && rubricData.skills?.length === 0);
+                  const jdChanged = jdFingerprint !== "" && jdFingerprint !== lastRubricJdRef.current;
+                  if (rubricIsEmpty || jdChanged) {
+                    setIsGeneratingRubric(true);
                     try {
-                      await navigator.clipboard.writeText(jobdivaSkillsCopyText);
-                      setSkillsCopied(true);
-                      setTimeout(() => setSkillsCopied(false), 1800);
-                    } catch {
-                      showToast("Copy failed. Please copy manually.", "info");
+                      const apiUrl = API_BASE;
+                      const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                          jobId: numericJobId || jobdivaId,
+                          jobdivaId: jobdivaId,
+                          jobTitle: jobData?.title || jobTitle,
+                          enhancedJobTitle: enhancedTitle || "",
+                          jobDescription: jobPosting,
+                          jobNotes: recruiterNotes,
+                          originalDescription: jobData?.description || "",
+                          customerName: jobData?.customer_name || jobData?.customer || "",
+                          requiredDegree: jobData?.required_degree || "",
+                          jobCity: jobData?.city || "",
+                          jobState: jobData?.state || "",
+                          locationType: jobData?.location_type || ""
+                        })
+                      });
+                      if (res.ok) {
+                        const data = await res.json();
+                        setRubricData(applyTitleRequiredSafetyNet(data));
+                        lastRubricJdRef.current = jdFingerprint;
+                        showToast("Step 2 saved and rubric generated!", "success");
+                      } else {
+                        throw new Error("API failed");
+                      }
+                    } catch (e) {
+                      console.error(e);
+                      showToast("Failed to generate rubric.", "info");
+                      setRubricData(null);
+                    } finally {
+                      setIsGeneratingRubric(false);
                     }
-                  }}
+                  }
+                  trackStepAdvance(2, 3, {
+                    via: "next_button",
+                    rubric_regenerated: rubricIsEmpty || jdChanged,
+                  });
+                  setCurrentStep(3);
+                  return;
+                } finally {
+                  setIsAdvancingStep(false);
+                }
+              } else if (currentStep === 3) {
+                setIsAdvancingStep(true);
+                try {
+                  const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
+                  if (!saved) return;
+                  // If the rubric (titles/skills/total_years) has been
+                  // edited since the current Step-4 question set was
+                  // generated, force-regenerate role-specific questions so
+                  // Step 4 reflects the recruiter's Step-3 changes. Custom
+                  // ("other") questions are preserved by the initializer.
+                  const nextKey = computeRubricQuestionsKey(rubricData);
+                  if (nextKey && nextKey !== lastQuestionsRubricKeyRef.current) {
+                    await initializeScreenQuestionsFromRubric({ force: true });
+                    lastQuestionsRubricKeyRef.current = nextKey;
+                  }
+                  trackStepAdvance(3, 4, { via: "next_button" });
+                } finally {
+                  setIsAdvancingStep(false);
+                }
+              } else if (currentStep === 4) {
+                setIsAdvancingStep(true);
+                try {
+                  const saved = await saveJobDraft({ currentStep: 5, skipToast: true });
+                  if (!saved) return;
+                  const nextSourcingKey = computeSourcingRubricKey(rubricData, resumeMatchFilters);
+                  // First entry: derive sourcing criteria from rubric.
+                  // Subsequent entries: only refresh when the rubric or
+                  // active filter set has actually changed since the last
+                  // sourcing init, so recruiter customisations on Step 5
+                  // aren't clobbered by no-op revisits.
+                  if (!sourcingCriteriaInitializedRef.current) {
+                    initializeSourceFromRubric();
+                    sourcingCriteriaInitializedRef.current = true;
+                  } else if (nextSourcingKey && nextSourcingKey !== lastSourcingRubricKeyRef.current) {
+                    initializeSourceFromRubric();
+                  }
+                  lastSourcingRubricKeyRef.current = nextSourcingKey;
+                  trackStepAdvance(4, 5, { via: "next_button" });
+                } finally {
+                  setIsAdvancingStep(false);
+                }
+              }
+
+              if (currentStep < 5) setCurrentStep((currentStep + 1) as Step);
+            }}
+            disabled={(currentStep === 1 && !jobData) || isGeneratingJD || isSearching || isAdvancingStep || isGeneratingRubric}
+          >
+            {isGeneratingJD ? (
+              <>
+                <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
+                Enriching...
+              </>
+            ) : (isAdvancingStep || isGeneratingRubric) ? (
+              <>
+                <span className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin mr-2" />
+                Preparing...
+              </>
+            ) : (
+              <>
+                Next
+                <ArrowRight className="w-5 h-5 ml-1.5" />
+              </>
+            )}
+          </Button>
+        )}
+      </div>
+    </div>
+
+    {/* Toast Notification */}
+    {toast && (
+      <div
+        className={`fixed bottom-8 right-8 flex items-center gap-2.5 px-5 py-3 rounded-lg text-[14px] font-medium text-white shadow-xl z-50 transition-all duration-300 transform translate-y-0 opacity-100 ${toast.type === "success" ? "bg-[#166534]" : "bg-primary"}`}
+      >
+        {toast.type === "success" ? (
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
+        ) : (
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" /></svg>
+        )}
+        {toast.message}
+      </div>
+    )}
+
+    {showJobdivaSkillsModal && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+        <div className="w-full max-w-2xl rounded-xl bg-white border border-slate-200 shadow-2xl overflow-hidden">
+          <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+            <div>
+              <h3 className="text-[16px] font-bold text-slate-900">JobDiva Search Agent string</h3>
+              <p className="text-[12px] text-slate-500 mt-0.5">Use this Boolean-ready string in JobDiva Search Agent, including location format.</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowJobdivaSkillsModal(false)}
+              className="w-8 h-8 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-100 flex items-center justify-center"
+              aria-label="Close skills modal"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="px-5 py-4 space-y-3">
+            <div className={`text-[12px] rounded-lg px-3 py-2 border ${jobdivaCriteriaUnconfigured ? "text-amber-800 bg-amber-50 border-amber-200" : "text-indigo-800 bg-indigo-50 border-indigo-200"}`}>
+              {jobdivaCriteriaUnconfigured
+                ? "JobDiva AI matcher isn’t configured for this job yet. We’ll still search, but quality improves once criteria are saved in JobDiva."
+                : "Tip: copy this string into JobDiva Search Agent criteria for stronger portal-side matching."}
+            </div>
+            <div className="text-[12px] text-slate-600">
+              {jobdivaSkillsToUse.length} skill{jobdivaSkillsToUse.length === 1 ? "" : "s"} formatted in Boolean form with location suffix: <span className="font-semibold">(HADOOP) AND (SPARK OR PYSPARK), IN (NC-US)</span>
+            </div>
+            <textarea
+              value={jobdivaSkillsCopyText}
+              readOnly
+              rows={8}
+              className="w-full rounded-lg border border-slate-200 bg-slate-50 text-[13px] text-slate-800 font-medium px-3 py-2 outline-none resize-y"
+            />
+            <div className="flex items-center justify-end gap-2">
+              {jobdivaJobEditUrl ? (
+                <a
+                  href={jobdivaJobEditUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="h-9 px-3 border border-slate-200 rounded-md inline-flex items-center gap-1.5 text-[12.5px] font-bold text-slate-700 hover:bg-slate-50"
                 >
-                  <Clipboard className="w-3.5 h-3.5" />
-                  {skillsCopied ? "Copied" : "Copy agent string"}
-                </Button>
-              </div>
+                  Open JobDiva Job
+                  <ExternalLink className="w-3.5 h-3.5" />
+                </a>
+              ) : null}
+              <Button
+                variant="outline"
+                className="h-9 px-3 text-[12.5px] font-bold"
+                onClick={() => setShowJobdivaSkillsModal(false)}
+              >
+                Close
+              </Button>
+              <Button
+                className="h-9 px-3 bg-[#6366f1] hover:bg-[#4f46e5] text-white text-[12.5px] font-bold flex items-center gap-1.5"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(jobdivaSkillsCopyText);
+                    setSkillsCopied(true);
+                    setTimeout(() => setSkillsCopied(false), 1800);
+                  } catch {
+                    showToast("Copy failed. Please copy manually.", "info");
+                  }
+                }}
+              >
+                <Clipboard className="w-3.5 h-3.5" />
+                {skillsCopied ? "Copied" : "Copy agent string"}
+              </Button>
             </div>
           </div>
         </div>
-      )}
+      </div>
+    )}
 
-      {/* Email Modal */}
-      {selectedCandidateForEmail && (
-        <CandidateMessageModal
-          candidateName={selectedCandidateForEmail.name}
-          candidateEmail={selectedCandidateForEmail.email}
-          isOpen={messageModalOpen}
-          onClose={() => {
-            setMessageModalOpen(false);
-            setSelectedCandidateForEmail(null);
-          }}
-        />
-      )}
-
-      {selectedCandidateForResume && (
-        <ResumeModal
-          candidateName={selectedCandidateForResume.name}
-          resumeText={selectedCandidateForResume.resumeText}
-          isOpen={resumeModalOpen}
-          onClose={() => {
-            setResumeModalOpen(false);
-            setSelectedCandidateForResume(null);
-          }}
-        />
-      )}
-
-      {/* Paste Resume Modal (External requirement) */}
-      <PasteResumeModal
-        open={pasteResumeOpen}
-        onClose={() => setPasteResumeOpen(false)}
-        name={pasteName}
-        onNameChange={setPasteName}
-        email={pasteEmail}
-        onEmailChange={setPasteEmail}
-        resumeText={pasteResumeText}
-        onResumeTextChange={setPasteResumeText}
-        isSaving={isSavingPasteResume}
-        onSubmit={handleSubmitPasteResume}
+    {/* Email Modal */}
+    {selectedCandidateForEmail && (
+      <CandidateMessageModal
+        candidateName={selectedCandidateForEmail.name}
+        candidateEmail={selectedCandidateForEmail.email}
+        isOpen={messageModalOpen}
+        onClose={() => {
+          setMessageModalOpen(false);
+          setSelectedCandidateForEmail(null);
+        }}
       />
+    )}
 
-      {selectedCandidateForDetails && (
-        <CandidateDetailsModal
-          isOpen={detailsModalOpen}
-          candidateName={selectedCandidateForDetails.name}
-          profileUrl={selectedCandidateForDetails.profileUrl}
-          imageUrl={selectedCandidateForDetails.imageUrl}
-          jobTitle={selectedCandidateForDetails.jobTitle}
-          location={selectedCandidateForDetails.location}
-          experienceYears={selectedCandidateForDetails.experienceYears}
-          tags={selectedCandidateForDetails.tags}
-          matchScore={selectedCandidateForDetails.matchScore}
-          missingSkills={selectedCandidateForDetails.missingSkills}
-          matchedSkills={selectedCandidateForDetails.matchedSkills}
-          matchScoreDetails={selectedCandidateForDetails.matchScoreDetails}
-          explainability={selectedCandidateForDetails.explainability}
-          onClose={() => {
-            setDetailsModalOpen(false);
-            setSelectedCandidateForDetails(null);
-          }}
-        />
-      )}
-    </div>
-  );
+    {selectedCandidateForResume && (
+      <ResumeModal
+        candidateName={selectedCandidateForResume.name}
+        resumeText={selectedCandidateForResume.resumeText}
+        keywords={selectedCandidateForResume.keywords}
+        similarKeywords={selectedCandidateForResume.similarKeywords}
+        isOpen={resumeModalOpen}
+        onClose={() => {
+          setResumeModalOpen(false);
+          setSelectedCandidateForResume(null);
+        }}
+      />
+    )}
+
+    {/* Paste Resume Modal (External requirement) */}
+    <PasteResumeModal
+      open={pasteResumeOpen}
+      onClose={() => setPasteResumeOpen(false)}
+      name={pasteName}
+      onNameChange={setPasteName}
+      email={pasteEmail}
+      onEmailChange={setPasteEmail}
+      resumeText={pasteResumeText}
+      onResumeTextChange={setPasteResumeText}
+      isSaving={isSavingPasteResume}
+      onSubmit={handleSubmitPasteResume}
+    />
+
+    {selectedCandidateForDetails && (
+      <CandidateDetailsModal
+        isOpen={detailsModalOpen}
+        candidateName={selectedCandidateForDetails.name}
+        profileUrl={selectedCandidateForDetails.profileUrl}
+        imageUrl={selectedCandidateForDetails.imageUrl}
+        jobTitle={selectedCandidateForDetails.jobTitle}
+        location={selectedCandidateForDetails.location}
+        experienceYears={selectedCandidateForDetails.experienceYears}
+        tags={selectedCandidateForDetails.tags}
+        matchScore={selectedCandidateForDetails.matchScore}
+        missingSkills={selectedCandidateForDetails.missingSkills}
+        matchedSkills={selectedCandidateForDetails.matchedSkills}
+        matchScoreDetails={selectedCandidateForDetails.matchScoreDetails}
+        explainability={selectedCandidateForDetails.explainability}
+        candidateId={selectedCandidateForDetails.candidateId}
+        source={selectedCandidateForDetails.source}
+        onClose={() => {
+          setDetailsModalOpen(false);
+          setSelectedCandidateForDetails(null);
+        }}
+      />
+    )}
+  </div>
+);
 };

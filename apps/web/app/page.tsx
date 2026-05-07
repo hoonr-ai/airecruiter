@@ -34,7 +34,7 @@ interface Job {
   programDuration: string;
   maxAllowedSubmittals: string;
   pairStatus: string;
-  candidatesSourced: number;
+  candidatesLaunched: number;
   resumesShortlisted: number;
   completeSubmissions: number;
   passSubmissions: number;
@@ -70,6 +70,12 @@ export default function DashboardPage() {
   const [jobToUnarchive, setJobToUnarchive] = useState<Job | null>(null);
   const [isUnarchiving, setIsUnarchiving] = useState(false);
 
+  // Stop Job Activity dialog state — one-way action that flips an Active
+  // job to Inactive and blocks new candidate launches.
+  const [stopDialogOpen, setStopDialogOpen] = useState(false);
+  const [jobToStop, setJobToStop] = useState<Job | null>(null);
+  const [isStopping, setIsStopping] = useState(false);
+
   // Tab state
   const [activeTab, setActiveTab] = useState<"active" | "archived">("active");
 
@@ -103,27 +109,12 @@ export default function DashboardPage() {
         const status = details.status || "Open";
         const procStatus = details.processing_status || "pending";
 
-        let pairStatus = "Unpublished";
-
-        // Check if job is archived first
-        if (details.is_archived) {
-          pairStatus = "Archived";
-        } else if (procStatus === "monitoring_added" || procStatus === "manual_created") {
-          // Setup is finished. Check JobDiva status for Active/Inactive
-          if (status.toLowerCase() === "closed" || status.toLowerCase() === "cancelled") {
-            pairStatus = "Inactive";
-          } else {
-            pairStatus = "Active";
-          }
-        } else {
-          // If pending, step_X_complete, or any other state, wizard is not finished
-          pairStatus = "Unpublished";
-        }
+        const pairStatus = details.pair_status || "Unpublished";
 
         return {
           id,
           jobdiva_id: details.jobdiva_id || "",
-          title: details.title || "—",
+          title: details.enhanced_title || details.title || "—",
           customer_name: details.customer_name || "—",
           status: status || "—",
           location: [
@@ -138,7 +129,7 @@ export default function DashboardPage() {
             ? "—"
             : Number.parseInt(details.max_allowed_submittals, 10).toString(),
           pairStatus: pairStatus,
-          candidatesSourced: details.candidates_sourced || 0,
+          candidatesLaunched: details.candidates_launched || 0,
           resumesShortlisted: details.resumes_shortlisted || 0,
           completeSubmissions: details.complete_submissions || 0,
           passSubmissions: details.pass_submissions || 0,
@@ -208,7 +199,7 @@ export default function DashboardPage() {
       "Max Allowed Submittals",
       "Job Status",
       "Hoonr-Curate Status",
-      "Candidates Sourced",
+      "Candidates Launched",
       "Resumes Shortlisted",
       "Complete Submissions",
       "Pass Submissions",
@@ -232,7 +223,7 @@ export default function DashboardPage() {
       escapeCSV(job.maxAllowedSubmittals),
       escapeCSV(job.status),
       escapeCSV(job.pairStatus),
-      escapeCSV(job.candidatesSourced),
+      escapeCSV(job.candidatesLaunched),
       escapeCSV(job.resumesShortlisted),
       escapeCSV(job.completeSubmissions),
       escapeCSV(job.passSubmissions),
@@ -287,8 +278,8 @@ export default function DashboardPage() {
           <button
             onClick={() => setActiveTab("active")}
             className={`px-4 py-2 rounded-md text-[13px] font-medium transition-all ${activeTab === "active"
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
+              ? "bg-white text-slate-900 shadow-sm"
+              : "text-slate-500 hover:text-slate-700"
               }`}
           >
             Active Jobs
@@ -296,8 +287,8 @@ export default function DashboardPage() {
           <button
             onClick={() => setActiveTab("archived")}
             className={`px-4 py-2 rounded-md text-[13px] font-medium transition-all ${activeTab === "archived"
-                ? "bg-white text-slate-900 shadow-sm"
-                : "text-slate-500 hover:text-slate-700"
+              ? "bg-white text-slate-900 shadow-sm"
+              : "text-slate-500 hover:text-slate-700"
               }`}
           >
             Archived Jobs
@@ -371,7 +362,7 @@ export default function DashboardPage() {
                 <SortableHeader field="maxAllowedSubmittals">MAX ALLOWED SUBMITTALS</SortableHeader>
                 <SortableHeader field="status">JOB STATUS</SortableHeader>
                 <SortableHeader field="pairStatus">HOONR-CURATE STATUS</SortableHeader>
-                <SortableHeader field="candidatesSourced">CANDIDATES SOURCED</SortableHeader>
+                <SortableHeader field="candidatesLaunched">CANDIDATES LAUNCHED</SortableHeader>
                 <SortableHeader field="resumesShortlisted">RESUMES SHORTLISTED</SortableHeader>
                 <SortableHeader field="completeSubmissions">COMPLETE SUBMISSIONS</SortableHeader>
                 <SortableHeader field="passSubmissions">PASS SUBMISSIONS</SortableHeader>
@@ -430,7 +421,7 @@ export default function DashboardPage() {
                     </div>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
-                    {job.candidatesSourced}
+                    {job.candidatesLaunched}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
                     {job.resumesShortlisted}
@@ -458,23 +449,46 @@ export default function DashboardPage() {
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="rounded-xl border-slate-200 font-medium text-[13px] shadow-lg">
-                        {job.pairStatus === 'Unpublished' ? (
-                          <DropdownMenuItem className="cursor-pointer bg-primary/5 text-primary font-bold">
+                        {/* Per-status primary actions. The wizard at /jobs/new
+                            handles all three modes (edit / source / view) via
+                            ?mode and ?step query params. */}
+                        {activeTab !== "archived" && job.pairStatus === 'Unpublished' && (
+                          <DropdownMenuItem asChild className="cursor-pointer bg-primary/5 text-primary font-bold">
                             <Link prefetch={false} href={`/jobs/new?jobId=${job.jobdiva_id || job.id}`} className="w-full">
-                              Resume Setup
-                            </Link>
-                          </DropdownMenuItem>
-                        ) : (
-                          <DropdownMenuItem className="cursor-pointer">
-                            <Link prefetch={false} href={`/jobs/${job.jobdiva_id || job.id}`} className="w-full">
-                              View Details
+                              Resume Job Setup
                             </Link>
                           </DropdownMenuItem>
                         )}
-                        {activeTab !== "archived" && (
-                          <DropdownMenuItem className="cursor-pointer" asChild>
-                            <Link prefetch={false} href={`/jobs/${job.jobdiva_id || job.id}`} className="w-full">
-                              Edit Job
+                        {activeTab !== "archived" && job.pairStatus === 'Active' && (
+                          <>
+                            <DropdownMenuItem asChild className="cursor-pointer bg-primary/5 text-primary font-bold">
+                              <Link prefetch={false} href={`/jobs/new?jobId=${job.jobdiva_id || job.id}&mode=source&step=5`} className="w-full">
+                                Source Candidates
+                              </Link>
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              disabled
+                              className="cursor-not-allowed text-slate-400"
+                              title="Coming soon"
+                              onSelect={(e) => e.preventDefault()}
+                            >
+                              Edit Job Setup
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              className="text-amber-600 focus:text-amber-700 cursor-pointer"
+                              onClick={() => {
+                                setJobToStop(job);
+                                setStopDialogOpen(true);
+                              }}
+                            >
+                              Stop Job Activity
+                            </DropdownMenuItem>
+                          </>
+                        )}
+                        {activeTab !== "archived" && job.pairStatus === 'Inactive' && (
+                          <DropdownMenuItem asChild className="cursor-pointer">
+                            <Link prefetch={false} href={`/jobs/new?jobId=${job.jobdiva_id || job.id}&mode=view`} className="w-full">
+                              View Job Setup
                             </Link>
                           </DropdownMenuItem>
                         )}
@@ -633,6 +647,77 @@ export default function DashboardPage() {
               disabled={isArchiving}
             >
               {isArchiving ? "Archiving..." : "Archive Job"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Stop Job Activity Confirmation Dialog */}
+      <Dialog open={stopDialogOpen} onOpenChange={setStopDialogOpen}>
+        <DialogContent className="sm:max-w-[460px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-amber-600">
+              <AlertTriangle className="h-5 w-5" />
+              Stop Job Activity
+            </DialogTitle>
+            <DialogDescription>
+              This will stop new outreach to candidates for this job. The job will move to Inactive status. <strong>This cannot be undone.</strong>
+            </DialogDescription>
+          </DialogHeader>
+          {jobToStop && (
+            <div className="py-4">
+              <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
+                <p className="font-semibold text-slate-900">{jobToStop.title}</p>
+                <p className="text-sm text-slate-500">ID: {jobToStop.jobdiva_id || jobToStop.id}</p>
+                <p className="text-sm text-slate-500">Customer: {jobToStop.customer_name}</p>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setStopDialogOpen(false);
+                setJobToStop(null);
+              }}
+              disabled={isStopping}
+            >
+              Cancel
+            </Button>
+            <Button
+              className="bg-amber-600 hover:bg-amber-700 text-white"
+              onClick={async () => {
+                if (!jobToStop) return;
+                setIsStopping(true);
+                try {
+                  const response = await fetch(
+                    `${API_BASE}/jobs/${jobToStop.jobdiva_id || jobToStop.id}/stop-activity`,
+                    {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                    }
+                  );
+                  if (response.ok) {
+                    setToast({ message: "Job activity stopped", type: "success" });
+                    setAllJobs(prev => prev.map(j => j.id === jobToStop.id ? { ...j, pairStatus: 'Inactive' } : j));
+                    setFilteredJobs(prev => prev.map(j => j.id === jobToStop.id ? { ...j, pairStatus: 'Inactive' } : j));
+                  } else {
+                    const errorData = await response.json().catch(() => ({ detail: "Unknown error" }));
+                    console.error("Stop activity error:", errorData);
+                    setToast({ message: errorData.detail || "Failed to stop job activity", type: "error" });
+                  }
+                } catch (error) {
+                  console.error("Stop activity exception:", error);
+                  setToast({ message: "Failed to stop job activity", type: "error" });
+                } finally {
+                  setIsStopping(false);
+                  setStopDialogOpen(false);
+                  setJobToStop(null);
+                }
+              }}
+              disabled={isStopping}
+            >
+              {isStopping ? "Stopping..." : "Stop Activity"}
             </Button>
           </DialogFooter>
         </DialogContent>

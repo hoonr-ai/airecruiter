@@ -179,9 +179,13 @@ class JobRubricDB:
                         jobdiva_id # Fallback if jobdiva_id is actually the job_id
                     ))
                     
-                    # 8. Save Screen Questions
-                    if rubric.get('screen_questions'):
-                        self._save_screen_questions_internal(cur, jobdiva_id, rubric.get('screen_questions'))
+                    # 8. Save Screen Questions. Sync the table whenever the
+                    # caller passed a list — including an empty one — so that
+                    # recruiter deletions on Step 4 don't leak into the next
+                    # interview payload. Only skip when the key is absent
+                    # (partial save from a step that doesn't touch questions).
+                    if 'screen_questions' in rubric and rubric.get('screen_questions') is not None:
+                        self._save_screen_questions_internal(cur, jobdiva_id, rubric.get('screen_questions') or [])
 
                 conn.commit()
                 return True

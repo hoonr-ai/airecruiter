@@ -1,16 +1,17 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
-import { 
-  Linkedin, 
-  Check, 
-  MapPin, 
+import {
+  Linkedin,
+  Check,
+  MapPin,
   Briefcase,
   Sparkles,
   Link,
   TrendingUp,
   AlertCircle,
-  Clock
+  Clock,
+  ExternalLink
 } from "lucide-react";
 import { 
   Dialog, 
@@ -36,6 +37,8 @@ interface CandidateDetailsModalProps {
   matchedSkills?: string[];
   matchScoreDetails?: Record<string, any>;
   explainability?: string[];
+  candidateId?: string;
+  source?: string;
 }
 
 /** Title-case a string: "cloud security engineer" → "Cloud Security Engineer" */
@@ -147,8 +150,14 @@ function CandidateDetailsModalBase({
   matchedSkills,
   matchScoreDetails,
   explainability,
+  candidateId,
+  source,
 }: CandidateDetailsModalProps) {
   const isLinkedIn = profileUrl?.includes("linkedin.com");
+  const showJobDivaLink = !!candidateId && !!source && source.startsWith("JobDiva");
+  const jobDivaUrl = showJobDivaLink
+    ? `https://www1.jobdiva.com/employers/myreports/viewcandidate2_real.jsp?docids=-1&candidateid=${encodeURIComponent(candidateId!)}`
+    : null;
 
   const formattedTitle = toTitleCase(jobTitle || "");
   const formattedLocation = formatLocation(location || "");
@@ -317,17 +326,32 @@ function CandidateDetailsModalBase({
 
         {/* ── Footer ── */}
         <div className="px-5 py-3.5 bg-white border-t border-slate-100 flex items-center justify-between">
-          {profileUrl ? (
-            <a
-              href={profileUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3.5 py-2 rounded-lg transition-colors"
-            >
-              <Link className="w-3.5 h-3.5" />
-              View Profile
-            </a>
-          ) : <div />}
+          <div className="flex items-center gap-2">
+            {profileUrl ? (
+              <a
+                href={profileUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3.5 py-2 rounded-lg transition-colors"
+              >
+                <Link className="w-3.5 h-3.5" />
+                View Profile
+              </a>
+            ) : null}
+
+            {jobDivaUrl && (
+              <a
+                href={jobDivaUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-[#c2410c] bg-[#fff7ed] hover:bg-[#ffedd5] border border-[#fed7aa] px-3.5 py-2 rounded-lg transition-colors"
+                title="Open candidate record in JobDiva"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                View on JobDiva
+              </a>
+            )}
+          </div>
 
           <Button
             onClick={onClose}

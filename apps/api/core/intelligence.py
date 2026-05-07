@@ -25,6 +25,12 @@ class TribunalVerdict(BaseModel):
     consensus_flags: List[RiskSignal]
     consensus_strengths: List[StrengthSignal]
     trajectory_analysis: CareerTrajectory
-    
+
     # We do NOT return a score. We return a "Tag".
     narrative_tag: Literal["top_tier_potential", "solid_performer", "high_risk", "mismatch", "analysis_failed"]
+
+    # Soft location fit (0-100). 100 = same metro / well within radius;
+    # ~40 at the edge of the requested radius; <=20 outside. Null when
+    # location data was unavailable or the role is fully remote.
+    location_fit_score: Optional[int] = None
+    location_fit_reason: str = ""

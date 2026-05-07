@@ -24,6 +24,9 @@ import json
 import logging
 import smtplib
 import ssl
+import html
+from email import encoders
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Dict, List, Optional
@@ -67,7 +70,7 @@ def _send(
     subject: str,
     html_body: str,
     text_body: str = "",
-    attachments: Optional[List[dict]] = None  # List of {"filename": str, "content": bytes}
+    attachments: Optional[List[dict]] = None  # List of {"filename": str, "content": bytes, "content_type"?: str}
 ) -> bool:
     """
     Low-level send helper.  Returns True on success, False on any failure.
@@ -94,13 +97,16 @@ def _send(
 
     # Attachments
     if attachments:
-        from email.mime.application import MIMEApplication
         for att in attachments:
             filename = att.get("filename", "attachment")
             content  = att.get("content")
+            content_type = att.get("content_type", "application/octet-stream")
             if not content:
                 continue
-            part = MIMEApplication(content)
+            main_type, sub_type = content_type.split("/", 1)
+            part = MIMEBase(main_type, sub_type)
+            part.set_payload(content)
+            encoders.encode_base64(part)
             part.add_header("Content-Disposition", "attachment", filename=filename)
             msg.attach(part)
 
@@ -195,6 +201,24 @@ def _info_row(label: str, value: str) -> str:
         f'<td style="padding:8px 12px;color:#1e293b;font-size:13px;font-weight:500;">{value}</td>'
         f'</tr>'
     )
+
+
+def _build_word_resume_document(candidate_name: str, resume_text: str) -> bytes:
+    """Return a Word-compatible HTML document as .doc bytes."""
+    safe_name = html.escape(candidate_name or "Candidate")
+    resume_html = html.escape(resume_text or "").replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
+    doc_html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>{safe_name} Resume</title>
+</head>
+<body style="font-family:Calibri, Arial, sans-serif;font-size:11pt;line-height:1.4;color:#111827;">
+  <h1 style="font-size:16pt;margin:0 0 12pt;">{safe_name} Resume</h1>
+  <p style="margin:0;white-space:normal;">{resume_html}</p>
+</body>
+</html>"""
+    return doc_html.encode("utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -482,20 +506,32 @@ def notify_candidate_passed(
         f'{job_title or "PAIR Rank List"}</a>'
     )
 
-    # Screening Summary Table Rows
+    # Screening Summary rows rendered as stacked cards for readability.
     summary_rows_html = ""
     for item in screening_summary:
         f = item.get("field") or "—"
         v = item.get("value") or "—"
+        field_text = html.escape(str(f))
+        value_text = html.escape(str(v)).replace("\n", "<br>")
+
         # Color code Pass/Fail in the summary table
-        val_styled = v
+        val_styled = value_text
         v_low = str(v).lower()
         if "pass" in v_low:
-            val_styled = f'<span style="color:#059669;font-weight:600;">{v}</span>'
+            val_styled = f'<span style="color:#059669;font-weight:600;">{value_text}</span>'
         elif "fail" in v_low:
-            val_styled = f'<span style="color:#dc2626;font-weight:600;">{v}</span>'
-            
-        summary_rows_html += _info_row(f, val_styled)
+            val_styled = f'<span style="color:#dc2626;font-weight:600;">{value_text}</span>'
+
+        summary_rows_html += (
+            '<tr><td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;vertical-align:top;">'
+            '<div style="font-size:12px;font-weight:700;color:#475569;margin-bottom:6px;line-height:1.4;">'
+            f'{field_text}'
+            '</div>'
+            '<div style="font-size:13px;color:#1e293b;line-height:1.55;word-break:break-word;overflow-wrap:anywhere;">'
+            f'{val_styled}'
+            '</div>'
+            '</td></tr>'
+        )
 
     content = f"""
     <h2 style="margin:0 0 6px;font-size:20px;color:#1e293b;">
@@ -547,7 +583,7 @@ def notify_candidate_passed(
 
     <div style="background:#fff7ed;border:1px solid #ffedd5;border-radius:8px;padding:12px;">
       <p style="margin:0;font-size:12px;color:#9a3412;line-height:1.5;">
-        <strong>Note:</strong> The candidate's resume is attached to this email (if available in JobDiva).
+        <strong>Note:</strong> The candidate's resume is attached in Word format (if available in JobDiva).
       </p>
     </div>
     """
@@ -575,7 +611,11 @@ def notify_candidate_passed(
 
     attachments = []
     if resume_bytes and resume_filename:
-        attachments.append({"filename": resume_filename, "content": resume_bytes})
+        attachments.append({
+            "filename": resume_filename,
+            "content": resume_bytes,
+            "content_type": "application/msword",
+        })
 
     return _send(to_list, subject, _base_html(content), plain, attachments=attachments)
 

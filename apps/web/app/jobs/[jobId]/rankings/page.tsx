@@ -70,19 +70,19 @@ const formatDate = (dateStr: string) => {
   }
 };
 
-const ColumnFilterPopup = ({ 
-  field, 
-  label, 
-  onClose, 
-  onApply, 
-  onClear, 
+const ColumnFilterPopup = ({
+  field,
+  label,
+  onClose,
+  onApply,
+  onClear,
   currentFilter,
   align = "left"
-}: { 
-  field: string; 
-  label: string; 
-  onClose: () => void; 
-  onApply: (filter: { condition: any; value: string }) => void; 
+}: {
+  field: string;
+  label: string;
+  onClose: () => void;
+  onApply: (filter: { condition: any; value: string }) => void;
   onClear: () => void;
   currentFilter?: { condition: any; value: string };
   align?: "left" | "right";
@@ -102,7 +102,7 @@ const ColumnFilterPopup = ({
   }, [onClose]);
 
   return (
-    <div 
+    <div
       ref={popupRef}
       className={`absolute top-full ${align === "left" ? "left-0" : "right-0"} mt-1 w-64 bg-white border border-slate-200 rounded-lg shadow-xl z-[100] p-4 text-left normal-case tracking-normal cursor-default`}
     >
@@ -112,7 +112,7 @@ const ColumnFilterPopup = ({
           <X className="w-4 h-4" />
         </button>
       </div>
-      
+
       <div className="space-y-4">
         <div>
           <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1.5">Condition</label>
@@ -222,6 +222,13 @@ interface Candidate {
   engage_total_score?: number;
   engage_status?: string;
   engage_hard_filter_status?: string;
+  engage_hard_filter_details?: {
+    question: string;
+    status: "Pass" | "Fail" | "Pending";
+    score?: number | null;
+    total_score?: number | null;
+    reason?: string;
+  }[];
   engage_completed_at?: string;
   engage_created_at?: string;
   availability?: string;
@@ -231,6 +238,155 @@ interface Candidate {
 
 type EnrichStatus = { type: "info" | "error" | "success"; message: string };
 type ToastState = { type: "info" | "error" | "success"; message: string } | null;
+
+function ResumeScreeningHoverCard({
+  candidate,
+}: {
+  candidate: Candidate;
+}) {
+  const dataBlob = candidate.data || {};
+  const titleStr = String(candidate.job_title || candidate.headline || dataBlob?.headline || "").trim();
+  const companyExp = Array.isArray(dataBlob?.company_experience) ? dataBlob.company_experience : [];
+  const companyStr = String(companyExp[0]?.company || "").trim();
+  const titleAtCompany = titleStr && companyStr ? `${titleStr} @ ${companyStr}` : titleStr || companyStr;
+
+  const yearsRaw = dataBlob?.experience_years;
+  const yearsNum = typeof yearsRaw === "number" ? yearsRaw : Number(yearsRaw);
+  const yearsStr = Number.isFinite(yearsNum) && yearsNum > 0 ? `${yearsNum}+ yrs experience` : "";
+
+  const matched = Array.isArray(dataBlob?.matched_skills)
+    ? dataBlob.matched_skills.filter((s: unknown) => typeof s === "string" && s.trim().length > 0)
+    : [];
+  const missing = Array.isArray(dataBlob?.missing_skills)
+    ? dataBlob.missing_skills.filter((s: unknown) => typeof s === "string" && s.trim().length > 0).slice(0, 5)
+    : [];
+  const explainability = Array.isArray(dataBlob?.explainability) ? dataBlob.explainability : [];
+  const firstExplain =
+    typeof explainability[0] === "string"
+      ? explainability[0]
+      : explainability[0]?.text || "";
+
+  return (
+    <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 hidden w-[420px] -translate-x-1/2 rounded-xl border border-slate-200 bg-white p-4 text-left shadow-2xl group-hover:block">
+      {titleAtCompany && (
+        <div className="mb-1.5 truncate text-[12.5px] font-semibold text-slate-800" title={titleAtCompany}>
+          {titleAtCompany}
+        </div>
+      )}
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-[11.5px] text-slate-600">
+        {yearsStr && (
+          <span className="inline-flex items-center gap-1">
+            <Calendar className="h-3 w-3 text-slate-400" />
+            {yearsStr}
+          </span>
+        )}
+        {candidate.email && (
+          <span className="inline-flex max-w-[200px] items-center gap-1 truncate" title={candidate.email}>
+            <Mail className="h-3 w-3 shrink-0 text-slate-400" />
+            <span className="truncate">{candidate.email}</span>
+          </span>
+        )}
+      </div>
+
+      {matched.length > 0 && (
+        <div className="mb-3">
+          <div className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Matched Skills
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {matched.map((skill: string, i: number) => (
+              <span
+                key={`${skill}-${i}`}
+                className="rounded-md border border-emerald-100 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700"
+              >
+                {skill}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {missing.length > 0 && (
+        <div className="mb-3">
+          <div className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Top Missing Skills
+          </div>
+          <div className="flex flex-wrap gap-1">
+            {missing.map((skill: string, i: number) => (
+              <span
+                key={`${skill}-${i}`}
+                className="rounded-md border border-rose-100 bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-700"
+              >
+                {skill}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {firstExplain && (
+        <div className="border-t border-slate-100 pt-2 text-[11.5px] leading-snug text-slate-600">
+          {firstExplain}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HardFilterHoverCard({
+  details,
+}: {
+  details?: Candidate["engage_hard_filter_details"];
+}) {
+  if (!details || details.length === 0) return null;
+
+  return (
+    <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 hidden w-[380px] -translate-x-1/2 rounded-xl border border-slate-200 bg-white p-3 text-left shadow-2xl group-hover:block">
+      <div className="mb-2 border-b border-slate-100 pb-2">
+        <span className="text-[11px] font-bold uppercase tracking-widest text-slate-500">
+          Hard Filter Results
+        </span>
+      </div>
+      <div className="space-y-2">
+        {details.map((item, index) => (
+          <div key={`${item.question}-${index}`} className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+            <div className="mb-1 flex items-start justify-between gap-3">
+              <div className="text-[12px] font-semibold leading-snug text-slate-800">
+                {item.question}
+              </div>
+              <span
+                className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
+                  item.status === "Pass"
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                    : item.status === "Fail"
+                      ? "border-rose-200 bg-rose-50 text-rose-700"
+                      : "border-amber-200 bg-amber-50 text-amber-700"
+                }`}
+              >
+                {item.status}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-3 text-[11px] text-slate-500">
+              <span>
+                Score:{" "}
+                <strong className="text-slate-700">
+                  {item.score !== undefined && item.score !== null
+                    ? `${item.score}/${item.total_score ?? 10}`
+                    : "—"}
+                </strong>
+              </span>
+              {item.reason ? (
+                <span className="max-w-[190px] truncate text-right" title={item.reason}>
+                  {item.reason}
+                </span>
+              ) : null}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function CandidateRankingsPage() {
   const { jobId } = useParams();
@@ -1149,10 +1305,10 @@ export default function CandidateRankingsPage() {
               ) : (
                 <>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Total Candidates Sourced: <strong className="text-slate-900 ml-1">{candidates.length}</strong>
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Candidates Launched: <strong className="text-slate-900 ml-1">{candidates.length}</strong>
                   </div>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Resume Shortlisted Candidates: <strong className="text-slate-900 ml-1">{candidates.filter(c => (c.match_score ?? c.resume_match_percentage ?? 0) >= 70).length}</strong>
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Openings: <strong className="text-slate-900 ml-1">{!job?.openings ? "—" : job.openings}</strong>
                   </div>
                 </>
               )}
@@ -1166,10 +1322,7 @@ export default function CandidateRankingsPage() {
               ) : (
                 <>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Max. Allowed Submittals: <strong className="text-slate-900 ml-1">{job?.max_allowed_submittals ?? 0}</strong>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Openings: <strong className="text-slate-900 ml-1">{job?.openings ?? 0}</strong>
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Max. Allowed Submittals: <strong className="text-slate-900 ml-1">{!job?.max_allowed_submittals ? "—" : job.max_allowed_submittals}</strong>
                   </div>
                 </>
               )}
@@ -1724,15 +1877,20 @@ export default function CandidateRankingsPage() {
 
 
                         <TableCell className="text-center align-middle py-2 px-2 font-medium text-slate-900 text-[13px] border-l border-slate-200">
-                          <div className="flex items-center justify-center gap-1 w-full text-center">
+                          <div className="group relative flex items-center justify-center gap-1 w-full text-center">
 
                             {screeningScore > 0 ? (
-                              <span className="font-bold text-slate-900 text-[14px]">
+                              <span className="font-bold text-slate-900 text-[14px] underline decoration-dotted underline-offset-4">
                                 {screeningScore}/100
                               </span>
                             ) : (
-                              <span className="font-normal opacity-40 italic text-slate-400 text-[13px]">Pending</span>
+                              <span className="font-normal opacity-40 italic text-slate-400 text-[13px]">
+                                {String(candidate.source || "").toLowerCase().includes("applicant") ? "N/A" : "Pending"}
+                              </span>
                             )}
+                            {screeningScore > 0 ? (
+                              <ResumeScreeningHoverCard candidate={candidate} />
+                            ) : null}
                           </div>
                         </TableCell>
 
@@ -1790,13 +1948,15 @@ export default function CandidateRankingsPage() {
                           {(() => {
                             const eScore = candidate.engage_score;
                             const eTotal = candidate.engage_total_score || 100;
+                            const hardFilterDetails = candidate.engage_hard_filter_details || [];
 
                             if (eScore !== undefined && eScore !== null) {
                               return (
-                                <div className="flex items-center justify-center w-full">
-                                  <span className="font-bold text-slate-900 text-[14px]">
+                                <div className="group relative flex items-center justify-center w-full">
+                                  <span className="font-bold text-slate-900 text-[14px] underline decoration-dotted underline-offset-4">
                                     {eScore}/{eTotal}
                                   </span>
+                                  <HardFilterHoverCard details={hardFilterDetails} />
                                 </div>
                               );
                             }
@@ -1898,6 +2058,8 @@ export default function CandidateRankingsPage() {
           matchedSkills={selectedCandidate.data?.matched_skills}
           missingSkills={selectedCandidate.data?.missing_skills}
           explainability={selectedCandidate.data?.explainability}
+          candidateId={selectedCandidate.candidate_id}
+          source={selectedCandidate.source}
         />
       )}
 

@@ -4,7 +4,7 @@ from core.graph import ontology
 from core.models import CandidateProfile, JobDescription, CandidateSkill, ComputedStats
 from core.intelligence import TribunalVerdict
 from services.tribunal import TribunalService
-from services.location import LocationService
+from services.location import LocationService, geocode_location, haversine_miles
 from core.utils import normalize_skill
 
 
@@ -592,18 +592,34 @@ async def calculate_match(candidate: CandidateProfile, jd: JobDescription) -> Ma
     # NEW: Narrative Intelligence (Tribunal)
     # Run Tribunal if score is decent OR if we have critical failures (to explain why)
     tribunal_verdict = None
-    
+
+    # Deterministic distance for the Tribunal's location-fit dimension.
+    # Skipped for remote roles or when either side is missing/ungeocodable.
+    distance_miles_for_tribunal = None
+    if mode != "remote" and cand_loc and job_loc:
+        try:
+            cand_coords, _cr = geocode_location(cand_loc)
+            job_coords, _jr = geocode_location(job_loc)
+            if cand_coords and job_coords:
+                distance_miles_for_tribunal = haversine_miles(
+                    cand_coords[0], cand_coords[1],
+                    job_coords[0], job_coords[1],
+                )
+        except Exception as geo_err:
+            print(f"⚠️ Distance geocode failed for Tribunal context: {geo_err}")
+
     # If Critical Failures exist, we can generate a specific "Rejection" verdict instantly without costly LLM
-    should_run_tribunal = total_score >= 40.0 
+    should_run_tribunal = total_score >= 40.0
 
     if should_run_tribunal and not critical_failures:
         try:
             tribunal_verdict = await tribunal_service.evaluate_narrative(
-                resume_text="", 
+                resume_text="",
                 candidate=candidate,
-                jd=jd
+                jd=jd,
+                distance_miles=distance_miles_for_tribunal,
             )
-                
+
         except Exception as e:
             print(f"⚠️ Tribunal Service skipped: {e}")
             
@@ -624,6 +640,18 @@ async def calculate_match(candidate: CandidateProfile, jd: JobDescription) -> Ma
              ],
              narrative_tag="analysis_failed"
          )
+
+    # Apply location-fit soft penalty: if the Tribunal scored location_fit_score,
+    # downweight the total score proportionally. A floor of 0.5 prevents a far-but-
+    # still-considered candidate from collapsing entirely; the hard radius filter
+    # upstream already drops anyone genuinely outside scope.
+    if (
+        tribunal_verdict
+        and getattr(tribunal_verdict, "location_fit_score", None) is not None
+    ):
+        loc_score = max(0, min(100, int(tribunal_verdict.location_fit_score)))
+        multiplier = max(0.5, loc_score / 100.0)
+        total_score = round(min(100.0, total_score * multiplier), 2)
 
     # Return Flat Result
     # Combine traces
