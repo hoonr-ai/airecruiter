@@ -38,6 +38,71 @@ def _json_load_safe(value: Any, default: Any):
     return default
 
 
+def _extract_rankings_hard_filter_details(
+    data_blob: Dict[str, Any],
+    audit_response: Any,
+    audit_payload: Any,
+) -> List[Dict[str, Any]]:
+    """Return compact hard-filter rows derived from webhook/audit data."""
+    resp = audit_response if isinstance(audit_response, dict) else _json_load_safe(audit_response, {})
+    payload = audit_payload if isinstance(audit_payload, dict) else _json_load_safe(audit_payload, {})
+
+    details: List[Dict[str, Any]] = []
+
+    transcriptions = []
+    if isinstance(resp, dict):
+        transcriptions = resp.get("transcriptions") or []
+
+    if not transcriptions and isinstance(data_blob, dict):
+        last_response = data_blob.get("engage_last_response")
+        last_response = last_response if isinstance(last_response, dict) else _json_load_safe(last_response, {})
+        if isinstance(last_response, dict):
+            wp_data = last_response.get("data", last_response)
+            if isinstance(wp_data, dict):
+                transcriptions = wp_data.get("transcriptions") or []
+
+    if isinstance(transcriptions, list):
+        for item in transcriptions:
+            hf_status = str(item.get("hard_filter_status") or "").lower()
+            if hf_status not in {"passed", "failed", "pass", "fail"}:
+                continue
+            details.append({
+                "question": item.get("question") or item.get("question_text") or "Question",
+                "status": "Pass" if hf_status in {"passed", "pass"} else "Fail",
+                "score": item.get("candidate_score"),
+                "total_score": item.get("total_score"),
+                "reason": item.get("reason") or "",
+            })
+        if details:
+            return details
+
+    audit_questions = payload.get("questions") if isinstance(payload, dict) else []
+    audit_responses = resp.get("questions") if isinstance(resp, dict) else []
+    if isinstance(audit_questions, list) and audit_questions:
+        for question in audit_questions:
+            if not question.get("pass_criteria"):
+                continue
+            response = next(
+                (
+                    row for row in (audit_responses or [])
+                    if row.get("question_text") == question.get("question_text") or row.get("id") == question.get("id")
+                ),
+                {},
+            )
+            status = str(response.get("status") or "pending").lower()
+            details.append({
+                "question": question.get("question_text") or question.get("question") or question.get("name") or "Question",
+                "status": "Pass" if status == "pass" else "Fail" if status == "fail" else "Pending",
+                "score": response.get("candidate_score"),
+                "total_score": response.get("total_score"),
+                "reason": response.get("reason") or "",
+            })
+        if details:
+            return details
+
+    return details
+
+
 def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
     """Build SearchCriteria from monitored_jobs for detailed resume re-scoring."""
     try:
@@ -763,7 +828,9 @@ async def get_job_candidates(job_id_or_ref: str):
                             candidate_id,
                             status,
                             interview_id,
-                            created_at
+                            created_at,
+                            payload,
+                            response
                         FROM engage_interview_audit
                         WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                         ORDER BY candidate_id, id DESC
@@ -785,7 +852,9 @@ async def get_job_candidates(job_id_or_ref: str):
                         sc.data,
                         la.status as audit_status,
                         la.interview_id as audit_interview_id,
-                        la.created_at as audit_created_at
+                        la.created_at as audit_created_at,
+                        la.payload as audit_payload,
+                        la.response as audit_response
                     FROM sourced_candidates sc
                     LEFT JOIN latest_audit la
                         ON la.candidate_id = sc.candidate_id
@@ -840,6 +909,12 @@ async def get_job_candidates(job_id_or_ref: str):
             if not cand.get("engage_created_at") and cand.get("audit_created_at"):
                 cand["engage_created_at"] = cand.get("audit_created_at")
 
+            cand["engage_hard_filter_details"] = _extract_rankings_hard_filter_details(
+                data_blob if isinstance(data_blob, dict) else {},
+                cand.get("audit_response"),
+                cand.get("audit_payload"),
+            )
+
             # read-side normalization for consistency across views
             norm_engage_score = None
             raw_score = cand.get("engage_score") or cand.get("engage_candidate_score")
@@ -886,6 +961,8 @@ async def get_job_candidates(job_id_or_ref: str):
             cand.pop("audit_status", None)
             cand.pop("audit_interview_id", None)
             cand.pop("audit_created_at", None)
+            cand.pop("audit_payload", None)
+            cand.pop("audit_response", None)
 
         return {"status": "success", "candidates": candidates}
     except Exception as e:
