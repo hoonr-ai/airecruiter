@@ -147,17 +147,38 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
         # ----- Fetch candidate data -----
+        # DNC gate: rows with dnc_stopped_at set are excluded so a candidate
+        # added to the Do-Not-Contact list after launch stops receiving
+        # interview invites without inactivating the rest of the PAIR.
         resumes = []
         candidate_phone = ""
+        dnc_blocked_ids: List[str] = []
         for cid in request.candidate_ids:
             cur.execute("""
                 SELECT candidate_id, name, email, phone, resume_text, headline, location, data
                 FROM sourced_candidates
                 WHERE candidate_id = %s
+                  AND dnc_stopped_at IS NULL
                 ORDER BY updated_at DESC
                 LIMIT 1
             """, (cid,))
             row = cur.fetchone()
+            if not row:
+                # Either the candidate isn't sourced for any job, or every
+                # row is dnc_stopped. Probe a second query to tell them
+                # apart so we can log the DNC skip explicitly.
+                cur.execute("""
+                    SELECT 1 FROM sourced_candidates
+                    WHERE candidate_id = %s AND dnc_stopped_at IS NOT NULL
+                    LIMIT 1
+                """, (cid,))
+                if cur.fetchone():
+                    dnc_blocked_ids.append(cid)
+                    logger.info(
+                        "engagement_dnc_skip candidate_id=%s reason=dnc_stopped_at_set",
+                        cid,
+                    )
+                    continue
 
             if row:
                 name = row.get("name", "Unknown")
@@ -312,7 +333,9 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         return {
             "success": True,
             "payload": payload_str,
-            "candidate_count": len(resumes)
+            "candidate_count": len(resumes),
+            "dnc_blocked_count": len(dnc_blocked_ids),
+            "dnc_blocked_ids": dnc_blocked_ids,
         }
 
     except Exception as e:
