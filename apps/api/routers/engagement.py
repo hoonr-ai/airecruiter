@@ -324,9 +324,15 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
 # Fires Email #1 (launch confirmation) + Email #2 (job posting request)
 # from a single DB query so we don't hit monitored_jobs twice.
 # ---------------------------------------------------------------------------
-async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
+async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job_posting: bool = True) -> None:
     """
-    Fetches job metadata from monitored_jobs and fires both launch emails.
+    Fetches job metadata from monitored_jobs and fires launch emails.
+
+    Email #1 (PAIR launch confirmation to recruiters) always fires.
+    Email #2 (job posting team request) is gated on `send_job_posting` —
+    callers pass False on re-launches so we don't re-spam the posting team
+    every time a recruiter sources another batch of candidates.
+
     Runs inside asyncio.create_task() so failures are fully isolated.
     """
     if not job_id:
@@ -374,15 +380,21 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int) -> None:
             job_id=db_job_id,
         )
 
-        # ── Email #2: Job Posting Request ─────────────────────────────────────
-        await asyncio.to_thread(
-            notify_job_posting,
-            jobdiva_id=jobdiva_id,
-            job_title=job_title,
-            recruiter_emails=clean_emails,
-            job_boards=job_boards,
-            ai_description=ai_desc,
-        )
+        # ── Email #2: Job Posting Request (skipped on re-launch) ────────────
+        if send_job_posting:
+            await asyncio.to_thread(
+                notify_job_posting,
+                jobdiva_id=jobdiva_id,
+                job_title=job_title,
+                recruiter_emails=clean_emails,
+                job_boards=job_boards,
+                ai_description=ai_desc,
+            )
+        else:
+            logger.info(
+                "📧 Skipping job-posting email for job %s (re-launch — already sent on initial launch)",
+                jobdiva_id or job_id,
+            )
 
     except Exception as exc:
         logger.warning("📧 _send_pair_launch_email failed silently: %s", exc, exc_info=True)
@@ -524,6 +536,33 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             print(f"DEBUG: send_bulk_interview called for job {job_id_from_payload}")
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid JSON format in payload")
+
+        # Defense-in-depth: refuse to engage candidates for jobs whose outreach
+        # has been stopped. /candidates/save already blocks earlier, but this
+        # endpoint is also reachable directly.
+        if job_id_from_payload and job_id_from_payload != "unknown":
+            try:
+                _stop_conn = _get_db_connection()
+                try:
+                    _stop_cur = _stop_conn.cursor()
+                    _stop_cur.execute("""
+                        SELECT outreach_stopped_at FROM monitored_jobs
+                        WHERE job_id = %s OR jobdiva_id = %s
+                        LIMIT 1
+                    """, (str(job_id_from_payload), str(job_id_from_payload)))
+                    _stop_row = _stop_cur.fetchone()
+                    _stop_cur.close()
+                    if _stop_row and _stop_row[0] is not None:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Job activity has been stopped. Cannot launch new candidates.",
+                        )
+                finally:
+                    _stop_conn.close()
+            except HTTPException:
+                raise
+            except Exception as _stop_check_err:
+                logger.warning(f"Could not check outreach_stopped_at for job {job_id_from_payload}: {_stop_check_err}")
 
         is_success = False
         response_data = {}
@@ -738,13 +777,16 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 # Applicants are assigned to rankings with match_score=0 (N/A).
                 logger.info(f"🚀 [Engagement] Initial launch detected for job {job_id_from_payload}. Triggering applicant sync.")
                 asyncio.create_task(auto_assign_service.synchronize_job_applicants(job_id_from_payload))
-                
-                asyncio.create_task(
-                    _send_pair_launch_email(
-                        job_id=job_id_from_payload,
-                        candidate_count=len(interview_results),
-                    )
+
+            # Email #1 (launch confirmation) always fires; Email #2 (job posting
+            # team) is gated on initial launch so re-sourcing doesn't re-spam them.
+            asyncio.create_task(
+                _send_pair_launch_email(
+                    job_id=job_id_from_payload,
+                    candidate_count=len(interview_results),
+                    send_job_posting=request.is_initial_launch,
                 )
+            )
             return {
                 "success": True,
                 "message": "Interview(s) sent successfully",
