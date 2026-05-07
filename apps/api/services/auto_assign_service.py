@@ -2,7 +2,7 @@ import logging
 import json
 import psycopg2
 from datetime import datetime
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from core.config import DATABASE_URL, JOBDIVA_PAIR_QUALIFICATION_NAME, JOBDIVA_PASS_QUALIFICATION_VALUE
 from services.unified_candidate_search import SearchCriteria, unified_search_service
 from services.candidate_profiles_db import candidate_profiles_db
@@ -15,6 +15,126 @@ class AutoAssignService:
 
     def _get_db_connection(self):
         return psycopg2.connect(self.db_url, connect_timeout=5)
+
+    def _normalize_text(self, value: Any) -> str:
+        return str(value or "").strip()
+
+    def _normalize_email(self, value: Any) -> str:
+        return self._normalize_text(value).lower()
+
+    def _normalize_phone(self, value: Any) -> str:
+        return "".join(ch for ch in self._normalize_text(value) if ch.isdigit())
+
+    def _find_existing_candidate_row(
+        self,
+        cur,
+        target_job_id: str,
+        cand: Dict[str, Any],
+        candidate_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        email = self._normalize_email(cand.get("email"))
+        phone = self._normalize_phone(cand.get("phone"))
+        name = self._normalize_text(cand.get("name"))
+        profile_url = self._normalize_text(cand.get("profile_url"))
+
+        lookup_clauses = ["candidate_id = %s", "data->>'jobdiva_candidate_id' = %s"]
+        params: List[Any] = [candidate_id, candidate_id]
+
+        if email:
+            lookup_clauses.extend(
+                [
+                    "LOWER(COALESCE(email, '')) = %s",
+                    "LOWER(COALESCE(data->>'email', '')) = %s",
+                ]
+            )
+            params.extend([email, email])
+
+        if phone:
+            lookup_clauses.extend(
+                [
+                    "regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = %s",
+                    "regexp_replace(COALESCE(data->>'phone', ''), '\\D', '', 'g') = %s",
+                ]
+            )
+            params.extend([phone, phone])
+
+        if profile_url:
+            lookup_clauses.extend(
+                [
+                    "COALESCE(profile_url, '') = %s",
+                    "COALESCE(data->'urls'->>'linkedin', '') = %s",
+                ]
+            )
+            params.extend([profile_url, profile_url])
+
+        if name and (email or phone):
+            lookup_clauses.append(
+                "LOWER(COALESCE(name, '')) = %s"
+            )
+            params.append(name.lower())
+
+        cur.execute(
+            f"""
+                SELECT id, candidate_id, source, email, phone, name, headline, location,
+                       profile_url, resume_text, resume_match_percentage, data
+                FROM sourced_candidates
+                WHERE jobdiva_id = %s
+                  AND ({' OR '.join(lookup_clauses)})
+                ORDER BY
+                    CASE
+                        WHEN candidate_id = %s THEN 0
+                        WHEN data->>'jobdiva_candidate_id' = %s THEN 1
+                        WHEN LOWER(COALESCE(email, '')) = %s AND %s <> '' THEN 2
+                        WHEN regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = %s AND %s <> '' THEN 3
+                        ELSE 4
+                    END,
+                    CASE WHEN LOWER(COALESCE(source, '')) LIKE '%%applicants%%' THEN 1 ELSE 0 END,
+                    created_at DESC
+                LIMIT 1
+            """,
+            [
+                target_job_id,
+                *params,
+                candidate_id,
+                candidate_id,
+                email,
+                email,
+                phone,
+                phone,
+            ],
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return row if isinstance(row, dict) else None
+
+    def _build_candidate_payload(
+        self,
+        cand: Dict[str, Any],
+        candidate_id: str,
+        existing_data: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        existing_data = existing_data if isinstance(existing_data, dict) else {}
+        payload = dict(existing_data)
+        payload.update({
+            "skills": cand.get("skills") or existing_data.get("skills") or [],
+            "experience_years": cand.get("experience_years") or existing_data.get("experience_years") or 0,
+            "education": cand.get("enhanced_info", {}).get("candidate_education") or existing_data.get("education") or [],
+            "certifications": cand.get("enhanced_info", {}).get("candidate_certification") or existing_data.get("certifications") or [],
+            "company_experience": cand.get("enhanced_info", {}).get("company_experience") or existing_data.get("company_experience") or [],
+            "urls": cand.get("enhanced_info", {}).get("urls") or existing_data.get("urls") or {},
+            "is_selected": True,
+            "match_score": cand.get("match_score") if cand.get("match_score") is not None else existing_data.get("match_score", 0),
+            "missing_skills": cand.get("missing_skills") or existing_data.get("missing_skills") or [],
+            "matched_skills": cand.get("matched_skills") or existing_data.get("matched_skills") or [],
+            "explainability": cand.get("explainability") or existing_data.get("explainability") or "",
+            "match_score_details": cand.get("match_score_details") or existing_data.get("match_score_details") or {},
+            "enhanced_info": cand.get("enhanced_info") or existing_data.get("enhanced_info"),
+            "auto_assigned": True,
+        })
+        if candidate_id:
+            payload["jobdiva_candidate_id"] = candidate_id
+        return payload
 
     async def _count_external_curate_submittals(self, numeric_job_id) -> int:
         """
@@ -138,7 +258,7 @@ class AutoAssignService:
         """
         try:
             with self._get_db_connection() as conn:
-                with conn.cursor() as cur:
+                with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     # Count where feedback_type is set and feedback_reason is not null/empty
                     cur.execute(
                         """
@@ -299,16 +419,26 @@ class AutoAssignService:
                 bypass_screening=True,
             )
 
-            # 3. Fetch existing candidates to avoid redundant inserts
+            # 3. Fetch existing candidates to avoid redundant inserts and allow
+            # applicant sync to enrich the existing sourced row instead of
+            # creating a second human-visible candidate entry.
             existing_ids = set()
             try:
                 with self._get_db_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
-                            "SELECT candidate_id FROM sourced_candidates WHERE jobdiva_id = %s",
+                            """
+                            SELECT candidate_id, data->>'jobdiva_candidate_id'
+                            FROM sourced_candidates
+                            WHERE jobdiva_id = %s
+                            """,
                             (target_job_id,)
                         )
-                        existing_ids = {str(row[0]) for row in cur.fetchall()}
+                        for row in cur.fetchall():
+                            if row[0]:
+                                existing_ids.add(str(row[0]))
+                            if len(row) > 1 and row[1]:
+                                existing_ids.add(str(row[1]))
             except Exception as e:
                 logger.warning(f"[AutoAssignService] Could not fetch existing candidates for {job_id}: {e}")
 
@@ -325,64 +455,87 @@ class AutoAssignService:
                         cand = event["data"]
                         try:
                             candidate_id = str(cand.get("candidate_id") or cand.get("id") or "")
-
-                            # Skip if already exists to reduce DB write volume
-                            if candidate_id in existing_ids:
-                                continue
-
-                            candidate_data_json = json.dumps({
-                                "skills": cand.get("skills") or [],
-                                "experience_years": cand.get("experience_years") or 0,
-                                "education": cand.get("enhanced_info", {}).get("candidate_education") or [],
-                                "certifications": cand.get("enhanced_info", {}).get("candidate_certification") or [],
-                                "company_experience": cand.get("enhanced_info", {}).get("company_experience") or [],
-                                "urls": cand.get("enhanced_info", {}).get("urls") or {},
-                                "is_selected": True,
-                                "match_score": cand.get("match_score") or 0,
-                                "missing_skills": cand.get("missing_skills") or [],
-                                "matched_skills": cand.get("matched_skills") or [],
-                                "explainability": cand.get("explainability") or "",
-                                "match_score_details": cand.get("match_score_details") or {},
-                                "enhanced_info": cand.get("enhanced_info"),
-                                "auto_assigned": True,
-                            })
-
-                            cur.execute("""
-                                INSERT INTO sourced_candidates (
-                                    jobdiva_id, candidate_id, source, name, email, phone,
-                                    headline, location, resume_text, data, status,
-                                    resume_match_percentage, updated_at
-                                ) VALUES (
-                                    %s, %s, %s, %s, %s, %s,
-                                    %s, %s, %s, %s, %s,
-                                    %s, CURRENT_TIMESTAMP
+                            existing_row = self._find_existing_candidate_row(cur, target_job_id, cand, candidate_id)
+                            if existing_row:
+                                existing_data = existing_row.get("data")
+                                if isinstance(existing_data, str):
+                                    try:
+                                        existing_data = json.loads(existing_data)
+                                    except Exception:
+                                        existing_data = {}
+                                merged_data = self._build_candidate_payload(cand, candidate_id, existing_data)
+                                cur.execute(
+                                    """
+                                    UPDATE sourced_candidates
+                                    SET
+                                        email = COALESCE(NULLIF(email, ''), %s),
+                                        phone = COALESCE(NULLIF(phone, ''), %s),
+                                        headline = COALESCE(NULLIF(headline, ''), %s),
+                                        location = COALESCE(NULLIF(location, ''), %s),
+                                        profile_url = COALESCE(NULLIF(profile_url, ''), %s),
+                                        resume_text = COALESCE(NULLIF(resume_text, ''), %s),
+                                        data = %s,
+                                        updated_at = CURRENT_TIMESTAMP
+                                    WHERE id = %s
+                                    """,
+                                    (
+                                        cand.get("email"),
+                                        cand.get("phone"),
+                                        cand.get("headline") or cand.get("title"),
+                                        cand.get("location"),
+                                        cand.get("profile_url"),
+                                        cand.get("resume_text"),
+                                        json.dumps(merged_data),
+                                        existing_row["id"],
+                                    ),
                                 )
-                                ON CONFLICT (jobdiva_id, candidate_id, source) DO UPDATE SET
-                                    name       = EXCLUDED.name,
-                                    email      = EXCLUDED.email,
-                                    phone      = EXCLUDED.phone,
-                                    headline   = EXCLUDED.headline,
-                                    location   = EXCLUDED.location,
-                                    resume_text= EXCLUDED.resume_text,
-                                    data       = EXCLUDED.data,
-                                    status     = EXCLUDED.status,
-                                    resume_match_percentage= EXCLUDED.resume_match_percentage,
-                                    updated_at = CURRENT_TIMESTAMP
-                            """, (
-                                target_job_id,
-                                candidate_id,
-                                cand.get("source", "JobDiva-Applicants"),
-                                cand.get("name") or "",
-                                cand.get("email"),
-                                cand.get("phone"),
-                                cand.get("headline") or cand.get("title"),
-                                cand.get("location"),
-                                cand.get("resume_text"),
-                                candidate_data_json,
-                                "sourced",
-                                cand.get("match_score") or 0,
-                             ))
-                            total_assigned += 1
+                                existing_ids.add(candidate_id)
+                            else:
+                                if candidate_id in existing_ids:
+                                    continue
+
+                                candidate_data_json = json.dumps(
+                                    self._build_candidate_payload(cand, candidate_id)
+                                )
+
+                                cur.execute("""
+                                    INSERT INTO sourced_candidates (
+                                        jobdiva_id, candidate_id, source, name, email, phone,
+                                        headline, location, profile_url, resume_text, data, status,
+                                        resume_match_percentage, updated_at
+                                    ) VALUES (
+                                        %s, %s, %s, %s, %s, %s,
+                                        %s, %s, %s, %s, %s, %s,
+                                        %s, CURRENT_TIMESTAMP
+                                    )
+                                    ON CONFLICT (jobdiva_id, candidate_id, source) DO UPDATE SET
+                                        name       = EXCLUDED.name,
+                                        email      = EXCLUDED.email,
+                                        phone      = EXCLUDED.phone,
+                                        headline   = EXCLUDED.headline,
+                                        location   = EXCLUDED.location,
+                                        profile_url= EXCLUDED.profile_url,
+                                        resume_text= EXCLUDED.resume_text,
+                                        data       = EXCLUDED.data,
+                                        status     = EXCLUDED.status,
+                                        resume_match_percentage= EXCLUDED.resume_match_percentage,
+                                        updated_at = CURRENT_TIMESTAMP
+                                """, (
+                                    target_job_id,
+                                    candidate_id,
+                                    cand.get("source", "JobDiva-Applicants"),
+                                    cand.get("name") or "",
+                                    cand.get("email"),
+                                    cand.get("phone"),
+                                    cand.get("headline") or cand.get("title"),
+                                    cand.get("location"),
+                                    cand.get("profile_url"),
+                                    cand.get("resume_text"),
+                                    candidate_data_json,
+                                    "sourced",
+                                    cand.get("match_score") or 0,
+                                 ))
+                                total_assigned += 1
 
                             # Populate normalized tables
                             try:

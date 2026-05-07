@@ -1188,26 +1188,80 @@ export default function CandidateRankingsPage() {
         });
         setFeedbacks(initialFeedbacks);
 
-        // Deduplicate candidates by their JobDiva candidate ID.
-        // We keep the first occurrence since they are sorted by created_at DESC from the backend.
-        const seen = new Set();
-        const uniqueCandidates = candData.candidates.filter((c: any) => {
-          const candidateIdKey = String(c.candidate_id || "").trim();
-          const emailKey = String(c.email || "").trim().toLowerCase();
+        // Deduplicate humans, not source-specific rows. Once Launchpad maps a
+        // sourced candidate into JobDiva we want one rankings row carrying the
+        // JobDiva identity, not a second "applicant" row.
+        const getCanonicalCandidateKey = (c: any) => {
+          const jobDivaCandidateId = String(
+            c.jobdiva_candidate_id || c.data?.jobdiva_candidate_id || ""
+          ).trim();
+          const emailKey = String(c.email || c.data?.email || "").trim().toLowerCase();
+          const phoneKey = String(c.phone || c.data?.phone || "").replace(/\D/g, "");
+          const profileKey = String(c.profile_url || c.data?.urls?.linkedin || "").trim().toLowerCase();
+          const sourceCandidateId = String(c.candidate_id || "").trim();
           const nameKey = String(c.name || "").trim().toLowerCase();
-          const dedupKey =
-            candidateIdKey
-              ? `cid:${candidateIdKey}`
-              : emailKey
-                ? `email:${emailKey}`
-                : nameKey
-                  ? `name:${nameKey}`
-                  : `row:${String(c.id || "").trim()}`;
-          if (!dedupKey) return true;
-          if (seen.has(dedupKey)) return false;
-          seen.add(dedupKey);
-          return true;
+
+          if (jobDivaCandidateId) return `jd:${jobDivaCandidateId}`;
+          if (emailKey) return `email:${emailKey}`;
+          if (phoneKey && nameKey) return `phone-name:${phoneKey}:${nameKey}`;
+          if (profileKey) return `profile:${profileKey}`;
+          if (sourceCandidateId) return `cid:${sourceCandidateId}`;
+          if (nameKey) return `name:${nameKey}`;
+          return `row:${String(c.id || "").trim()}`;
+        };
+
+        const getCandidateRank = (c: any) => {
+          const hasJobDivaCandidateId = Boolean(
+            String(c.jobdiva_candidate_id || c.data?.jobdiva_candidate_id || "").trim()
+          );
+          const source = String(c.source || "").toLowerCase();
+          const sourcePriority =
+            source.includes("linkedin") ? 0 :
+            source.includes("talentsearch") || source.includes("talent_search") ? 1 :
+            source.includes("applicants") ? 2 : 3;
+          const matchScore = Number(c.match_score || c.resume_match_percentage || c.data?.match_score || 0);
+          return {
+            hasJobDivaCandidateId,
+            sourcePriority,
+            matchScore,
+            createdAt: Date.parse(String(c.created_at || 0)) || 0,
+          };
+        };
+
+        const dedupedByIdentity = new Map<string, any>();
+        candData.candidates.forEach((candidate: any) => {
+          const dedupKey = getCanonicalCandidateKey(candidate);
+          const existing = dedupedByIdentity.get(dedupKey);
+          if (!existing) {
+            dedupedByIdentity.set(dedupKey, candidate);
+            return;
+          }
+
+          const currentRank = getCandidateRank(candidate);
+          const existingRank = getCandidateRank(existing);
+          const shouldReplace =
+            (currentRank.hasJobDivaCandidateId ? 1 : 0) > (existingRank.hasJobDivaCandidateId ? 1 : 0) ||
+            (
+              currentRank.hasJobDivaCandidateId === existingRank.hasJobDivaCandidateId &&
+              currentRank.sourcePriority < existingRank.sourcePriority
+            ) ||
+            (
+              currentRank.hasJobDivaCandidateId === existingRank.hasJobDivaCandidateId &&
+              currentRank.sourcePriority === existingRank.sourcePriority &&
+              currentRank.matchScore > existingRank.matchScore
+            ) ||
+            (
+              currentRank.hasJobDivaCandidateId === existingRank.hasJobDivaCandidateId &&
+              currentRank.sourcePriority === existingRank.sourcePriority &&
+              currentRank.matchScore === existingRank.matchScore &&
+              currentRank.createdAt > existingRank.createdAt
+            );
+
+          if (shouldReplace) {
+            dedupedByIdentity.set(dedupKey, candidate);
+          }
         });
+        const uniqueCandidates = Array.from(dedupedByIdentity.values());
 
         const getSourcePriority = (source: string) => {
           const s = (source || "").toLowerCase();
