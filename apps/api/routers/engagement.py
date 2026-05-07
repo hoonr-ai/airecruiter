@@ -22,7 +22,12 @@ import httpx
 from datetime import datetime, timezone, timedelta
 from routers._helpers import get_db_connection
 
-from core.email import notify_pair_launched, notify_job_posting, notify_candidate_passed
+from core.email import (
+    notify_pair_launched,
+    notify_job_posting,
+    notify_candidate_passed,
+    _build_word_resume_document,
+)
 from services.jobdiva import jobdiva_service
 from services.auto_assign_service import auto_assign_service
 from core import (
@@ -57,6 +62,21 @@ def _parse_json_list(val) -> list:
         except Exception:
             return [e.strip() for e in val.split(",") if e.strip()]
     return []
+
+
+def _format_normalized_score_100(score: Any, total: Any) -> Optional[str]:
+    """Format raw score/total as the same normalized 100-point score used in the report."""
+    if score is None or total in (None, 0, 0.0, "0", ""):
+        return None
+
+    try:
+        normalized_score = (float(score) / float(total)) * 100.0
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+    if normalized_score.is_integer():
+        return f"{int(normalized_score)}/100"
+    return f"{round(normalized_score, 1):.1f}/100"
 
 # ---------------------------------------------------------------------------
 # Auto-Migration: Ensure audit table exists
@@ -1022,18 +1042,21 @@ async def _check_and_fire_candidate_passed_notification(
         # Pass logic: Must have 'passed' status AND (if scores provided) score >= 70% of total
         meets_criteria = (hf_status == HARD_FILTER_PASS_STATUS)
         
+        normalized_score_display = "Passed"
         if meets_criteria and cand_score is not None and total_possible:
-            # Check ratio (e.g. 35/40 = 0.875 >= 0.7)
+            # Check ratio (e.g. 35/40 = 0.875 >= 0.7) and normalize for email display.
             ratio = float(cand_score) / float(total_possible)
             if ratio < PASS_CANDIDATE_SCORE_RATIO:
                 logger.info(f"⏭️ Candidate {candidate_id} passed hard filters but score ratio {ratio:.2f} is below threshold {PASS_CANDIDATE_SCORE_RATIO}")
                 meets_criteria = False
+            else:
+                normalized_score_display = _format_normalized_score_100(cand_score, total_possible) or "Passed"
         
         if not meets_criteria:
             logger.info(f"⏭️ Candidate {candidate_id} did not meet strict pass criteria (HF: {hf_status}, Score: {cand_score}/{total_possible}).")
             return
 
-        score_display = f"{cand_score}/{total_possible}" if cand_score is not None else "Passed"
+        score_display = normalized_score_display if cand_score is not None else "Passed"
 
         # 5. Fetch Job & Candidate metadata for email
         conn = _get_db_connection()
@@ -1106,22 +1129,50 @@ async def _check_and_fire_candidate_passed_notification(
                     "value": ev.get("answer", ev.get("status", "—"))
                 })
 
-        # 6. Prepare attachment (resume text as .txt fallback)
-        resume_bytes = None
-        resume_filename = None
-        resume_text = cand_row.get("resume_text")
-        if resume_text:
-            resume_bytes = resume_text.encode("utf-8")
-            # Try to get name from candidate
-            safe_name = "".join(c for c in (cand_row["name"] or "Candidate") if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
-            resume_filename = f"Resume_{safe_name}_{job_id}.txt"
-
         # Resolve Numeric Candidate ID for JobDiva API calls
         jd_candidate_id = candidate_id
         if cand_data and (cand_data.get("jobdiva_candidate_id") or cand_data.get("candidate_id")):
             potential_id = cand_data.get("jobdiva_candidate_id") or cand_data.get("candidate_id")
             if str(potential_id).isdigit():
                 jd_candidate_id = str(potential_id)
+
+        # 6. Prepare attachment (resume text as Word-compatible .doc fallback)
+        resume_bytes = None
+        resume_filename = None
+        resume_text = ""
+
+        # Reuse the same quality gate as the View Resume endpoint:
+        # attach only real JobDiva resume text, skip placeholder/generated text.
+        blocked_resume_markers = (
+            "Professional experience details available upon request",
+            "Experienced professional with a strong background",
+            "Contact information and detailed work history available upon request",
+            "Resume content unavailable",
+        )
+
+        # Only use JobDiva full resume text for attachment; no local fallback.
+        if str(jd_candidate_id).isdigit():
+            try:
+                jd_resume = await jobdiva_service.get_candidate_resume(candidate_id=str(jd_candidate_id))
+                if isinstance(jd_resume, dict):
+                    fetched = jd_resume.get("resume_text") or ""
+                    if fetched and not any(marker in fetched for marker in blocked_resume_markers):
+                        resume_text = fetched
+            except Exception as resume_err:
+                logger.warning(
+                    "Failed to fetch JobDiva resume for candidate %s: %s",
+                    jd_candidate_id,
+                    resume_err,
+                )
+
+        if any(marker in (resume_text or "") for marker in blocked_resume_markers):
+            resume_text = ""
+
+        if (resume_text or "").strip():
+            resume_bytes = _build_word_resume_document(cand_row["name"] or "Candidate", resume_text)
+            # Try to get name from candidate
+            safe_name = "".join(c for c in (cand_row["name"] or "Candidate") if c.isalnum() or c in (" ", "-", "_")).strip().replace(" ", "_")
+            resume_filename = f"Resume_{safe_name}_{job_id}.doc"
         
         # 7. Fire the email & Update JobDiva Qualification
         recruiter_emails = _parse_json_list(job_row.get("recruiter_emails", []))
