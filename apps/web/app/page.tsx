@@ -70,6 +70,12 @@ export default function DashboardPage() {
   const [jobToUnarchive, setJobToUnarchive] = useState<Job | null>(null);
   const [isUnarchiving, setIsUnarchiving] = useState(false);
 
+  // Stop Job Activity dialog state — one-way action that flips an Active
+  // job to Inactive and blocks new candidate launches.
+  const [stopDialogOpen, setStopDialogOpen] = useState(false);
+  const [jobToStop, setJobToStop] = useState<Job | null>(null);
+  const [isStopping, setIsStopping] = useState(false);
+
   // Tab state
   const [activeTab, setActiveTab] = useState<"active" | "archived">("active");
 
@@ -443,23 +449,46 @@ export default function DashboardPage() {
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="rounded-xl border-slate-200 font-medium text-[13px] shadow-lg">
-                        {job.pairStatus === 'Unpublished' ? (
-                          <DropdownMenuItem className="cursor-pointer bg-primary/5 text-primary font-bold">
+                        {/* Per-status primary actions. The wizard at /jobs/new
+                            handles all three modes (edit / source / view) via
+                            ?mode and ?step query params. */}
+                        {activeTab !== "archived" && job.pairStatus === 'Unpublished' && (
+                          <DropdownMenuItem asChild className="cursor-pointer bg-primary/5 text-primary font-bold">
                             <Link prefetch={false} href={`/jobs/new?jobId=${job.jobdiva_id || job.id}`} className="w-full">
-                              Resume Setup
-                            </Link>
-                          </DropdownMenuItem>
-                        ) : (
-                          <DropdownMenuItem className="cursor-pointer">
-                            <Link prefetch={false} href={`/jobs/${job.jobdiva_id || job.id}`} className="w-full">
-                              View Details
+                              Resume Job Setup
                             </Link>
                           </DropdownMenuItem>
                         )}
-                        {activeTab !== "archived" && (
-                          <DropdownMenuItem className="cursor-pointer" asChild>
-                            <Link prefetch={false} href={`/jobs/${job.jobdiva_id || job.id}`} className="w-full">
-                              Edit Job
+                        {activeTab !== "archived" && job.pairStatus === 'Active' && (
+                          <>
+                            <DropdownMenuItem asChild className="cursor-pointer bg-primary/5 text-primary font-bold">
+                              <Link prefetch={false} href={`/jobs/new?jobId=${job.jobdiva_id || job.id}&mode=source&step=5`} className="w-full">
+                                Source Candidates
+                              </Link>
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              disabled
+                              className="cursor-not-allowed text-slate-400"
+                              title="Coming soon"
+                              onSelect={(e) => e.preventDefault()}
+                            >
+                              Edit Job Setup
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              className="text-amber-600 focus:text-amber-700 cursor-pointer"
+                              onClick={() => {
+                                setJobToStop(job);
+                                setStopDialogOpen(true);
+                              }}
+                            >
+                              Stop Job Activity
+                            </DropdownMenuItem>
+                          </>
+                        )}
+                        {activeTab !== "archived" && job.pairStatus === 'Inactive' && (
+                          <DropdownMenuItem asChild className="cursor-pointer">
+                            <Link prefetch={false} href={`/jobs/new?jobId=${job.jobdiva_id || job.id}&mode=view`} className="w-full">
+                              View Job Setup
                             </Link>
                           </DropdownMenuItem>
                         )}
@@ -618,6 +647,77 @@ export default function DashboardPage() {
               disabled={isArchiving}
             >
               {isArchiving ? "Archiving..." : "Archive Job"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Stop Job Activity Confirmation Dialog */}
+      <Dialog open={stopDialogOpen} onOpenChange={setStopDialogOpen}>
+        <DialogContent className="sm:max-w-[460px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-amber-600">
+              <AlertTriangle className="h-5 w-5" />
+              Stop Job Activity
+            </DialogTitle>
+            <DialogDescription>
+              This will stop new outreach to candidates for this job. The job will move to Inactive status. <strong>This cannot be undone.</strong>
+            </DialogDescription>
+          </DialogHeader>
+          {jobToStop && (
+            <div className="py-4">
+              <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
+                <p className="font-semibold text-slate-900">{jobToStop.title}</p>
+                <p className="text-sm text-slate-500">ID: {jobToStop.jobdiva_id || jobToStop.id}</p>
+                <p className="text-sm text-slate-500">Customer: {jobToStop.customer_name}</p>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setStopDialogOpen(false);
+                setJobToStop(null);
+              }}
+              disabled={isStopping}
+            >
+              Cancel
+            </Button>
+            <Button
+              className="bg-amber-600 hover:bg-amber-700 text-white"
+              onClick={async () => {
+                if (!jobToStop) return;
+                setIsStopping(true);
+                try {
+                  const response = await fetch(
+                    `${API_BASE}/jobs/${jobToStop.jobdiva_id || jobToStop.id}/stop-activity`,
+                    {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                    }
+                  );
+                  if (response.ok) {
+                    setToast({ message: "Job activity stopped", type: "success" });
+                    setAllJobs(prev => prev.map(j => j.id === jobToStop.id ? { ...j, pairStatus: 'Inactive' } : j));
+                    setFilteredJobs(prev => prev.map(j => j.id === jobToStop.id ? { ...j, pairStatus: 'Inactive' } : j));
+                  } else {
+                    const errorData = await response.json().catch(() => ({ detail: "Unknown error" }));
+                    console.error("Stop activity error:", errorData);
+                    setToast({ message: errorData.detail || "Failed to stop job activity", type: "error" });
+                  }
+                } catch (error) {
+                  console.error("Stop activity exception:", error);
+                  setToast({ message: "Failed to stop job activity", type: "error" });
+                } finally {
+                  setIsStopping(false);
+                  setStopDialogOpen(false);
+                  setJobToStop(null);
+                }
+              }}
+              disabled={isStopping}
+            >
+              {isStopping ? "Stopping..." : "Stop Activity"}
             </Button>
           </DialogFooter>
         </DialogContent>
