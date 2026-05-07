@@ -881,6 +881,8 @@ async def get_job_candidates(job_id_or_ref: str):
             # Promote engage values from JSONB blob to top-level response fields.
             # These are persisted by engagement sync endpoints in sourced_candidates.data.
             if isinstance(data_blob, dict):
+                if data_blob.get("jobdiva_candidate_id"):
+                    cand["jobdiva_candidate_id"] = str(data_blob.get("jobdiva_candidate_id"))
                 if data_blob.get("engage_status"):
                     cand["engage_status"] = data_blob.get("engage_status")
                 if data_blob.get("engage_interview_id"):
