@@ -222,6 +222,13 @@ interface Candidate {
   engage_total_score?: number;
   engage_status?: string;
   engage_hard_filter_status?: string;
+  engage_hard_filter_details?: {
+    question: string;
+    status: "Pass" | "Fail" | "Pending";
+    score?: number | null;
+    total_score?: number | null;
+    reason?: string;
+  }[];
   engage_completed_at?: string;
   engage_created_at?: string;
   availability?: string;
@@ -231,6 +238,61 @@ interface Candidate {
 
 type EnrichStatus = { type: "info" | "error" | "success"; message: string };
 type ToastState = { type: "info" | "error" | "success"; message: string } | null;
+
+function HardFilterHoverCard({
+  details,
+}: {
+  details?: Candidate["engage_hard_filter_details"];
+}) {
+  if (!details || details.length === 0) return null;
+
+  return (
+    <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 hidden w-[380px] -translate-x-1/2 rounded-xl border border-slate-200 bg-white p-3 text-left shadow-2xl group-hover:block">
+      <div className="mb-2 border-b border-slate-100 pb-2">
+        <span className="text-[11px] font-bold uppercase tracking-widest text-slate-500">
+          Hard Filter Results
+        </span>
+      </div>
+      <div className="space-y-2">
+        {details.map((item, index) => (
+          <div key={`${item.question}-${index}`} className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
+            <div className="mb-1 flex items-start justify-between gap-3">
+              <div className="text-[12px] font-semibold leading-snug text-slate-800">
+                {item.question}
+              </div>
+              <span
+                className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
+                  item.status === "Pass"
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                    : item.status === "Fail"
+                      ? "border-rose-200 bg-rose-50 text-rose-700"
+                      : "border-amber-200 bg-amber-50 text-amber-700"
+                }`}
+              >
+                {item.status}
+              </span>
+            </div>
+            <div className="flex items-center justify-between gap-3 text-[11px] text-slate-500">
+              <span>
+                Score:{" "}
+                <strong className="text-slate-700">
+                  {item.score !== undefined && item.score !== null
+                    ? `${item.score}/${item.total_score ?? 10}`
+                    : "—"}
+                </strong>
+              </span>
+              {item.reason ? (
+                <span className="max-w-[190px] truncate text-right" title={item.reason}>
+                  {item.reason}
+                </span>
+              ) : null}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function CandidateRankingsPage() {
   const { jobId } = useParams();
@@ -1789,13 +1851,15 @@ export default function CandidateRankingsPage() {
                           {(() => {
                             const eScore = candidate.engage_score;
                             const eTotal = candidate.engage_total_score || 100;
+                            const hardFilterDetails = candidate.engage_hard_filter_details || [];
 
                             if (eScore !== undefined && eScore !== null) {
                               return (
-                                <div className="flex items-center justify-center w-full">
-                                  <span className="font-bold text-slate-900 text-[14px]">
+                                <div className="group relative flex items-center justify-center w-full">
+                                  <span className="font-bold text-slate-900 text-[14px] underline decoration-dotted underline-offset-4">
                                     {eScore}/{eTotal}
                                   </span>
+                                  <HardFilterHoverCard details={hardFilterDetails} />
                                 </div>
                               );
                             }
