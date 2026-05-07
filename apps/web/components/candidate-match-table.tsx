@@ -43,6 +43,10 @@ interface Props {
   sortKey: CandidateMatchSortKey;
   sortDir: "asc" | "desc";
   onSortChange: (key: CandidateMatchSortKey, dir: "asc" | "desc") => void;
+  // Set of "${source}:${candidate_id}" keys for candidates already launched
+  // on this job. Rows matching are rendered disabled with a badge so the
+  // recruiter can't re-launch them.
+  disabledLaunchedKeys?: Set<string>;
 }
 
 const POPOVER_WIDTH = 420;
@@ -202,6 +206,7 @@ export function CandidateMatchTable({
   sortKey,
   sortDir,
   onSortChange,
+  disabledLaunchedKeys,
 }: Props) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [hoverPos, setHoverPos] = useState<{ top: number; left: number; placement: "below" | "above" } | null>(null);
@@ -320,6 +325,8 @@ export function CandidateMatchTable({
               const receivedShort = formatReceivedShort(receivedDate);
               const sourceBadge = getSourceBadge(candidate.source);
               const checked = selectedIds.has(id);
+              const launchedKey = `${candidate.source ?? ''}:${id}`;
+              const isAlreadyLaunched = !!disabledLaunchedKeys?.has(launchedKey);
 
               return (
                 <TableRow
@@ -328,7 +335,11 @@ export function CandidateMatchTable({
                     if (el) rowRefs.current.set(id, el);
                     else rowRefs.current.delete(id);
                   }}
-                  className="cursor-default hover:bg-indigo-50/30 transition-colors"
+                  className={`cursor-default transition-colors ${
+                    isAlreadyLaunched
+                      ? "bg-slate-50 opacity-60"
+                      : "hover:bg-indigo-50/30"
+                  }`}
                   onMouseEnter={(e) => {
                     setHoveredId(id);
                     computePosition(e.currentTarget as HTMLTableRowElement);
@@ -341,7 +352,12 @@ export function CandidateMatchTable({
                     <Checkbox
                       className="w-4 h-4 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600"
                       checked={checked}
-                      onCheckedChange={(v) => onToggleSelect(id, !!v)}
+                      disabled={isAlreadyLaunched}
+                      onCheckedChange={(v) => {
+                        if (isAlreadyLaunched) return;
+                        onToggleSelect(id, !!v);
+                      }}
+                      title={isAlreadyLaunched ? "Already launched on this job" : undefined}
                     />
                   </TableCell>
                   <TableCell className="max-w-[280px]">
@@ -426,13 +442,23 @@ export function CandidateMatchTable({
                     )}
                   </TableCell>
                   <TableCell className="pr-4">
-                    <span
-                      className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center gap-1 border ${sourceBadge.colors}`}
-                      title={candidate.source || ""}
-                    >
-                      <sourceBadge.Icon className="w-2.5 h-2.5" />
-                      {sourceBadge.label}
-                    </span>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span
+                        className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center gap-1 border ${sourceBadge.colors}`}
+                        title={candidate.source || ""}
+                      >
+                        <sourceBadge.Icon className="w-2.5 h-2.5" />
+                        {sourceBadge.label}
+                      </span>
+                      {isAlreadyLaunched && (
+                        <span
+                          className="px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center border bg-amber-50 text-amber-700 border-amber-200"
+                          title="This candidate was already launched on this job"
+                        >
+                          Already Launched
+                        </span>
+                      )}
+                    </div>
                   </TableCell>
                 </TableRow>
               );

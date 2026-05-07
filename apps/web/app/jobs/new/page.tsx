@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useEffectEvent, useMemo, useRef, Suspense } from "react";
+import { useState, useEffect, useEffectEvent, useMemo, useRef, Suspense, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -314,6 +314,8 @@ export default function NewJobPage() {
   );
 }
 
+type WizardMode = 'edit' | 'source' | 'view';
+
 function NewJobPageContent() {
   const router = useRouter();
   const engagement = useEngagementFlow();
@@ -324,6 +326,15 @@ function NewJobPageContent() {
   // current-1 and current+1. Without this, stepping backward from step 4 to
   // step 1 forced the user to click Next three more times to return.
   const [maxStepReached, setMaxStepReached] = useState<Step>(1);
+  // Mode controls whether Steps 1-4 are editable. 'edit' (default) for
+  // Unpublished resume; 'source' for Active jobs sourcing another batch
+  // (Steps 1-4 read-only, Step 5 actionable); 'view' for Inactive jobs
+  // (everything read-only, Launch PAIR disabled).
+  const [wizardMode, setWizardMode] = useState<WizardMode>('edit');
+  const isReadOnly = wizardMode !== 'edit';
+  const isViewOnly = wizardMode === 'view';
+  // Already-launched candidate keys for Step 5 (only fetched in source/view modes).
+  const [launchedCandidateKeys, setLaunchedCandidateKeys] = useState<Set<string>>(new Set());
   const setCurrentStep = (next: Step | ((prev: Step) => Step)) => {
     setCurrentStepState(prev => {
       const resolved = typeof next === "function" ? (next as (p: Step) => Step)(prev) : next;
@@ -1031,6 +1042,22 @@ function NewJobPageContent() {
 
   useEffect(() => {
     const jobIdFromUrl = searchParams.get("jobId");
+    const modeParam = searchParams.get("mode");
+    const stepParam = searchParams.get("step");
+
+    if (modeParam === 'source') {
+      setWizardMode('source');
+    } else if (modeParam === 'view') {
+      setWizardMode('view');
+    }
+
+    if (stepParam) {
+      const parsed = parseInt(stepParam, 10);
+      if (!Number.isNaN(parsed) && parsed >= 1 && parsed <= 5) {
+        setCurrentStep(parsed as Step);
+      }
+    }
+
     if (jobIdFromUrl) {
       if (jobIdFromUrl.includes("-")) {
         setJobdivaId(jobIdFromUrl);
@@ -1045,6 +1072,34 @@ function NewJobPageContent() {
   useEffect(() => {
     setHasSeededSourceLocation(false);
   }, [numericJobId, jobdivaId]);
+
+  // In source/view mode, pull the (candidate_id, source) keys for everyone
+  // already launched so Step 5 can disable those rows.
+  useEffect(() => {
+    if (wizardMode === 'edit') return;
+    const ref = jobdivaId || numericJobId;
+    if (!ref) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/jobs/${ref}/launched-candidate-keys`);
+        if (!res.ok) return;
+        const json = await res.json();
+        if (cancelled) return;
+        const keys = new Set<string>();
+        for (const item of json?.launched ?? []) {
+          if (item?.candidate_id) {
+            keys.add(`${item.source ?? ''}:${item.candidate_id}`);
+          }
+        }
+        setLaunchedCandidateKeys(keys);
+      } catch (err) {
+        console.warn('Failed to load launched candidate keys', err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [wizardMode, jobdivaId, numericJobId]);
 
   useEffect(() => {
     trackStepStart(currentStep);
@@ -1749,6 +1804,13 @@ function NewJobPageContent() {
     saveType?: string,
     skipToast?: boolean
   }) => {
+    if (isReadOnly) {
+      // Source / view mode: Steps 1-4 are read-only, so skip the draft save
+      // entirely. Falsely returning true keeps the Next button flow intact
+      // (it gates step transitions on save success) without mutating the
+      // saved job.
+      return true;
+    }
     if (!jobData || (!numericJobId && !jobdivaId)) {
       showToast("Job data not available for saving.", "info");
       return false;
@@ -5428,7 +5490,9 @@ function NewJobPageContent() {
             await engagement.sendBulkInterview({
               payload: engageData.payload,
               realCandidateIds: selectedIds,
-              isInitialLaunch: true,
+              // Source mode = re-launch on an Active job; backend gates the
+              // job-posting team email + applicant sync on this flag.
+              isInitialLaunch: wizardMode !== 'source',
               dryRun: true, // Disables phone calls but keeps recruiter notification emails
             });
           }
@@ -6571,11 +6635,12 @@ function NewJobPageContent() {
                       variant="outline"
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50"
                       onClick={() => {
-                        const first150 = candidates.slice(0, 150);
-                        const first150Ids = new Set(first150.map(c => c.candidate_id || c.id));
+                        const first150 = candidates
+                          .filter(c => !launchedCandidateKeys.has(`${c.source ?? ''}:${c.candidate_id || c.id}`))
+                          .slice(0, 150);
 
                         // Check if all first 150 are already selected
-                        const allFirst150Selected = first150.every(c => selectedCandidates.has(c.candidate_id || c.id));
+                        const allFirst150Selected = first150.length > 0 && first150.every(c => selectedCandidates.has(c.candidate_id || c.id));
 
                         if (allFirst150Selected) {
                           // Deselect all first 150
@@ -6602,8 +6667,10 @@ function NewJobPageContent() {
                     >
                       <Star className="w-3.5 h-3.5 fill-slate-700" />
                       {(() => {
-                        const first150 = candidates.slice(0, 150);
-                        const allFirst150Selected = first150.every(c => selectedCandidates.has(c.candidate_id || c.id));
+                        const first150 = candidates
+                          .filter(c => !launchedCandidateKeys.has(`${c.source ?? ''}:${c.candidate_id || c.id}`))
+                          .slice(0, 150);
+                        const allFirst150Selected = first150.length > 0 && first150.every(c => selectedCandidates.has(c.candidate_id || c.id));
                         return allFirst150Selected ? 'Deselect Best 150' : 'Select Best 150';
                       })()
                       }
@@ -6612,21 +6679,23 @@ function NewJobPageContent() {
                       variant="outline"
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white"
                       onClick={() => {
-                        const allIds = candidates.map(c => c.candidate_id || c.id);
-                        const allSelected = allIds.every(id => selectedCandidates.has(id));
+                        const eligible = candidates.filter(c => !launchedCandidateKeys.has(`${c.source ?? ''}:${c.candidate_id || c.id}`));
+                        const allIds = eligible.map(c => c.candidate_id || c.id);
+                        const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
 
                         if (allSelected) {
                           // Deselect all
                           setSelectedCandidates(new Set());
                         } else {
-                          // Select all
+                          // Select all (skipping already-launched)
                           setSelectedCandidates(new Set(allIds));
                         }
                       }}
                     >
                       {(() => {
-                        const allIds = candidates.map(c => c.candidate_id || c.id);
-                        const allSelected = allIds.every(id => selectedCandidates.has(id));
+                        const eligible = candidates.filter(c => !launchedCandidateKeys.has(`${c.source ?? ''}:${c.candidate_id || c.id}`));
+                        const allIds = eligible.map(c => c.candidate_id || c.id);
+                        const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
                         return allSelected ? 'Deselect All' : 'Select All';
                       })()
                       }
@@ -6808,6 +6877,7 @@ function NewJobPageContent() {
                     <CandidateMatchTable
                       candidates={paginatedCandidates}
                       selectedIds={selectedCandidates}
+                      disabledLaunchedKeys={launchedCandidateKeys}
                       onToggleSelect={(id, checked) => {
                         setSelectedCandidates((prev) => {
                           const next = new Set(prev);
@@ -6996,9 +7066,10 @@ function NewJobPageContent() {
                 {hasSearched && !isSearching ? `${selectedCandidates.size} candidates selected` : ''}
               </span>
               <Button
-                className="h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98]"
+                className="h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98] disabled:bg-slate-300 disabled:cursor-not-allowed disabled:hover:translate-y-0"
                 onClick={handleLaunchPairClick}
-                disabled={isSearching || isEnrichingContacts}
+                disabled={isSearching || isEnrichingContacts || isViewOnly}
+                title={isViewOnly ? "Job activity has been stopped" : undefined}
               >
                 {isEnrichingContacts ? (
                   <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -7015,14 +7086,28 @@ function NewJobPageContent() {
   );
 
 const renderStepContent = () => {
+  let content: ReactNode = null;
   switch (currentStep) {
-    case 1: return intakeStep;
-    case 2: return publishStep;
-    case 3: return establishRubricStep;
-    case 4: return setFiltersStep;
-    case 5: return sourceStep;
-    default: return null;
+    case 1: content = intakeStep; break;
+    case 2: content = publishStep; break;
+    case 3: content = establishRubricStep; break;
+    case 4: content = setFiltersStep; break;
+    case 5: content = sourceStep; break;
+    default: content = null;
   }
+  // Steps 1-4 lock down to read-only when the wizard is opened in source
+  // (Active job, re-launching) or view (Inactive job) mode. Step 5 stays
+  // interactive in source mode; in view mode the Launch PAIR button itself
+  // is gated so we still wrap the step to also freeze its filters/search.
+  const shouldFreeze = isReadOnly && (currentStep !== 5 || isViewOnly);
+  if (shouldFreeze) {
+    return (
+      <fieldset disabled className="contents">
+        {content}
+      </fieldset>
+    );
+  }
+  return content;
 };
 
 // Full-page loader while we hydrate a saved draft. Prevents the flash-of-

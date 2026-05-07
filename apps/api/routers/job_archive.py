@@ -123,6 +123,83 @@ async def archive_job(job_id: str, request: JobArchiveRequest = None):
         raise HTTPException(status_code=500, detail=f"Failed to archive job: {str(e)}")
 
 
+@router.post("/{job_id}/stop-activity")
+async def stop_job_activity(job_id: str):
+    """
+    One-way action: stops new outreach for an Active job by setting
+    outreach_stopped_at. The HC status flips to Inactive on the next read.
+
+    Blocks future Launch PAIR calls and engagement sends. The external
+    PAIR scheduler (pairbotqa.hoonr.ai) keeps running until candidates
+    respond/timeout — TODO: integrate an external stop API once available.
+    """
+    try:
+        logger.info(f"Stopping activity for job {job_id}")
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT job_id, jobdiva_id, pair_launched_at, outreach_stopped_at FROM monitored_jobs
+            WHERE job_id = %s
+            UNION ALL
+            SELECT job_id, jobdiva_id, pair_launched_at, outreach_stopped_at FROM monitored_jobs
+            WHERE jobdiva_id = %s AND job_id <> %s
+            LIMIT 1
+        """, (job_id, job_id, job_id))
+        row = cursor.fetchone()
+        if not row:
+            cursor.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+        actual_job_id, jobdiva_id, pair_launched_at, outreach_stopped_at = row
+        if pair_launched_at is None:
+            cursor.close()
+            conn.close()
+            raise HTTPException(
+                status_code=409,
+                detail="Cannot stop activity on an unpublished job",
+            )
+        if outreach_stopped_at is not None:
+            cursor.close()
+            conn.close()
+            return {
+                "status": "ALREADY_STOPPED",
+                "job_id": job_id,
+                "stopped_at": outreach_stopped_at.isoformat() if hasattr(outreach_stopped_at, "isoformat") else str(outreach_stopped_at),
+            }
+
+        cursor.execute("""
+            UPDATE monitored_jobs
+            SET outreach_stopped_at = NOW(),
+                updated_at = %s
+            WHERE job_id = %s
+            RETURNING outreach_stopped_at
+        """, (readable_ist_now(), actual_job_id))
+        stopped_row = cursor.fetchone()
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        _invalidate_monitored_jobs_cache()
+
+        stopped_at_value = stopped_row[0] if stopped_row else None
+        logger.info(f"✅ Job {job_id} activity stopped at {stopped_at_value}")
+        return {
+            "status": "SUCCESS",
+            "job_id": job_id,
+            "stopped_at": stopped_at_value.isoformat() if hasattr(stopped_at_value, "isoformat") else str(stopped_at_value),
+            "message": "Job activity stopped",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error stopping activity for job {job_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to stop job activity: {str(e)}")
+
+
 @router.put("/{job_id}/unarchive")
 async def unarchive_job(job_id: str):
     """

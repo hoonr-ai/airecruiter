@@ -893,6 +893,47 @@ async def get_job_candidates(job_id_or_ref: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/jobs/{job_id_or_ref}/launched-candidate-keys")
+async def get_launched_candidate_keys(job_id_or_ref: str):
+    """
+    Lightweight endpoint returning just (candidate_id, source) tuples for
+    every candidate already in sourced_candidates for this job. The Step 5
+    UI uses this to mark already-launched rows as disabled with an
+    "Already Launched" badge, preventing duplicate Launch PAIR clicks.
+    """
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT jobdiva_id, job_id FROM monitored_jobs
+                    WHERE job_id = %s OR jobdiva_id = %s
+                    LIMIT 1
+                """, (job_id_or_ref, job_id_or_ref))
+                row = cur.fetchone()
+                resolved_jobdiva_id = row[0] if row and row[0] else (row[1] if row else job_id_or_ref)
+        finally:
+            conn.close()
+
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT candidate_id, source
+                    FROM sourced_candidates
+                    WHERE jobdiva_id = %s
+                """, (str(resolved_jobdiva_id),))
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+
+        launched = [{"candidate_id": r[0], "source": r[1]} for r in rows]
+        return {"status": "success", "launched": launched}
+    except Exception as e:
+        logger.error(f"Error fetching launched candidate keys for {job_id_or_ref}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 class RefreshResumeMatchRequest(BaseModel):
     source: Optional[str] = None
 
@@ -1051,6 +1092,30 @@ async def save_candidates(request: CandidatesSaveRequest):
 
         print(f"✅ Resolved jobdiva_id: {request.jobdiva_id!r} → {resolved_jobdiva_id!r}")
 
+        # Reject if outreach has been stopped for this job. This is the
+        # main gate for "Stop Job Activity" — blocks all future launches.
+        try:
+            _conn = get_db_connection()
+            try:
+                with _conn.cursor() as _cur:
+                    _cur.execute("""
+                        SELECT outreach_stopped_at FROM monitored_jobs
+                        WHERE job_id = %s OR jobdiva_id = %s
+                        LIMIT 1
+                    """, (request.jobdiva_id, request.jobdiva_id))
+                    _stopped_row = _cur.fetchone()
+                    if _stopped_row and _stopped_row[0] is not None:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Job activity has been stopped. Cannot launch new candidates.",
+                        )
+            finally:
+                _conn.close()
+        except HTTPException:
+            raise
+        except Exception as _stop_check_err:
+            print(f"⚠️ Could not check outreach_stopped_at: {_stop_check_err}")
+
         # Update pair_launched_at if it's not set yet. This marks the moment
         # PAIR was first "launched" for this job, which serves as the start
         # baseline for the 'Time to First Pass' metric.
@@ -1059,7 +1124,7 @@ async def save_candidates(request: CandidatesSaveRequest):
             try:
                 with _conn.cursor() as _cur:
                     _cur.execute("""
-                        UPDATE monitored_jobs 
+                        UPDATE monitored_jobs
                         SET pair_launched_at = COALESCE(pair_launched_at, NOW()),
                             updated_at = NOW()
                         WHERE job_id = %s OR jobdiva_id = %s
@@ -1316,6 +1381,8 @@ async def save_candidates(request: CandidatesSaveRequest):
             "enhanced_count": enhanced_count
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         import logging
         logging.getLogger(__name__).error(f"Error saving candidates: {e}")
