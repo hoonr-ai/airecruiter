@@ -193,6 +193,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:  # noqa: BLE001
         logger.error(f"dnc_schema_init_failed: {e}; continuing")
 
+    # 7. Provision `source` column on job_skills / job_education so the
+    # Step 3 rubric chip can show "Recruiter" vs "Hoonr-Curate" provenance
+    # and have it survive save+reload. Idempotent ALTER TABLE ADD COLUMN
+    # IF NOT EXISTS — safe across redeploys.
+    try:
+        from services import job_rubric_db as _jrd
+        await asyncio.wait_for(_jrd.init_rubric_schema(), timeout=10)
+    except asyncio.TimeoutError:
+        logger.error("rubric_schema_init_timeout (10s); continuing")
+    except Exception as e:  # noqa: BLE001
+        logger.error(f"rubric_schema_init_failed: {e}; continuing")
+
     # Delay first auto-sync 60s. Previously the sync ran immediately and held
     # the DB pool for minutes, while fresh user requests queued behind it —
     # manifesting as site-wide slowness right after every deploy. The 15-min
