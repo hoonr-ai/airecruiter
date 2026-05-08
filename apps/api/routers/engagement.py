@@ -27,6 +27,7 @@ from core.email import (
     notify_job_posting,
     notify_candidate_passed,
     _build_word_resume_document,
+    resolve_app_base_url,
 )
 from services.jobdiva import jobdiva_service
 from services.auto_assign_service import auto_assign_service
@@ -150,6 +151,7 @@ class SendBulkInterviewRequest(BaseModel):
     real_candidate_ids: List[str]
     is_initial_launch: bool = False
     dry_run: bool = False
+    app_base_url: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +369,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
 # Fires Email #1 (launch confirmation) + Email #2 (job posting request)
 # from a single DB query so we don't hit monitored_jobs twice.
 # ---------------------------------------------------------------------------
-async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job_posting: bool = True) -> None:
+async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job_posting: bool = True, app_base_url: str = "") -> None:
     """
     Fetches job metadata from monitored_jobs and fires launch emails.
 
@@ -384,7 +386,7 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job
         conn = _get_db_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cur.execute("""
-            SELECT job_id, jobdiva_id, title, customer_name,
+            SELECT job_id, jobdiva_id, title, enhanced_title, customer_name,
                    city, state, location_type, bot_introduction,
                    jobdiva_description, ai_description, recruiter_notes,
                    selected_job_boards, recruiter_emails
@@ -405,7 +407,7 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job
         job_boards: list       = _parse_json_list(row.get("selected_job_boards", []))
 
         jobdiva_id    = str(row.get("jobdiva_id") or "")
-        job_title      = row.get("title", "")
+        job_title      = row.get("enhanced_title") or row.get("title", "")
         customer_name  = row.get("customer_name", "Unknown")
         location       = f"{row.get('city', 'TBD')}, {row.get('state', '')}"
         db_job_id     = str(row.get("job_id") or job_id)
@@ -421,6 +423,7 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job
             candidate_count=candidate_count,
             recruiter_emails=clean_emails,
             job_id=db_job_id,
+            app_base_url=app_base_url,
         )
 
         # ── Email #2: Job Posting Request (skipped on re-launch) ────────────
@@ -432,6 +435,7 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job
                 recruiter_emails=clean_emails,
                 job_boards=job_boards,
                 ai_description=ai_desc,
+                app_base_url=app_base_url,
             )
         else:
             logger.info(
@@ -828,6 +832,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                     job_id=job_id_from_payload,
                     candidate_count=len(interview_results),
                     send_job_posting=request.is_initial_launch,
+                    app_base_url=request.app_base_url,
                 )
             )
             return {
@@ -1223,9 +1228,9 @@ async def _check_and_fire_candidate_passed_notification(
 
         # Create JobDiva Note: PAIR Pass Candidate Report
         # Note: We use the job title from job_row for the message
-        from core.email import APP_BASE_URL
+        base_url = resolve_app_base_url(request.app_base_url if 'request' in locals() else "")
         pair_job_title = job_row.get("title") or "the"
-        report_link = f"{APP_BASE_URL}/jobs/{app_job_id}/report?candidateId={candidate_id}"
+        report_link = f"{base_url}/jobs/{app_job_id}/report?candidateId={candidate_id}"
         note_text = f"Candidate completed Phone Screen for {pair_job_title} position. <a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report."
         
         async def create_and_pin_note():
