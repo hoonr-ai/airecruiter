@@ -522,6 +522,12 @@ STRICT RULES — FOLLOW EVERY ONE:
     check?" / "A user does Y. Trace the flow." NOT "Can you explain how you used X?"
 9. Do not repeat or paraphrase the same question.
 10. Return nothing except the JSON below.
+11. Do NOT generate questions about work arrangement (onsite / remote / hybrid /
+    willingness to relocate or work onsite), candidate location, visa or work
+    authorization, salary or compensation, availability or start date, or
+    current job-search status. The front-matter already covers those — your
+    questions would be duplicates and will be rejected. Every question MUST
+    probe a rubric skill or role competence.
 
 OUTPUT FORMAT — return a STRICT JSON object like this:
 {{
@@ -569,6 +575,27 @@ def _is_it_behavioral_question(text: str) -> bool:
     return bool(_IT_BEHAVIORAL_BAN_PATTERNS.search(text or ""))
 
 
+# Logistics topics owned by the front-matter. The LLM keeps re-emitting these
+# (work-arrangement, location, visa, comp, availability) as role-specific
+# questions, producing exact duplicates of Q3/Q4/Q6/Q7/Q8. Defense in depth on
+# top of the prompt rule — anything matching gets dropped and replaced with a
+# rubric-anchored technical template by the existing top-up pass.
+_LOGISTICS_BAN_PATTERNS = re.compile(
+    r"(work\s+arrangement|onsite|on-site|on\s+site|remote\s+work|hybrid\s+work"
+    r"|willing(ness)?\s+to\s+(relocate|work|commute)"
+    r"|are\s+you\s+open\s+to\s+working\s+(onsite|remote|hybrid|in)"
+    r"|current\s+location|where\s+are\s+you\s+(currently\s+)?(based|located)"
+    r"|visa\s+sponsorship|work\s+authoriz|authorized\s+to\s+work"
+    r"|expected\s+(compensation|salary|pay)|current\s+(compensation|salary|pay)"
+    r"|when\s+can\s+you\s+start|earliest\s+(availability|start))",
+    flags=re.IGNORECASE,
+)
+
+
+def _is_logistics_question(text: str) -> bool:
+    return bool(_LOGISTICS_BAN_PATTERNS.search(text or ""))
+
+
 def _sanitize_questions(
     raw: List[Dict[str, Any]],
     *,
@@ -604,6 +631,12 @@ def _sanitize_questions(
                 qt[:160],
             )
             continue
+        if _is_logistics_question(qt):
+            logger.info(
+                "screening_question_generator: dropping logistics question (front-matter duplicate, will be replaced): %r",
+                qt[:160],
+            )
+            continue
         pc = _strip_years_language((q.get("pass_criteria") or q.get("criteria") or "").strip())
         if not pc:
             pc = "Candidate gives concrete, project-level details with specific decisions and outcomes."
@@ -619,6 +652,16 @@ def _sanitize_questions(
     return cleaned
 
 
+def _is_remote_role(work_arrangement: str, city: str) -> bool:
+    """True for remote roles. Catches "Remote / W2", "Fully Remote", etc.,
+    AND the JobDiva-import quirk where location_type is empty but the city
+    field literally contains "REMOTE" (e.g. "REMOTE, ON")."""
+    norm = (work_arrangement or "").strip().lower().replace("-", "").replace("_", "")
+    if "remote" in norm or norm in ("fullyremote", "wfh"):
+        return True
+    return (city or "").strip().upper() == "REMOTE"
+
+
 async def generate_screening_questions(
     openai_client: openai.AsyncOpenAI,
     *,
@@ -628,6 +671,7 @@ async def generate_screening_questions(
     screening_level: str = "medium",
     customer_name: str = "",
     work_arrangement: str = "on-site",   # one of: on-site | onsite | hybrid | remote
+    city: str = "",
     address: str = "",
     total_years: int = 0,
 ) -> List[Dict[str, Any]]:
@@ -716,7 +760,7 @@ async def generate_screening_questions(
 
     # 3. Work-arrangement (hard filter unless remote)
     arrangement_norm = (work_arrangement or "").strip().lower().replace("-", "").replace("_", "")
-    if arrangement_norm not in ("remote", "fullyremote", "wfh"):
+    if not _is_remote_role(work_arrangement, city):
         is_hybrid = "hybrid" in arrangement_norm
         arrangement_label = "a hybrid" if is_hybrid else "an onsite"
         addr_str = address.strip() if address else "the client site"
