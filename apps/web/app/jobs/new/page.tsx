@@ -1705,6 +1705,7 @@ function NewJobPageContent() {
           jobDescription: descOverride || jobData?.description || jobPosting,
           jobNotes: notesOverride === undefined ? recruiterNotes : notesOverride,
           workAuthorization: selectedEmpTypes.join(", "),
+          payRate: jobData?.pay_rate || "",
           // Forward rubric-derived context so the backend prompt can include
           // required YoE and Education/Certs without paraphrasing them away.
           yearsOfExperience: typeof rubricData?.total_years === "number"
