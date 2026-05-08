@@ -3759,7 +3759,7 @@ function NewJobPageContent() {
         raw
           .filter((q: any) => {
             const cat = String(q?.category || "").toLowerCase();
-            return cat !== "default" && cat !== "work-arrangement" && cat !== "intro";
+            return cat !== "default" && cat !== "work-arrangement" && cat !== "intro" && cat !== "logistics";
           })
           .slice(0, targetRoleSpecificCount)
           .forEach((q: any) => {
