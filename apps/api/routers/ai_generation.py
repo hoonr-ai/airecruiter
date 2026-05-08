@@ -213,6 +213,11 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
 
     education_block = f"EDUCATION & CERTIFICATIONS:\n{_fmt_edu(req.education)}"
     certs_block = f"ADDITIONAL CERTIFICATIONS:\n{_fmt_certs(req.certifications)}"
+    canonical_title_block = (
+        f"CANONICAL JOB TITLE (highest priority for naming): {req.jobTitle}"
+        if (req.jobTitle or "").strip()
+        else "CANONICAL JOB TITLE: (not specified)"
+    )
 
     # Remote roles get a hard directive: the JD must call out that it's remote
     # and must NOT include city / state / zip in the body. Without this the
@@ -241,6 +246,7 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         f"Input Data:\n"
         f"{recruiter_notes_block}\n\n"
         f"{remote_directive_block}{chr(10) if remote_directive_block else ''}"
+        f"{canonical_title_block}\n\n"
         f"Work Authorization: {req.workAuthorization or '(not specified)'}\n\n"
         f"{pay_rate_block}\n\n"
         f"{yoe_block}\n\n"
@@ -249,6 +255,8 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         f"Existing Job Description:\n\"\"\"\n{req.jobDescription}\n\"\"\"\n\n"
         f"Job Title: {req.jobTitle}\n\n"
         "MANDATORY CONTENT (non-negotiable):\n"
+        "- The CANONICAL JOB TITLE is authoritative. Use that exact role naming throughout the output, even if the raw source JD contains an older or alternate title variation.\n"
+        "- Do NOT reintroduce discarded title fragments, prefixes, or suffixes from the source JD when the canonical title already provides the cleaned title.\n"
         "- If Structured Pay Rate is provided, the **Pay Rate Transparency** section MUST use that exact value verbatim.\n"
         "- If Required Experience is provided, the phrase '**X+ years**' MUST appear in 'What You Bring'.\n"
         "- Every Required education/certification item MUST appear as a bullet in 'What You Bring'; Preferred items go in a 'Nice to have' bullet set under the same section.\n"
