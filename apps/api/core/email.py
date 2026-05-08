@@ -60,6 +60,13 @@ JOBDIVA_URL        = _cfg("JOBDIVA_URL",         "https://www1.jobdiva.com")
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def resolve_app_base_url(override: Optional[str] = None) -> str:
+    """Prefer the caller's current frontend origin over the env default."""
+    candidate = (override or "").strip().rstrip("/")
+    if candidate.startswith("http://") or candidate.startswith("https://"):
+        return candidate
+    return APP_BASE_URL.rstrip("/")
+
 def _smtp_configured() -> bool:
     """Return True only when enough SMTP settings are present to attempt a send."""
     return bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD)
@@ -233,6 +240,7 @@ def notify_pair_launched(
     candidate_count: int,
     recruiter_emails: List[str],
     job_id: str,                # internal DB job_id for deep-link
+    app_base_url: Optional[str] = None,
 ) -> bool:
     """
     Email #1 – PAIR Launch Confirmation.
@@ -241,8 +249,9 @@ def notify_pair_launched(
     To   : pair-recruiting@pyramidci.com + recruiter emails
     Subj : PAIR Has Been Launched for [jobdiva_id]
     """
+    base_url = resolve_app_base_url(app_base_url)
     jobdiva_link   = f"{JOBDIVA_URL}/jobdiva/servlet/jd?uid={jobdiva_id}"
-    rankings_link  = f"{APP_BASE_URL}/jobs/{job_id}/rankings"
+    rankings_link  = f"{base_url}/jobs/{job_id}/rankings"
 
     jd_hyperlink = (
         f'<a href="{jobdiva_link}" target="_blank" '
@@ -310,6 +319,7 @@ def notify_job_posting(
     recruiter_emails: List[str],
     job_boards: List[str],
     ai_description: str,
+    app_base_url: Optional[str] = None,
 ) -> bool:
     """
     Email #2 – Job Posting Request.
@@ -323,6 +333,7 @@ def notify_job_posting(
     """
     import re as _re
 
+    _ = resolve_app_base_url(app_base_url)
     jobdiva_link = f"{JOBDIVA_URL}/jobdiva/servlet/jd?uid={jobdiva_id}"
 
     jd_hyperlink = (
@@ -344,33 +355,81 @@ def notify_job_posting(
 
     # ── Markdown-to-HTML renderer matching the UI AIPostingJobDescription ──
     def _render_inline(text: str) -> str:
-        """Convert **bold**, *italic*, and [label](url) to HTML spans."""
-        # Links first so inner text isn't mangled
-        text = _re.sub(
-            r'\[([^\]]+)\]\(([^)]+)\)',
-            r'<a href="\2" target="_blank" style="color:#4f46e5;text-decoration:underline;">\1</a>',
-            text,
-        )
-        # Bold
-        text = _re.sub(r'\*\*(.+?)\*\*', r'<strong style="font-weight:600;color:#1e293b;">\1</strong>', text)
-        # Italic (single *)
-        text = _re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<em>\1</em>', text)
+        """Convert [label](url), **bold**, and *italic* with semantic HTML."""
+        if not text:
+            return ""
+
+        parts = _re.split(r'(\[.*?\]\(.*?\)+|\*\*.*?\*\*|\*(?!\*).*?\*(?!\*))', text)
+        rendered: list[str] = []
+
+        for part in parts:
+            if not part:
+                continue
+
+            if part.startswith("[") and "](" in part and part.endswith(")"):
+                match = _re.match(r'\[(.*?)\]\((.*?)\)', part)
+                if match:
+                    label = html.escape(match.group(1))
+                    url = html.escape(match.group(2), quote=True)
+                    rendered.append(
+                        f'<a href="{url}" target="_blank" '
+                        f'style="color:#4f46e5;text-decoration:underline;">{label}</a>'
+                    )
+                    continue
+
+            if part.startswith("**") and part.endswith("**") and len(part) >= 4:
+                rendered.append(
+                    "<strong>"
+                    f"{html.escape(part[2:-2])}"
+                    "</strong>"
+                )
+                continue
+
+            if part.startswith("*") and part.endswith("*") and len(part) >= 2:
+                rendered.append(f"<em>{html.escape(part[1:-1])}</em>")
+                continue
+
+            rendered.append(html.escape(part))
+
+        return "".join(rendered)
+
+    def _render_copy_paste_text(raw: str) -> str:
+        """Plain-text, copy/paste-friendly version of the posting description.
+
+        Preserve paragraph breaks and literal bullets while removing markdown
+        emphasis markers so the posting team can paste directly into job boards.
+        """
+        if not raw or not raw.strip():
+            return "Not available"
+
+        text = raw.replace("\r\n", "\n").replace("\r", "\n").strip()
+        text = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'\1 (\2)', text)
+        text = text.replace("**", "")
+        text = _re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'\1', text)
         return text
 
     def _render_description(raw: str) -> str:
-        """Render the full ai_description as HTML matching the UI component."""
+        """Render AI JD HTML optimized for manual select/copy from email clients."""
         if not raw or not raw.strip():
             return "<em style='color:#94a3b8;'>Not available</em>"
 
         lines = raw.split("\n")
         html_parts: list = []
+        in_list = False
+
+        def _close_list():
+            nonlocal in_list
+            if in_list:
+                html_parts.append("</ul>")
+                in_list = False
 
         for line in lines:
             trimmed = line.strip()
 
             # Empty line → spacer
             if not trimmed:
-                html_parts.append('<div style="height:8px;"></div>')
+                _close_list()
+                html_parts.append('<div style="height:8px;line-height:8px;">&nbsp;</div>')
                 continue
 
             # Header detection: **ALL CAPS** or plain ALL CAPS (3–25 chars)
@@ -379,36 +438,42 @@ def notify_job_posting(
                 or bool(_re.match(r'^[A-Z\s]{3,25}$', trimmed))
             )
             if is_header:
+                _close_list()
                 title = trimmed.replace("**", "").strip()
                 html_parts.append(
-                    f'<div style="font-size:14px;font-weight:700;color:#0f172a;'
-                    f'margin-top:20px;margin-bottom:6px;text-transform:uppercase;'
-                    f'letter-spacing:0.04em;">{title}</div>'
+                    f'<p style="margin:20px 0 6px 0;font-size:14px;line-height:1.5;'
+                    f'color:#0f172a;text-transform:uppercase;letter-spacing:0.04em;">'
+                    f'<strong>{html.escape(title)}</strong>'
+                    f'</p>'
                 )
                 continue
 
             # Bullet points (• or -)
             if trimmed.startswith("•") or trimmed.startswith("-"):
+                if not in_list:
+                    html_parts.append(
+                        "<ul style='margin:6px 0 10px 20px;padding:0;color:#334155;"
+                        "font-size:13px;line-height:1.75;'>"
+                    )
+                    in_list = True
                 content = _re.sub(r'^[•\-]\s*', '', trimmed)
                 html_parts.append(
-                    f'<div style="display:flex;gap:10px;margin-left:4px;'
-                    f'margin-top:4px;margin-bottom:4px;align-items:flex-start;">'
-                    f'<span style="color:#94a3b8;margin-top:2px;">•</span>'
-                    f'<div style="flex:1;font-size:13px;color:#334155;">'
-                    f'{_render_inline(content)}</div></div>'
+                    f"<li style='margin:0 0 4px 0;padding:0;'><span>{_render_inline(content)}</span></li>"
                 )
                 continue
 
             # Normal paragraph line
+            _close_list()
             html_parts.append(
-                f'<div style="margin-bottom:6px;font-size:13px;color:#475569;line-height:1.75;">'
-                f'{_render_inline(trimmed)}</div>'
+                f'<p style="margin:0 0 8px 0;font-size:13px;color:#475569;line-height:1.75;">'
+                f'{_render_inline(trimmed)}</p>'
             )
 
+        _close_list()
         return "\n".join(html_parts)
 
     desc_html  = _render_description(ai_description or "")
-    desc_plain = (ai_description or "—").strip()
+    desc_plain = _render_copy_paste_text(ai_description or "—")
 
     content = f"""
     <h2 style="margin:0 0 6px;font-size:20px;color:#1e293b;">
@@ -436,7 +501,8 @@ def notify_job_posting(
     <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:#64748b;
               text-transform:uppercase;letter-spacing:0.05em;">Posting Description</p>
     <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;
-                padding:16px;margin-bottom:8px;">
+                padding:16px;margin-bottom:8px;-webkit-user-select:text;
+                user-select:text;">
       {desc_html}
     </div>
     """
@@ -458,7 +524,7 @@ def notify_job_posting(
         f"Job Title: {job_title or '—'}\n"
         f"Recruiter Requesting: {recruiter_list_html}\n"
         f"Job Boards: {boards_plain}\n\n"
-        f"Posting Description:\n{ai_description or '—'}\n"
+        f"Posting Description:\n{desc_plain or '—'}\n"
     )
 
     return _send(to_list, subject, _base_html(content), plain)
@@ -481,6 +547,7 @@ def notify_candidate_passed(
     resume_filename: Optional[str] = None,
     candidate_id: str = "",
     job_id: str = "",
+    app_base_url: Optional[str] = None,
 ) -> bool:
     """
     Email #3 – Candidate Passed Phone Screen.
@@ -490,10 +557,11 @@ def notify_candidate_passed(
     To   : Pair-recruiting@pyramidci.com + recruiter emails
     Subj : [Candidate Name] – Passed Phone Screen for [jobdiva_id]
     """
+    base_url = resolve_app_base_url(app_base_url)
     jobdiva_link   = f"{JOBDIVA_URL}/jobdiva/servlet/jd?uid={jobdiva_id}"
-    rankings_link  = f"{APP_BASE_URL}/jobs/{job_id}/rankings"
+    rankings_link  = f"{base_url}/jobs/{job_id}/rankings"
     # Deep link to the candidate evaluation report
-    report_link    = f"{APP_BASE_URL}/jobs/{job_id}/report?candidateId={candidate_id}"
+    report_link    = f"{base_url}/jobs/{job_id}/report?candidateId={candidate_id}"
 
     jd_hyperlink = (
         f'<a href="{jobdiva_link}" target="_blank" '

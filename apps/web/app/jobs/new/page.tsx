@@ -1804,7 +1804,11 @@ function NewJobPageContent() {
       });
       if (res.ok) {
         const data = await res.json();
-        setEnhancedTitle(data.title);
+        const nextTitle = (data?.title || "").trim();
+        setEnhancedTitle(nextTitle);
+        if (nextTitle) {
+          await handleEnhanceJob(nextTitle);
+        }
 
         showToast("Title enhanced by Hoonr-Curate.", "success");
         trackEvent("job_wizard_step2_title_enhance_success", {
@@ -7402,7 +7406,7 @@ return (
       <h1 className="text-[32px] font-bold text-slate-900 leading-tight">New Job</h1>
       <p className="text-slate-500 text-[16px] font-medium mt-1">
         {(() => {
-          const title = jobData?.title || jobTitle;
+          const title = enhancedTitle || jobData?.enhanced_title || jobData?.title || jobTitle;
           const customer = jobData?.customer_name || jobData?.customer || "";
           if (!title && !customer) return "Enter a JobDiva Job ID to get started.";
           if (title && customer) return `${title} · ${customer}`;
