@@ -23,6 +23,7 @@ export type SendBulkInterviewInput = {
   realCandidateIds: string[];
   isInitialLaunch?: boolean;
   dryRun?: boolean;
+  appBaseUrl?: string;
 };
 
 export type SendBulkInterviewResult = {
@@ -72,7 +73,8 @@ export function useEngagementFlow() {
         payload: input.payload, 
         real_candidate_ids: input.realCandidateIds,
         is_initial_launch: input.isInitialLaunch ?? false,
-        dry_run: input.dryRun ?? false
+        dry_run: input.dryRun ?? false,
+        app_base_url: input.appBaseUrl || (typeof window !== "undefined" ? window.location.origin : ""),
       }),
     });
     let data: any = null;
