@@ -3,6 +3,12 @@
 job_skills_extractor.py
 -----------------------
 Two-phase rubric extraction for Step 3 of the job creation wizard.
+
+LLM-only — Azure Agent grounding has been retired in favor of a single
+LLM extraction pass, with a conditional second-pass through
+`taxonomy_service.extract_grounded_rubric` for non-IT roles whose
+first-pass rubric came back too thin (rescues phrases the IT-tuned
+prompt drops).
 """
 
 from typing import List, Dict, Optional
@@ -11,30 +17,18 @@ import json
 import logging
 from dataclasses import dataclass
 from core.graph import ontology
+from services.role_family import detect_role_family
+from services.taxonomy_service import extract_grounded_rubric
 import openai
 
 logger = logging.getLogger(__name__)
 
-# ── Azure AI Agent bootstrap ──────────────────────────────────────────────────
-_azure_agent = None
-AZURE_AGENT_AVAILABLE = False
-
-try:
-    from services.azure_agent_service import AzureAgentService
-    from core import AZURE_AI_PROJECT_ENDPOINT, AZURE_OPENAI_API_KEY, AZURE_AI_AGENT_NAME
-
-    if AZURE_AI_PROJECT_ENDPOINT and AZURE_OPENAI_API_KEY:
-        _azure_agent = AzureAgentService(
-            project_endpoint=AZURE_AI_PROJECT_ENDPOINT,
-            api_key=AZURE_OPENAI_API_KEY,
-            agent_name=AZURE_AI_AGENT_NAME,
-        )
-        AZURE_AGENT_AVAILABLE = True
-        logger.info(f"✅ LLMExtractor: Azure Agent '{AZURE_AI_AGENT_NAME}' initialized for grounding")
-    else:
-        logger.warning("⚠️  Azure AI Agent: endpoint/key not configured")
-except Exception as _azure_err:
-    logger.warning(f"⚠️  Azure AI Agent NOT available: {_azure_err}")
+# Below this many hard skills, a non-IT JD gets a second-pass through
+# the family-aware grounding prompt. IT JDs typically yield 6-8 hard
+# skills on the first pass, so they would not trip this threshold even
+# if the gate were removed — gating on family makes the IT path
+# provably untouched.
+_MIN_NON_IT_RUBRIC_SKILLS = 4
 
 
 # ── Data models ───────────────────────────────────────────────────────────────
@@ -107,35 +101,8 @@ class JobSkillsExtractor:
         grounded_roles       = []
         all_grounded         = []
 
-        # AZURE AGENT COMMENTED OUT - Using LLM-only extraction for now
-        # TODO: Re-enable Azure Agent when rate limiting issues are resolved
-        # if AZURE_AGENT_AVAILABLE and _azure_agent:
-        #     try:
-        #         agent_result = await _azure_agent.extract_roles_and_skills(grounding_text)
-        #
-        #         logger.info("=" * 80)
-        #         logger.info("🛠️  Step 4: Extract grounded roles and placeholder skills from taxonomy.")
-        #         logger.info("-" * 40)
-        #
-        #         grounded_roles = _azure_agent.convert_to_rubric_roles(
-        #             agent_result.get("job_roles", []),
-        #             target_job_title=job_title,
-        #         )
-        #         all_grounded = _azure_agent.convert_to_rubric_skills(
-        #             agent_result.get("job_skills") or agent_result.get("skills") or []
-        #         )
-        #         
-        #         if grounded_roles:
-        #             logger.info(f"   👔 PRIMARY TITLE : {grounded_roles[0]['value']}")
-        #         
-        #         logger.info(f"   🛠️  GROUNDED SKILLS ({len(all_grounded)}) queued for LLM categorization.")
-        #         for s in all_grounded:
-        #             logger.info(f"      - {s['value']}")
-        #                 
-        #     except Exception as azure_err:
-        #         logger.error(f"❌ Azure Agent call failed: {azure_err}")
-        
-        logger.info("📝 Azure Agent disabled - Using LLM-only extraction")
+        family = detect_role_family(enhanced_job_title or job_title, "", [])
+        logger.info(f"🧭 Detected role family: {family}")
 
         logger.info("=" * 80)
         logger.info("🧠 Step 5: Extract general rubric details & Categorize skills via LLM.")
@@ -603,6 +570,69 @@ IMPORTANT:
                     grounded_hard_skills.append(s)
 
             logger.info(f"⚠️  Limited hard skills from {total_hard_skills_before} to {len(grounded_hard_skills)} (max 8)")
+
+        # Non-IT rescue pass — if the LLM-only first-pass came back thin
+        # for a non-IT role, re-run through the family-aware grounding
+        # pipeline (same LLM, family-aware prompt + blacklist). IT roles
+        # are intentionally exempt: the IT path is the well-tuned default
+        # and typically returns ≥ 6 hard skills, so the gate also acts as
+        # a noop for IT.
+        if family != "it" and len(grounded_hard_skills) < _MIN_NON_IT_RUBRIC_SKILLS:
+            logger.info(
+                f"🔁 Non-IT rescue pass triggered "
+                f"(family={family}, hard_skills={len(grounded_hard_skills)} < {_MIN_NON_IT_RUBRIC_SKILLS})"
+            )
+            try:
+                rescue = await extract_grounded_rubric(
+                    grounding_text,
+                    enhanced_job_title or job_title,
+                    self.openai_client,
+                    family=family,
+                )
+            except Exception as rescue_err:
+                logger.warning(f"⚠️  Non-IT rescue pass failed: {rescue_err}")
+                rescue = {}
+
+            existing_keys = {s["value"].strip().lower() for s in grounded_hard_skills if s.get("value")}
+            for s in rescue.get("hard_skills") or []:
+                key = (s.get("value") or "").strip().lower()
+                if not key or key in existing_keys:
+                    continue
+                grounded_hard_skills.append({
+                    "value": s["value"],
+                    "source": "PAIR-rescue",
+                    "matchType": "Similar",
+                    "importance": "preferred",
+                    "required": "Preferred",
+                    "minYears": s.get("minYears", 0) or min_years,
+                    "category": "hard",
+                    "evidence_type": "inferred",
+                })
+                existing_keys.add(key)
+                if len(grounded_hard_skills) >= 8:
+                    break
+
+            existing_soft = {s["value"].strip().lower() for s in grounded_soft_skills if s.get("value")}
+            for s in rescue.get("soft_skills") or []:
+                key = (s.get("value") or "").strip().lower()
+                if not key or key in existing_soft:
+                    continue
+                grounded_soft_skills.append({
+                    "value": s["value"],
+                    "source": "PAIR-rescue",
+                    "matchType": "Similar",
+                    "importance": "preferred",
+                    "required": "Preferred",
+                    "minYears": 0,
+                    "category": "soft",
+                    "evidence_type": "inferred",
+                })
+                existing_soft.add(key)
+
+            logger.info(
+                f"   ➕ Rescue added {len(grounded_hard_skills)} total hard / "
+                f"{len(grounded_soft_skills)} total soft skills"
+            )
 
         # Log Step 5 Results
         total_skills = len(grounded_hard_skills) + len(grounded_soft_skills)

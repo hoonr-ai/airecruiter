@@ -236,6 +236,23 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
     else:
         remote_directive_block = ""
 
+    # Remote roles get a hard directive: the JD must call out that it's remote
+    # and must NOT include city / state / zip in the body. Without this the
+    # model happily renders a "REMOTE, ON" location header when a JobDiva
+    # remote import has the location_type empty and city literally "REMOTE".
+    if _is_remote_job(req.workArrangement, req.city):
+        country_phrase = (req.country or "").strip() or "the United States"
+        remote_directive_block = (
+            "REMOTE ROLE DIRECTIVE (highest priority — these instructions override "
+            "anything in the source JD that says otherwise):\n"
+            f"- The role is fully remote. Add the sentence \"This is a remote position based in {country_phrase}.\" "
+            "near the top of **The Role** section.\n"
+            "- Do NOT include a city, state, street address, or zip code anywhere in the body.\n"
+            "- Do NOT label the role as onsite or hybrid, and do NOT describe a client site.\n"
+        )
+    else:
+        remote_directive_block = ""
+
     prompt = (
         "You are an expert recruitment copywriter. Your task is to generate a premium, catchy, and concise job description ready for external publication on platforms like LinkedIn and job boards.\n\n"
         "STRICT EXTRACTION PRIORITY (You MUST extract concrete facts based on this hierarchy):\n"
