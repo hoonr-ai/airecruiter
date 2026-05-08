@@ -33,6 +33,7 @@ class JobDescriptionRequest(BaseModel):
     jobNotes: str = ""
     workAuthorization: str = ""
     jobDescription: str = ""
+    payRate: str = ""
     # Rubric-derived context. All optional so older clients keep working.
     yearsOfExperience: Optional[int] = None
     education: List[Dict[str, Any]] = Field(default_factory=list)
@@ -182,6 +183,12 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         else "REQUIRED EXPERIENCE: (not specified — infer conservatively from JD if needed)"
     )
 
+    pay_rate_block = (
+        f"STRUCTURED PAY RATE (highest priority for compensation formatting): {req.payRate}"
+        if (req.payRate or "").strip()
+        else "STRUCTURED PAY RATE: (not specified — only infer from the source JD if explicitly present there)"
+    )
+
     def _fmt_edu(items: List[Dict[str, Any]]) -> str:
         lines = []
         for e in items or []:
@@ -235,12 +242,14 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         f"{recruiter_notes_block}\n\n"
         f"{remote_directive_block}{chr(10) if remote_directive_block else ''}"
         f"Work Authorization: {req.workAuthorization or '(not specified)'}\n\n"
+        f"{pay_rate_block}\n\n"
         f"{yoe_block}\n\n"
         f"{education_block}\n\n"
         f"{certs_block}\n\n"
         f"Existing Job Description:\n\"\"\"\n{req.jobDescription}\n\"\"\"\n\n"
         f"Job Title: {req.jobTitle}\n\n"
         "MANDATORY CONTENT (non-negotiable):\n"
+        "- If Structured Pay Rate is provided, the **Pay Rate Transparency** section MUST use that exact value verbatim.\n"
         "- If Required Experience is provided, the phrase '**X+ years**' MUST appear in 'What You Bring'.\n"
         "- Every Required education/certification item MUST appear as a bullet in 'What You Bring'; Preferred items go in a 'Nice to have' bullet set under the same section.\n"
         "- Every concrete fact in Recruiter Notes (named tools, certifications, domain terms, numeric thresholds) MUST be reflected in the output.\n\n"
