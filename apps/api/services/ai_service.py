@@ -5,7 +5,15 @@ import httpx
 from openai import AsyncOpenAI
 from core.config import OPENAI_API_KEY
 from core.models import JobDescription, CandidateProfile, SkillProfileEntry
-from services.job_skills_extractor import _azure_agent, AZURE_AGENT_AVAILABLE
+# Azure-Agent grounding was retired from job_skills_extractor (see its
+# module docstring) but the conditional usage below still references the
+# old symbols. Guard the import so a re-export removal can't crash app
+# startup on every worker, which 502s the whole API.
+try:
+    from services.job_skills_extractor import _azure_agent, AZURE_AGENT_AVAILABLE
+except ImportError:
+    _azure_agent = None
+    AZURE_AGENT_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
