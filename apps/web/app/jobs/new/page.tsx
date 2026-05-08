@@ -105,6 +105,35 @@ function cleanLocationType(locationType: string | null | undefined): string {
   return locationType.trim();
 }
 
+// Robust remote-job detection: catches "Remote", "Remote / W2", "Fully Remote",
+// AND the JobDiva quirk where city is literally "REMOTE" with location_type empty.
+function isRemoteJob(jd: { location_type?: string | null; city?: string | null } | null | undefined): boolean {
+  if (!jd) return false;
+  if ((jd.location_type || "").toLowerCase().includes("remote")) return true;
+  return (jd.city || "").trim().toUpperCase() === "REMOTE";
+}
+
+const CANADIAN_PROVINCES = new Set([
+  "ON", "BC", "QC", "AB", "MB", "SK", "NS", "NB", "NL", "PE", "YT", "NT", "NU",
+]);
+
+// monitored_jobs has no country column. Derive from state/province code so
+// the JD copy and screening intro can say "based in {country}" without a
+// schema migration. US is the default; only Canadian provinces flip it.
+function deriveCountry(stateCode: string | null | undefined): string {
+  return CANADIAN_PROVINCES.has((stateCode || "").trim().toUpperCase()) ? "Canada" : "United States";
+}
+
+// Provenance chip text for rubric items (titles, skills, education, domain).
+// Items extracted by the AI keep the existing "Hoonr-Curate" label; items
+// added manually by the recruiter via the "Add" buttons get "Recruiter".
+function sourceLabel(source: string | null | undefined): string {
+  return (source || "").toLowerCase() === "recruiter" ? "Recruiter" : "Hoonr-Curate";
+}
+function isRecruiterSource(source: string | null | undefined): boolean {
+  return (source || "").toLowerCase() === "recruiter";
+}
+
 type Step = 1 | 2 | 3 | 4 | 5;
 type ScreeningLevel = "L1" | "L1.5" | "L2";
 type EmploymentType = "W2" | "1099" | "C2C" | "Full-Time";
@@ -1671,6 +1700,7 @@ function NewJobPageContent() {
           jobDescription: descOverride || jobData?.description || jobPosting,
           jobNotes: notesOverride === undefined ? recruiterNotes : notesOverride,
           workAuthorization: selectedEmpTypes.join(", "),
+          payRate: jobData?.pay_rate || "",
           // Forward rubric-derived context so the backend prompt can include
           // required YoE and Education/Certs without paraphrasing them away.
           yearsOfExperience: typeof rubricData?.total_years === "number"
@@ -1678,6 +1708,12 @@ function NewJobPageContent() {
             : (parseInt(rubricData?.total_years, 10) || null),
           education: Array.isArray(rubricData?.education) ? rubricData.education : [],
           certifications: Array.isArray(rubricData?.certifications) ? rubricData.certifications : [],
+          // Remote-job context: backend uses these to inject the "This is a
+          // remote position based in {country}" disclaimer and suppress
+          // city/state in the body when the role is fully remote.
+          workArrangement: jobData?.location_type || "",
+          country: deriveCountry(jobData?.state),
+          city: jobData?.city || "",
         })
       });
 
@@ -2794,13 +2830,14 @@ function NewJobPageContent() {
       if (!prev) return prev;
       const updated = { ...prev };
       if (!updated[category]) updated[category] = [];
-      // For titles, always set source to 'Hoonr-Curate' and remove any other source
+      // Titles preserve the source from the call site (AI extractor passes
+      // 'Hoonr-Curate'; the manual "Add Title" button passes 'Recruiter') so
+      // the chip label can reflect provenance.
       if (category === 'titles') {
         const pairTitle = getNormalizedTitleItem({
           ...newItem,
           required: 'Preferred',
           matchType: 'Similar',
-          source: 'Hoonr-Curate',
         });
         updated[category] = [...updated[category], pairTitle];
       } else if (category === "skills") {
@@ -2880,7 +2917,9 @@ function NewJobPageContent() {
                         onChange={(e) => updateRubricItem('titles', idx, 'value', e.target.value)}
                         className="flex-1 min-w-0 text-[13px] font-normal text-slate-700 bg-transparent border border-transparent rounded px-2 py-1.5 outline-none focus:border-slate-200 focus:bg-white transition-all"
                       />
-                      <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap">Hoonr-Curate</span>
+                      <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap ${isRecruiterSource(title.source) ? "bg-slate-100 text-slate-700" : "bg-[#ede9fe] text-[#6d28d9]"}`}>
+                        {sourceLabel(title.source)}
+                      </span>
                     </div>
                     <div className="w-[110px] flex-shrink-0 flex items-center gap-1.5">
                       <input
@@ -2966,7 +3005,7 @@ function NewJobPageContent() {
                   variant="outline"
                   size="sm"
                   disabled={(rubricData.titles?.length || 0) >= 5}
-                  onClick={() => addRubricItem('titles', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'Hoonr-Curate' })}
+                  onClick={() => addRubricItem('titles', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'Recruiter' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
@@ -2987,7 +3026,7 @@ function NewJobPageContent() {
               <div className="flex items-center gap-2">
                 <Wand2 className="w-4 h-4 text-slate-900 flex-shrink-0" />
                 <h3 className="text-[14px] font-bold text-slate-800">Skills</h3>
-                <span className="text-[12px] font-normal text-slate-500">Top 8 · ordered by importance</span>
+                <span className="text-[12px] font-normal text-slate-500">Ordered by importance</span>
               </div>
               <Button
                 variant="outline"
@@ -3047,7 +3086,9 @@ function NewJobPageContent() {
                       onChange={(e) => updateRubricItem('skills', idx, 'value', e.target.value)}
                       className="flex-1 min-w-0 text-[13px] font-normal text-slate-700 bg-transparent border border-transparent rounded px-2 py-1.5 outline-none focus:border-slate-200 focus:bg-white transition-all"
                     />
-                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap">Hoonr-Curate</span>
+                    <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0 whitespace-nowrap ${isRecruiterSource(skill.source) ? "bg-slate-100 text-slate-700" : "bg-[#ede9fe] text-[#6d28d9]"}`}>
+                      {sourceLabel(skill.source)}
+                    </span>
                   </div>
                   <div className="w-[110px] flex-shrink-0 flex items-center gap-1.5">
                     <input
@@ -3094,15 +3135,14 @@ function NewJobPageContent() {
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={(rubricData.skills?.length || 0) >= 8}
-                  onClick={() => addRubricItem('skills', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'Hoonr-Curate' })}
-                  className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  onClick={() => addRubricItem('skills', { value: '', minYears: 0, recent: false, matchType: 'Similar', required: 'Preferred', source: 'Recruiter' })}
+                  className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
                   Add Skill
                 </Button>
-                <span className={`ml-3 text-[13.5px] font-medium ${(rubricData.skills?.length || 0) >= 8 ? 'text-rose-600' : 'text-slate-500'}`}>
-                  {(rubricData.skills?.length || 0)} / 8
+                <span className="ml-3 text-[13.5px] font-medium text-slate-500">
+                  {(rubricData.skills?.length || 0)} skill{(rubricData.skills?.length || 0) === 1 ? '' : 's'}
                 </span>
               </div>
             </div>
@@ -3146,7 +3186,9 @@ function NewJobPageContent() {
                       className="w-[260px] flex-shrink-0 h-[34px] text-[13px] font-medium text-slate-700 bg-white border-slate-200"
                       placeholder="Field of study"
                     />
-                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight whitespace-nowrap ml-1 uppercase">Hoonr-Curate</span>
+                    <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight whitespace-nowrap ml-1 uppercase ${isRecruiterSource(edu.source) ? "bg-slate-100 text-slate-700" : "bg-[#ede9fe] text-[#6d28d9]"}`}>
+                      {sourceLabel(edu.source)}
+                    </span>
                   </div>
                   <div className="w-[110px] flex-shrink-0"></div>
                   <div className="w-[70px] flex-shrink-0"></div>
@@ -3177,7 +3219,7 @@ function NewJobPageContent() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => addRubricItem('education', { degree: "Bachelor's degree", field: '', required: 'Preferred' })}
+                  onClick={() => addRubricItem('education', { degree: "Bachelor's degree", field: '', required: 'Preferred', source: 'Recruiter' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
@@ -3209,7 +3251,9 @@ function NewJobPageContent() {
                       onChange={(e) => updateRubricItem('domain', idx, 'value', e.target.value)}
                       className="flex-1 h-[34px] text-[13px] font-medium text-slate-700 bg-white border-slate-200"
                     />
-                    <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight whitespace-nowrap ml-2 uppercase">Hoonr-Curate</span>
+                    <span className={`text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight whitespace-nowrap ml-2 uppercase ${isRecruiterSource(dom.source) ? "bg-slate-100 text-slate-700" : "bg-[#ede9fe] text-[#6d28d9]"}`}>
+                      {sourceLabel(dom.source)}
+                    </span>
                   </div>
                   <div className="w-[110px] flex-shrink-0"></div>
                   <div className="w-[70px] flex-shrink-0"></div>
@@ -3240,7 +3284,7 @@ function NewJobPageContent() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => addRubricItem('domain', { value: '', required: 'Preferred' })}
+                  onClick={() => addRubricItem('domain', { value: '', required: 'Preferred', source: 'Recruiter' })}
                   className="border-slate-200 text-[#334155] bg-white hover:bg-slate-50 font-medium text-[13.5px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
                 >
                   <Plus className="w-3.5 h-3.5 mr-1.5 text-slate-500" />
@@ -3609,8 +3653,9 @@ function NewJobPageContent() {
     const addressStr = addressParts.join(", ");
     const location = `${jobData.city || ""}, ${jobData.state || ""}`.trim().replace(/^, |, $/g, "");
     const arrangement = (jobData.location_type || "").toLowerCase();
-    const isRemote = arrangement === "remote";
-    const arrangementLabel = arrangement === "hybrid" ? "a hybrid" : "an onsite";
+    const isRemote = isRemoteJob(jobData);
+    const country = deriveCountry(jobData.state);
+    const arrangementLabel = arrangement.includes("hybrid") ? "a hybrid" : "an onsite";
 
     let idCounter = 1;
     const questions: ScreenQuestion[] = [];
@@ -3626,7 +3671,9 @@ function NewJobPageContent() {
 
     // 1. Bot Introduction
     const introTitle = (enhancedTitle || jobTitle || "role").trim();
-    const intro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+    const intro = isRemote
+      ? `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a remote ${introTitle} based in ${country}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`
+      : `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
     setBotIntroduction(prev => (prev && prev.trim().length > 0 ? prev : intro));
 
     // 2. Default Questions — arrangement-aware, address-aware. The onsite/hybrid
@@ -3680,6 +3727,10 @@ function NewJobPageContent() {
           screeningLevel: levelForApi,
           customerName: jobData?.customer_name || "",
           workArrangement: jobData?.location_type || "",
+          // Plumbed so the backend can detect the JobDiva-import quirk where
+          // city is literally "REMOTE" with location_type empty, and skip the
+          // onsite work-arrangement question accordingly.
+          city: jobData?.city || "",
           address: addressStr,
           totalYears: rubricData?.total_years ?? 0,
         }),
@@ -6602,6 +6653,24 @@ function NewJobPageContent() {
                         so recruiters can always see the primary action. The
                         collapsible above is for reviewing/editing the string. */}
                     <div className="flex items-center justify-end gap-2 px-6 pb-6 pt-2">
+                      {/* Recruiter-triggered re-open of the auto-show modal. The
+                          modal auto-opens once per session (sessionStorage gate)
+                          on Step 5 entry, so once dismissed there was no path
+                          back to it. Same outline/slate look as Save & Exit so
+                          it doesn't compete visually with the primary purple
+                          "Run Search" CTA. */}
+                      <Button
+                        variant="outline"
+                        className="bg-white border-slate-200 hover:bg-slate-50 text-slate-700 font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
+                        onClick={() => {
+                          setShowJobdivaSkillsModal(true);
+                          setSkillsCopied(false);
+                          trackEvent("job_wizard_step5_view_agent_string_clicked", { step: 5 });
+                        }}
+                      >
+                        <FileText className="w-4 h-4 text-slate-400" />
+                        View JobDiva Search Agent string
+                      </Button>
                       {isSearching && (
                         <Button
                           className="bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 font-bold h-9 px-4 rounded-lg flex items-center gap-2 shadow-sm transition-all active:scale-95 text-[13.5px] flex-shrink-0"
