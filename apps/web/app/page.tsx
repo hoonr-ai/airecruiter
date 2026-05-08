@@ -103,6 +103,10 @@ export default function DashboardPage() {
         `${API_BASE}/jobs/monitored?include_archived=${includeArchived}`,
         { signal: controller.signal },
       );
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw new Error(`${response.status} /jobs/monitored${text ? `: ${text}` : ""}`);
+      }
       const data = await response.json();
 
       const jobs: Job[] = Object.entries(data.jobs || {}).map(([id, details]: [string, any]) => {
