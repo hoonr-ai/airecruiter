@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -206,3 +207,131 @@ OPENAI_EMBEDDING_MODEL = get_env_with_default(
     "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"
 )
 EMBEDDING_CACHE_MAX = int(get_env_with_default("EMBEDDING_CACHE_MAX", "50000"))
+
+# Per-family override for the embedding skill matcher. Keyword fuzzy
+# matching misses non-IT synonymy ("Stakeholder Management" ↔ "Executive
+# Alignment", "Pipeline Forecasting" ↔ "Quota Attainment Planning"), so
+# we turn embeddings on for non-IT families while keeping the legacy IT
+# default (`EMBEDDING_SKILL_MATCH`, off unless explicitly enabled).
+# Lookup order in the scorer: family-specific override → global flag.
+EMBEDDING_SKILL_MATCH_BY_FAMILY = {
+    "program_management": True,
+    "sales": True,
+    "hr": True,
+    "marketing": True,
+    "customer_success": True,
+    "finance": True,
+    "accounting": True,
+    "healthcare": True,
+    "legal": True,
+    "education": True,
+    "ops": True,
+    "recruiting": True,
+    "generic_non_it": True,
+}
+
+
+# ---- Role-family-aware scoring weights ----
+# Default scoring path (used for IT and unknown family) is preserved
+# byte-for-byte from the pre-fix configuration — IT recruiters do not
+# get a different score on the same JD/candidate after this change.
+# Non-IT families use a rebalance that down-weights skills (which are
+# often a thin signal for these roles, since the rubric typically has
+# 2-4 skills) and up-weights titles + experience trajectory + certs/
+# licenses (CPA / CFA / Bar / RN).
+SCORING_WEIGHTS_DEFAULT = {
+    "titles": 15.0,
+    "skills": 45.0,
+    "location": 4.0,
+    "companies": 5.0,
+    "education": 8.0,
+    "certifications": 7.0,
+    "keywords": 5.0,
+}
+
+# Non-IT weight sets. Each must sum to the same total as the default
+# (89.0) so an apples-to-apples score can be compared across families.
+SCORING_WEIGHTS_BY_FAMILY = {
+    "program_management": {
+        "titles": 25.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
+        "education": 8.0, "certifications": 7.0, "keywords": 9.0,
+    },
+    "sales": {
+        # Book-of-business signal lives in "company experience" for sales —
+        # the candidate's prior employers are themselves a quota signal.
+        "titles": 25.0, "skills": 30.0, "location": 4.0, "companies": 8.0,
+        "education": 7.0, "certifications": 6.0, "keywords": 9.0,
+    },
+    "hr": {
+        "titles": 25.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
+        "education": 8.0, "certifications": 7.0, "keywords": 9.0,
+    },
+    "marketing": {
+        "titles": 25.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
+        "education": 8.0, "certifications": 7.0, "keywords": 9.0,
+    },
+    "customer_success": {
+        "titles": 25.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
+        "education": 8.0, "certifications": 7.0, "keywords": 9.0,
+    },
+    "finance": {
+        # Cert-heavy: CPA / CFA / FRM signal is genuine.
+        "titles": 20.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
+        "education": 10.0, "certifications": 10.0, "keywords": 9.0,
+    },
+    "accounting": {
+        "titles": 20.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
+        "education": 10.0, "certifications": 10.0, "keywords": 9.0,
+    },
+    "ops": {
+        "titles": 25.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
+        "education": 8.0, "certifications": 7.0, "keywords": 9.0,
+    },
+    "recruiting": {
+        "titles": 25.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
+        "education": 8.0, "certifications": 7.0, "keywords": 9.0,
+    },
+    "healthcare": {
+        # License-heavy: RN / NP / PA / state license signal dominates.
+        "titles": 20.0, "skills": 30.0, "location": 4.0, "companies": 4.0,
+        "education": 12.0, "certifications": 15.0, "keywords": 4.0,
+    },
+    "legal": {
+        # Bar admission and jurisdiction signal dominates.
+        "titles": 20.0, "skills": 30.0, "location": 4.0, "companies": 4.0,
+        "education": 12.0, "certifications": 15.0, "keywords": 4.0,
+    },
+    "education": {
+        "titles": 20.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
+        "education": 12.0, "certifications": 8.0, "keywords": 9.0,
+    },
+    "generic_non_it": {
+        "titles": 25.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
+        "education": 8.0, "certifications": 7.0, "keywords": 9.0,
+    },
+}
+
+
+def scoring_weights_for_family(family: Optional[str] = None) -> dict:
+    """Return the dimension-weight map for a family.
+
+    `None` and `"it"` return the legacy default — preserves IT scoring
+    behavior byte-for-byte. Unknown families fall back to default rather
+    than to `generic_non_it`, since unknown often means the classifier
+    couldn't read the title (e.g. blank string).
+    """
+    if family is None or family == "it":
+        return SCORING_WEIGHTS_DEFAULT
+    return SCORING_WEIGHTS_BY_FAMILY.get(family, SCORING_WEIGHTS_DEFAULT)
+
+
+def embedding_skill_match_for_family(family: Optional[str] = None) -> bool:
+    """Resolve the effective embedding-skill-match flag for a family.
+
+    Order of precedence: family-specific override > global flag. IT and
+    unknown families read the global flag, so the existing
+    `EMBEDDING_SKILL_MATCH` env var still controls them.
+    """
+    if family in EMBEDDING_SKILL_MATCH_BY_FAMILY:
+        return EMBEDDING_SKILL_MATCH_BY_FAMILY[family]
+    return EMBEDDING_SKILL_MATCH

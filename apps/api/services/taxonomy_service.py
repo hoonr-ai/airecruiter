@@ -1,7 +1,7 @@
 """
 taxonomy_service.py
 -------------------
-Hybrid Discovery & Grounding Service (Async Ready) - v11 Optimized.
+Hybrid Discovery & Grounding Service (Async Ready) - v12 Family-Aware.
 
 Grounding Workflow:
 1. Discovery (Phase 1): LLM identifies all potential skills/roles in the JD (Recall).
@@ -9,7 +9,11 @@ Grounding Workflow:
 2. Grounding (Phase 2): Each discovered phrase is anchored to the master tables (Precision).
    - Exact Match first.
    - Fuzzy Match (token_set_ratio >= 90) second.
-   - DOUBLE-LOCK: Rejects matches that ground to blacklisted generic terms.
+   - DOUBLE-LOCK: Rejects matches that ground to true boilerplate noise only
+     (STRICT_NOISE). IT-flavored words like "Software" / "Systems" / "Management"
+     are filtered at the *single-word pre-filter* for IT-classified roles
+     (preserves legacy IT behavior) but allowed for non-IT roles where they
+     are legitimate domain stems (e.g. "Stakeholder Management" for PgM).
 """
 
 import os
@@ -27,22 +31,58 @@ from core.config import DATABASE_URL
 
 logger = logging.getLogger(__name__)
 
-# Expanded list of terms that are noise for a technical rubric
-GENERIC_SKILLS_BLACKLIST = {
-    "DIGITAL", "SOFTWARE", "MANAGEMENT", "MANAGED", "OPERATION", "OPERATIONS",
-    "PROCEDURES", "MONITORING", "HEALTHCARE", "CLINICAL", "PROCEDURE",
-    "STANDARDS", "BASIC", "LEVEL", "SERVICE", "SERVICES",
-    "SUPPORT", "TECHNICAL", "TECHNOLOGY", "SOLUTIONS", "SYSTEMS", "ANALYST",
-    "CONSULTING", "DEVELOPMENT", "ENGINEERING", "QUALITY", "ASSURANCE",
-    "GOVERNMENT", "ENTERPRISE", "BUSINESS", "PROFESSIONAL", "INDUSTRY",
-    "RADIOLOGY", "BENEFITS", "BENEFIT", "DENTAL", "VISION", "INSURANCE",
-    "MEDICAL", "401K", "PTO", "SALARY", "COMPENSATION", "VACATION", "XRAYS",
-    "X-RAYS", "SCHEDULE", "SCHEDULING", "PATIENT", "PATIENTS", "JD", "JOB",
-    "DESCRIPTION", "RESPONSIBILITIES", "REQUIREMENTS", "QUALIFICATIONS",
-    "REQUIRED", "PREFERRED", "MUST HAVE", "NICE TO HAVE", "HOSPITAL", 
-    "CLINICAL", "RECORDS", "FACILITY", "STAFF", "TEAM", "SHIFTS", "AVAILABILITY",
-    "DIAGNOSTIC", "EQUIPMENT", "OPERATION", "IMAGES", "RECORD"
+# True boilerplate — applied to every family at every grounding stage.
+# These are JD-formatting tokens, never legitimate skills, and they
+# appear in IT and non-IT JDs equally.
+STRICT_NOISE = {
+    "JD", "JOB", "DESCRIPTION", "RESPONSIBILITIES", "REQUIREMENTS",
+    "QUALIFICATIONS", "REQUIRED", "PREFERRED", "MUST HAVE", "NICE TO HAVE",
+    "401K", "PTO", "SALARY", "COMPENSATION", "VACATION", "BENEFITS",
+    "BENEFIT", "BASIC", "LEVEL", "SHIFTS", "AVAILABILITY",
 }
+
+# IT-flavored generic stems. Applied only when family is `it` or
+# unknown — preserves the pre-existing IT filtering behavior. These are
+# legitimate skill stems for non-IT roles (e.g. PgM expects
+# "Management", healthcare ops expects "Operations") so for non-IT
+# JDs we let the LLM validator decide whether the phrase grounds.
+IT_GENERIC_TERMS = {
+    "DIGITAL", "SOFTWARE", "TECHNICAL", "TECHNOLOGY", "SOLUTIONS", "SYSTEMS",
+    "ANALYST", "CONSULTING", "DEVELOPMENT", "ENGINEERING",
+    "MANAGEMENT", "MANAGED", "OPERATION", "OPERATIONS",
+    "STANDARDS", "BUSINESS", "ENTERPRISE", "PROFESSIONAL", "INDUSTRY",
+    "QUALITY", "ASSURANCE", "SUPPORT", "SERVICE", "SERVICES", "MONITORING",
+    "PROCEDURES", "PROCEDURE", "GOVERNMENT",
+}
+
+# Legacy alias for callers that still import GENERIC_SKILLS_BLACKLIST.
+# Equivalent to the IT-classified union; new callers should use
+# `_blacklist_for_family()` instead so non-IT JDs aren't punished.
+GENERIC_SKILLS_BLACKLIST = STRICT_NOISE | IT_GENERIC_TERMS
+
+
+# Families that should NOT have IT-generic stems blacklisted. Centralized
+# here so adding a family in role_family.py doesn't silently re-impose
+# the IT noise filter. `None` and `"it"` use the full IT-classified set;
+# everything else uses STRICT_NOISE only.
+_NON_IT_FAMILIES = frozenset({
+    "recruiting", "program_management", "accounting", "finance", "ops",
+    "sales", "hr", "marketing", "customer_success", "healthcare", "legal",
+    "education", "generic_non_it",
+})
+
+
+def _blacklist_for_family(family: Optional[str]) -> set:
+    """Return the single-word blacklist appropriate for this role family.
+
+    IT and unknown-family JDs see the legacy IT-classified set, which
+    keeps IT extraction behavior byte-identical. Non-IT JDs see only
+    STRICT_NOISE so legitimate domain stems like "Management" for a
+    Program Manager don't get pre-filtered.
+    """
+    if family in _NON_IT_FAMILIES:
+        return STRICT_NOISE
+    return GENERIC_SKILLS_BLACKLIST
 
 # ── Master Taxonomy Cache ───────────────────────────────────────────────────────
 _SKILLS_CACHE: Optional[List[str]] = None
@@ -90,16 +130,32 @@ def _load_master_caches():
 
 # ── Grounding Logic ──────────────────────────────────────────────────────────
 
-def _ground_phrase(phrase: str, is_role: bool = False) -> Tuple[Optional[str], int, str]:
-    """Anchors a phrase to the master taxonomy using Exact ➔ Fuzzy (90%)."""
+def _ground_phrase(
+    phrase: str,
+    is_role: bool = False,
+    family: Optional[str] = None,
+) -> Tuple[Optional[str], int, str]:
+    """Anchors a phrase to the master taxonomy using Exact ➔ Fuzzy (90%).
+
+    `family` chooses the single-word blacklist subset:
+      - `None` / `"it"`         → full GENERIC_SKILLS_BLACKLIST (legacy IT behavior)
+      - any non-IT family       → STRICT_NOISE only
+
+    The post-fuzzy double-lock always uses STRICT_NOISE only — by the
+    time the LLM validator has picked a canonical, re-rejecting it
+    because the canonical happens to spell to a generic IT stem is
+    wrong by construction (it was already validated as semantically
+    appropriate).
+    """
     if not phrase or len(phrase) < 2: return None, 0, "none"
-    
+
     up = phrase.upper().strip()
+    blacklist = _blacklist_for_family(family)
     # PRE-FILTER: Only block single-word generic noise.
     # Multi-word technical phrases (e.g. "Diagnostic Imaging") must proceed to fuzzy match.
-    if len(phrase.split()) == 1 and up in GENERIC_SKILLS_BLACKLIST:
+    if len(phrase.split()) == 1 and up in blacklist:
         return None, 0, "blacklisted"
-    
+
     _load_master_caches()
     lookup = _ROLES_LOOKUP_UPPER if is_role else _SKILLS_LOOKUP_UPPER
     choices = _ROLES_CACHE if is_role else _SKILLS_CACHE
@@ -112,8 +168,8 @@ def _ground_phrase(phrase: str, is_role: bool = False) -> Tuple[Optional[str], i
     result = rfprocess.extractOne(phrase, choices, scorer=fuzz.token_set_ratio, score_cutoff=90)
     if result:
         canonical_name = result[0]
-        # DOUBLE-LOCK post-grounding check
-        if canonical_name.upper() in GENERIC_SKILLS_BLACKLIST:
+        # DOUBLE-LOCK post-grounding check — STRICT_NOISE only.
+        if canonical_name.upper() in STRICT_NOISE:
             return None, 0, "blacklisted_result"
         return canonical_name, int(result[1]), "fuzzy"
 
@@ -130,26 +186,34 @@ TASK: Classify ALL technical and professional requirements from this job descrip
 
 CRITICAL CLASSIFICATION RULES:
 
-1. hard_skills: Specific technical tools, platforms, specialized methodologies, and clinical/domain procedures.
-   - PRESERVE CONTEXT: Do not over-compress. Extract full, descriptive multi-word phrases (e.g., "Infection Control Standards", "Diagnostic X-Ray Procedures", "Test Automation").
-   - IMPLICIT SKILLS: Look closely at responsibilities and action verbs. If a bullet says "Prepare and position patients accurately", extract "Patient Positioning". If it says "Writing automated tests", extract "Test Automation".
-   - THE SINGLE-WORD RULE: Single-word skills are ONLY allowed if they are specific Technologies, Proper Nouns, or Acronyms (e.g., "Python", "Postman", "SQL", "ARRT").
-   - BANNED: Never extract general English words or generic actions as standalone skills (e.g., "Testing", "Manual", "Auto", "Review", "Analysis", "Procedures", "Safety", "Quality"). Always combine them into their full methodology (e.g., "Manual Testing", "Quality Control").
+1. hard_skills: Specific tools, platforms, specialized methodologies, and domain-specific procedures (technical, clinical, financial, legal, program-delivery, etc.).
+   - PRESERVE CONTEXT: Do not over-compress. Extract full, descriptive multi-word phrases.
+     Examples across domains:
+       * IT:        "Test Automation", "REST API Development", "Kubernetes Cluster Management"
+       * Healthcare:"Infection Control Standards", "Diagnostic X-Ray Procedures", "Patient Positioning"
+       * Program Mgmt: "Stakeholder Management", "Risk Register", "RAID Log", "OKR Tracking",
+                      "Executive Reporting", "Cross-functional Coordination", "Dependency Mapping"
+       * Sales:     "Account Management", "Pipeline Forecasting", "MEDDIC", "Quota Attainment"
+       * Finance:   "Variance Analysis", "Month-End Close", "GAAP Reporting", "GL Reconciliation"
+       * Legal:     "Contract Negotiation", "Discovery Process", "Regulatory Compliance"
+   - IMPLICIT SKILLS: Look closely at responsibilities and action verbs. If a bullet says "Prepare and position patients accurately", extract "Patient Positioning". If it says "Writing automated tests", extract "Test Automation". If it says "Drive cross-functional alignment on quarterly OKRs", extract "Cross-functional Coordination" and "OKR Tracking".
+   - THE SINGLE-WORD RULE: Single-word skills are ONLY allowed if they are specific Technologies, Proper Nouns, or Acronyms (e.g., "Python", "Postman", "SQL", "ARRT", "MEDDIC", "GAAP").
+   - GENERIC-WORD RULE: Generic English words or generic actions ("Testing", "Manual", "Auto", "Review", "Analysis", "Procedures", "Safety", "Quality", "Management", "Operations") are NOT valid as standalone skills — always combine them into the full named concept ("Manual Testing", "Quality Control", "Stakeholder Management", "Variance Analysis", "Operations Management"). The full multi-word phrase IS valid even when the head word is generic, because the phrase names a real domain concept.
    - NOT certifications, NOT domain knowledge, NOT soft skills.
 
 2. soft_skills: Interpersonal or workplace skills.
    - e.g. "Communication Skills", "Problem Solving", "Teamwork", "Attention to Detail", "Stakeholder Engagement"
 
 3. certifications: Licenses, certifications, degrees required.
-   - e.g. "ARRT Certification", "BLS Certification", "Bachelor's Degree in IT"
+   - e.g. "ARRT Certification", "BLS Certification", "Bachelor's Degree in IT", "CPA License", "PMP Certification", "Bar Admission"
    - Do NOT include these in hard_skills.
 
 4. domains: Industry or knowledge domain areas (NOT specific tools).
-   - e.g. "Commercial Auto Insurance", "Healthcare", "Financial Services"
+   - e.g. "Commercial Auto Insurance", "Healthcare", "Financial Services", "B2B SaaS", "Public Sector"
    - Do NOT include these in hard_skills.
 
 5. discovered_roles: Professional titles or roles mentioned as required or alternative backgrounds.
-   - e.g. "QA Engineer", "Radiologic Technologist", "Business Analyst"
+   - e.g. "QA Engineer", "Radiologic Technologist", "Business Analyst", "Program Manager", "Account Executive", "Senior Counsel"
 
 ALWAYS IGNORE: job benefits, insurance perks (medical/dental/vision), 401k, PTO, pay rates, section headers.
 
@@ -164,16 +228,23 @@ Return ONLY JSON:
 """
 
 VALIDATION_PROMPT = """
-You are an expert technical recruiter mapping extracted job requirements to an official taxonomy.
+You are an expert recruiter mapping extracted job requirements to an official taxonomy.
+You handle roles across all domains — engineering, sales, finance, healthcare, legal, program management, marketing, operations, HR — so judge each match in the context of the role's actual domain, not a default-tech lens.
 You are provided with the Job Description text and a JSON object mapping extracted skills/roles to potential taxonomy options.
 
 Your task is to select the SINGLE MOST ACCURATE taxonomy matched term for each extracted item, based strictly on the context of the Job Description.
 
 CRITICAL RULES:
-1. Contextual Meaning vs Spelling: Read the context. Match based on professional function, not just string similarity. 
+1. Contextual Meaning vs Spelling: Read the context. Match based on professional function, not just string similarity.
    - e.g., "X-Ray Technician" does NOT match "TV Technician".
+   - e.g., for a Sales role, "Account Management" must match the sales-CRM-flavored taxonomy entry — NOT "AWS Account Management" (cloud IAM) even though the strings are close.
+   - e.g., for a Program Manager role, "Vendor Management" must match the PgM/procurement taxonomy entry — NOT "Vendor Management Software (DevOps)".
 2. Strictness: If NONE of the taxonomy options accurately represent the extracted skill in the context of this job, you MUST return null. Do not select a loose or inaccurate match.
-3. Domain Consistency: Heavily penalize and REJECT taxonomy options that belong to a completely unrelated industry. For example, if the role is Healthcare, options like "Welding Procedures", "Stored Procedures", or "Civil Procedures" are mathematically similar but contextually INCORRECT. Reject them.
+3. Domain Consistency: Heavily penalize and REJECT taxonomy options that belong to a completely unrelated industry. Examples:
+   - Healthcare role: reject "Welding Procedures", "Stored Procedures", or "Civil Procedures" even though they're string-similar.
+   - Finance role: reject "Pipeline Engineering" (oil & gas) when the JD means "Sales Pipeline Forecasting".
+   - Program Manager role: reject "Stakeholder Reporting (PowerBI dashboards)" when the JD means executive-narrative status updates.
+   Domain mismatch beats string similarity every time.
 4. Specificity Filter: If the originally extracted term is overly generic (e.g. just "Procedures" or "Tests"), and none of the dictionary options exactly capture the specific context of the job description, return null. Do not force a match on generic words.
 
 Job Description Context:
@@ -204,12 +275,25 @@ async def _call_discovery_llm(prompt: str, client) -> Dict:
 
 # ── Main Integrated Grounding ───────────────────────────────────────────────
 
-async def extract_grounded_rubric(job_text: str, job_title: str, client, max_skills: int = 15, max_titles: int = 5) -> Dict:
-    """Consolidated Grounding Flow (v12) — 4-category aware."""
+async def extract_grounded_rubric(
+    job_text: str,
+    job_title: str,
+    client,
+    max_skills: int = 15,
+    max_titles: int = 5,
+    family: Optional[str] = None,
+) -> Dict:
+    """Consolidated Grounding Flow (v12) — 4-category aware, family-aware blacklist.
+
+    `family` selects the single-word blacklist subset. None / "it" use
+    the legacy IT blacklist (preserves IT extraction behavior). Non-IT
+    families use STRICT_NOISE only so legitimate domain stems
+    ("Management", "Operations", "Quality") aren't pre-filtered.
+    """
 
     # 1. Discovery
     logger.info("─" * 60)
-    logger.info("🧠 PHASE 1: LLM Discovery")
+    logger.info(f"🧠 PHASE 1: LLM Discovery (family={family or 'unknown'})")
     discovery = await _call_discovery_llm(DISCOVERY_PROMPT.format(
         job_title=job_title,
         job_text=job_text[:5000]
@@ -236,12 +320,14 @@ async def extract_grounded_rubric(job_text: str, job_title: str, client, max_ski
     logger.info("─" * 60)
     logger.info("⚡ PHASE 2: Fast Taxonomy Option Retrieval (RAG)")
 
+    blacklist = _blacklist_for_family(family)
+
     def get_taxonomy_options(phrase: str, is_role: bool = False) -> List[str]:
         if not phrase or len(phrase) < 2: return []
         up = phrase.upper().strip()
-        if len(phrase.split()) == 1 and up in GENERIC_SKILLS_BLACKLIST:
+        if len(phrase.split()) == 1 and up in blacklist:
             return []
-            
+
         _load_master_caches()
         lookup  = _ROLES_LOOKUP_UPPER if is_role else _SKILLS_LOOKUP_UPPER
         choices = _ROLES_CACHE        if is_role else _SKILLS_CACHE
@@ -249,14 +335,19 @@ async def extract_grounded_rubric(job_text: str, job_title: str, client, max_ski
         results = []
         if up in lookup:
             results.append(lookup[up])
-            
-        # Get top 40 options to act as our context window (increased from 15 to prevent missing valid distant matches)
+
+        # Top 40 fuzzy options as the validator's context window. We only
+        # screen the *option list itself* against STRICT_NOISE here — the
+        # IT-generic stems are kept as candidates for non-IT families
+        # because they may be the right canonical (e.g. a PgM JD's
+        # "Stakeholder Management" rolling up under a "Management" branch
+        # of the taxonomy that's still semantically correct).
         fuzzy_results = rfprocess.extract(phrase, choices, scorer=fuzz.token_set_ratio, limit=40)
         for r in fuzzy_results:
             can = r[0]
-            if can not in results and can.upper() not in GENERIC_SKILLS_BLACKLIST:
+            if can not in results and can.upper() not in STRICT_NOISE:
                 results.append(can)
-                
+
         return results
 
     mapping_request = {}
@@ -318,9 +409,9 @@ async def extract_grounded_rubric(job_text: str, job_title: str, client, max_ski
                 })
                 seen_skills.add(can_up)
             else:
-                logger.info(f"   ❌ [DROPPED]  {phrase} (LLM returned invalid taxonomy term)")
+                logger.info(f"   ❌ [DROPPED]  family={family or 'unknown'} phrase={phrase!r} reason=invalid_canonical")
         else:
-            logger.info(f"   ❌ [DROPPED]  {phrase} (LLM rejected all taxonomy options)")
+            logger.info(f"   ❌ [DROPPED]  family={family or 'unknown'} phrase={phrase!r} reason=llm_rejected_all_options")
 
     for phrase in raw_roles:
         mapped = mapping_response.get(phrase)
@@ -334,9 +425,9 @@ async def extract_grounded_rubric(job_text: str, job_title: str, client, max_ski
                  })
                  seen_roles.add(can_up)
              else:
-                 logger.info(f"   ❌ [DROPPED]  {phrase} (LLM returned invalid taxonomy term)")
+                 logger.info(f"   ❌ [DROPPED]  family={family or 'unknown'} phrase={phrase!r} reason=invalid_canonical")
         else:
-             logger.info(f"   ❌ [DROPPED]  {phrase} (LLM rejected all taxonomy options)")
+             logger.info(f"   ❌ [DROPPED]  family={family or 'unknown'} phrase={phrase!r} reason=llm_rejected_all_options")
 
     final_soft_skills = []
     for phrase in raw_soft_skills:
@@ -353,9 +444,9 @@ async def extract_grounded_rubric(job_text: str, job_title: str, client, max_ski
                 })
                 seen_skills.add(can_up)
             else:
-                logger.info(f"   ❌ [DROPPED]  {phrase} (LLM returned invalid taxonomy term)")
+                logger.info(f"   ❌ [DROPPED]  family={family or 'unknown'} phrase={phrase!r} reason=invalid_canonical")
         else:
-            logger.info(f"   ❌ [DROPPED]  {phrase} (LLM rejected all taxonomy options)")
+            logger.info(f"   ❌ [DROPPED]  family={family or 'unknown'} phrase={phrase!r} reason=llm_rejected_all_options")
 
     logger.info(f"   💬 Validated Soft Skills ({len(final_soft_skills)}):")
     for s in final_soft_skills:

@@ -27,8 +27,11 @@ from core.config import (
     SOURCE_TIER_BONUS,
     EMBEDDING_SKILL_MATCH,
     EMBEDDING_MATCH_THRESHOLD,
+    scoring_weights_for_family,
+    embedding_skill_match_for_family,
 )
 from services import skill_embeddings
+from services.role_family import detect_role_family
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +90,28 @@ class UnifiedCandidateSearch:
         self.unipile_service = unipile_service
         self.vetted_service = vetted_service
         self.exa_service = exa_service
+        # Set per-search by `_resolve_search_family`; read by
+        # `_fuzzy_term_score` to choose between the global embedding
+        # flag and the per-family override. None means "no active
+        # family override" (use the global flag).
+        self._current_family: Optional[str] = None
+
+    def _resolve_search_family(self, criteria: "SearchCriteria") -> Optional[str]:
+        """Detect role family from the criteria's title + skill hints.
+
+        Returns None when there's no signal to classify (treated as IT
+        downstream — preserves legacy behavior on empty criteria).
+        """
+        title_hint = ""
+        for item in criteria.title_criteria or []:
+            if isinstance(item, dict):
+                v = str(item.get("value") or "").strip()
+                if v:
+                    title_hint = v
+                    break
+        if not title_hint:
+            return None
+        return detect_role_family(title_hint, "", criteria.skill_criteria or [])
 
 
     def _log_stage(self, stage: str, message: str) -> None:
@@ -100,12 +125,20 @@ class UnifiedCandidateSearch:
         start_time = time.time()
         self._log_stage("Start", f"job={criteria.job_id} sources={', '.join(criteria.sources or [])}")
 
+        # Detect role family once per search. Stored on the instance so
+        # `_fuzzy_term_score` can swap between the global EMBEDDING_SKILL_MATCH
+        # flag (legacy IT behavior) and the per-family override
+        # (`embedding_skill_match_for_family`). None family → IT path.
+        self._current_family = self._resolve_search_family(criteria)
+        self._log_stage("Family", f"detected={self._current_family or 'unknown (IT path)'}")
+
         # Pre-warm embeddings for all query-side terms once per search.
-        # No-op when EMBEDDING_SKILL_MATCH is off or OPENAI_API_KEY is
-        # unset. Per-candidate skill embeddings are warmed lazily inside
-        # emit_candidate; this batches the (small) query side once so we
-        # don't pay an embedding round-trip per candidate.
-        if EMBEDDING_SKILL_MATCH:
+        # No-op when both the global flag is off and the family override
+        # is off. Per-candidate skill embeddings are warmed lazily
+        # inside emit_candidate; this batches the (small) query side
+        # once so we don't pay an embedding round-trip per candidate.
+        embedding_active = embedding_skill_match_for_family(self._current_family)
+        if embedding_active:
             try:
                 query_terms = self._criteria_query_terms(criteria)
                 if query_terms:
@@ -231,8 +264,9 @@ class UnifiedCandidateSearch:
 
             # Warm candidate-side skill embeddings before scoring so the
             # sync `_fuzzy_term_score` path can read them from the
-            # in-process cache. Off when EMBEDDING_SKILL_MATCH is unset.
-            if EMBEDDING_SKILL_MATCH:
+            # in-process cache. Honors both the global flag and the
+            # per-family override (non-IT families default-on).
+            if embedding_skill_match_for_family(self._current_family):
                 try:
                     cand_terms = self._candidate_skill_terms(cand)
                     if cand_terms:
@@ -1590,16 +1624,20 @@ class UnifiedCandidateSearch:
             text_matches = sum(1 for word in term_words if word in profile_text)
             text_score = (text_matches / len(term_words)) * 0.35
 
-        # Embedding-cosine augmentation. When EMBEDDING_SKILL_MATCH is on
+        # Embedding-cosine augmentation. The effective flag honors both
+        # the global EMBEDDING_SKILL_MATCH env var (legacy / IT path)
+        # and the per-family override (non-IT families default on),
+        # resolved through `embedding_skill_match_for_family`. When on
         # and the embeddings have been pre-warmed (in `search_candidates`
-        # for the query side and `emit_candidate` for the candidate side),
-        # take the max of keyword score and cosine similarity. Below the
-        # configured threshold the cosine score is treated as 0 so noisy
-        # near-matches don't promote weak candidates. Locations and other
-        # non-skill collections are excluded — embeddings make sense only
-        # for free-form skill / title text.
+        # for the query side and `emit_candidate` for the candidate
+        # side), take the max of keyword score and cosine similarity.
+        # Below the configured threshold the cosine score is treated as
+        # 0 so noisy near-matches don't promote weak candidates.
+        # Locations and other non-skill collections are excluded —
+        # embeddings make sense only for free-form skill / title text.
         embedding_score = 0.0
-        if EMBEDDING_SKILL_MATCH and not is_location_only:
+        embedding_active = embedding_skill_match_for_family(self._current_family)
+        if embedding_active and not is_location_only:
             candidate_terms: List[str] = []
             for coll in collections:
                 for item in profile.get(coll, []) or []:
@@ -2328,11 +2366,19 @@ class UnifiedCandidateSearch:
         return list(dimensions.values())
 
     def _collect_scoring_dimensions(self, criteria: SearchCriteria) -> List[Dict[str, Any]]:
-        """Collect match dimensions for SCORING using Page 3 rubrics + Page 4 resume match filters."""
+        """Collect match dimensions for SCORING using Page 3 rubrics + Page 4 resume match filters.
+
+        Weights are looked up from `core.config.scoring_weights_for_family`
+        keyed by the search's detected role family (set on the instance
+        in `search_candidates` via `_resolve_search_family`). IT and
+        unknown family resolve to the legacy default weight set, so IT
+        scoring is byte-identical to pre-fix behavior.
+        """
+        weights = scoring_weights_for_family(self._current_family)
         dimensions = {
             "titles": {
                 "label": "Titles",
-                "weight": 15.0,
+                "weight": weights["titles"],
                 "collections": ["titles"],
                 "required": [],
                 "preferred": [],
@@ -2340,7 +2386,7 @@ class UnifiedCandidateSearch:
             },
             "skills": {
                 "label": "Skills",
-                "weight": 45.0,
+                "weight": weights["skills"],
                 "collections": ["skills"],
                 "required": [],
                 "preferred": [],
@@ -2348,7 +2394,7 @@ class UnifiedCandidateSearch:
             },
             "location": {
                 "label": "Location",
-                "weight": 4.0,
+                "weight": weights["location"],
                 "collections": ["locations"],
                 "required": [],
                 "preferred": [],
@@ -2356,7 +2402,7 @@ class UnifiedCandidateSearch:
             },
             "companies": {
                 "label": "Company Experience",
-                "weight": 5.0,
+                "weight": weights["companies"],
                 "collections": ["companies"],
                 "required": [],
                 "preferred": [],
@@ -2364,7 +2410,7 @@ class UnifiedCandidateSearch:
             },
             "education": {
                 "label": "Education",
-                "weight": 8.0,
+                "weight": weights["education"],
                 "collections": ["education"],
                 "required": [],
                 "preferred": [],
@@ -2372,7 +2418,7 @@ class UnifiedCandidateSearch:
             },
             "certifications": {
                 "label": "Certifications",
-                "weight": 7.0,
+                "weight": weights["certifications"],
                 "collections": ["certifications"],
                 "required": [],
                 "preferred": [],
@@ -2380,7 +2426,7 @@ class UnifiedCandidateSearch:
             },
             "keywords": {
                 "label": "Keywords",
-                "weight": 5.0,
+                "weight": weights["keywords"],
                 "collections": ["skills", "titles", "companies", "education", "certifications", "locations"],
                 "required": [],
                 "preferred": [],

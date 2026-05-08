@@ -29,6 +29,8 @@ import re
 
 import openai
 
+from services.role_family import detect_role_family, detect_it_domain
+
 logger = logging.getLogger(__name__)
 
 # Recognized seniority tokens in job titles. Order matters: longer/more
@@ -84,158 +86,11 @@ def _question_count_for_level(level: str) -> int:
     return 5
 
 
-# Role-family + IT-domain detection. Single `_build_prompt` injects the
-# right shots / artifacts at template time, so non-data IT roles and non-IT
-# roles each get role-shape-appropriate examples instead of being forced
-# through a Databricks-flavored prompt.
-
-_IT_TITLE_KEYWORDS = (
-    "engineer", "developer", "architect", "devops", "sre", "site reliability",
-    "data engineer", "data scientist", "machine learning", "ai engineer",
-    "cloud", "programmer", "full stack", "backend", "frontend", "qa automation",
-    "platform", "security engineer", "database", "etl", "analytics engineer",
-    "ios", "android",
-)
-
-_NON_IT_FAMILY_RULES: List[tuple] = [
-    ("recruiting", (
-        "recruiter", "talent acquisition", "sourcer", "headhunter",
-        "ta partner",
-    )),
-    ("finance", (
-        "accountant", "controller", "fp&a", "treasury", "cfo", "audit",
-        "gaap", "ifrs", "payroll", "bookkeep",
-    )),
-    ("ops", (
-        "operations manager", "coo", "ops lead", "supply chain",
-        "logistics", "procurement", "vendor management", "operations",
-    )),
-    ("sales", (
-        "account executive", "ae ", "bdr", "sdr", "sales development",
-        "sales rep", "salesperson", "sales manager",
-    )),
-    ("hr", (
-        "hrbp", "hr manager", "people partner", "chro", "benefits",
-        "hris", "human resources",
-    )),
-    ("marketing", (
-        "marketing manager", "demand gen", "content marketing", "seo",
-        "brand manager", "growth marketing", "marketing director",
-    )),
-    ("customer_success", (
-        "customer success", "csm", "renewal manager",
-    )),
-]
-
-_IT_DOMAIN_RULES: List[tuple] = [
-    ("data", (
-        "databricks", "snowflake", "spark", "kafka", "airflow", "dbt",
-        "redshift", "bigquery", "etl", "data engineer", "delta",
-        "lakehouse", "data scientist", "analytics engineer",
-    )),
-    ("frontend", (
-        "react", "angular", "vue", "next.js", "next ", "frontend",
-        "front-end", "ui engineer", "web developer", "tailwind",
-    )),
-    ("devops", (
-        "kubernetes", "k8s", "terraform", "helm", "jenkins",
-        "gitlab ci", "github actions", "devops", "sre", "ansible",
-        "ci/cd", "argo",
-    )),
-    ("mobile", (
-        "ios ", "android", "swift ", "kotlin", "react native", "flutter",
-        "mobile engineer",
-    )),
-    ("security", (
-        "security engineer", "appsec", "pen test", "infosec", "soc2",
-        "iam", "vuln", "ciso",
-    )),
-    ("qa", (
-        "qa engineer", "sdet", "test automation", "selenium",
-        "cypress", "playwright", "quality assurance",
-    )),
-    ("backend", (
-        "java", ".net", "c#", "golang", "go ", "node.js", "node ",
-        "ruby", "spring boot", "spring", "microservice", "fastapi",
-        "django", "flask", "backend", "server-side", "api ",
-    )),
-]
-
-
-def _hits_in(haystack: str, terms: tuple) -> int:
-    return sum(1 for t in terms if t in haystack)
-
-
-def detect_role_family(
-    job_title: str,
-    industry: str,
-    required_skills: List[Dict[str, Any]],
-) -> str:
-    """Return one of: it | recruiting | finance | ops | sales | hr |
-    marketing | customer_success | generic_non_it.
-
-    Compares IT signal vs non-IT family signal so a JD with strong technical
-    skills (e.g. "Java, Kafka, Spring Boot") doesn't get misclassified as ops
-    or finance just because the title or industry happens to share a token.
-    """
-    title = (job_title or "").lower()
-    skill_blob = " ".join(
-        (s.get("value") or s.get("name") or "").lower()
-        for s in (required_skills or [])
-    )
-    haystack = f" {title} {industry.lower() if industry else ''} {skill_blob} "
-
-    family_scores: Dict[str, int] = {}
-    for family, terms in _NON_IT_FAMILY_RULES:
-        h = _hits_in(haystack, terms)
-        if h > 0:
-            family_scores[family] = h
-
-    it_title_hits = sum(1 for t in _IT_TITLE_KEYWORDS if t in title)
-    it_skill_hits = sum(_hits_in(haystack, terms) for _, terms in _IT_DOMAIN_RULES)
-    # Title evidence is stronger than skill evidence: a JD titled "Software
-    # Engineer" is unambiguously IT; one merely mentioning "Java" might be a
-    # non-tech role using a tool name.
-    it_score = it_title_hits * 3 + it_skill_hits
-
-    top_family_score = max(family_scores.values()) if family_scores else 0
-
-    # IT wins outright when title is IT, or when its weighted score
-    # outpaces the strongest non-IT family signal.
-    if it_title_hits > 0 or it_score > top_family_score:
-        return "it"
-
-    if family_scores:
-        return max(family_scores.items(), key=lambda kv: kv[1])[0]
-
-    if it_score > 0:
-        return "it"
-    return "generic_non_it"
-
-
-def detect_it_domain(
-    job_title: str,
-    required_skills: List[Dict[str, Any]],
-    preferred_skills: List[Dict[str, Any]],
-) -> str:
-    """For IT roles: return `data | backend | frontend | devops | mobile |
-    security | qa | generic_it`. Tiebreaker: highest hit count → first
-    listed → generic_it."""
-    title = (job_title or "").lower()
-    skill_blob = " ".join(
-        (s.get("value") or s.get("name") or "").lower()
-        for s in (required_skills or []) + (preferred_skills or [])
-    )
-    haystack = f" {title} {skill_blob} "
-
-    best_domain = "generic_it"
-    best_hits = 0
-    for domain, terms in _IT_DOMAIN_RULES:
-        h = _hits_in(haystack, terms)
-        if h > best_hits:
-            best_hits = h
-            best_domain = domain
-    return best_domain
+# Role-family + IT-domain detection lives in services/role_family.py so the
+# scorer + extractor + screening generator all use the same classifier.
+# `_build_prompt` injects the right shots / artifacts at template time, so
+# non-data IT roles and non-IT roles each get role-shape-appropriate
+# examples instead of being forced through a Databricks-flavored prompt.
 
 
 # Domain shot bank — one BAD + one GOOD example per IT domain. Injected
@@ -328,6 +183,33 @@ _NON_IT_FAMILY_SHOTS: Dict[str, str] = {
         "     GOOD: \"Walk through a churn save in the last 6 months. What signal warned you,\n"
         "            what intervention did you run, and did NRR move?\""
     ),
+    "program_management": (
+        "BAD:  \"Tell me about a program you ran.\"\n"
+        "     GOOD: \"Walk me through the last cross-team dependency that nearly slipped your\n"
+        "            launch. Which RAID-log entry caught it, who did you escalate to, and what\n"
+        "            decision unblocked the path?\""
+    ),
+    "accounting": (
+        "BAD:  \"Tell me about your accounting experience.\"\n"
+        "     GOOD: \"Describe a real audit finding you remediated. What control was missing,\n"
+        "            and what did you change in the close cycle so it wouldn't repeat?\""
+    ),
+    "healthcare": (
+        "BAD:  \"Tell me about your clinical experience.\"\n"
+        "     GOOD: \"Walk me through a patient case where your assessment changed the planned\n"
+        "            care pathway. What signal led you to escalate, and what was the outcome?\""
+    ),
+    "legal": (
+        "BAD:  \"Describe your legal background.\"\n"
+        "     GOOD: \"Walk through a recent contract you negotiated where the counterparty\n"
+        "            pushed back hard on a specific clause. How did you reframe the risk and\n"
+        "            land an acceptable redline?\""
+    ),
+    "education": (
+        "BAD:  \"Describe your teaching experience.\"\n"
+        "     GOOD: \"Describe a unit students consistently struggled with. How did you redesign\n"
+        "            the lesson, and what assessment evidence showed it worked?\""
+    ),
     "generic_non_it": (
         "BAD:  \"Describe your background.\"\n"
         "     GOOD: \"Walk me through your most measurable win in the last year — the metric,\n"
@@ -353,6 +235,11 @@ _FAMILY_ARTIFACTS: Dict[str, str] = {
     "hr": "ER cases, performance calibration, comp bands, engagement surveys, workforce planning, HRIS records",
     "marketing": "campaign attribution, MQL/SQL handoff, brand guidelines, content calendars, A/B tests, channel ROI",
     "customer_success": "health scores, QBRs, renewal forecast, expansion playbooks, churn cohorts, onboarding milestones",
+    "program_management": "RAID logs, dependency maps, executive readouts, status cadence, escalation paths, OKRs/north-star metrics, integrated launch plans",
+    "accounting": "general ledger, journal entries, audit workpapers, SOX controls, reconciliations, accruals, trial balance, fixed asset register",
+    "healthcare": "patient charts, care pathways, infection-control protocols, vitals trending, escalation criteria, EHR documentation, handoff communication",
+    "legal": "contract redlines, clause libraries, NDAs/MSAs, discovery deadlines, regulatory filings, privilege logs, matter-management trackers",
+    "education": "lesson plans, formative assessments, IEP accommodations, standards alignment, classroom-management routines, parent communication",
     "generic_non_it": "stakeholder maps, decision logs, OKRs, runbooks, status reports",
 }
 
