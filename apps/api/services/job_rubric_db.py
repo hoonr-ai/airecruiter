@@ -1,9 +1,35 @@
+import asyncio
 import json
+import logging
 import psycopg2
 import psycopg2.extras
 from typing import List, Dict, Optional
 from dataclasses import asdict
 from core.config import DATABASE_URL
+
+logger = logging.getLogger(__name__)
+
+
+def _ensure_rubric_schema_sync() -> None:
+    """Add `source` columns to rubric tables. Idempotent. Recruiter-added vs
+    AI-extracted rubric items need to round-trip provenance so the chip in
+    Step 3 ("Recruiter" / "Hoonr-Curate") survives save+reload.
+
+    `job_titles.source` already existed pre-change. `job_skills.source` and
+    `job_education.source` are new — added here as nullable TEXT so legacy
+    rows are read as Hoonr-Curate by the reader's COALESCE.
+    """
+    with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE job_skills ADD COLUMN IF NOT EXISTS source TEXT")
+            cur.execute("ALTER TABLE job_education ADD COLUMN IF NOT EXISTS source TEXT")
+        conn.commit()
+
+
+async def init_rubric_schema() -> None:
+    """Async wrapper so main.py startup can await the sync alter."""
+    await asyncio.to_thread(_ensure_rubric_schema_sync)
+
 
 def _normalize_title(value: str) -> str:
     return "".join(ch.lower() for ch in (value or "").strip() if ch.isalnum())
@@ -93,8 +119,8 @@ class JobRubricDB:
 
                     for s in all_skills:
                         cur.execute("""
-                            INSERT INTO job_skills (jobdiva_id, skill_name, min_years, recent, match_type, is_required, category, similar_skills)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::text[])
+                            INSERT INTO job_skills (jobdiva_id, skill_name, min_years, recent, match_type, is_required, category, similar_skills, source)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::text[], %s)
                         """, (
                             jobdiva_id,
                             s.get('value', ''),
@@ -103,7 +129,8 @@ class JobRubricDB:
                             s.get('matchType', 'Similar'),
                             (s.get('importance', s.get('required', 'Required')) == 'Required'),
                             s.get('category', 'hard'),
-                            s.get('similar_skills', []) # psycopg2 handles list as postgres ARRAY
+                            s.get('similar_skills', []), # psycopg2 handles list as postgres ARRAY
+                            s.get('source') or 'Hoonr-Curate',
                         ))
 
                     # 3. Save Titles / Experience
@@ -128,13 +155,14 @@ class JobRubricDB:
                     # 4. Save Education & Certs
                     for e in rubric.get('education', []):
                         cur.execute("""
-                            INSERT INTO job_education (jobdiva_id, degree, field, is_required)
-                            VALUES (%s, %s, %s, %s)
+                            INSERT INTO job_education (jobdiva_id, degree, field, is_required, source)
+                            VALUES (%s, %s, %s, %s, %s)
                         """, (
                             jobdiva_id,
                             e.get('degree', ''),
                             e.get('field', ''),
-                            e.get('required', 'Required') == 'Required'
+                            e.get('required', 'Required') == 'Required',
+                            e.get('source') or 'Hoonr-Curate',
                         ))
 
                     # 5. Save Customer Requirements
@@ -222,6 +250,7 @@ class JobRubricDB:
                             "recent": r['recent'],
                             "matchType": 'Similar' if not r['match_type'] or r['match_type'].lower() == 'similar' else r['match_type'],
                             "required": "Required" if r['is_required'] else "Preferred",
+                            "source": r.get('source') or 'Hoonr-Curate',
                             "similar_skills": list(r['similar_skills']) if r.get('similar_skills') else []
                         }
                         if r.get('category') == 'soft':
@@ -236,7 +265,7 @@ class JobRubricDB:
                         "recent": r['recent'],
                         "matchType": 'Similar' if not r['match_type'] or r['match_type'].lower() == 'similar' else r['match_type'],
                         "required": "Required" if r['is_required'] else "Preferred",
-                        "source": "PAIR",
+                        "source": r.get('source') or 'Hoonr-Curate',
                         "similar_titles": list(r['similar_titles']) if r.get('similar_titles') else []
                     } for r in cur.fetchall()]
 
@@ -244,7 +273,8 @@ class JobRubricDB:
                     education = [{
                         "degree": r['degree'],
                         "field": r['field'],
-                        "required": "Required" if r['is_required'] else "Preferred"
+                        "required": "Required" if r['is_required'] else "Preferred",
+                        "source": r.get('source') or 'Hoonr-Curate'
                     } for r in cur.fetchall()]
 
                     cur.execute("SELECT * FROM job_customer_requirements WHERE jobdiva_id = %s", (jobdiva_id,))
