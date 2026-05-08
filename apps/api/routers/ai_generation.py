@@ -33,10 +33,30 @@ class JobDescriptionRequest(BaseModel):
     jobNotes: str = ""
     workAuthorization: str = ""
     jobDescription: str = ""
+    payRate: str = ""
     # Rubric-derived context. All optional so older clients keep working.
     yearsOfExperience: Optional[int] = None
     education: List[Dict[str, Any]] = Field(default_factory=list)
     certifications: List[Dict[str, Any]] = Field(default_factory=list)
+    # Remote-job context. workArrangement comes from monitored_jobs.location_type,
+    # city lets us catch the JobDiva quirk where location_type is empty and the
+    # city field literally contains "REMOTE", and country is derived client-side
+    # from the state code (no DB column for it yet).
+    workArrangement: str = ""
+    country: str = ""
+    city: str = ""
+
+
+def _is_remote_job(work_arrangement: str, city: str) -> bool:
+    """True when the role should be presented as fully remote.
+
+    Matches "Remote", "Remote / W2", "Fully Remote", "WFH", etc., AND the
+    JobDiva-import case where location_type is empty but city is "REMOTE".
+    """
+    norm = (work_arrangement or "").strip().lower().replace("-", "").replace("_", "")
+    if "remote" in norm or norm in ("fullyremote", "wfh"):
+        return True
+    return (city or "").strip().upper() == "REMOTE"
 
 class JobDivaSyncRequest(BaseModel):
     jobId: str
@@ -163,6 +183,12 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         else "REQUIRED EXPERIENCE: (not specified — infer conservatively from JD if needed)"
     )
 
+    pay_rate_block = (
+        f"STRUCTURED PAY RATE (highest priority for compensation formatting): {req.payRate}"
+        if (req.payRate or "").strip()
+        else "STRUCTURED PAY RATE: (not specified — only infer from the source JD if explicitly present there)"
+    )
+
     def _fmt_edu(items: List[Dict[str, Any]]) -> str:
         lines = []
         for e in items or []:
@@ -188,6 +214,23 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
     education_block = f"EDUCATION & CERTIFICATIONS:\n{_fmt_edu(req.education)}"
     certs_block = f"ADDITIONAL CERTIFICATIONS:\n{_fmt_certs(req.certifications)}"
 
+    # Remote roles get a hard directive: the JD must call out that it's remote
+    # and must NOT include city / state / zip in the body. Without this the
+    # model happily renders a "REMOTE, ON" location header when a JobDiva
+    # remote import has the location_type empty and city literally "REMOTE".
+    if _is_remote_job(req.workArrangement, req.city):
+        country_phrase = (req.country or "").strip() or "the United States"
+        remote_directive_block = (
+            "REMOTE ROLE DIRECTIVE (highest priority — these instructions override "
+            "anything in the source JD that says otherwise):\n"
+            f"- The role is fully remote. Add the sentence \"This is a remote position based in {country_phrase}.\" "
+            "near the top of **The Role** section.\n"
+            "- Do NOT include a city, state, street address, or zip code anywhere in the body.\n"
+            "- Do NOT label the role as onsite or hybrid, and do NOT describe a client site.\n"
+        )
+    else:
+        remote_directive_block = ""
+
     prompt = (
         "You are an expert recruitment copywriter. Your task is to generate a premium, catchy, and concise job description ready for external publication on platforms like LinkedIn and job boards.\n\n"
         "STRICT EXTRACTION PRIORITY (You MUST extract concrete facts based on this hierarchy):\n"
@@ -197,13 +240,16 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         "4. LAST PRIORITY - Job Title: Use this for general context and naming conventions.\n\n"
         f"Input Data:\n"
         f"{recruiter_notes_block}\n\n"
+        f"{remote_directive_block}{chr(10) if remote_directive_block else ''}"
         f"Work Authorization: {req.workAuthorization or '(not specified)'}\n\n"
+        f"{pay_rate_block}\n\n"
         f"{yoe_block}\n\n"
         f"{education_block}\n\n"
         f"{certs_block}\n\n"
         f"Existing Job Description:\n\"\"\"\n{req.jobDescription}\n\"\"\"\n\n"
         f"Job Title: {req.jobTitle}\n\n"
         "MANDATORY CONTENT (non-negotiable):\n"
+        "- If Structured Pay Rate is provided, the **Pay Rate Transparency** section MUST use that exact value verbatim.\n"
         "- If Required Experience is provided, the phrase '**X+ years**' MUST appear in 'What You Bring'.\n"
         "- Every Required education/certification item MUST appear as a bullet in 'What You Bring'; Preferred items go in a 'Nice to have' bullet set under the same section.\n"
         "- Every concrete fact in Recruiter Notes (named tools, certifications, domain terms, numeric thresholds) MUST be reflected in the output.\n\n"
@@ -492,6 +538,10 @@ class ScreeningQuestionsRequest(BaseModel):
     screeningLevel: str = "medium"      # light | medium | intensive
     customerName: str = ""
     workArrangement: str = "on-site"    # on-site | onsite | hybrid | remote
+    # JobDiva imports occasionally leave location_type empty and stuff "REMOTE"
+    # into the city field. The screening generator falls back to this when
+    # workArrangement doesn't already say "remote".
+    city: str = ""
     address: str = ""
     totalYears: Optional[int] = 0
 
@@ -521,6 +571,7 @@ async def generate_screening_questions_endpoint(job_id: str, req: ScreeningQuest
             screening_level=req.screeningLevel,
             customer_name=req.customerName,
             work_arrangement=req.workArrangement,
+            city=req.city,
             address=req.address,
             total_years=req.totalYears or 0,
         )
