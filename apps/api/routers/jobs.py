@@ -122,16 +122,53 @@ def _ensure_monitored_jobs_schema() -> None:
         conn = get_db_connection()
         conn.autocommit = True
         cur = conn.cursor()
+        # Order matters: add columns BEFORE indexes that filter on them
+        # (the partial indexes below predicate on `is_archived`).
         for stmt in (
+            # Restored from f2d70e2 ("removing in-path migrations"). These
+            # ALTERs were deleted from the bootstrap but the columns are
+            # still written/read by extraction, archive, and rubric paths,
+            # so any DB that pre-dated them broke /jobs/fetch and friends.
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS is_archived BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS archive_reason TEXT",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS archived_at TIMESTAMP",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS job_requirements JSONB DEFAULT '[]'",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS summary TEXT",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS hard_skills JSONB",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS soft_skills JSONB",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS experience_level TEXT",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS extraction_metadata JSONB",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS bot_introduction TEXT",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS sourcing_filters JSONB",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS resume_match_filters JSONB",
+            "ALTER TABLE IF EXISTS job_screen_questions ADD COLUMN IF NOT EXISTS is_hard_filter BOOLEAN NOT NULL DEFAULT FALSE",
+
+            # Columns referenced by recent features but never had a
+            # corresponding ADD COLUMN — fresh DBs hit "column does not
+            # exist" on /jobs/monitored summary view and /jobs/fetch
+            # writes via services.jobdiva.monitor_job_locally.
+            # pair_launched_at: stamped when the first candidate is launched.
+            # Drives HC status (Unpublished vs Active/Inactive) on the dashboard.
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS pair_launched_at TIMESTAMP NULL",
+            # outreach_stopped_at: set when recruiter clicks "Stop Job Activity",
+            # flips HC status to Inactive and blocks further launches.
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS outreach_stopped_at TIMESTAMP NULL",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS pair_external_subs INTEGER DEFAULT 0",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS feedback_completed INTEGER DEFAULT 0",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS time_to_first_pass DOUBLE PRECISION",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS candidates_sourced INTEGER DEFAULT 0",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS resumes_shortlisted INTEGER DEFAULT 0",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS current_step INTEGER",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS user_session TEXT",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS ai_enhanced BOOLEAN DEFAULT FALSE",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS processing_stage TEXT",
+
             # v28: hot-path read optimizations for GET /jobs/monitored
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_active_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS NOT TRUE",
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_archived_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS TRUE",
             # v29: direct job-scoped lookup indexes for /jobs/{id}/... APIs
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_job_id_lookup ON monitored_jobs (job_id)",
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_jobdiva_id_lookup ON monitored_jobs (jobdiva_id)",
-            # outreach_stopped_at: set when recruiter clicks "Stop Job Activity",
-            # flips HC status to Inactive and blocks further launches.
-            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS outreach_stopped_at TIMESTAMP NULL",
         ):
             try:
                 cur.execute(stmt)
@@ -1794,10 +1831,11 @@ async def get_monitored_jobs(
             stale_cached["warning"] = "Returned stale cache due DB contention"
             return stale_cached
 
-        # Fail fast when DB and cache are both unavailable.
+        # Fail fast when DB and cache are both unavailable. Surface the real
+        # error so schema mismatches don't get masked as "contention".
         raise HTTPException(
             status_code=503,
-            detail="Monitored jobs temporarily unavailable due to database contention",
+            detail=f"Monitored jobs temporarily unavailable: {e}",
         )
 
 @router.post("/jobs/poll-now")
