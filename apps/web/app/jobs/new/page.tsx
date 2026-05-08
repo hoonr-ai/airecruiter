@@ -590,6 +590,10 @@ function NewJobPageContent() {
     id: number;
     value: string;
     matchType: 'must' | 'can' | 'exclude';
+    // OR-group bucket. Only meaningful when matchType === 'can'. Items in
+    // the same group are OR'd together; different groups are AND'd. Existing
+    // 'can' items default to group 1, preserving legacy single-bucket behavior.
+    orGroup?: number;
     years: number;
     recent: boolean;
     similarCount: string;
@@ -602,6 +606,7 @@ function NewJobPageContent() {
     id: number;
     value: string;
     matchType: 'must' | 'can' | 'exclude';
+    orGroup?: number;
     years: number;
     recent: boolean;
     similarCount: string;
@@ -1799,7 +1804,11 @@ function NewJobPageContent() {
       });
       if (res.ok) {
         const data = await res.json();
-        setEnhancedTitle(data.title);
+        const nextTitle = (data?.title || "").trim();
+        setEnhancedTitle(nextTitle);
+        if (nextTitle) {
+          await handleEnhanceJob(nextTitle);
+        }
 
         showToast("Title enhanced by Hoonr-Curate.", "success");
         trackEvent("job_wizard_step2_title_enhance_success", {
@@ -3750,7 +3759,7 @@ function NewJobPageContent() {
         raw
           .filter((q: any) => {
             const cat = String(q?.category || "").toLowerCase();
-            return cat !== "default" && cat !== "work-arrangement" && cat !== "intro";
+            return cat !== "default" && cat !== "work-arrangement" && cat !== "intro" && cat !== "logistics";
           })
           .slice(0, targetRoleSpecificCount)
           .forEach((q: any) => {
@@ -3912,6 +3921,7 @@ function NewJobPageContent() {
               id: existing?.id ?? index + 1,
               value: title.value || "",
               matchType: getRubricDrivenMatchType(title, existing?.matchType),
+              orGroup: existing?.orGroup,
               years: title.minYears || 0,
               recent: existing?.recent ?? !!title.recent,
               similarCount: `${(title.similar_titles || []).length}/${(title.similar_titles || []).length} similar`,
@@ -3945,6 +3955,7 @@ function NewJobPageContent() {
               id: existing?.id ?? index + 1001,
               value: skill.value || "",
               matchType: getRubricDrivenMatchType(skill, existing?.matchType),
+              orGroup: existing?.orGroup,
               years: skill.minYears || 0,
               recent: existing?.recent ?? !!skill.recent,
               similarCount: `${(skill.similar_skills || []).length}/${(skill.similar_skills || []).length} similar`,
@@ -4372,10 +4383,13 @@ function NewJobPageContent() {
     };
 
     const must: string[] = [];
-    const can: string[] = [];
+    // OR-groups keyed by group id (1, 2, 3, ...). Items within a group are
+    // OR'd; groups are AND'd into the must chain. Keeping the legacy `can`
+    // bucket as group 1 means existing items still produce `(A OR B)`.
+    const orGroups = new Map<number, string[]>();
+    const orGroupSeen = new Map<number, Set<string>>();
     const exclude: string[] = [];
     const seenMust = new Set<string>();
-    const seenCan = new Set<string>();
     const seenExclude = new Set<string>();
     const addUnique = (bucket: string[], seen: Set<string>, clause: string, keyValue = clause) => {
       const key = normalizeTerm(keyValue);
@@ -4383,12 +4397,20 @@ function NewJobPageContent() {
       seen.add(key);
       bucket.push(clause);
     };
+    const addToOrGroup = (groupId: number, clause: string, keyValue: string) => {
+      const gid = groupId > 0 ? groupId : 1;
+      if (!orGroups.has(gid)) {
+        orGroups.set(gid, []);
+        orGroupSeen.set(gid, new Set());
+      }
+      addUnique(orGroups.get(gid)!, orGroupSeen.get(gid)!, clause, keyValue);
+    };
 
     sourceTitles.forEach(title => {
       const group = criterionGroup(title.value, title.selectedSimilarTitles || [], title.years, title.recent);
       if (!group) return;
       if (title.matchType === "exclude") addUnique(exclude, seenExclude, group, title.value);
-      else if (title.matchType === "can") addUnique(can, seenCan, group, title.value);
+      else if (title.matchType === "can") addToOrGroup(title.orGroup ?? 1, group, title.value);
       else addUnique(must, seenMust, group, title.value);
     });
 
@@ -4396,7 +4418,7 @@ function NewJobPageContent() {
       const group = criterionGroup(skill.value, skill.selectedSimilarSkills || [], skill.years, skill.recent);
       if (!group) return;
       if (skill.matchType === "exclude") addUnique(exclude, seenExclude, group, skill.value);
-      else if (skill.matchType === "can") addUnique(can, seenCan, group, skill.value);
+      else if (skill.matchType === "can") addToOrGroup(skill.orGroup ?? 1, group, skill.value);
       else addUnique(must, seenMust, group, skill.value);
     });
 
@@ -4416,10 +4438,38 @@ function NewJobPageContent() {
       });
 
     const parts = [...must];
-    if (can.length) parts.push(`(${can.join(" OR ")})`);
+    // Render OR-groups in ascending group-id order so the string is stable
+    // across re-renders. Singleton groups are flattened (no parens) — `(A)`
+    // and `A` are equivalent in Boolean syntax but the parens look odd.
+    const sortedGroupIds = Array.from(orGroups.keys()).sort((a, b) => a - b);
+    sortedGroupIds.forEach(gid => {
+      const items = orGroups.get(gid) || [];
+      if (items.length === 0) return;
+      parts.push(items.length === 1 ? items[0] : `(${items.join(" OR ")})`);
+    });
     let booleanString = parts.length ? parts.join(" AND ") : (isValidBoolean(jobTitle) ? jobTitle : quote(jobTitle || "Role"));
     if (exclude.length) booleanString += ` NOT (${exclude.join(" OR ")})`;
     return booleanString;
+  };
+
+  // Returns the next OR-group id available across all source* state. Used by
+  // the "+ New OR group" menu item to mint a fresh bucket without colliding
+  // with an existing one.
+  const nextOrGroupId = (): number => {
+    let maxId = 0;
+    sourceTitles.forEach(t => {
+      if (t.matchType === "can" && (t.orGroup ?? 1) > maxId) maxId = t.orGroup ?? 1;
+    });
+    sourceSkills.forEach(s => {
+      if (s.matchType === "can" && (s.orGroup ?? 1) > maxId) maxId = s.orGroup ?? 1;
+    });
+    return maxId + 1 >= 1 ? maxId + 1 : 1;
+  };
+  const existingOrGroupIds = (): number[] => {
+    const ids = new Set<number>();
+    sourceTitles.forEach(t => { if (t.matchType === "can") ids.add(t.orGroup ?? 1); });
+    sourceSkills.forEach(s => { if (s.matchType === "can") ids.add(s.orGroup ?? 1); });
+    return Array.from(ids).sort((a, b) => a - b);
   };
 
   const isValidBoolean = (str: string) => {
@@ -5954,11 +6004,11 @@ function NewJobPageContent() {
                               title.matchType === 'exclude' ? 'bg-[#fef2f2] text-[#dc2626] border border-[#fee2e2]' :
                                 'bg-[#f0fdf4] text-[#16a34a] border border-[#dcfce7]'
                               }`}>
-                              {title.matchType === 'must' ? 'Must have' : title.matchType === 'exclude' ? 'Must not have' : 'Can have'}
+                              {title.matchType === 'must' ? 'Must have' : title.matchType === 'exclude' ? 'Must not have' : `Can have · Group ${title.orGroup ?? 1}`}
                               <ChevronDown className="w-4 h-4 opacity-50 ml-1" />
                             </div>
                           </DropdownMenuTrigger>
-                          <DropdownMenuContent align="start" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
+                          <DropdownMenuContent align="start" className="w-[180px] p-1.5 rounded-xl border-slate-200 shadow-lg">
                             <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => {
                               setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'must' } : t));
                               trackEvent("job_wizard_step5_source_title_match_type_changed", {
@@ -5969,15 +6019,38 @@ function NewJobPageContent() {
                             }}>
                               Must have
                             </DropdownMenuItem>
-                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => {
-                              setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'can' } : t));
-                              trackEvent("job_wizard_step5_source_title_match_type_changed", {
-                                step: 5,
-                                title: truncateForTelemetry(title.value, 100),
-                                match_type: "can",
-                              });
-                            }}>
-                              Can have
+                            {existingOrGroupIds().map(gid => (
+                              <DropdownMenuItem
+                                key={`title-or-${gid}`}
+                                className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]"
+                                onClick={() => {
+                                  setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'can', orGroup: gid } : t));
+                                  trackEvent("job_wizard_step5_source_title_match_type_changed", {
+                                    step: 5,
+                                    title: truncateForTelemetry(title.value, 100),
+                                    match_type: "can",
+                                    or_group: gid,
+                                  });
+                                }}
+                              >
+                                Can have · Group {gid}
+                              </DropdownMenuItem>
+                            ))}
+                            <DropdownMenuItem
+                              className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px] text-[#16a34a]"
+                              onClick={() => {
+                                const newGid = nextOrGroupId();
+                                setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'can', orGroup: newGid } : t));
+                                trackEvent("job_wizard_step5_source_title_match_type_changed", {
+                                  step: 5,
+                                  title: truncateForTelemetry(title.value, 100),
+                                  match_type: "can",
+                                  or_group: newGid,
+                                  new_group: true,
+                                });
+                              }}
+                            >
+                              + New OR group
                             </DropdownMenuItem>
                             <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px] text-red-600" onClick={() => {
                               setSourceTitles(prev => prev.map(t => t.id === title.id ? { ...t, matchType: 'exclude' } : t));
@@ -6135,11 +6208,11 @@ function NewJobPageContent() {
                               skill.matchType === 'exclude' ? 'bg-[#fef2f2] text-[#dc2626] border border-[#fee2e2]' :
                                 'bg-[#f0fdf4] text-[#16a34a] border border-[#dcfce7]'
                               }`}>
-                              {skill.matchType === 'must' ? 'Must have' : skill.matchType === 'exclude' ? 'Must not have' : 'Can have'}
+                              {skill.matchType === 'must' ? 'Must have' : skill.matchType === 'exclude' ? 'Must not have' : `Can have · Group ${skill.orGroup ?? 1}`}
                               <ChevronDown className="w-4 h-4 opacity-50 ml-1" />
                             </div>
                           </DropdownMenuTrigger>
-                          <DropdownMenuContent align="start" className="w-[150px] p-1.5 rounded-xl border-slate-200 shadow-lg">
+                          <DropdownMenuContent align="start" className="w-[180px] p-1.5 rounded-xl border-slate-200 shadow-lg">
                             <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => {
                               setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'must' } : s));
                               trackEvent("job_wizard_step5_source_skill_match_type_changed", {
@@ -6150,15 +6223,38 @@ function NewJobPageContent() {
                             }}>
                               Must have
                             </DropdownMenuItem>
-                            <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]" onClick={() => {
-                              setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'can' } : s));
-                              trackEvent("job_wizard_step5_source_skill_match_type_changed", {
-                                step: 5,
-                                skill: truncateForTelemetry(skill.value, 100),
-                                match_type: "can",
-                              });
-                            }}>
-                              Can have
+                            {existingOrGroupIds().map(gid => (
+                              <DropdownMenuItem
+                                key={`skill-or-${gid}`}
+                                className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px]"
+                                onClick={() => {
+                                  setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'can', orGroup: gid } : s));
+                                  trackEvent("job_wizard_step5_source_skill_match_type_changed", {
+                                    step: 5,
+                                    skill: truncateForTelemetry(skill.value, 100),
+                                    match_type: "can",
+                                    or_group: gid,
+                                  });
+                                }}
+                              >
+                                Can have · Group {gid}
+                              </DropdownMenuItem>
+                            ))}
+                            <DropdownMenuItem
+                              className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px] text-[#16a34a]"
+                              onClick={() => {
+                                const newGid = nextOrGroupId();
+                                setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'can', orGroup: newGid } : s));
+                                trackEvent("job_wizard_step5_source_skill_match_type_changed", {
+                                  step: 5,
+                                  skill: truncateForTelemetry(skill.value, 100),
+                                  match_type: "can",
+                                  or_group: newGid,
+                                  new_group: true,
+                                });
+                              }}
+                            >
+                              + New OR group
                             </DropdownMenuItem>
                             <DropdownMenuItem className="flex items-center gap-2 rounded-lg py-2 cursor-pointer font-bold text-[12px] text-red-600" onClick={() => {
                               setSourceSkills(prev => prev.map(s => s.id === skill.id ? { ...s, matchType: 'exclude' } : s));
@@ -7310,7 +7406,7 @@ return (
       <h1 className="text-[32px] font-bold text-slate-900 leading-tight">New Job</h1>
       <p className="text-slate-500 text-[16px] font-medium mt-1">
         {(() => {
-          const title = jobData?.title || jobTitle;
+          const title = enhancedTitle || jobData?.enhanced_title || jobData?.title || jobTitle;
           const customer = jobData?.customer_name || jobData?.customer || "";
           if (!title && !customer) return "Enter a JobDiva Job ID to get started.";
           if (title && customer) return `${title} · ${customer}`;

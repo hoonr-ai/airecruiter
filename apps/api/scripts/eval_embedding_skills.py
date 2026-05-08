@@ -38,17 +38,46 @@ def _load_cases() -> List[Dict]:
     if not CASES_PATH.exists():
         # Bootstrap minimal default cases so the script runs out of the box.
         default = [
+            # ── IT positives ──
             {"query": "React", "skills": ["ReactJS", "JavaScript"], "expected": True},
             {"query": "Node.js", "skills": ["Node", "Express"], "expected": True},
             {"query": "Web Development", "skills": ["Web Dev", "HTML/CSS"], "expected": True},
             {"query": "Python", "skills": ["python3", "Django"], "expected": True},
             {"query": "Machine Learning", "skills": ["ML Engineering", "PyTorch"], "expected": True},
             {"query": "AWS", "skills": ["Amazon Web Services", "S3"], "expected": True},
-            # Negatives — these should NOT match.
+
+            # ── Program/Project Management positives ──
+            {"query": "Stakeholder Management", "skills": ["Executive Alignment", "Cross-functional Coordination"], "expected": True},
+            {"query": "Risk Register", "skills": ["RAID Log", "Risk Tracking"], "expected": True},
+            {"query": "OKR Tracking", "skills": ["OKRs", "Quarterly Goal Setting"], "expected": True},
+            {"query": "Dependency Mapping", "skills": ["Dependency Tracking", "Cross-team Dependencies"], "expected": True},
+
+            # ── Sales positives ──
+            {"query": "Account Management", "skills": ["Strategic Account Management", "Customer Relationship Management"], "expected": True},
+            {"query": "Pipeline Forecasting", "skills": ["Sales Forecasting", "Pipeline Management"], "expected": True},
+            {"query": "MEDDIC", "skills": ["MEDDPICC", "Sales Qualification"], "expected": True},
+
+            # ── Finance / Accounting positives ──
+            {"query": "Variance Analysis", "skills": ["Budget Variance", "Forecast vs Actual Analysis"], "expected": True},
+            {"query": "Month-End Close", "skills": ["MEC", "Period-End Close Process"], "expected": True},
+            {"query": "GL Reconciliation", "skills": ["General Ledger Reconciliation", "Balance Sheet Reconciliation"], "expected": True},
+
+            # ── HR / Marketing / CS positives ──
+            {"query": "Employee Relations", "skills": ["ER Cases", "Workplace Investigations"], "expected": True},
+            {"query": "Demand Generation", "skills": ["Demand Gen", "Lead Generation Programs"], "expected": True},
+            {"query": "Net Revenue Retention", "skills": ["NRR", "Customer Expansion Revenue"], "expected": True},
+
+            # ── Healthcare / Legal positives ──
+            {"query": "Patient Care", "skills": ["Clinical Patient Care", "Bedside Care"], "expected": True},
+            {"query": "Contract Negotiation", "skills": ["Commercial Contract Negotiation", "Redlining"], "expected": True},
+
+            # ── Negatives — these should NOT match (mostly cross-domain noise). ──
             {"query": "React", "skills": ["Java", "Spring Boot"], "expected": False},
             {"query": "Python", "skills": ["JavaScript", "TypeScript"], "expected": False},
             {"query": "Frontend", "skills": ["DBA", "PL/SQL"], "expected": False},
-            {"query": "DevOps", "skills": ["Marketing", "Sales"], "expected": False},
+            {"query": "MEDDIC", "skills": ["Kubernetes", "Helm"], "expected": False},
+            {"query": "Variance Analysis", "skills": ["Pipeline Engineering", "Oil & Gas Operations"], "expected": False},
+            {"query": "Stakeholder Management", "skills": ["Stakeholder Reporting (PowerBI)", "ETL Pipelines"], "expected": False},
         ]
         CASES_PATH.write_text(json.dumps(default, indent=2))
         print(f"Bootstrapped default cases → {CASES_PATH}")
