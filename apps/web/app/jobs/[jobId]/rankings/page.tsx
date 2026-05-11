@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -1006,6 +1006,9 @@ export default function CandidateRankingsPage() {
   const runScreen = async (candidate: Candidate) => {
     setScreenLoading(true);
     setScreenError(null);
+    setScreenApiResponse(null);
+    setScreenPayload("");
+    setSelectedScreenCandidateIds([]);
     try {
       const data = await engagement.generatePayload({
         candidateIds: [candidate.candidate_id || String(candidate.id)],
@@ -1020,6 +1023,12 @@ export default function CandidateRankingsPage() {
       setScreenLoading(false);
     }
   };
+
+  const handleScreenModalClose = useCallback(() => {
+    setIsScreenModalOpen(false);
+    setScreenApiResponse(null);
+    setScreenError(null);
+  }, []);
 
   const handleScreenClick = async (candidate: Candidate) => {
     if (!hasUsablePhone(candidate.phone)) {
@@ -2167,7 +2176,7 @@ export default function CandidateRankingsPage() {
 
       <EngageWizardModal
         open={isScreenModalOpen}
-        onClose={() => setIsScreenModalOpen(false)}
+        onClose={handleScreenModalClose}
         initialPayload={screenPayload}
         candidateIds={selectedScreenCandidateIds}
         onSend={async (payload) => {
