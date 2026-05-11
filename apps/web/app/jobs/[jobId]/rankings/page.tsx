@@ -70,6 +70,36 @@ const formatDate = (dateStr: string) => {
   }
 };
 
+const FINAL_ENGAGE_STATUSES = new Set([
+  "completed",
+  "passed",
+  "failed",
+  "rejected",
+  "pass",
+  "fail",
+]);
+
+const normalizeStatusValue = (value: unknown): string =>
+  String(value || "").trim().toLowerCase();
+
+const hasFinalEngageOutcome = (candidate: {
+  engage_status?: string;
+  engage_hard_filter_status?: string;
+  data?: any;
+}): boolean => {
+  const statusCandidates = [
+    candidate.engage_hard_filter_status,
+    candidate.data?.engage_hard_filter_status,
+    candidate.engage_status,
+    candidate.data?.engage_status,
+  ];
+
+  return statusCandidates.some((status) => {
+    const raw = normalizeStatusValue(status);
+    return raw ? FINAL_ENGAGE_STATUSES.has(raw) || raw.includes("complete") : false;
+  });
+};
+
 const ColumnFilterPopup = ({
   field,
   label,
@@ -649,12 +679,12 @@ export default function CandidateRankingsPage() {
         else if (field === "source") val = normalizeSourceLabel(c.source);
         else if (field === "engage_status") val = normalizeInterviewStatus(c).label;
         else if (field === "screening_score") val = String(c.match_score || 0);
-        else if (field === "engage_score") val = String(c.engage_score || 0);
+        else if (field === "engage_score") val = hasFinalEngageOutcome(c) ? String(c.engage_score || 0) : "";
         else if (field === "total_score") {
           const screeningScore = c.match_score || 0;
-          const engageScore = c.engage_score || 0;
-          const isDone = ["completed", "passed", "failed", "rejected", "pass", "fail"].includes((c.engage_status || "").toLowerCase());
-          val = String(isDone ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : screeningScore);
+          const showEngageScore = hasFinalEngageOutcome(c);
+          const engageScore = showEngageScore ? (c.engage_score || 0) : 0;
+          val = String(showEngageScore ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : screeningScore);
         }
 
         const v = val.toLowerCase();
@@ -683,7 +713,13 @@ export default function CandidateRankingsPage() {
       const dir = sortDir === "asc" ? 1 : -1;
       rows = [...rows].sort((a, b) => {
         const getScore = (c: Candidate) => c.match_score ?? c.resume_match_percentage ?? 0;
-        const getEngage = (c: Candidate) => c.engage_score ?? 0;
+        const getEngage = (c: Candidate) => (hasFinalEngageOutcome(c) ? (c.engage_score ?? 0) : -1);
+        const getTotalScore = (c: Candidate) => {
+          const screeningScore = getScore(c);
+          return hasFinalEngageOutcome(c)
+            ? Math.round((screeningScore + (c.engage_score ?? 0)) / 2 * 10) / 10
+            : screeningScore;
+        };
         switch (sortField) {
           case "name":
             return dir * (a.name || "").localeCompare(b.name || "");
@@ -692,7 +728,7 @@ export default function CandidateRankingsPage() {
           case "engage_score":
             return dir * (getEngage(a) - getEngage(b));
           case "total_score":
-            return dir * ((getScore(a) + getEngage(a)) - (getScore(b) + getEngage(b)));
+            return dir * (getTotalScore(a) - getTotalScore(b));
           case "source":
             return dir * (normalizeSourceLabel(a.source)).localeCompare(normalizeSourceLabel(b.source));
           case "engage_status":
@@ -1849,9 +1885,9 @@ export default function CandidateRankingsPage() {
                 ) : (
                   filteredCandidates.map((candidate, idx) => {
                     const screeningScore = candidate.match_score || 0;
-                    const engageScore = candidate.engage_score || 0;
-                    const isDone = ["completed", "passed", "failed", "rejected", "pass", "fail"].includes((candidate.engage_status || "").toLowerCase());
-                    const totalScore = isDone ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : screeningScore;
+                    const showEngageScore = hasFinalEngageOutcome(candidate);
+                    const engageScore = showEngageScore ? (candidate.engage_score || 0) : 0;
+                    const totalScore = showEngageScore ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : screeningScore;
 
                     return (
                       <TableRow key={`${candidate.id || candidate.candidate_id}-${idx}`} className="border-b border-slate-100 hover:bg-slate-50 transition-all duration-200 h-auto group leading-tight relative">
@@ -2004,7 +2040,7 @@ export default function CandidateRankingsPage() {
                             const eTotal = candidate.engage_total_score || 100;
                             const hardFilterDetails = candidate.engage_hard_filter_details || [];
 
-                            if (eScore !== undefined && eScore !== null) {
+                            if (showEngageScore && eScore !== undefined && eScore !== null) {
                               return (
                                 <div className="group relative flex items-center justify-center w-full">
                                   <span className="font-bold text-slate-900 text-[14px] underline decoration-dotted underline-offset-4">
