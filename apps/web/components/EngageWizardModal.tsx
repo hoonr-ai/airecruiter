@@ -672,18 +672,20 @@ export function EngageWizardModal({
 
   // Show success overlay when API confirms
   useEffect(() => {
-    if (successData?.success) {
-      const interviewId = successData.data?.[0]?.interview_id || null;
-      setSuccessInterviewId(interviewId);
-      setShowSuccess(true);
-      // Auto-close after 2.5 seconds
-      const timer = setTimeout(() => {
-        setShowSuccess(false);
-        onClose();
-      }, 2500);
-      return () => clearTimeout(timer);
+    if (!open || !successData?.success) {
+      return;
     }
-  }, [successData, onClose]);
+
+    const interviewId = successData.data?.[0]?.interview_id || null;
+    setSuccessInterviewId(interviewId);
+    setShowSuccess(true);
+    // Auto-close after 2.5 seconds
+    const timer = setTimeout(() => {
+      setShowSuccess(false);
+      onClose();
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, [open, successData, onClose]);
 
   const handleNext = () => setStep((s) => Math.min(s + 1, 4));
   const handleBack = () => setStep((s) => Math.max(s - 1, 1));
