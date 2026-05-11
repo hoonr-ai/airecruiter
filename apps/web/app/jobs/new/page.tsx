@@ -3650,6 +3650,10 @@ function NewJobPageContent() {
 
   const initializeScreenQuestionsFromRubric = async (opts: { force?: boolean } = {}) => {
     if (!jobData) return;
+    // Source / view mode: Steps 1-4 are frozen and the saved question set is
+    // the audit trail of what Alex actually asked. Never recompute defaults
+    // here, even when called with `force: true` from the Step 3→4 path.
+    if (isReadOnly) return;
     // Respect recruiter edits, UNLESS the screening level has changed since
     // the last generation (recruiter dialed depth up/down on Step 1 — they
     // expect the question set to track). `force: true` from the explicit
@@ -3702,7 +3706,8 @@ function NewJobPageContent() {
     defaultQs.push(
       { text: "What is your earliest availability to start a new role?", criteria: `Must be available by ${jobData.start_date || 'ASAP'}` },
       { text: "What is your current compensation and expected compensation?", criteria: "" },
-      { text: "Are you authorized to work in the United States?", criteria: "" },
+      { text: "Which types of working arrangements are you open to and eligible for? Select all that apply: W2 Employee, Subcontractor to Pyramid through your current employer, Independent Contractor", criteria: "" },
+      { text: "Are you authorized to work indefinitely for any employer in the United States?", criteria: "" },
       { text: "Will you now or in the future require visa sponsorship to continue working in the United States?", criteria: "" },
     );
 
@@ -3993,6 +3998,10 @@ function NewJobPageContent() {
 
   const syncStepFourData = useEffectEvent(() => {
     if (!rubricData) return;
+    // In source / view mode the Step-4 form is frozen — re-initializing
+    // filters and questions from the rubric would clobber the saved set
+    // that Alex used for the historical screens.
+    if (isReadOnly) return;
 
     initializeFiltersFromRubric();
     initializeScreenQuestionsFromRubric();
@@ -4006,6 +4015,10 @@ function NewJobPageContent() {
 
   const syncStepFiveData = useEffectEvent(() => {
     if (!rubricData) return;
+    // View mode: Step 5 is frozen too, so skip the seed. Source mode is
+    // the whole reason recruiters re-enter Step 5, so it still runs (the
+    // ref below prevents repeat init within a single session).
+    if (isViewOnly) return;
     if (sourcingCriteriaInitializedRef.current) return;
 
     initializeSourceFromRubric();
@@ -7500,6 +7513,11 @@ return (
                 }
                 return;
               } else if (currentStep === 2) {
+                if (isReadOnly) {
+                  trackStepAdvance(2, 3, { via: "next_button", read_only: true });
+                  setCurrentStep(3);
+                  return;
+                }
                 setIsAdvancingStep(true);
                 try {
                   const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
@@ -7563,6 +7581,11 @@ return (
                   setIsAdvancingStep(false);
                 }
               } else if (currentStep === 3) {
+                if (isReadOnly) {
+                  trackStepAdvance(3, 4, { via: "next_button", read_only: true });
+                  setCurrentStep(4);
+                  return;
+                }
                 setIsAdvancingStep(true);
                 try {
                   const saved = await saveJobDraft({ currentStep: 4, skipToast: true });
@@ -7582,6 +7605,11 @@ return (
                   setIsAdvancingStep(false);
                 }
               } else if (currentStep === 4) {
+                if (isViewOnly) {
+                  trackStepAdvance(4, 5, { via: "next_button", read_only: true });
+                  setCurrentStep(5);
+                  return;
+                }
                 setIsAdvancingStep(true);
                 try {
                   const saved = await saveJobDraft({ currentStep: 5, skipToast: true });

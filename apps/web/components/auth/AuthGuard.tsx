@@ -5,6 +5,13 @@ import { useMsal, useIsAuthenticated } from "@azure/msal-react";
 import { InteractionStatus } from "@azure/msal-browser";
 import { LoginPage } from "./LoginPage";
 
+// Local-development escape hatch. Set NEXT_PUBLIC_DISABLE_SSO=true in
+// .env.local to skip the Microsoft Entra sign-in wall — useful when running
+// without Azure credentials. Must remain unset/false in deployed envs; the
+// flag is read at build time via Next's NEXT_PUBLIC_* inlining, so a prod
+// build with the var absent can never bypass auth.
+const SSO_DISABLED = process.env.NEXT_PUBLIC_DISABLE_SSO === "true";
+
 export function AuthGuard({ children }: { children: ReactNode }) {
     const { inProgress } = useMsal();
     const isAuthenticated = useIsAuthenticated();
@@ -17,6 +24,13 @@ export function AuthGuard({ children }: { children: ReactNode }) {
             setIsLoading(false);
         }
     }, [inProgress]);
+
+    // Dev bypass: render the app without an MSAL session. TelemetryBootstrap
+    // and AzureLoginButton both short-circuit when `accounts` is empty, so
+    // downstream UI stays intact.
+    if (SSO_DISABLED) {
+        return <>{children}</>;
+    }
 
     // Show a minimal loading state while MSAL processes the redirect
     if (isLoading) {
