@@ -35,7 +35,6 @@ interface Job {
   maxAllowedSubmittals: string;
   pairStatus: string;
   candidatesLaunched: number;
-  resumesShortlisted: number;
   completeSubmissions: number;
   passSubmissions: number;
   pairExternalSubs: number;
@@ -134,7 +133,6 @@ export default function DashboardPage() {
             : Number.parseInt(details.max_allowed_submittals, 10).toString(),
           pairStatus: pairStatus,
           candidatesLaunched: details.candidates_launched || 0,
-          resumesShortlisted: details.resumes_shortlisted || 0,
           completeSubmissions: details.complete_submissions || 0,
           passSubmissions: details.pass_submissions || 0,
           pairExternalSubs: details.pair_external_subs || 0,
@@ -204,7 +202,6 @@ export default function DashboardPage() {
       "Job Status",
       "Hoonr-Curate Status",
       "Candidates Launched",
-      "Resumes Shortlisted",
       "Complete Submissions",
       "Pass Submissions",
       "Hoonr-Curate External Subs",
@@ -228,7 +225,6 @@ export default function DashboardPage() {
       escapeCSV(job.status),
       escapeCSV(job.pairStatus),
       escapeCSV(job.candidatesLaunched),
-      escapeCSV(job.resumesShortlisted),
       escapeCSV(job.completeSubmissions),
       escapeCSV(job.passSubmissions),
       escapeCSV(job.pairExternalSubs),
@@ -367,7 +363,6 @@ export default function DashboardPage() {
                 <SortableHeader field="status">JOB STATUS</SortableHeader>
                 <SortableHeader field="pairStatus">HOONR-CURATE STATUS</SortableHeader>
                 <SortableHeader field="candidatesLaunched">CANDIDATES LAUNCHED</SortableHeader>
-                <SortableHeader field="resumesShortlisted">RESUMES SHORTLISTED</SortableHeader>
                 <SortableHeader field="completeSubmissions">COMPLETE SUBMISSIONS</SortableHeader>
                 <SortableHeader field="passSubmissions">PASS SUBMISSIONS</SortableHeader>
                 <SortableHeader field="pairExternalSubs">HOONR-CURATE EXTERNAL SUBS</SortableHeader>
@@ -426,9 +421,6 @@ export default function DashboardPage() {
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
                     {job.candidatesLaunched}
-                  </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
-                    {job.resumesShortlisted}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
                     {job.completeSubmissions}
