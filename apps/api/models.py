@@ -160,6 +160,10 @@ class CandidateSaveRecord(BaseModel):
     experience_years: Any = 0
     source: str = "JobDiva"
     match_score: Any = 0.0
+    matched_skills: Optional[Any] = None
+    missing_skills: Optional[Any] = None
+    match_score_details: Optional[Any] = None
+    explainability: Optional[Any] = None
     is_selected: bool = False
     # Additional enrichment fields sent by frontend
     education: Optional[Any] = None
