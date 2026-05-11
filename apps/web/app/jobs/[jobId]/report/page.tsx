@@ -90,6 +90,26 @@ interface EvaluationReport {
   };
 }
 
+const FINAL_ENGAGE_STATUSES = new Set([
+  "completed",
+  "passed",
+  "failed",
+  "rejected",
+  "pass",
+  "fail",
+]);
+
+const normalizeStatusValue = (value: unknown): string =>
+  String(value || "").trim().toLowerCase();
+
+const hasFinalEngageOutcome = (hardFilterStatus?: string, engageStatus?: string): boolean => {
+  const statuses = [hardFilterStatus, engageStatus];
+  return statuses.some((status) => {
+    const raw = normalizeStatusValue(status);
+    return raw ? FINAL_ENGAGE_STATUSES.has(raw) || raw.includes("complete") : false;
+  });
+};
+
 export default function CandidateEvaluationReportPage() {
   const { jobId } = useParams();
   const searchParams = useSearchParams();
@@ -259,6 +279,10 @@ export default function CandidateEvaluationReportPage() {
   }
 
   const { candidate, scores, job, pair } = data;
+  const showEngageScore = hasFinalEngageOutcome(scores.hard_filter_status, scores.engage_status);
+  const displayedTotalFitScore = showEngageScore
+    ? (scores.total_fit_score || 0)
+    : (scores.resume_match_score || 0);
 
   const formatAvailability = (availability: string, interviewDate?: string) => {
     if (!availability || availability.toLowerCase().includes("no data available")) return "No data available";
@@ -437,14 +461,14 @@ export default function CandidateEvaluationReportPage() {
                   status={formatStatusLabel(scores.hard_filter_status || scores.engage_status)} 
                   type={getStatusType(scores.hard_filter_status || scores.engage_status)} 
                 />
-                <div className="text-[14px] text-[#475569]">Score: <strong className="text-[#0f172a] ml-1 font-bold">{scores.engage_score !== null ? `${scores.engage_score}/100` : "N/A"}</strong></div>
+                <div className="text-[14px] text-[#475569]">Score: <strong className="text-[#0f172a] ml-1 font-bold">{showEngageScore && scores.engage_score !== null ? `${scores.engage_score}/100` : "N/A"}</strong></div>
               </div>
             </div>
             <div className="w-[1px] bg-[#f1f5f9] my-4 hidden md:block" />
             <div className="flex-1 p-6 space-y-3">
               <div className="text-[12px] font-bold text-[#94a3b8] uppercase tracking-widest">Total Fit Score</div>
               <div className="flex items-center gap-4">
-                <div className="text-[14px] text-[#475569]">Score: <strong className="text-[#0f172a] ml-1 font-bold">{scores.total_fit_score || 0}/100</strong></div>
+                <div className="text-[14px] text-[#475569]">Score: <strong className="text-[#0f172a] ml-1 font-bold">{displayedTotalFitScore}/100</strong></div>
               </div>
             </div>
           </div>
@@ -542,7 +566,7 @@ export default function CandidateEvaluationReportPage() {
                                 status={hf_status === 'passed' ? 'Pass' : 'Fail'} 
                                 type={hf_status === 'passed' ? 'success' : 'danger'} 
                               />
-                              {score !== undefined && (
+                              {showEngageScore && score !== undefined && (
                                 <div className="px-3 py-1 bg-slate-100 rounded-lg border border-slate-200">
                                   <span className="text-[13px] font-bold text-slate-700">{score}/{total}</span>
                                 </div>
