@@ -271,8 +271,10 @@ type ToastState = { type: "info" | "error" | "success"; message: string } | null
 
 function ResumeScreeningHoverCard({
   candidate,
+  open,
 }: {
   candidate: Candidate;
+  open: boolean;
 }) {
   const dataBlob = candidate.data || {};
   const titleStr = String(candidate.job_title || candidate.headline || dataBlob?.headline || "").trim();
@@ -297,7 +299,7 @@ function ResumeScreeningHoverCard({
       : explainability[0]?.text || "";
 
   return (
-    <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 hidden w-[420px] -translate-x-1/2 rounded-xl border border-slate-200 bg-white p-4 text-left shadow-2xl group-hover:block">
+    <div className={`pointer-events-none absolute left-1/2 top-full z-30 mt-2 w-[420px] -translate-x-1/2 rounded-xl border border-slate-200 bg-white p-4 text-left shadow-2xl ${open ? "block" : "hidden"}`}>
       {titleAtCompany && (
         <div className="mb-1.5 truncate text-[12.5px] font-semibold text-slate-800" title={titleAtCompany}>
           {titleAtCompany}
@@ -772,6 +774,7 @@ export default function CandidateRankingsPage() {
   const [screenError, setScreenError] = useState<string | null>(null);
   const [selectedScreenCandidateIds, setSelectedScreenCandidateIds] = useState<string[]>([]);
   const [screenApiResponse, setScreenApiResponse] = useState<any>(null);
+  const [hoveredResumeScoreKey, setHoveredResumeScoreKey] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>(null);
   const pushToast = (message: string, type: "info" | "error" | "success" = "info") => {
     setToast({ message, type });
@@ -1893,13 +1896,14 @@ export default function CandidateRankingsPage() {
                   ))
                 ) : (
                   filteredCandidates.map((candidate, idx) => {
+                    const candidateKey = `${candidate.id || candidate.candidate_id || idx}`;
                     const screeningScore = candidate.match_score || 0;
                     const showEngageScore = hasFinalEngageOutcome(candidate);
                     const engageScore = showEngageScore ? (candidate.engage_score || 0) : 0;
                     const totalScore = showEngageScore ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : screeningScore;
 
                     return (
-                      <TableRow key={`${candidate.id || candidate.candidate_id}-${idx}`} className="border-b border-slate-100 hover:bg-slate-50 transition-all duration-200 h-auto group leading-tight relative">
+                      <TableRow key={`${candidateKey}-${idx}`} className="border-b border-slate-100 hover:bg-slate-50 transition-all duration-200 h-auto group leading-tight relative">
                         <TableCell className="w-[50px] border-r border-slate-200 py-2 px-2 align-middle text-center font-medium text-slate-700 group-hover:bg-slate-50 transition-colors">
                           {idx + 1}
                         </TableCell>
@@ -1975,12 +1979,19 @@ export default function CandidateRankingsPage() {
 
 
 
-                        <TableCell className="text-center align-middle py-2 px-2 font-medium text-slate-900 text-[13px] border-l border-slate-200">
-                          <div className="group relative flex items-center justify-center gap-1 w-full text-center">
-
+                        <TableCell
+                          className="text-center align-middle py-2 px-2 font-medium text-slate-900 text-[13px] border-l border-slate-200"
+                          onMouseEnter={() => {
+                            if (screeningScore > 0) setHoveredResumeScoreKey(candidateKey);
+                          }}
+                          onMouseLeave={() => setHoveredResumeScoreKey((prev) => (prev === candidateKey ? null : prev))}
+                        >
+                          <div className="relative flex items-center justify-center gap-1 w-full text-center">
                             {screeningScore > 0 ? (
-                              <span className="font-bold text-slate-900 text-[14px] underline decoration-dotted underline-offset-4">
-                                {screeningScore}/100
+                              <span className="inline-flex items-center justify-center">
+                                <span className="font-bold text-slate-900 text-[14px] underline decoration-dotted underline-offset-4">
+                                  {screeningScore}/100
+                                </span>
                               </span>
                             ) : (
                               <span className="font-normal opacity-40 italic text-slate-400 text-[13px]">
@@ -1988,7 +1999,10 @@ export default function CandidateRankingsPage() {
                               </span>
                             )}
                             {screeningScore > 0 ? (
-                              <ResumeScreeningHoverCard candidate={candidate} />
+                              <ResumeScreeningHoverCard
+                                candidate={candidate}
+                                open={hoveredResumeScoreKey === candidateKey}
+                              />
                             ) : null}
                           </div>
                         </TableCell>

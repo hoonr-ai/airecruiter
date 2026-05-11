@@ -1273,6 +1273,33 @@ async def save_candidates(request: CandidatesSaveRequest):
                         except Exception:
                             incoming_match_score = None
 
+                        def _clean_string_list(raw: Any) -> List[str]:
+                            if not isinstance(raw, list):
+                                return []
+                            cleaned: List[str] = []
+                            for item in raw:
+                                value = item if isinstance(item, str) else (
+                                    item.get("name") if isinstance(item, dict) else None
+                                )
+                                if isinstance(value, str) and value.strip():
+                                    cleaned.append(value.strip())
+                            return cleaned
+
+                        incoming_matched_skills = _clean_string_list(getattr(c, 'matched_skills', None))
+                        incoming_missing_skills = _clean_string_list(getattr(c, 'missing_skills', None))
+                        raw_incoming_explainability = getattr(c, 'explainability', None)
+                        incoming_explainability = (
+                            _clean_string_list(raw_incoming_explainability)
+                            if isinstance(raw_incoming_explainability, list)
+                            else (
+                                [raw_incoming_explainability.strip()]
+                                if isinstance(raw_incoming_explainability, str) and raw_incoming_explainability.strip()
+                                else []
+                            )
+                        )
+                        raw_incoming_score_details = getattr(c, 'match_score_details', None)
+                        incoming_score_details = raw_incoming_score_details if isinstance(raw_incoming_score_details, dict) else {}
+
                         raw_urls = getattr(c, 'urls', {})
                         if not isinstance(raw_urls, dict):
                             raw_urls = {}
@@ -1317,10 +1344,10 @@ async def save_candidates(request: CandidatesSaveRequest):
                             scoring = {
                                 "score": incoming_match_score,
                                 "status": "done",
-                                "missing_skills": [],
-                                "matched_skills": [],
-                                "explainability": ["Score preserved from Step-5 sourcing"],
-                                "score_details": {},
+                                "missing_skills": incoming_missing_skills,
+                                "matched_skills": incoming_matched_skills,
+                                "explainability": incoming_explainability or ["Score preserved from Step-5 sourcing"],
+                                "score_details": incoming_score_details,
                                 "scored_at": datetime.now(timezone.utc).isoformat(),
                             }
                         else:

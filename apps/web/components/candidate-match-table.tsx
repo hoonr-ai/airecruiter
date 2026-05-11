@@ -215,10 +215,10 @@ export function CandidateMatchTable({
 }: Props) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [hoverPos, setHoverPos] = useState<{ top: number; left: number; placement: "below" | "above" } | null>(null);
-  const rowRefs = useRef<Map<string, HTMLTableRowElement | null>>(new Map());
+  const scoreRefs = useRef<Map<string, HTMLElement | null>>(new Map());
 
-  const computePosition = (rowEl: HTMLTableRowElement) => {
-    const rect = rowEl.getBoundingClientRect();
+  const computePosition = (scoreEl: HTMLElement) => {
+    const rect = scoreEl.getBoundingClientRect();
     const left = Math.min(
       Math.max(8, rect.left),
       window.innerWidth - POPOVER_WIDTH - 8
@@ -228,14 +228,14 @@ export function CandidateMatchTable({
     setHoverPos({ top, left, placement: placeBelow ? "below" : "above" });
   };
 
-  // Recompute on scroll/resize while a row is hovered.
+  // Recompute on scroll/resize while the score is hovered.
   useLayoutEffect(() => {
     if (!hoveredId) return;
-    const rowEl = rowRefs.current.get(hoveredId);
-    if (!rowEl) return;
-    computePosition(rowEl);
+    const scoreEl = scoreRefs.current.get(hoveredId);
+    if (!scoreEl) return;
+    computePosition(scoreEl);
     const handler = () => {
-      const el = rowRefs.current.get(hoveredId);
+      const el = scoreRefs.current.get(hoveredId);
       if (el) computePosition(el);
     };
     window.addEventListener("scroll", handler, { passive: true, capture: true });
@@ -337,10 +337,6 @@ export function CandidateMatchTable({
               return (
                 <TableRow
                   key={id}
-                  ref={(el) => {
-                    if (el) rowRefs.current.set(id, el);
-                    else rowRefs.current.delete(id);
-                  }}
                   className={`cursor-default transition-colors ${
                     isDnc
                       ? "bg-rose-50 opacity-80"
@@ -348,13 +344,6 @@ export function CandidateMatchTable({
                         ? "bg-slate-50 opacity-60"
                         : "hover:bg-indigo-50/30"
                   }`}
-                  onMouseEnter={(e) => {
-                    setHoveredId(id);
-                    computePosition(e.currentTarget as HTMLTableRowElement);
-                  }}
-                  onMouseLeave={() => {
-                    setHoveredId((prev) => (prev === id ? null : prev));
-                  }}
                 >
                   <TableCell className="pl-4">
                     <Checkbox
@@ -398,7 +387,22 @@ export function CandidateMatchTable({
                       onSaved={(normalised) => onPhoneSaved(id, normalised)}
                     />
                   </TableCell>
-                  <TableCell className="text-center">
+                  <TableCell
+                    className="text-center"
+                    ref={(el) => {
+                      if (el) scoreRefs.current.set(id, el);
+                      else scoreRefs.current.delete(id);
+                    }}
+                    onMouseEnter={(e) => {
+                      if (matchScore != null && tone) {
+                        setHoveredId(id);
+                        computePosition(e.currentTarget);
+                      }
+                    }}
+                    onMouseLeave={() => {
+                      setHoveredId((prev) => (prev === id ? null : prev));
+                    }}
+                  >
                     {matchScore != null && tone ? (
                       <button
                         type="button"

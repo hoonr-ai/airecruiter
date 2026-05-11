@@ -5620,6 +5620,10 @@ function NewJobPageContent() {
             company_experience: Array.isArray(c.company_experience || c.enhanced_info?.company_experience) ? (c.company_experience || c.enhanced_info?.company_experience) : [],
             urls: (c.urls && typeof c.urls === 'object' && !Array.isArray(c.urls)) ? c.urls : (c.enhanced_info?.urls || {}),
             match_score: typeof c.match_score === 'number' ? c.match_score : 0,
+            matched_skills: Array.isArray(c.matched_skills) ? c.matched_skills : [],
+            missing_skills: Array.isArray(c.missing_skills) ? c.missing_skills : [],
+            match_score_details: (c.match_score_details && typeof c.match_score_details === 'object' && !Array.isArray(c.match_score_details)) ? c.match_score_details : {},
+            explainability: Array.isArray(c.explainability) ? c.explainability : [],
             enhanced_info: (c.enhanced_info && typeof c.enhanced_info === 'object' && !Array.isArray(c.enhanced_info)) ? c.enhanced_info : null
           };
         });
