@@ -2986,8 +2986,9 @@ async def get_candidate_evaluation_report(
                     if "open to exploring new job" in txt: eval_map["isActivelyLookingForJob"] = ans
                     elif "current or most recent role" in txt: eval_map["currentRole"] = ans
                     elif "current location" in txt: eval_map["currentLocation"] = ans
-                    elif "authorized to work in the united states" in txt: eval_map["isAuthorizedToWorkInUS"] = ans
+                    elif "authorized to work" in txt and "united states" in txt: eval_map["isAuthorizedToWorkInUS"] = ans
                     elif "visa sponsorship" in txt: eval_map["requireVisaSponsorship"] = ans
+                    elif "working arrangements are you open to" in txt: eval_map["openWorkingArrangements"] = ans
                     elif "onsite work arrangement" in txt: eval_map["isOpenToRelocation"] = ans
                     elif "availability to start" in txt: eval_map["isAvailableToStartSoon"] = ans
                     elif "compensation" in txt: eval_map["expectedPayRate"] = ans
