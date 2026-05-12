@@ -13,7 +13,8 @@ import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { decryptField } from "@/lib/crypto";
 import { useState, useEffect } from "react";
-import { MessageCircle, Mail, ChevronRight, User, MapPin } from "lucide-react";
+import { MessageCircle, Mail, ChevronRight, User, MapPin, Briefcase } from "lucide-react";
+import { getCandidateLocations } from "@/lib/candidate-location";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
     Dialog,
@@ -35,6 +36,10 @@ interface Candidate {
     email: string;
     city: string;
     state: string;
+    work_city?: string;
+    work_state?: string;
+    work_location?: string;
+    location?: string;
     source?: string;
     open_to_work?: boolean;
     open_to_relocation?: boolean;
@@ -317,7 +322,29 @@ function CandidateRow({
             </TableCell>
             <TableCell>
                 <div className="flex flex-col gap-1 items-start">
-                    <span>{candidate.city}, {candidate.state}</span>
+                    {(() => {
+                        const { home, work } = getCandidateLocations(candidate);
+                        if (!home && !work) {
+                            return <span className="text-slate-300">—</span>;
+                        }
+                        return (
+                            <>
+                                {home && (
+                                    <span className="inline-flex items-center gap-1" title={`Location: ${home}`}>
+                                        <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
+                                        {home}
+                                    </span>
+                                )}
+                                {work && (
+                                    <span className="inline-flex items-center gap-1 text-slate-500" title={`Works in: ${work}`}>
+                                        <Briefcase className="w-3 h-3 text-slate-400 shrink-0" />
+                                        <span className="text-slate-400">Works in:</span>
+                                        {work}
+                                    </span>
+                                )}
+                            </>
+                        );
+                    })()}
                     {candidate.open_to_relocation && (
                         <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 font-medium">
                             Open to Relocation

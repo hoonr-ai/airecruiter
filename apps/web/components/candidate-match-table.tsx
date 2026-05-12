@@ -22,8 +22,10 @@ import {
   Mail,
   Clock,
   MapPin,
+  Briefcase,
   Calendar,
 } from "lucide-react";
+import { getCandidateLocations } from "@/lib/candidate-location";
 
 export type CandidateMatchSortKey =
   | "match"
@@ -80,14 +82,6 @@ function getDisplayName(c: any): string {
     normalize(c.title) ||
     (c.source === "LinkedIn" ? "LinkedIn profile" : "Unnamed candidate")
   );
-}
-
-function getLocationStr(c: any): string {
-  if (c.location) return String(c.location);
-  if (c.city || c.state) {
-    return `${c.city || ""}${c.city && c.state ? ", " : ""}${c.state || ""}`;
-  }
-  return "";
 }
 
 function getReceivedDate(c: any): Date | null {
@@ -215,10 +209,10 @@ export function CandidateMatchTable({
 }: Props) {
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [hoverPos, setHoverPos] = useState<{ top: number; left: number; placement: "below" | "above" } | null>(null);
-  const rowRefs = useRef<Map<string, HTMLTableRowElement | null>>(new Map());
+  const scoreRefs = useRef<Map<string, HTMLElement | null>>(new Map());
 
-  const computePosition = (rowEl: HTMLTableRowElement) => {
-    const rect = rowEl.getBoundingClientRect();
+  const computePosition = (scoreEl: HTMLElement) => {
+    const rect = scoreEl.getBoundingClientRect();
     const left = Math.min(
       Math.max(8, rect.left),
       window.innerWidth - POPOVER_WIDTH - 8
@@ -228,14 +222,14 @@ export function CandidateMatchTable({
     setHoverPos({ top, left, placement: placeBelow ? "below" : "above" });
   };
 
-  // Recompute on scroll/resize while a row is hovered.
+  // Recompute on scroll/resize while the score is hovered.
   useLayoutEffect(() => {
     if (!hoveredId) return;
-    const rowEl = rowRefs.current.get(hoveredId);
-    if (!rowEl) return;
-    computePosition(rowEl);
+    const scoreEl = scoreRefs.current.get(hoveredId);
+    if (!scoreEl) return;
+    computePosition(scoreEl);
     const handler = () => {
-      const el = rowRefs.current.get(hoveredId);
+      const el = scoreRefs.current.get(hoveredId);
       if (el) computePosition(el);
     };
     window.addEventListener("scroll", handler, { passive: true, capture: true });
@@ -325,7 +319,7 @@ export function CandidateMatchTable({
               const matchScore =
                 typeof candidate.match_score === "number" ? candidate.match_score : null;
               const tone = getMatchTone(matchScore);
-              const locationStr = getLocationStr(candidate);
+              const { home: homeLocation, work: workLocation } = getCandidateLocations(candidate);
               const receivedDate = getReceivedDate(candidate);
               const receivedShort = formatReceivedShort(receivedDate);
               const sourceBadge = getSourceBadge(candidate.source);
@@ -337,10 +331,6 @@ export function CandidateMatchTable({
               return (
                 <TableRow
                   key={id}
-                  ref={(el) => {
-                    if (el) rowRefs.current.set(id, el);
-                    else rowRefs.current.delete(id);
-                  }}
                   className={`cursor-default transition-colors ${
                     isDnc
                       ? "bg-rose-50 opacity-80"
@@ -348,13 +338,6 @@ export function CandidateMatchTable({
                         ? "bg-slate-50 opacity-60"
                         : "hover:bg-indigo-50/30"
                   }`}
-                  onMouseEnter={(e) => {
-                    setHoveredId(id);
-                    computePosition(e.currentTarget as HTMLTableRowElement);
-                  }}
-                  onMouseLeave={() => {
-                    setHoveredId((prev) => (prev === id ? null : prev));
-                  }}
                 >
                   <TableCell className="pl-4">
                     <Checkbox
@@ -398,7 +381,22 @@ export function CandidateMatchTable({
                       onSaved={(normalised) => onPhoneSaved(id, normalised)}
                     />
                   </TableCell>
-                  <TableCell className="text-center">
+                  <TableCell
+                    className="text-center"
+                    ref={(el) => {
+                      if (el) scoreRefs.current.set(id, el);
+                      else scoreRefs.current.delete(id);
+                    }}
+                    onMouseEnter={(e) => {
+                      if (matchScore != null && tone) {
+                        setHoveredId(id);
+                        computePosition(e.currentTarget);
+                      }
+                    }}
+                    onMouseLeave={() => {
+                      setHoveredId((prev) => (prev === id ? null : prev));
+                    }}
+                  >
                     {matchScore != null && tone ? (
                       <button
                         type="button"
@@ -436,11 +434,30 @@ export function CandidateMatchTable({
                     </div>
                   </TableCell>
                   <TableCell>
-                    {locationStr ? (
-                      <span className="inline-flex items-center gap-1 text-slate-600 truncate max-w-[170px]" title={locationStr}>
-                        <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
-                        <span className="truncate">{locationStr}</span>
-                      </span>
+                    {homeLocation || workLocation ? (
+                      <div className="flex flex-col gap-0.5 max-w-[170px]">
+                        {homeLocation && (
+                          <span
+                            className="inline-flex items-center gap-1 text-slate-600 truncate"
+                            title={`Location: ${homeLocation}`}
+                          >
+                            <MapPin className="w-3 h-3 text-slate-400 shrink-0" />
+                            <span className="truncate">{homeLocation}</span>
+                          </span>
+                        )}
+                        {workLocation && (
+                          <span
+                            className="inline-flex items-center gap-1 text-slate-500 truncate"
+                            title={`Works in: ${workLocation}`}
+                          >
+                            <Briefcase className="w-3 h-3 text-slate-400 shrink-0" />
+                            <span className="truncate">
+                              <span className="text-slate-400">Works in: </span>
+                              {workLocation}
+                            </span>
+                          </span>
+                        )}
+                      </div>
                     ) : (
                       <span className="text-slate-300">—</span>
                     )}

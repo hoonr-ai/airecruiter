@@ -73,6 +73,9 @@ class SourcedCandidate(BaseModel):
     name: Optional[str] = None
     headline: Optional[str] = None
     location: Optional[str] = None
+    work_city: Optional[str] = None
+    work_state: Optional[str] = None
+    work_location: Optional[str] = None
     profile_url: Optional[str] = None
     image_url: Optional[str] = None
     data: Optional[Dict[str, Any]] = None  # Additional metadata
@@ -152,6 +155,9 @@ class CandidateSaveRecord(BaseModel):
     phone: Optional[str] = None
     headline: Optional[str] = None
     location: Optional[str] = None
+    work_city: Optional[str] = None
+    work_state: Optional[str] = None
+    work_location: Optional[str] = None
     profile_url: Optional[str] = None
     image_url: Optional[str] = None
     resume_id: Optional[str] = None
@@ -160,6 +166,10 @@ class CandidateSaveRecord(BaseModel):
     experience_years: Any = 0
     source: str = "JobDiva"
     match_score: Any = 0.0
+    matched_skills: Optional[Any] = None
+    missing_skills: Optional[Any] = None
+    match_score_details: Optional[Any] = None
+    explainability: Optional[Any] = None
     is_selected: bool = False
     # Additional enrichment fields sent by frontend
     education: Optional[Any] = None

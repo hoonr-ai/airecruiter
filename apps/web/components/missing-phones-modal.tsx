@@ -19,8 +19,17 @@ export interface MissingPhoneCandidate {
   name: string;
   headline?: string;
   location?: string;
+  work_location?: string;
   source?: string;
   jobdiva_id?: string;
+}
+
+function locationDisplay(c: { location?: string; work_location?: string }): string {
+  const home = (c.location || "").trim();
+  if (home) return home;
+  const work = (c.work_location || "").trim();
+  if (work) return `Works in ${work}`;
+  return "";
 }
 
 interface MissingPhonesModalProps {
@@ -138,7 +147,10 @@ export function MissingPhonesModal({
                   <p className="font-semibold text-slate-900 text-[14px] truncate">{c.name || "Unnamed"}</p>
                   <p className="text-[12px] text-slate-500 truncate">
                     {c.headline || "—"}
-                    {c.location ? ` • ${c.location}` : ""}
+                    {(() => {
+                      const loc = locationDisplay(c);
+                      return loc ? ` • ${loc}` : "";
+                    })()}
                     {c.source ? ` • ${c.source}` : ""}
                   </p>
                 </div>

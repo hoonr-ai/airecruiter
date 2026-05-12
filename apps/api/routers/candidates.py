@@ -883,6 +883,12 @@ async def get_job_candidates(job_id_or_ref: str):
             if isinstance(data_blob, dict):
                 if data_blob.get("jobdiva_candidate_id"):
                     cand["jobdiva_candidate_id"] = str(data_blob.get("jobdiva_candidate_id"))
+                if data_blob.get("work_city"):
+                    cand["work_city"] = data_blob.get("work_city")
+                if data_blob.get("work_state"):
+                    cand["work_state"] = data_blob.get("work_state")
+                if data_blob.get("work_location"):
+                    cand["work_location"] = data_blob.get("work_location")
                 if data_blob.get("engage_status"):
                     cand["engage_status"] = data_blob.get("engage_status")
                 if data_blob.get("engage_interview_id"):
@@ -1273,6 +1279,33 @@ async def save_candidates(request: CandidatesSaveRequest):
                         except Exception:
                             incoming_match_score = None
 
+                        def _clean_string_list(raw: Any) -> List[str]:
+                            if not isinstance(raw, list):
+                                return []
+                            cleaned: List[str] = []
+                            for item in raw:
+                                value = item if isinstance(item, str) else (
+                                    item.get("name") if isinstance(item, dict) else None
+                                )
+                                if isinstance(value, str) and value.strip():
+                                    cleaned.append(value.strip())
+                            return cleaned
+
+                        incoming_matched_skills = _clean_string_list(getattr(c, 'matched_skills', None))
+                        incoming_missing_skills = _clean_string_list(getattr(c, 'missing_skills', None))
+                        raw_incoming_explainability = getattr(c, 'explainability', None)
+                        incoming_explainability = (
+                            _clean_string_list(raw_incoming_explainability)
+                            if isinstance(raw_incoming_explainability, list)
+                            else (
+                                [raw_incoming_explainability.strip()]
+                                if isinstance(raw_incoming_explainability, str) and raw_incoming_explainability.strip()
+                                else []
+                            )
+                        )
+                        raw_incoming_score_details = getattr(c, 'match_score_details', None)
+                        incoming_score_details = raw_incoming_score_details if isinstance(raw_incoming_score_details, dict) else {}
+
                         raw_urls = getattr(c, 'urls', {})
                         if not isinstance(raw_urls, dict):
                             raw_urls = {}
@@ -1317,10 +1350,10 @@ async def save_candidates(request: CandidatesSaveRequest):
                             scoring = {
                                 "score": incoming_match_score,
                                 "status": "done",
-                                "missing_skills": [],
-                                "matched_skills": [],
-                                "explainability": ["Score preserved from Step-5 sourcing"],
-                                "score_details": {},
+                                "missing_skills": incoming_missing_skills,
+                                "matched_skills": incoming_matched_skills,
+                                "explainability": incoming_explainability or ["Score preserved from Step-5 sourcing"],
+                                "score_details": incoming_score_details,
                                 "scored_at": datetime.now(timezone.utc).isoformat(),
                             }
                         else:
@@ -1510,6 +1543,24 @@ class UpdateCandidatePhoneRequest(BaseModel):
     phone: str
     jobdiva_id: Optional[str] = None
     candidate_id: Optional[str] = None
+
+
+class UpdateCandidateEmailRequest(BaseModel):
+    email: str
+    jobdiva_id: Optional[str] = None
+    candidate_id: Optional[str] = None
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _validate_email(raw: str) -> str:
+    cleaned = (raw or "").strip().lower()
+    if not cleaned or not _EMAIL_RE.match(cleaned):
+        raise HTTPException(status_code=400, detail="Enter a valid email address")
+    if cleaned.endswith("@noemail.pair.ai"):
+        raise HTTPException(status_code=400, detail="Placeholder emails are not allowed")
+    return cleaned
 
 
 class EnrichCandidateContactRequest(BaseModel):
@@ -2465,6 +2516,50 @@ async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhon
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.patch("/candidates/{candidate_id:path}/email")
+async def update_candidate_email(candidate_id: str, request: UpdateCandidateEmailRequest):
+    actual_candidate_id = request.candidate_id or candidate_id
+
+    import urllib.parse
+    actual_candidate_id = urllib.parse.unquote(actual_candidate_id)
+
+    email = _validate_email(request.email)
+
+    try:
+        logger.info(f"update_candidate_email called with candidate_id='{actual_candidate_id}', request.jobdiva_id='{request.jobdiva_id}'")
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                if request.jobdiva_id:
+                    cur.execute(
+                        """
+                        UPDATE sourced_candidates
+                        SET email = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE candidate_id = %s AND jobdiva_id = %s
+                        """,
+                        (email, actual_candidate_id, request.jobdiva_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE sourced_candidates
+                        SET email = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE candidate_id = %s
+                        """,
+                        (email, actual_candidate_id),
+                    )
+                updated = cur.rowcount
+            conn.commit()
+        finally:
+            conn.close()
+        return {"status": "success", "candidate_id": candidate_id, "email": email, "updated_rows": updated}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"update_candidate_email failed for {candidate_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/candidates/list")
 async def get_all_candidates(
     limit: int = Query(50, ge=1, le=200),
@@ -2986,8 +3081,9 @@ async def get_candidate_evaluation_report(
                     if "open to exploring new job" in txt: eval_map["isActivelyLookingForJob"] = ans
                     elif "current or most recent role" in txt: eval_map["currentRole"] = ans
                     elif "current location" in txt: eval_map["currentLocation"] = ans
-                    elif "authorized to work in the united states" in txt: eval_map["isAuthorizedToWorkInUS"] = ans
+                    elif "authorized to work" in txt and "united states" in txt: eval_map["isAuthorizedToWorkInUS"] = ans
                     elif "visa sponsorship" in txt: eval_map["requireVisaSponsorship"] = ans
+                    elif "working arrangements are you open to" in txt: eval_map["openWorkingArrangements"] = ans
                     elif "onsite work arrangement" in txt: eval_map["isOpenToRelocation"] = ans
                     elif "availability to start" in txt: eval_map["isAvailableToStartSoon"] = ans
                     elif "compensation" in txt: eval_map["expectedPayRate"] = ans
