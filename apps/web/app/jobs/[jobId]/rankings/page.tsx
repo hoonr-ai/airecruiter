@@ -240,6 +240,9 @@ interface Candidate {
   email: string;
   phone?: string;
   location?: string;
+  work_location?: string;
+  work_city?: string;
+  work_state?: string;
   headline?: string;
   job_title?: string;
   image_url?: string;
@@ -659,7 +662,7 @@ export default function CandidateRankingsPage() {
     let rows = candidates.filter(c => {
       // Search
       if (q) {
-        const hay = `${c.name || ""} ${c.email || ""} ${c.headline || ""} ${c.location || ""}`.toLowerCase();
+        const hay = `${c.name || ""} ${c.email || ""} ${c.headline || ""} ${c.location || ""} ${c.work_location || ""}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       // Status
@@ -768,7 +771,7 @@ export default function CandidateRankingsPage() {
 
   const [isScreenModalOpen, setIsScreenModalOpen] = useState(false);
   const [screenPayload, setScreenPayload] = useState<string>("");
-  const [screenLoading, setScreenLoading] = useState(false);
+  const [screeningCandidateIds, setScreeningCandidateIds] = useState<Set<string>>(new Set());
   const [screenError, setScreenError] = useState<string | null>(null);
   const [selectedScreenCandidateIds, setSelectedScreenCandidateIds] = useState<string[]>([]);
   const [screenApiResponse, setScreenApiResponse] = useState<any>(null);
@@ -1004,20 +1007,29 @@ export default function CandidateRankingsPage() {
   };
 
   const runScreen = async (candidate: Candidate) => {
-    setScreenLoading(true);
+    const targetId = String(candidate.candidate_id || candidate.id || "");
+    setScreeningCandidateIds(prev => {
+      const next = new Set(prev);
+      next.add(targetId);
+      return next;
+    });
     setScreenError(null);
     try {
       const data = await engagement.generatePayload({
-        candidateIds: [candidate.candidate_id || String(candidate.id)],
+        candidateIds: [targetId],
         jobId: candidate.jobdiva_id || String(jobId || ""),
       });
       setScreenPayload(data.payload);
-      setSelectedScreenCandidateIds([candidate.candidate_id || String(candidate.id)]);
+      setSelectedScreenCandidateIds([targetId]);
       setIsScreenModalOpen(true);
     } catch (err: any) {
       setScreenError(err?.message || "Failed to generate screening payload");
     } finally {
-      setScreenLoading(false);
+      setScreeningCandidateIds(prev => {
+        const next = new Set(prev);
+        next.delete(targetId);
+        return next;
+      });
     }
   };
 
@@ -1041,21 +1053,26 @@ export default function CandidateRankingsPage() {
   };
 
   const handleSendScreen = async (payloadOverride?: string) => {
-    setScreenLoading(true);
+    const idsAtSend = [...selectedScreenCandidateIds];
+    setScreeningCandidateIds(prev => {
+      const next = new Set(prev);
+      for (const id of idsAtSend) next.add(id);
+      return next;
+    });
     setScreenError(null);
     setScreenApiResponse(null);
     const payloadToSend = payloadOverride ?? screenPayload;
     try {
       const data = await engagement.sendBulkInterview({
         payload: payloadToSend,
-        realCandidateIds: selectedScreenCandidateIds,
+        realCandidateIds: idsAtSend,
       });
       setScreenApiResponse(data);
       if (data.success) {
         // Optimistically update status to Initiated for all selected candidates
         setCandidates(prev => prev.map(c => {
           const cid = String(c.candidate_id || c.id || "");
-          if (selectedScreenCandidateIds.includes(cid)) {
+          if (idsAtSend.includes(cid)) {
             return {
               ...c,
               engage_status: "Initiated",
@@ -1073,7 +1090,11 @@ export default function CandidateRankingsPage() {
     } catch (err: any) {
       setScreenError(err?.message || "Screen call failed");
     } finally {
-      setScreenLoading(false);
+      setScreeningCandidateIds(prev => {
+        const next = new Set(prev);
+        for (const id of idsAtSend) next.delete(id);
+        return next;
+      });
     }
   };
 
@@ -2073,7 +2094,7 @@ export default function CandidateRankingsPage() {
                               size="sm"
                               className="h-8 px-3 bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-600 hover:text-white font-bold text-[11px] rounded-md shadow-sm transition-all duration-200"
                               onClick={() => handleScreenClick(candidate)}
-                              disabled={screenLoading}
+                              disabled={screeningCandidateIds.has(String(candidate.candidate_id || candidate.id || ""))}
                             >
                               <MessageSquare className="w-4 h-4 mr-1.5" />
                               Screen
@@ -2142,6 +2163,7 @@ export default function CandidateRankingsPage() {
           imageUrl={selectedCandidate.image_url}
           jobTitle={selectedCandidate.headline}
           location={selectedCandidate.location}
+          workLocation={selectedCandidate.work_location}
           experienceYears={selectedCandidate.data?.experience_years}
           matchScore={selectedCandidate.match_score}
           matchScoreDetails={selectedCandidate.data?.match_score_details}
@@ -2174,7 +2196,7 @@ export default function CandidateRankingsPage() {
           setScreenPayload(payload);
           await handleSendScreen(payload);
         }}
-        loading={screenLoading}
+        loading={selectedScreenCandidateIds.some(id => screeningCandidateIds.has(id))}
         error={screenError}
         successData={screenApiResponse}
       />

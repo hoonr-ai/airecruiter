@@ -31,6 +31,9 @@ interface CandidateResumeData {
   phone: string;
   title: string;
   location: string;
+  work_location?: string;
+  work_city?: string;
+  work_state?: string;
   resume_text: string;
   skills: string[] | string;
   experience: string;
@@ -182,9 +185,21 @@ export function CandidateResumeModal({
                   </div>
                 )}
                 {resumeData.location && (
-                  <div className="flex items-center space-x-2">
+                  <div className="flex items-center space-x-2" title={`Location: ${resumeData.location}`}>
                     <MapPin className="w-4 h-4 text-gray-500" />
                     <span>{resumeData.location}</span>
+                  </div>
+                )}
+                {(resumeData.work_location || resumeData.work_city) && (
+                  <div
+                    className="flex items-center space-x-2 text-slate-600"
+                    title={`Currently working in ${resumeData.work_location || [resumeData.work_city, resumeData.work_state].filter(Boolean).join(", ")}`}
+                  >
+                    <Briefcase className="w-4 h-4 text-gray-500" />
+                    <span>
+                      <span className="text-slate-400">Works in: </span>
+                      {resumeData.work_location || [resumeData.work_city, resumeData.work_state].filter(Boolean).join(", ")}
+                    </span>
                   </div>
                 )}
               </div>

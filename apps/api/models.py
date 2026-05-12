@@ -73,6 +73,9 @@ class SourcedCandidate(BaseModel):
     name: Optional[str] = None
     headline: Optional[str] = None
     location: Optional[str] = None
+    work_city: Optional[str] = None
+    work_state: Optional[str] = None
+    work_location: Optional[str] = None
     profile_url: Optional[str] = None
     image_url: Optional[str] = None
     data: Optional[Dict[str, Any]] = None  # Additional metadata
@@ -152,6 +155,9 @@ class CandidateSaveRecord(BaseModel):
     phone: Optional[str] = None
     headline: Optional[str] = None
     location: Optional[str] = None
+    work_city: Optional[str] = None
+    work_state: Optional[str] = None
+    work_location: Optional[str] = None
     profile_url: Optional[str] = None
     image_url: Optional[str] = None
     resume_id: Optional[str] = None

@@ -30,6 +30,7 @@ interface CandidateDetailsModalProps {
   imageUrl?: string;
   jobTitle?: string;
   location?: string;
+  workLocation?: string;
   experienceYears?: number | string | null;
   tags?: string[];
   matchScore?: number;
@@ -143,6 +144,7 @@ function CandidateDetailsModalBase({
   imageUrl,
   jobTitle,
   location,
+  workLocation,
   experienceYears,
   tags,
   matchScore = 0,
@@ -161,6 +163,7 @@ function CandidateDetailsModalBase({
 
   const formattedTitle = toTitleCase(jobTitle || "");
   const formattedLocation = formatLocation(location || "");
+  const formattedWorkLocation = formatLocation(workLocation || "");
   const formattedYears = experienceYears
     ? `${experienceYears}${typeof experienceYears === "number" ? "+ yrs" : ""}`
     : null;
@@ -220,9 +223,22 @@ function CandidateDetailsModalBase({
                 </span>
               )}
               {formattedLocation && (
-                <span className="flex items-center gap-1.5 bg-slate-50 px-2 py-0.5 rounded-md">
+                <span
+                  className="flex items-center gap-1.5 bg-slate-50 px-2 py-0.5 rounded-md"
+                  title={`Location: ${formattedLocation}`}
+                >
                   <MapPin className="w-3 h-3 text-slate-400" />
                   {formattedLocation}
+                </span>
+              )}
+              {formattedWorkLocation && (
+                <span
+                  className="flex items-center gap-1.5 bg-slate-50 px-2 py-0.5 rounded-md"
+                  title={`Currently working in ${formattedWorkLocation}`}
+                >
+                  <Briefcase className="w-3 h-3 text-slate-400" />
+                  <span className="text-slate-400">Works in:</span>
+                  {formattedWorkLocation}
                 </span>
               )}
               {formattedYears && (
