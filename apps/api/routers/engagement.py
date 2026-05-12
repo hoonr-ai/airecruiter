@@ -151,6 +151,11 @@ class SendBulkInterviewRequest(BaseModel):
     real_candidate_ids: List[str]
     is_initial_launch: bool = False
     dry_run: bool = False
+    # Wizard "Launch PAIR" sends this to trigger the recruiter launch email.
+    # Manual rankings Engage clicks leave it false so we don't spam emails.
+    # Previously, dry_run did double duty (skip pairbot + fire email), which
+    # silently caused bulk launches to never reach pairbot.
+    notify_recruiters: bool = False
     app_base_url: str = ""
 
 
@@ -447,6 +452,51 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job
         logger.warning("📧 _send_pair_launch_email failed silently: %s", exc, exc_info=True)
 
 
+async def _post_to_pairbot(
+    url: str,
+    payload_obj: Dict[str, Any],
+    *,
+    max_attempts: int = 3,
+    base_backoff_seconds: float = 2.0,
+    timeout_seconds: float = 60.0,
+) -> httpx.Response:
+    """POST to pairbot with retries on timeout / network error / 5xx.
+
+    Pairbot occasionally returns 5xx or times out under load; a single 60s
+    attempt was enough to make manual Engage clicks feel flaky. 4xx responses
+    are returned immediately (client error — retry won't help).
+    """
+    last_exc: Optional[BaseException] = None
+    last_response: Optional[httpx.Response] = None
+    for attempt in range(max_attempts):
+        try:
+            async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+                response = await client.post(
+                    url,
+                    json=payload_obj,
+                    headers={"Content-Type": "application/json"},
+                )
+            if response.status_code < 500:
+                return response
+            last_response = response
+            logger.warning(
+                "pairbot_5xx attempt=%d/%d status=%d",
+                attempt + 1, max_attempts, response.status_code,
+            )
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+            last_exc = exc
+            logger.warning(
+                "pairbot_transport_error attempt=%d/%d type=%s msg=%s",
+                attempt + 1, max_attempts, type(exc).__name__, str(exc),
+            )
+        if attempt < max_attempts - 1:
+            await asyncio.sleep(base_backoff_seconds * (2 ** attempt))
+
+    if last_response is not None:
+        return last_response
+    raise last_exc if last_exc is not None else RuntimeError("pairbot call failed")
+
+
 async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_internal: str):
     """
     Ensures a candidate exists in JobDiva as an applicant for the specified job.
@@ -630,12 +680,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             external_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/bulk-interviews"
             logger.info(f"📤 Sending bulk interview to {external_url}")
 
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(
-                    external_url,
-                    json=payload_obj,
-                    headers={"Content-Type": "application/json"}
-                )
+            response = await _post_to_pairbot(external_url, payload_obj)
 
             response_data = {}
             try:
@@ -737,22 +782,72 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             if not isinstance(data_list, list):
                 data_list = [response_data] if response_data else []
 
+            # Map pairbot response entries by email so partial / reordered /
+            # deduplicated responses don't get misattributed to the wrong
+            # candidate. Previously this used positional `data_list[idx]`,
+            # which silently wrote interview_id="" when pairbot returned fewer
+            # entries than candidates (timeout, dedup, etc.) — the root cause
+            # of "engage sometimes passes, sometimes fails".
+            interview_by_email: Dict[str, Dict[str, Any]] = {}
+            for item in data_list:
+                if not isinstance(item, dict):
+                    continue
+                item_email = str(item.get("candidate_email") or "").lower().strip()
+                if item_email:
+                    interview_by_email[item_email] = item
+
+            # Position N in real_candidate_ids corresponds to position N in
+            # payload_obj.resumes (both built from the same selection in
+            # generate-payload), so we can recover the submitted email per
+            # candidate without another DB lookup.
+            payload_resumes = payload_obj.get("resumes") or []
+            submitted_email_by_idx: List[str] = [
+                str((r or {}).get("email") or "").lower().strip()
+                for r in payload_resumes
+            ]
+
             # ── TRIGGER PROVISIONING (JobDiva Application) ─────────────
-            # ONLY trigger if the interview was successfully sent
-            provision_tasks = []
-            for cand_id in request.real_candidate_ids:
-                provision_tasks.append(
-                    _provision_candidate_to_jobdiva(cand_id, job_id_from_payload)
+            # ONLY trigger if the interview was successfully sent.
+            # asyncio.gather() without await/create_task discards the
+            # coroutines silently — _provision_candidate_to_jobdiva would
+            # never actually run. Schedule it as a background task with
+            # return_exceptions=True so a single failure doesn't cancel
+            # the rest.
+            provision_tasks = [
+                _provision_candidate_to_jobdiva(cand_id, job_id_from_payload)
+                for cand_id in request.real_candidate_ids
+            ]
+            if provision_tasks:
+                asyncio.create_task(
+                    asyncio.gather(*provision_tasks, return_exceptions=True)
                 )
-            # Fire them off in the background
-            asyncio.gather(*provision_tasks)
 
             for idx, candidate_id in enumerate(request.real_candidate_ids):
-                interview_info = data_list[idx] if idx < len(data_list) else {}
+                submitted_email = (
+                    submitted_email_by_idx[idx]
+                    if idx < len(submitted_email_by_idx)
+                    else ""
+                )
+                interview_info = interview_by_email.get(submitted_email) or {}
+                if not interview_info and idx < len(data_list) and isinstance(data_list[idx], dict):
+                    # Legacy positional fallback: only used when the email
+                    # match missed AND a positional entry actually exists.
+                    # Avoids dropping data when pairbot returns entries
+                    # without a candidate_email field.
+                    interview_info = data_list[idx]
 
                 interview_id = str(interview_info.get("interview_id", ""))
                 candidate_name = interview_info.get("candidate_name", "")
-                candidate_email = interview_info.get("candidate_email", "")
+                candidate_email = interview_info.get("candidate_email", submitted_email)
+
+                if not interview_id:
+                    logger.warning(
+                        "engagement_no_interview_match candidate_id=%s submitted_email=%s response_data_count=%d request_count=%d",
+                        candidate_id,
+                        submitted_email,
+                        len(data_list),
+                        len(request.real_candidate_ids),
+                    )
 
                 # Extract job_id from payload (prefer reference jobdiva_id for UI consistency)
                 job_id_resolved = payload_obj.get("jd", {}).get("jobdiva_id") or payload_obj.get("jd", {}).get("job_id", "")
@@ -826,8 +921,12 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 asyncio.create_task(auto_assign_service.synchronize_job_applicants(job_id_from_payload))
 
             # Manual rankings Screen sends should create the interview only.
-            # Launch/re-source flows use dry_run for recruiter notifications.
-            if request.is_initial_launch or request.dry_run:
+            # Wizard Launch/re-source flows pass notify_recruiters=True so the
+            # launch confirmation email goes out. (Pre-fix, this gate was
+            # `is_initial_launch or dry_run` — but dry_run also skipped the
+            # pairbot call, so wizard launches never actually created
+            # interviews.)
+            if request.is_initial_launch or request.notify_recruiters:
                 asyncio.create_task(
                     _send_pair_launch_email(
                         job_id=job_id_from_payload,
@@ -859,6 +958,152 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             "message": f"Server error: {str(e)}",
             "data": []
         }
+
+
+# Hard cap so a single sync run can never blast more than this many
+# candidates at pairbot, even if the job's filters are loose. The auto-sync
+# cron path uses this to avoid an unbounded blast radius.
+AUTO_LAUNCH_BATCH_CAP = 25
+
+
+async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> None:
+    """Auto-launch pairbot interviews for newly-synced JobDiva applicants.
+
+    Called from `auto_assign_service.synchronize_job_applicants` after it
+    upserts new rows into `sourced_candidates`. Closes the gap where the
+    15-min cron created candidate rows but never actually launched them
+    to pairbot — so recruiters had to manually click Engage on every new
+    applicant.
+
+    Guards:
+      - Only runs for jobs that have already been launched at least once
+        (≥1 row with engage_status in sent/pending/completed). This stops
+        us from auto-blasting brand-new jobs whose recruiter hasn't yet
+        clicked "Launch PAIR".
+      - Skips candidates that already have an engage_status set, are on
+        the DNC list, or whose job has outreach_stopped_at set.
+      - Hard-capped at AUTO_LAUNCH_BATCH_CAP per call.
+
+    Failures are logged and swallowed — this runs as a background task and
+    must not crash the calling sync cycle.
+    """
+    if not candidate_ids or not job_id:
+        return
+    try:
+        conn = _get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            # Job-level gating: outreach must not be stopped, and the
+            # recruiter must have launched PAIR at least once before — we
+            # treat any prior engage event as the signal that auto-launch
+            # is wanted for incoming applicants on this job.
+            cur.execute(
+                """
+                SELECT outreach_stopped_at
+                FROM monitored_jobs
+                WHERE job_id = %s OR jobdiva_id = %s
+                LIMIT 1
+                """,
+                (str(job_id), str(job_id)),
+            )
+            job_row = cur.fetchone()
+            if job_row and job_row.get("outreach_stopped_at") is not None:
+                logger.info(
+                    "auto_launch_skip job_id=%s reason=outreach_stopped",
+                    job_id,
+                )
+                return
+
+            cur.execute(
+                """
+                SELECT 1 FROM sourced_candidates
+                WHERE (jobdiva_id = %s OR jobdiva_id = %s)
+                  AND data->>'engage_status' IN ('sent', 'pending', 'completed')
+                LIMIT 1
+                """,
+                (str(job_id), str(job_id)),
+            )
+            if not cur.fetchone():
+                logger.info(
+                    "auto_launch_skip job_id=%s reason=no_prior_launch count=%d",
+                    job_id,
+                    len(candidate_ids),
+                )
+                return
+
+            # Filter to candidates that haven't already been engaged and
+            # aren't DNC-blocked. We re-check at the DB layer rather than
+            # trusting the caller's list, since the sync run could overlap
+            # with a manual Engage click.
+            cur.execute(
+                """
+                SELECT candidate_id
+                FROM sourced_candidates
+                WHERE candidate_id = ANY(%s)
+                  AND (jobdiva_id = %s OR jobdiva_id = %s)
+                  AND dnc_stopped_at IS NULL
+                  AND COALESCE(data->>'engage_status', '') NOT IN ('sent', 'pending', 'completed')
+                """,
+                (list(candidate_ids), str(job_id), str(job_id)),
+            )
+            eligible_ids = [str(r["candidate_id"]) for r in cur.fetchall()]
+        finally:
+            cur.close()
+            conn.close()
+
+        if not eligible_ids:
+            logger.info(
+                "auto_launch_skip job_id=%s reason=no_eligible_candidates",
+                job_id,
+            )
+            return
+
+        if len(eligible_ids) > AUTO_LAUNCH_BATCH_CAP:
+            logger.warning(
+                "auto_launch_truncated job_id=%s requested=%d cap=%d",
+                job_id, len(eligible_ids), AUTO_LAUNCH_BATCH_CAP,
+            )
+            eligible_ids = eligible_ids[:AUTO_LAUNCH_BATCH_CAP]
+
+        # Generate payload via the existing builder so JD context, rubric
+        # and pre-screen questions stay in sync with manual launches.
+        payload_result = await generate_engage_payload(
+            GeneratePayloadRequest(candidate_ids=eligible_ids, job_id=job_id)
+        )
+        payload_str = payload_result.get("payload", "")
+        if not payload_str:
+            logger.warning(
+                "auto_launch_skip job_id=%s reason=empty_payload candidate_count=%d",
+                job_id, len(eligible_ids),
+            )
+            return
+
+        logger.info(
+            "auto_launch_dispatch job_id=%s candidate_count=%d",
+            job_id, len(eligible_ids),
+        )
+        result = await send_bulk_interview(
+            SendBulkInterviewRequest(
+                payload=payload_str,
+                real_candidate_ids=eligible_ids,
+                is_initial_launch=False,
+                dry_run=False,
+                notify_recruiters=False,
+            )
+        )
+        if not (result or {}).get("success"):
+            logger.warning(
+                "auto_launch_pairbot_unsuccessful job_id=%s message=%s",
+                job_id, (result or {}).get("message"),
+            )
+    except Exception as exc:  # noqa: BLE001 — background task, must not crash caller
+        logger.error(
+            "auto_launch_failed job_id=%s candidate_count=%d error=%s",
+            job_id, len(candidate_ids), exc,
+            exc_info=True,
+        )
+
+
 @router.get("/latest-interview/by-id/{candidate_id}")
 async def get_latest_interview(candidate_id: str):
     """
