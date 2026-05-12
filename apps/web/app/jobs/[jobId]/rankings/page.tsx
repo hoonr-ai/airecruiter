@@ -310,7 +310,7 @@ function ResumeScreeningHoverCard({
       }`}
     >
       {titleAtCompany && (
-        <div className="mb-1.5 truncate text-[12.5px] font-semibold text-slate-800" title={titleAtCompany}>
+        <div className="mb-1.5 text-[12.5px] font-semibold text-slate-800 break-words leading-relaxed" title={titleAtCompany}>
           {titleAtCompany}
         </div>
       )}
@@ -322,9 +322,9 @@ function ResumeScreeningHoverCard({
           </span>
         )}
         {candidate.email && (
-          <span className="inline-flex max-w-[200px] items-center gap-1 truncate" title={candidate.email}>
+          <span className="inline-flex items-center gap-1 break-all" title={candidate.email}>
             <Mail className="h-3 w-3 shrink-0 text-slate-400" />
-            <span className="truncate">{candidate.email}</span>
+            <span>{candidate.email}</span>
           </span>
         )}
       </div>
@@ -366,7 +366,7 @@ function ResumeScreeningHoverCard({
       )}
 
       {firstExplain && (
-        <div className="border-t border-slate-100 pt-2 text-[11.5px] leading-snug text-slate-600">
+        <div className="border-t border-slate-100 pt-2 text-[11.5px] leading-relaxed text-slate-600 break-words whitespace-normal">
           {firstExplain}
         </div>
       )}
@@ -385,7 +385,7 @@ function HardFilterHoverCard({
 
   return (
     <div 
-      className={`pointer-events-none absolute left-1/2 top-full z-40 mt-3 w-[400px] -translate-x-1/2 rounded-2xl border border-slate-200 bg-white/95 p-4 text-left shadow-2xl backdrop-blur-md transition-all duration-300 origin-top ${
+      className={`pointer-events-none absolute left-1/2 top-full z-40 mt-3 w-[420px] -translate-x-1/2 rounded-2xl border border-slate-200 bg-white/95 p-4 text-left shadow-2xl backdrop-blur-md transition-all duration-300 origin-top ${
         open 
           ? "opacity-100 translate-y-0 scale-100 visible" 
           : "opacity-0 -translate-y-2 scale-95 invisible"
@@ -400,14 +400,14 @@ function HardFilterHoverCard({
           {details.length} Questions
         </span>
       </div>
-      <div className="space-y-2.5 max-h-[400px] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-slate-200">
+      <div className="space-y-2.5 max-h-[450px] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-slate-200">
         {details.map((item, index) => (
           <div 
             key={`${item.question}-${index}`} 
             className="group/item rounded-xl border border-slate-200 bg-slate-50/50 p-3 hover:border-indigo-200 hover:bg-white transition-all duration-200"
           >
             <div className="mb-2 flex items-start justify-between gap-3">
-              <div className="text-[13px] font-semibold leading-relaxed text-slate-800">
+              <div className="text-[13px] font-semibold leading-relaxed text-slate-800 flex-1 break-words">
                 {item.question}
               </div>
               <span
@@ -434,7 +434,7 @@ function HardFilterHoverCard({
                 </span>
               </div>
               {item.reason ? (
-                <div className="bg-white/50 rounded-lg p-2 border border-slate-100 text-[11px] leading-relaxed text-slate-600 italic">
+                <div className="bg-white/50 rounded-lg p-2.5 border border-slate-100 text-[11px] leading-relaxed text-slate-600 italic break-words whitespace-normal">
                   {item.reason}
                 </div>
               ) : null}
@@ -2034,7 +2034,7 @@ export default function CandidateRankingsPage() {
                           <div className="relative flex items-center justify-center gap-1 w-full text-center">
                             {screeningScore > 0 ? (
                               <span className="inline-flex items-center justify-center">
-                                <span className="font-bold text-slate-900 text-[14px] underline decoration-dotted underline-offset-4">
+                                <span className="font-bold text-slate-900 text-[14px] underline decoration-indigo-200 underline-offset-4">
                                   {screeningScore}/100
                                 </span>
                               </span>
@@ -2117,7 +2117,7 @@ export default function CandidateRankingsPage() {
                             if (showEngageScore && eScore !== undefined && eScore !== null) {
                               return (
                                 <div className="relative flex items-center justify-center w-full">
-                                  <span className="font-bold text-slate-900 text-[14px] underline decoration-dotted underline-offset-4 cursor-help">
+                                  <span className="font-bold text-slate-900 text-[14px] underline decoration-indigo-200 underline-offset-4">
                                     {eScore}/{eTotal}
                                   </span>
                                   <HardFilterHoverCard 
