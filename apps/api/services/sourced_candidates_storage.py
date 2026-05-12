@@ -484,6 +484,12 @@ class SourcedCandidatesStorage:
                                 c_dict['engage_score'] = data['engage_score']
                             if 'engage_status' in data and c_dict.get('engage_status') is None:
                                 c_dict['engage_status'] = data['engage_status']
+                            if data.get('work_city'):
+                                c_dict['work_city'] = data['work_city']
+                            if data.get('work_state'):
+                                c_dict['work_state'] = data['work_state']
+                            if data.get('work_location'):
+                                c_dict['work_location'] = data['work_location']
                     except Exception as e:
                         print(f"Error parsing candidate data: {e}")
                 if c_dict.get('created_at'):
@@ -674,6 +680,12 @@ class SourcedCandidatesStorage:
                                 c_dict["engage_score"] = data["engage_score"]
                             if data.get("engage_status") and c_dict.get("engage_status") is None:
                                 c_dict["engage_status"] = data["engage_status"]
+                            if data.get("work_city"):
+                                c_dict["work_city"] = data["work_city"]
+                            if data.get("work_state"):
+                                c_dict["work_state"] = data["work_state"]
+                            if data.get("work_location"):
+                                c_dict["work_location"] = data["work_location"]
                     except Exception as e:
                         logger.debug(f"Error parsing candidate.data json: {e}")
                 if c_dict.get("created_at"):
