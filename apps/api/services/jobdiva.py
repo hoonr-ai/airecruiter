@@ -642,6 +642,13 @@ class JobDivaService:
                         # Extract candidate skills
                         candidate_skills = self._extract_candidate_skills(c)
                         
+                        home_city = get_field(c, ["CITY", "city", "locationCity"]) or ""
+                        home_state = get_field(c, ["STATE", "state", "locationState"]) or ""
+                        work_city = get_field(c, ["workCity", "WORKCITY"]) or ""
+                        work_state = get_field(c, ["workState", "WORKSTATE"]) or ""
+                        work_location_str = ", ".join(p for p in [work_city, work_state] if p).strip()
+                        home_location_str = ", ".join(p for p in [home_city, home_state] if p).strip()
+
                         jd_results.append({
                             "candidate_id": str(candidate_id),  # Add this field for consistency
                             "id": str(candidate_id),
@@ -651,8 +658,12 @@ class JobDivaService:
                             "firstName": first_name,
                             "lastName": last_name,
                             "email": get_field(c, ["EMAIL", "email", "emailAddress"]) or "",
-                            "city": get_field(c, ["CITY", "city", "locationCity", "workCity"]) or "",
-                            "state": get_field(c, ["STATE", "state", "locationState", "workState"]) or "",
+                            "city": home_city,
+                            "state": home_state,
+                            "location": home_location_str,
+                            "work_city": work_city,
+                            "work_state": work_state,
+                            "work_location": work_location_str,
                             "title": get_field(c, ["TITLE", "title", "candidateTitle", "jobTitle"]) or "",
                             "source": "JobDiva-Applicants",
                             "match_score": match_score,
@@ -845,6 +856,9 @@ class JobDivaService:
                 "state": state,
                 "zipcode": get_field(c, ["zipcode", "ZIPCODE", "zip", "ZIP"]) or "",
                 "location": location_str,
+                "work_city": "",
+                "work_state": "",
+                "work_location": "",
                 "title": get_field(c, ["title", "candidateTitle", "TITLE"]) or "",
                 "source": "JobDiva-JobAgent",
                 "match_score": 75,
@@ -1039,6 +1053,9 @@ class JobDivaService:
                                 get_field(c, ["city", "locationCity", "CITY"]) or "",
                                 get_field(c, ["state", "locationState", "STATE"]) or "",
                             ] if p]).strip(),
+                            "work_city": "",
+                            "work_state": "",
+                            "work_location": "",
                             "title": get_field(c, ["title", "candidateTitle", "TITLE"]) or "",
                             "source": "JobDiva-TalentSearch",
                             "match_score": 75,
@@ -1127,6 +1144,9 @@ class JobDivaService:
                         "city": city,
                         "state": state,
                         "location": location_str,
+                        "work_city": "",
+                        "work_state": "",
+                        "work_location": "",
                         "title": get_field(c, ["title", "candidateTitle", "TITLE"]) or "",
                         "source": "JobDiva-TalentSearch",
                         "match_score": 75,
@@ -1836,7 +1856,10 @@ class JobDivaService:
             "email": get_field(candidate, ["email", "EMAIL", "emailAddress"]) or "Available upon request",
             "phone": get_field(candidate, ["phone", "PHONE", "phoneNumber", "mobilePhone"]) or "Available upon request", 
             "title": get_field(candidate, ["title", "TITLE", "currentTitle", "jobTitle"]) or "",
-            "location": get_field(candidate, ["location", "city", "CITY", "workCity"]) or "",
+            "location": get_field(candidate, ["location", "city", "CITY"]) or "",
+            "work_city": get_field(candidate, ["work_city", "workCity", "WORKCITY"]) or "",
+            "work_state": get_field(candidate, ["work_state", "workState", "WORKSTATE"]) or "",
+            "work_location": get_field(candidate, ["work_location"]) or "",
             "text": resume_text,  # Main resume text field
             "resume_text": resume_text,  # Backup field name
             "resume_id": get_field(candidate, ["resume_id", "resumeId", "RESUMEID"]),
@@ -2468,6 +2491,12 @@ class JobDivaService:
             "headline": (get_field(candidate_detail, ["TITLE", "title", "currentTitle"]) or 
                         get_field(applicant, ["TITLE", "title"]) or ""),
             "location": self._extract_location(candidate_detail) or self._extract_location(applicant),
+            "work_city": get_field(applicant, ["workCity", "WORKCITY"]) or "",
+            "work_state": get_field(applicant, ["workState", "WORKSTATE"]) or "",
+            "work_location": ", ".join(p for p in [
+                get_field(applicant, ["workCity", "WORKCITY"]) or "",
+                get_field(applicant, ["workState", "WORKSTATE"]) or "",
+            ] if p).strip(),
             "profile_url": get_field(candidate_detail, ["PROFILEURL", "profileUrl"]) or "",
             "image_url": get_field(candidate_detail, ["IMAGEURL", "imageUrl"]) or "",
             "resume_id": resume_id,
