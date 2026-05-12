@@ -302,7 +302,13 @@ function ResumeScreeningHoverCard({
       : explainability[0]?.text || "";
 
   return (
-    <div className={`pointer-events-none absolute left-1/2 top-full z-30 mt-2 w-[420px] -translate-x-1/2 rounded-xl border border-slate-200 bg-white p-4 text-left shadow-2xl ${open ? "block" : "hidden"}`}>
+    <div 
+      className={`pointer-events-none absolute left-1/2 top-full z-40 mt-3 w-[420px] -translate-x-1/2 rounded-2xl border border-slate-200 bg-white/95 p-5 text-left shadow-2xl backdrop-blur-md transition-all duration-300 origin-top ${
+        open 
+          ? "opacity-100 translate-y-0 scale-100 visible" 
+          : "opacity-0 -translate-y-2 scale-95 invisible"
+      }`}
+    >
       {titleAtCompany && (
         <div className="mb-1.5 truncate text-[12.5px] font-semibold text-slate-800" title={titleAtCompany}>
           {titleAtCompany}
@@ -370,27 +376,42 @@ function ResumeScreeningHoverCard({
 
 function HardFilterHoverCard({
   details,
+  open,
 }: {
   details?: Candidate["engage_hard_filter_details"];
+  open: boolean;
 }) {
   if (!details || details.length === 0) return null;
 
   return (
-    <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 hidden w-[380px] -translate-x-1/2 rounded-xl border border-slate-200 bg-white p-3 text-left shadow-2xl group-hover:block">
-      <div className="mb-2 border-b border-slate-100 pb-2">
-        <span className="text-[11px] font-bold uppercase tracking-widest text-slate-500">
+    <div 
+      className={`pointer-events-none absolute left-1/2 top-full z-40 mt-3 w-[400px] -translate-x-1/2 rounded-2xl border border-slate-200 bg-white/95 p-4 text-left shadow-2xl backdrop-blur-md transition-all duration-300 origin-top ${
+        open 
+          ? "opacity-100 translate-y-0 scale-100 visible" 
+          : "opacity-0 -translate-y-2 scale-95 invisible"
+      }`}
+    >
+      <div className="mb-3 flex items-center justify-between border-b border-slate-100 pb-2.5">
+        <span className="text-[12px] font-bold uppercase tracking-widest text-slate-800 flex items-center gap-2">
+          <Zap className="w-3.5 h-3.5 text-indigo-500" />
           Hard Filter Results
         </span>
+        <span className="text-[10px] font-medium text-slate-400">
+          {details.length} Questions
+        </span>
       </div>
-      <div className="space-y-2">
+      <div className="space-y-2.5 max-h-[400px] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-slate-200">
         {details.map((item, index) => (
-          <div key={`${item.question}-${index}`} className="rounded-lg border border-slate-200 bg-slate-50 p-2.5">
-            <div className="mb-1 flex items-start justify-between gap-3">
-              <div className="text-[12px] font-semibold leading-snug text-slate-800">
+          <div 
+            key={`${item.question}-${index}`} 
+            className="group/item rounded-xl border border-slate-200 bg-slate-50/50 p-3 hover:border-indigo-200 hover:bg-white transition-all duration-200"
+          >
+            <div className="mb-2 flex items-start justify-between gap-3">
+              <div className="text-[13px] font-semibold leading-relaxed text-slate-800">
                 {item.question}
               </div>
               <span
-                className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${
+                className={`shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide shadow-sm ${
                   item.status === "Pass"
                     ? "border-emerald-200 bg-emerald-50 text-emerald-700"
                     : item.status === "Fail"
@@ -401,19 +422,21 @@ function HardFilterHoverCard({
                 {item.status}
               </span>
             </div>
-            <div className="flex items-center justify-between gap-3 text-[11px] text-slate-500">
-              <span>
-                Score:{" "}
-                <strong className="text-slate-700">
-                  {item.score !== undefined && item.score !== null
-                    ? `${item.score}/${item.total_score ?? 10}`
-                    : "—"}
-                </strong>
-              </span>
-              {item.reason ? (
-                <span className="max-w-[190px] truncate text-right" title={item.reason}>
-                  {item.reason}
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-slate-500">
+                  Candidate Score:{" "}
+                  <strong className="text-slate-900 font-bold ml-1 px-1.5 py-0.5 rounded bg-white border border-slate-200">
+                    {item.score !== undefined && item.score !== null
+                      ? `${item.score}/${item.total_score ?? 10}`
+                      : "—"}
+                  </strong>
                 </span>
+              </div>
+              {item.reason ? (
+                <div className="bg-white/50 rounded-lg p-2 border border-slate-100 text-[11px] leading-relaxed text-slate-600 italic">
+                  {item.reason}
+                </div>
               ) : null}
             </div>
           </div>
@@ -778,6 +801,7 @@ export default function CandidateRankingsPage() {
   const [selectedScreenCandidateIds, setSelectedScreenCandidateIds] = useState<string[]>([]);
   const [screenApiResponse, setScreenApiResponse] = useState<any>(null);
   const [hoveredResumeScoreKey, setHoveredResumeScoreKey] = useState<string | null>(null);
+  const [hoveredEngageScoreKey, setHoveredEngageScoreKey] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>(null);
   const pushToast = (message: string, type: "info" | "error" | "success" = "info") => {
     setToast({ message, type });
@@ -2078,7 +2102,13 @@ export default function CandidateRankingsPage() {
 
 
 
-                        <TableCell className="text-center align-middle py-3 px-2 font-medium text-slate-700 text-[13px] transition-colors border-l border-slate-200">
+                        <TableCell 
+                          className="text-center align-middle py-3 px-2 font-medium text-slate-700 text-[13px] transition-colors border-l border-slate-200"
+                          onMouseEnter={() => {
+                            if (showEngageScore) setHoveredEngageScoreKey(candidateKey);
+                          }}
+                          onMouseLeave={() => setHoveredEngageScoreKey((prev) => (prev === candidateKey ? null : prev))}
+                        >
                           {(() => {
                             const eScore = candidate.engage_score;
                             const eTotal = candidate.engage_total_score || 100;
@@ -2086,11 +2116,14 @@ export default function CandidateRankingsPage() {
 
                             if (showEngageScore && eScore !== undefined && eScore !== null) {
                               return (
-                                <div className="group relative flex items-center justify-center w-full">
-                                  <span className="font-bold text-slate-900 text-[14px] underline decoration-dotted underline-offset-4">
+                                <div className="relative flex items-center justify-center w-full">
+                                  <span className="font-bold text-slate-900 text-[14px] underline decoration-dotted underline-offset-4 cursor-help">
                                     {eScore}/{eTotal}
                                   </span>
-                                  <HardFilterHoverCard details={hardFilterDetails} />
+                                  <HardFilterHoverCard 
+                                    details={hardFilterDetails} 
+                                    open={hoveredEngageScoreKey === candidateKey}
+                                  />
                                 </div>
                               );
                             }
