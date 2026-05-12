@@ -23,6 +23,10 @@ export type SendBulkInterviewInput = {
   realCandidateIds: string[];
   isInitialLaunch?: boolean;
   dryRun?: boolean;
+  // Wizard "Launch PAIR" sets this so the recruiter launch email fires.
+  // Manual rankings Engage clicks leave it false (the recruiter is already
+  // looking at the screen — no need to notify themselves).
+  notifyRecruiters?: boolean;
   appBaseUrl?: string;
 };
 
@@ -69,11 +73,12 @@ export function useEngagementFlow() {
     const res = await fetch(`${API_BASE}/api/v1/engagement/engage/send-bulk-interview`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ 
-        payload: input.payload, 
+      body: JSON.stringify({
+        payload: input.payload,
         real_candidate_ids: input.realCandidateIds,
         is_initial_launch: input.isInitialLaunch ?? false,
         dry_run: input.dryRun ?? false,
+        notify_recruiters: input.notifyRecruiters ?? false,
         app_base_url: input.appBaseUrl || (typeof window !== "undefined" ? window.location.origin : ""),
       }),
     });
