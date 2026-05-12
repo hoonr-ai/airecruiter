@@ -310,7 +310,7 @@ function ResumeScreeningHoverCard({
       }`}
     >
       {titleAtCompany && (
-        <div className="mb-1.5 text-[12.5px] font-semibold text-slate-800 break-words leading-relaxed" title={titleAtCompany}>
+        <div className="mb-1.5 text-[12.5px] font-semibold text-slate-800 break-words whitespace-normal leading-relaxed" title={titleAtCompany}>
           {titleAtCompany}
         </div>
       )}
