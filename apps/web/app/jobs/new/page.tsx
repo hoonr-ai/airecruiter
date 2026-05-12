@@ -77,6 +77,7 @@ import { PasteResumeModal } from "@/components/jobs/PasteResumeModal";
 import { BulkUploadSection } from "@/components/jobs/BulkUploadSection";
 import { PhoneIndicator } from "@/components/phone-indicator";
 import { CandidateMatchTable, type CandidateMatchSortKey } from "@/components/candidate-match-table";
+import { MissingContactsModal, type MissingContactCandidate } from "@/components/missing-contacts-modal";
 import { normalizePhone } from "@/lib/phone";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { API_BASE } from "@/lib/api";
@@ -636,6 +637,10 @@ function NewJobPageContent() {
   const [minExperienceYears, setMinExperienceYears] = useState<number | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [isEnrichingContacts, setIsEnrichingContacts] = useState(false);
+  const [missingContactsOpen, setMissingContactsOpen] = useState(false);
+  const [missingContactCandidates, setMissingContactCandidates] = useState<MissingContactCandidate[]>([]);
+  const [pendingLaunchOverrides, setPendingLaunchOverrides] = useState<Record<string, { phone?: string; email?: string }>>({});
+  const [readyLaunchedPendingRedirect, setReadyLaunchedPendingRedirect] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [booleanStringOpen, setBooleanStringOpen] = useState(false);
   const [generatedBoolean, setGeneratedBoolean] = useState("");
@@ -5555,8 +5560,13 @@ function NewJobPageContent() {
 
   // Launch PAIR consumes selected candidates (with optional contact overrides
   // from enrichment) and persists them to sourced_candidates.
-  const runLaunchPair = async (contactOverrides?: Record<string, { phone?: string; email?: string }>) => {
-    if (selectedCandidates.size === 0) return;
+  const runLaunchPair = async (
+    contactOverrides?: Record<string, { phone?: string; email?: string }>,
+    launchIdsOverride?: Set<string>,
+    options?: { skipRedirect?: boolean },
+  ): Promise<{ success: boolean; savedCount: number }> => {
+    const launchIds = launchIdsOverride ?? selectedCandidates;
+    if (launchIds.size === 0) return { success: false, savedCount: 0 };
     try {
       const effective = contactOverrides
         ? candidates.map(c => {
@@ -5581,7 +5591,7 @@ function NewJobPageContent() {
       // the auto-deselect from handleLaunchPairClick. The backend repeats
       // this check at /candidates/save — defense in depth.
       const candidatesPayload = effective
-        .filter(c => selectedCandidates.has(c.candidate_id || c.id))
+        .filter(c => launchIds.has(c.candidate_id || c.id))
         .filter(c => {
           if (dncPhones.size === 0) return true;
           const np = normalizePhone(c.phone);
@@ -5654,6 +5664,7 @@ function NewJobPageContent() {
         }
 
         // ── Fire Emails Immediately ──────────────────────────────────────────
+        let engageSendResult: { success?: boolean; message?: string } | null = null;
         try {
           const engageData = await engagement.generatePayload({
             candidateIds: selectedIds,
@@ -5661,7 +5672,7 @@ function NewJobPageContent() {
           });
 
           if (engageData?.payload) {
-            await engagement.sendBulkInterview({
+            engageSendResult = await engagement.sendBulkInterview({
               payload: engageData.payload,
               realCandidateIds: selectedIds,
               // Source mode = re-launch on an Active job; backend gates the
@@ -5672,27 +5683,49 @@ function NewJobPageContent() {
           }
         } catch (engageErr) {
           console.warn("Engagement emails failed to fire, but candidates saved:", engageErr);
+          engageSendResult = {
+            success: false,
+            message: engageErr instanceof Error ? engageErr.message : "Engagement call failed",
+          };
         }
         // ─────────────────────────────────────────────────────────────────────
 
         const saved = result.saved_count || selectedCount;
-        setTimeout(() => {
-          if (jobIdForEngage) {
-            router.push(`/jobs/${encodeURIComponent(jobIdForEngage)}/rankings`);
-          } else {
-            router.push(`/`);
-          }
-        }, 1000);
+        const failed = Math.max(0, selectedCount - saved - backendDncSkipped);
+        const engageFailed = engageSendResult && engageSendResult.success === false;
+        if (engageFailed) {
+          const reason = engageSendResult?.message || "PAIR rejected the batch";
+          showToast(`Saved ${saved} but PAIR couldn't be reached: ${reason}`, "error");
+        } else if (failed > 0) {
+          showToast(
+            `Launched ${saved} · ${failed} failed (backend rejected — check phone/email)`,
+            "info",
+          );
+        } else {
+          showToast(`Launched PAIR for ${saved} candidate${saved === 1 ? "" : "s"}`, "success");
+        }
+        if (!options?.skipRedirect) {
+          setTimeout(() => {
+            if (jobIdForEngage) {
+              router.push(`/jobs/${encodeURIComponent(jobIdForEngage)}/rankings`);
+            } else {
+              router.push(`/`);
+            }
+          }, 1000);
+        }
+        return { success: true, savedCount: saved };
       } else {
         console.error('Save failed details:', JSON.stringify(result, null, 2));
         const errorMsg = result.detail
           ? (Array.isArray(result.detail) ? JSON.stringify(result.detail) : result.detail)
           : (result.message || 'Unknown error');
         showToast(`Error saving candidates: ${errorMsg}`, "error");
+        return { success: false, savedCount: 0 };
       }
     } catch (e) {
       console.error("Failed to save candidates:", e);
       showToast("Failed to save candidates. Please try again.", "error");
+      return { success: false, savedCount: 0 };
     }
   };
 
@@ -5832,8 +5865,8 @@ function NewJobPageContent() {
       // results may now have one via ZoomInfo, and that phone may match the
       // DNC list. Auto-deselect any matches and surface a toast so the user
       // sees why the count dropped before the POST fires.
+      const dncDropped = new Set<string>();
       if (dncPhones.size > 0) {
-        const dncSelectedIds = new Set<string>();
         for (const c of candidates) {
           const id = String(c.candidate_id || c.id || "").trim();
           if (!id || !selectedCandidates.has(id)) continue;
@@ -5841,25 +5874,112 @@ function NewJobPageContent() {
           const phoneToCheck = overridePhone || c.phone;
           const np = normalizePhone(phoneToCheck);
           if (np && dncPhones.has(np)) {
-            dncSelectedIds.add(id);
+            dncDropped.add(id);
           }
         }
-        if (dncSelectedIds.size > 0) {
+        if (dncDropped.size > 0) {
           setSelectedCandidates(prev => {
             const next = new Set(prev);
-            for (const id of dncSelectedIds) next.delete(id);
+            for (const id of dncDropped) next.delete(id);
             return next;
           });
           showToast(
-            `${dncSelectedIds.size} candidate${dncSelectedIds.size === 1 ? "" : "s"} skipped — Do Not Contact list match`,
+            `${dncDropped.size} candidate${dncDropped.size === 1 ? "" : "s"} skipped — Do Not Contact list match`,
             "info",
           );
         }
       }
 
-      await runLaunchPair(contactOverrides);
+      // Partition selected candidates into Ready (has phone + real email) and
+      // Needs-info (missing either). Ready candidates launch immediately; the
+      // Needs-info group opens MissingContactsModal so the recruiter can fill
+      // in details and launch them in a second pass.
+      const readyIds = new Set<string>();
+      const needsInfo: MissingContactCandidate[] = [];
+      const launchJobdivaId = jobdivaId || jobData?.jobdiva_id || numericJobId || undefined;
+      for (const c of candidates) {
+        const id = String(c.candidate_id || c.id || "").trim();
+        if (!id || !selectedCandidates.has(id) || dncDropped.has(id)) continue;
+        const overridePhone = contactOverrides[id]?.phone;
+        const overrideEmail = contactOverrides[id]?.email;
+        const effectivePhone = overridePhone || c.phone;
+        const effectiveEmail = String(overrideEmail || c.email || "").trim().toLowerCase();
+        const phoneOK = String(effectivePhone || "").replace(/\D/g, "").length >= 7;
+        const emailOK = !!effectiveEmail && !effectiveEmail.endsWith("@noemail.pair.ai");
+        if (phoneOK && emailOK) {
+          readyIds.add(id);
+        } else {
+          needsInfo.push({
+            candidate_id: id,
+            name: getCandidateDisplayName(c) || c.name || "Unnamed",
+            headline: c.title || c.headline || "",
+            location: c.location || "",
+            source: c.source || "",
+            jobdiva_id: launchJobdivaId ? String(launchJobdivaId) : undefined,
+            needsPhone: !phoneOK,
+            needsEmail: !emailOK,
+          });
+        }
+      }
+
+      const hasReady = readyIds.size > 0;
+      const hasNeeds = needsInfo.length > 0;
+
+      if (hasReady) {
+        const result = await runLaunchPair(contactOverrides, readyIds, {
+          skipRedirect: hasNeeds,
+        });
+        setReadyLaunchedPendingRedirect(hasNeeds && result.success);
+      } else {
+        setReadyLaunchedPendingRedirect(false);
+      }
+
+      if (hasNeeds) {
+        setPendingLaunchOverrides(contactOverrides);
+        setMissingContactCandidates(needsInfo);
+        setMissingContactsOpen(true);
+      } else if (!hasReady) {
+        showToast("No candidates available to launch.", "info");
+      }
     } finally {
       setIsEnrichingContacts(false);
+    }
+  };
+
+  const handleMissingContactsProvided = async (
+    newContacts: Record<string, { phone?: string; email?: string }>,
+  ) => {
+    setMissingContactsOpen(false);
+    const mergedOverrides: Record<string, { phone?: string; email?: string }> = {
+      ...pendingLaunchOverrides,
+    };
+    for (const [id, vals] of Object.entries(newContacts)) {
+      mergedOverrides[id] = {
+        phone: vals.phone || pendingLaunchOverrides[id]?.phone,
+        email: vals.email || pendingLaunchOverrides[id]?.email,
+      };
+    }
+    const launchIds = new Set<string>(Object.keys(newContacts));
+    await runLaunchPair(mergedOverrides, launchIds, { skipRedirect: false });
+    setReadyLaunchedPendingRedirect(false);
+    setPendingLaunchOverrides({});
+    setMissingContactCandidates([]);
+  };
+
+  const handleMissingContactsClose = () => {
+    setMissingContactsOpen(false);
+    setMissingContactCandidates([]);
+    setPendingLaunchOverrides({});
+    if (readyLaunchedPendingRedirect) {
+      const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
+      setTimeout(() => {
+        if (jobIdForEngage) {
+          router.push(`/jobs/${encodeURIComponent(jobIdForEngage)}/rankings`);
+        } else {
+          router.push(`/`);
+        }
+      }, 200);
+      setReadyLaunchedPendingRedirect(false);
     }
   };
 
@@ -7771,6 +7891,13 @@ return (
         }}
       />
     )}
+
+    <MissingContactsModal
+      open={missingContactsOpen}
+      candidates={missingContactCandidates}
+      onClose={handleMissingContactsClose}
+      onAllProvided={handleMissingContactsProvided}
+    />
 
     {/* Paste Resume Modal (External requirement) */}
     <PasteResumeModal

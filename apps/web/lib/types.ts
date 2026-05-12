@@ -87,6 +87,9 @@ export interface Candidate {
   location?: string;
   city?: string;
   state?: string;
+  work_city?: string;
+  work_state?: string;
+  work_location?: string;
   years_experience?: number;
   experience_years?: number;
   skills?: (string | { name: string; years?: number })[];

@@ -883,6 +883,12 @@ async def get_job_candidates(job_id_or_ref: str):
             if isinstance(data_blob, dict):
                 if data_blob.get("jobdiva_candidate_id"):
                     cand["jobdiva_candidate_id"] = str(data_blob.get("jobdiva_candidate_id"))
+                if data_blob.get("work_city"):
+                    cand["work_city"] = data_blob.get("work_city")
+                if data_blob.get("work_state"):
+                    cand["work_state"] = data_blob.get("work_state")
+                if data_blob.get("work_location"):
+                    cand["work_location"] = data_blob.get("work_location")
                 if data_blob.get("engage_status"):
                     cand["engage_status"] = data_blob.get("engage_status")
                 if data_blob.get("engage_interview_id"):
@@ -1510,6 +1516,24 @@ class UpdateCandidatePhoneRequest(BaseModel):
     phone: str
     jobdiva_id: Optional[str] = None
     candidate_id: Optional[str] = None
+
+
+class UpdateCandidateEmailRequest(BaseModel):
+    email: str
+    jobdiva_id: Optional[str] = None
+    candidate_id: Optional[str] = None
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _validate_email(raw: str) -> str:
+    cleaned = (raw or "").strip().lower()
+    if not cleaned or not _EMAIL_RE.match(cleaned):
+        raise HTTPException(status_code=400, detail="Enter a valid email address")
+    if cleaned.endswith("@noemail.pair.ai"):
+        raise HTTPException(status_code=400, detail="Placeholder emails are not allowed")
+    return cleaned
 
 
 class EnrichCandidateContactRequest(BaseModel):
@@ -2462,6 +2486,50 @@ async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhon
         raise
     except Exception as e:
         logger.error(f"update_candidate_phone failed for {candidate_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/candidates/{candidate_id:path}/email")
+async def update_candidate_email(candidate_id: str, request: UpdateCandidateEmailRequest):
+    actual_candidate_id = request.candidate_id or candidate_id
+
+    import urllib.parse
+    actual_candidate_id = urllib.parse.unquote(actual_candidate_id)
+
+    email = _validate_email(request.email)
+
+    try:
+        logger.info(f"update_candidate_email called with candidate_id='{actual_candidate_id}', request.jobdiva_id='{request.jobdiva_id}'")
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                if request.jobdiva_id:
+                    cur.execute(
+                        """
+                        UPDATE sourced_candidates
+                        SET email = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE candidate_id = %s AND jobdiva_id = %s
+                        """,
+                        (email, actual_candidate_id, request.jobdiva_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        UPDATE sourced_candidates
+                        SET email = %s, updated_at = CURRENT_TIMESTAMP
+                        WHERE candidate_id = %s
+                        """,
+                        (email, actual_candidate_id),
+                    )
+                updated = cur.rowcount
+            conn.commit()
+        finally:
+            conn.close()
+        return {"status": "success", "candidate_id": candidate_id, "email": email, "updated_rows": updated}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"update_candidate_email failed for {candidate_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
