@@ -825,16 +825,17 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 logger.info(f"🚀 [Engagement] Initial launch detected for job {job_id_from_payload}. Triggering applicant sync.")
                 asyncio.create_task(auto_assign_service.synchronize_job_applicants(job_id_from_payload))
 
-            # Email #1 (launch confirmation) always fires; Email #2 (job posting
-            # team) is gated on initial launch so re-sourcing doesn't re-spam them.
-            asyncio.create_task(
-                _send_pair_launch_email(
-                    job_id=job_id_from_payload,
-                    candidate_count=len(interview_results),
-                    send_job_posting=request.is_initial_launch,
-                    app_base_url=request.app_base_url,
+            # Manual rankings Screen sends should create the interview only.
+            # Launch/re-source flows use dry_run for recruiter notifications.
+            if request.is_initial_launch or request.dry_run:
+                asyncio.create_task(
+                    _send_pair_launch_email(
+                        job_id=job_id_from_payload,
+                        candidate_count=len(interview_results),
+                        send_job_posting=request.is_initial_launch,
+                        app_base_url=request.app_base_url,
+                    )
                 )
-            )
             return {
                 "success": True,
                 "message": "Interview(s) sent successfully",

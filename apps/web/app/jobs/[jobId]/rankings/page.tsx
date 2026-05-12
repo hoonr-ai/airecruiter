@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
@@ -68,6 +68,36 @@ const formatDate = (dateStr: string) => {
   } catch {
     return dateStr;
   }
+};
+
+const FINAL_ENGAGE_STATUSES = new Set([
+  "completed",
+  "passed",
+  "failed",
+  "rejected",
+  "pass",
+  "fail",
+]);
+
+const normalizeStatusValue = (value: unknown): string =>
+  String(value || "").trim().toLowerCase();
+
+const hasFinalEngageOutcome = (candidate: {
+  engage_status?: string;
+  engage_hard_filter_status?: string;
+  data?: any;
+}): boolean => {
+  const statusCandidates = [
+    candidate.engage_hard_filter_status,
+    candidate.data?.engage_hard_filter_status,
+    candidate.engage_status,
+    candidate.data?.engage_status,
+  ];
+
+  return statusCandidates.some((status) => {
+    const raw = normalizeStatusValue(status);
+    return raw ? FINAL_ENGAGE_STATUSES.has(raw) || raw.includes("complete") : false;
+  });
 };
 
 const ColumnFilterPopup = ({
@@ -210,6 +240,9 @@ interface Candidate {
   email: string;
   phone?: string;
   location?: string;
+  work_location?: string;
+  work_city?: string;
+  work_state?: string;
   headline?: string;
   job_title?: string;
   image_url?: string;
@@ -241,8 +274,10 @@ type ToastState = { type: "info" | "error" | "success"; message: string } | null
 
 function ResumeScreeningHoverCard({
   candidate,
+  open,
 }: {
   candidate: Candidate;
+  open: boolean;
 }) {
   const dataBlob = candidate.data || {};
   const titleStr = String(candidate.job_title || candidate.headline || dataBlob?.headline || "").trim();
@@ -267,7 +302,7 @@ function ResumeScreeningHoverCard({
       : explainability[0]?.text || "";
 
   return (
-    <div className="pointer-events-none absolute left-1/2 top-full z-30 mt-2 hidden w-[420px] -translate-x-1/2 rounded-xl border border-slate-200 bg-white p-4 text-left shadow-2xl group-hover:block">
+    <div className={`pointer-events-none absolute left-1/2 top-full z-30 mt-2 w-[420px] -translate-x-1/2 rounded-xl border border-slate-200 bg-white p-4 text-left shadow-2xl ${open ? "block" : "hidden"}`}>
       {titleAtCompany && (
         <div className="mb-1.5 truncate text-[12.5px] font-semibold text-slate-800" title={titleAtCompany}>
           {titleAtCompany}
@@ -629,7 +664,7 @@ export default function CandidateRankingsPage() {
     let rows = candidates.filter(c => {
       // Search
       if (q) {
-        const hay = `${c.name || ""} ${c.email || ""} ${c.headline || ""} ${c.location || ""}`.toLowerCase();
+        const hay = `${c.name || ""} ${c.email || ""} ${c.headline || ""} ${c.location || ""} ${c.work_location || ""}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       // Status
@@ -649,12 +684,12 @@ export default function CandidateRankingsPage() {
         else if (field === "source") val = normalizeSourceLabel(c.source);
         else if (field === "engage_status") val = normalizeInterviewStatus(c).label;
         else if (field === "screening_score") val = String(c.match_score || 0);
-        else if (field === "engage_score") val = String(c.engage_score || 0);
+        else if (field === "engage_score") val = hasFinalEngageOutcome(c) ? String(c.engage_score || 0) : "";
         else if (field === "total_score") {
           const screeningScore = c.match_score || 0;
-          const engageScore = c.engage_score || 0;
-          const isDone = ["completed", "passed", "failed", "rejected", "pass", "fail"].includes((c.engage_status || "").toLowerCase());
-          val = String(isDone ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : screeningScore);
+          const showEngageScore = hasFinalEngageOutcome(c);
+          const engageScore = showEngageScore ? (c.engage_score || 0) : 0;
+          val = String(showEngageScore ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : screeningScore);
         }
 
         const v = val.toLowerCase();
@@ -683,7 +718,13 @@ export default function CandidateRankingsPage() {
       const dir = sortDir === "asc" ? 1 : -1;
       rows = [...rows].sort((a, b) => {
         const getScore = (c: Candidate) => c.match_score ?? c.resume_match_percentage ?? 0;
-        const getEngage = (c: Candidate) => c.engage_score ?? 0;
+        const getEngage = (c: Candidate) => (hasFinalEngageOutcome(c) ? (c.engage_score ?? 0) : -1);
+        const getTotalScore = (c: Candidate) => {
+          const screeningScore = getScore(c);
+          return hasFinalEngageOutcome(c)
+            ? Math.round((screeningScore + (c.engage_score ?? 0)) / 2 * 10) / 10
+            : screeningScore;
+        };
         switch (sortField) {
           case "name":
             return dir * (a.name || "").localeCompare(b.name || "");
@@ -692,7 +733,7 @@ export default function CandidateRankingsPage() {
           case "engage_score":
             return dir * (getEngage(a) - getEngage(b));
           case "total_score":
-            return dir * ((getScore(a) + getEngage(a)) - (getScore(b) + getEngage(b)));
+            return dir * (getTotalScore(a) - getTotalScore(b));
           case "source":
             return dir * (normalizeSourceLabel(a.source)).localeCompare(normalizeSourceLabel(b.source));
           case "engage_status":
@@ -732,10 +773,11 @@ export default function CandidateRankingsPage() {
 
   const [isScreenModalOpen, setIsScreenModalOpen] = useState(false);
   const [screenPayload, setScreenPayload] = useState<string>("");
-  const [screenLoading, setScreenLoading] = useState(false);
+  const [screeningCandidateIds, setScreeningCandidateIds] = useState<Set<string>>(new Set());
   const [screenError, setScreenError] = useState<string | null>(null);
   const [selectedScreenCandidateIds, setSelectedScreenCandidateIds] = useState<string[]>([]);
   const [screenApiResponse, setScreenApiResponse] = useState<any>(null);
+  const [hoveredResumeScoreKey, setHoveredResumeScoreKey] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState>(null);
   const pushToast = (message: string, type: "info" | "error" | "success" = "info") => {
     setToast({ message, type });
@@ -968,22 +1010,40 @@ export default function CandidateRankingsPage() {
   };
 
   const runScreen = async (candidate: Candidate) => {
-    setScreenLoading(true);
+    const targetId = String(candidate.candidate_id || candidate.id || "");
+    setScreeningCandidateIds(prev => {
+      const next = new Set(prev);
+      next.add(targetId);
+      return next;
+    });
     setScreenError(null);
+    setScreenApiResponse(null);
+    setScreenPayload("");
+    setSelectedScreenCandidateIds([]);
     try {
       const data = await engagement.generatePayload({
-        candidateIds: [candidate.candidate_id || String(candidate.id)],
+        candidateIds: [targetId],
         jobId: candidate.jobdiva_id || String(jobId || ""),
       });
       setScreenPayload(data.payload);
-      setSelectedScreenCandidateIds([candidate.candidate_id || String(candidate.id)]);
+      setSelectedScreenCandidateIds([targetId]);
       setIsScreenModalOpen(true);
     } catch (err: any) {
       setScreenError(err?.message || "Failed to generate screening payload");
     } finally {
-      setScreenLoading(false);
+      setScreeningCandidateIds(prev => {
+        const next = new Set(prev);
+        next.delete(targetId);
+        return next;
+      });
     }
   };
+
+  const handleScreenModalClose = useCallback(() => {
+    setIsScreenModalOpen(false);
+    setScreenApiResponse(null);
+    setScreenError(null);
+  }, []);
 
   const handleScreenClick = async (candidate: Candidate) => {
     if (!hasUsablePhone(candidate.phone)) {
@@ -1005,21 +1065,26 @@ export default function CandidateRankingsPage() {
   };
 
   const handleSendScreen = async (payloadOverride?: string) => {
-    setScreenLoading(true);
+    const idsAtSend = [...selectedScreenCandidateIds];
+    setScreeningCandidateIds(prev => {
+      const next = new Set(prev);
+      for (const id of idsAtSend) next.add(id);
+      return next;
+    });
     setScreenError(null);
     setScreenApiResponse(null);
     const payloadToSend = payloadOverride ?? screenPayload;
     try {
       const data = await engagement.sendBulkInterview({
         payload: payloadToSend,
-        realCandidateIds: selectedScreenCandidateIds,
+        realCandidateIds: idsAtSend,
       });
       setScreenApiResponse(data);
       if (data.success) {
         // Optimistically update status to Initiated for all selected candidates
         setCandidates(prev => prev.map(c => {
           const cid = String(c.candidate_id || c.id || "");
-          if (selectedScreenCandidateIds.includes(cid)) {
+          if (idsAtSend.includes(cid)) {
             return {
               ...c,
               engage_status: "Initiated",
@@ -1037,7 +1102,11 @@ export default function CandidateRankingsPage() {
     } catch (err: any) {
       setScreenError(err?.message || "Screen call failed");
     } finally {
-      setScreenLoading(false);
+      setScreeningCandidateIds(prev => {
+        const next = new Set(prev);
+        for (const id of idsAtSend) next.delete(id);
+        return next;
+      });
     }
   };
 
@@ -1848,13 +1917,14 @@ export default function CandidateRankingsPage() {
                   ))
                 ) : (
                   filteredCandidates.map((candidate, idx) => {
+                    const candidateKey = `${candidate.id || candidate.candidate_id || idx}`;
                     const screeningScore = candidate.match_score || 0;
-                    const engageScore = candidate.engage_score || 0;
-                    const isDone = ["completed", "passed", "failed", "rejected", "pass", "fail"].includes((candidate.engage_status || "").toLowerCase());
-                    const totalScore = isDone ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : screeningScore;
+                    const showEngageScore = hasFinalEngageOutcome(candidate);
+                    const engageScore = showEngageScore ? (candidate.engage_score || 0) : 0;
+                    const totalScore = showEngageScore ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : screeningScore;
 
                     return (
-                      <TableRow key={`${candidate.id || candidate.candidate_id}-${idx}`} className="border-b border-slate-100 hover:bg-slate-50 transition-all duration-200 h-auto group leading-tight relative">
+                      <TableRow key={`${candidateKey}-${idx}`} className="border-b border-slate-100 hover:bg-slate-50 transition-all duration-200 h-auto group leading-tight relative">
                         <TableCell className="w-[50px] border-r border-slate-200 py-2 px-2 align-middle text-center font-medium text-slate-700 group-hover:bg-slate-50 transition-colors">
                           {idx + 1}
                         </TableCell>
@@ -1930,12 +2000,19 @@ export default function CandidateRankingsPage() {
 
 
 
-                        <TableCell className="text-center align-middle py-2 px-2 font-medium text-slate-900 text-[13px] border-l border-slate-200">
-                          <div className="group relative flex items-center justify-center gap-1 w-full text-center">
-
+                        <TableCell
+                          className="text-center align-middle py-2 px-2 font-medium text-slate-900 text-[13px] border-l border-slate-200"
+                          onMouseEnter={() => {
+                            if (screeningScore > 0) setHoveredResumeScoreKey(candidateKey);
+                          }}
+                          onMouseLeave={() => setHoveredResumeScoreKey((prev) => (prev === candidateKey ? null : prev))}
+                        >
+                          <div className="relative flex items-center justify-center gap-1 w-full text-center">
                             {screeningScore > 0 ? (
-                              <span className="font-bold text-slate-900 text-[14px] underline decoration-dotted underline-offset-4">
-                                {screeningScore}/100
+                              <span className="inline-flex items-center justify-center">
+                                <span className="font-bold text-slate-900 text-[14px] underline decoration-dotted underline-offset-4">
+                                  {screeningScore}/100
+                                </span>
                               </span>
                             ) : (
                               <span className="font-normal opacity-40 italic text-slate-400 text-[13px]">
@@ -1943,7 +2020,10 @@ export default function CandidateRankingsPage() {
                               </span>
                             )}
                             {screeningScore > 0 ? (
-                              <ResumeScreeningHoverCard candidate={candidate} />
+                              <ResumeScreeningHoverCard
+                                candidate={candidate}
+                                open={hoveredResumeScoreKey === candidateKey}
+                              />
                             ) : null}
                           </div>
                         </TableCell>
@@ -2004,7 +2084,7 @@ export default function CandidateRankingsPage() {
                             const eTotal = candidate.engage_total_score || 100;
                             const hardFilterDetails = candidate.engage_hard_filter_details || [];
 
-                            if (eScore !== undefined && eScore !== null) {
+                            if (showEngageScore && eScore !== undefined && eScore !== null) {
                               return (
                                 <div className="group relative flex items-center justify-center w-full">
                                   <span className="font-bold text-slate-900 text-[14px] underline decoration-dotted underline-offset-4">
@@ -2037,7 +2117,7 @@ export default function CandidateRankingsPage() {
                               size="sm"
                               className="h-8 px-3 bg-white border border-indigo-200 text-indigo-600 hover:bg-indigo-600 hover:text-white font-bold text-[11px] rounded-md shadow-sm transition-all duration-200"
                               onClick={() => handleScreenClick(candidate)}
-                              disabled={screenLoading}
+                              disabled={screeningCandidateIds.has(String(candidate.candidate_id || candidate.id || ""))}
                             >
                               <MessageSquare className="w-4 h-4 mr-1.5" />
                               Screen
@@ -2106,6 +2186,7 @@ export default function CandidateRankingsPage() {
           imageUrl={selectedCandidate.image_url}
           jobTitle={selectedCandidate.headline}
           location={selectedCandidate.location}
+          workLocation={selectedCandidate.work_location}
           experienceYears={selectedCandidate.data?.experience_years}
           matchScore={selectedCandidate.match_score}
           matchScoreDetails={selectedCandidate.data?.match_score_details}
@@ -2131,14 +2212,14 @@ export default function CandidateRankingsPage() {
 
       <EngageWizardModal
         open={isScreenModalOpen}
-        onClose={() => setIsScreenModalOpen(false)}
+        onClose={handleScreenModalClose}
         initialPayload={screenPayload}
         candidateIds={selectedScreenCandidateIds}
         onSend={async (payload) => {
           setScreenPayload(payload);
           await handleSendScreen(payload);
         }}
-        loading={screenLoading}
+        loading={selectedScreenCandidateIds.some(id => screeningCandidateIds.has(id))}
         error={screenError}
         successData={screenApiResponse}
       />

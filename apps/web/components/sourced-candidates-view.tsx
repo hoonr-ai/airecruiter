@@ -9,7 +9,7 @@ import { AssessModal } from "@/components/AssessModal";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { API_BASE } from "@/lib/api";
 
-import { 
+import {
   ArrowLeft,
   Linkedin,
   ShieldCheck,
@@ -17,8 +17,11 @@ import {
   Star,
   Mail,
   MessageSquare,
-  FileText
+  FileText,
+  MapPin,
+  Briefcase,
 } from "lucide-react";
+import { getCandidateLocations } from "@/lib/candidate-location";
 
 interface SourcedCandidate {
   id: string;
@@ -29,6 +32,11 @@ interface SourcedCandidate {
   email?: string;
   title?: string;
   location?: string;
+  work_location?: string;
+  work_city?: string;
+  work_state?: string;
+  city?: string;
+  state?: string;
   source: string;
   skills?: string[];
   experience_years?: number;
@@ -310,9 +318,26 @@ export function SourcedCandidatesView({
 
                 {/* Location & Source */}
                 <div className="flex items-center space-x-4 text-sm text-muted-foreground">
-                  {candidate.location && (
-                    <span>{candidate.location}</span>
-                  )}
+                  {(() => {
+                    const { home, work } = getCandidateLocations(candidate);
+                    return (
+                      <div className="flex flex-col gap-0.5">
+                        {home && (
+                          <span className="inline-flex items-center gap-1" title={`Location: ${home}`}>
+                            <MapPin className="w-3 h-3 text-slate-400" />
+                            {home}
+                          </span>
+                        )}
+                        {work && (
+                          <span className="inline-flex items-center gap-1 text-slate-500" title={`Works in: ${work}`}>
+                            <Briefcase className="w-3 h-3 text-slate-400" />
+                            <span className="text-slate-400">Works in:</span>
+                            {work}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })()}
                   <div className="flex items-center space-x-1">
                     {getSourceIcon(candidate.source)}
                     <span>{candidate.source}</span>
