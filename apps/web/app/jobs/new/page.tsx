@@ -191,9 +191,9 @@ function parseAvailabilityCriteria(s: string): { mode: "asap" | "date"; iso?: st
   if (/ASAP/i.test(raw)) return { mode: "asap" };
   const m = raw.match(/by\s+(.+?)\s*$/i);
   if (!m) return { mode: "asap" };
-  const d = new Date(m[1]);
+  // F2: parse in UTC to avoid local timezone shifts during ISO conversion
+  const d = new Date(m[1] + " UTC");
   if (isNaN(+d)) return { mode: "asap" };
-  // Normalize to ISO yyyy-mm-dd for <input type="date">.
   return { mode: "date", iso: d.toISOString().slice(0, 10) };
 }
 
@@ -3697,6 +3697,7 @@ function NewJobPageContent() {
     // 2. Default Questions — arrangement-aware, address-aware. The onsite/hybrid
     // question is a preference check, not a hard filter; recruiters can flip
     // it to a hard filter manually if disqualification should be automatic.
+    const availabilityDate = jobData.start_date || 'ASAP';
     const defaultQs: Array<{ text: string; criteria: string; is_hard_filter?: boolean }> = [
       { text: "Are you open to exploring new job opportunities?", criteria: "Must be open to new job opportunities" },
       { text: "What is your current or most recent role and key responsibilities?", criteria: "" },
@@ -3708,8 +3709,22 @@ function NewJobPageContent() {
         criteria: `Must be open to ${arrangementLabel} work arrangement`,
       });
     }
+    let availabilityText = "";
+    if (!jobData.start_date || availabilityDate === 'ASAP') {
+      availabilityText = "What is your earliest availability to start a new role? Ideally, we're looking for someone who can start as soon as possible.";
+    } else {
+      const d = new Date(jobData.start_date + 'T00:00:00Z');
+      if (!isNaN(+d)) {
+        d.setUTCDate(d.getUTCDate() - 1);
+        const formatted = d.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric', timeZone: 'UTC' });
+        availabilityText = `What is your earliest availability to start a new role? Ideally, we are looking for a candidate who can start by ${formatted}.`;
+      } else {
+        availabilityText = "What is your earliest availability to start a new role? Ideally, we're looking for someone who can start as soon as possible.";
+      }
+    }
+
     defaultQs.push(
-      { text: "What is your earliest availability to start a new role?", criteria: `Must be available by ${jobData.start_date || 'ASAP'}` },
+      { text: availabilityText, criteria: `Must be available by ${availabilityDate}` },
       { text: "What is your current compensation and expected compensation?", criteria: "" },
       { text: "Which types of working arrangements are you open to and eligible for? Select all that apply: W2 Employee, Subcontractor to Pyramid through your current employer, Independent Contractor", criteria: "" },
       { text: "Are you authorized to work indefinitely for any employer in the United States?", criteria: "" },
@@ -5169,7 +5184,34 @@ function NewJobPageContent() {
 
   const updateScreenQuestion = (id: number, field: keyof ScreenQuestion, value: any) => {
     userHasEditedQuestionsRef.current = true;
-    setScreenQuestions(prev => prev.map(q => q.id === id ? { ...q, [field]: value } : q));
+    setScreenQuestions(prev => prev.map(q => {
+      if (q.id === id) {
+        let next = { ...q, [field]: value };
+        // F2: if pass_criteria changed on an availability question, sync the target into question_text
+        if (field === 'pass_criteria' && isAvailabilityQuestion(q)) {
+          const parsed = parseAvailabilityCriteria(value);
+          if (parsed.mode === 'asap') {
+            const base = q.question_text.split('. ')[0];
+            next.question_text = `${base}. Ideally, we're looking for someone who can start as soon as possible.`;
+          } else {
+            const dateObj = new Date(parsed.iso + 'T00:00:00Z');
+            // Subtract one day for the bot's question to "focus on a day before" as requested
+            dateObj.setUTCDate(dateObj.getUTCDate() - 1);
+            
+            const targetStr = dateObj.toLocaleDateString('en-US', {
+              month: 'short',
+              day: '2-digit',
+              year: 'numeric',
+              timeZone: 'UTC'
+            });
+            const base = q.question_text.split('. ')[0].split('?')[0];
+            next.question_text = `${base}? Ideally, we are looking for a candidate who can start by ${targetStr}.`;
+          }
+        }
+        return next;
+      }
+      return q;
+    }));
     trackEvent("job_wizard_step4_screen_question_changed", {
       step: 4,
       question_id: id,
