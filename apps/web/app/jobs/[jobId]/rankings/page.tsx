@@ -303,10 +303,10 @@ function ResumeScreeningHoverCard({
 
   return (
     <div 
-      className={`pointer-events-none absolute left-1/2 top-full z-40 mt-3 w-[420px] -translate-x-1/2 rounded-2xl border border-slate-200 bg-white/95 p-5 text-left shadow-2xl backdrop-blur-md transition-all duration-300 origin-top ${
+      className={`absolute left-1/2 top-full z-40 mt-3 w-[420px] -translate-x-1/2 rounded-2xl border border-slate-200 bg-white/95 p-5 text-left shadow-2xl backdrop-blur-md transition-all duration-300 origin-top ${
         open 
-          ? "opacity-100 translate-y-0 scale-100 visible" 
-          : "opacity-0 -translate-y-2 scale-95 invisible"
+          ? "opacity-100 translate-y-0 scale-100 visible pointer-events-auto" 
+          : "opacity-0 -translate-y-2 scale-95 invisible pointer-events-none"
       }`}
     >
       {titleAtCompany && (
@@ -385,10 +385,10 @@ function HardFilterHoverCard({
 
   return (
     <div 
-      className={`pointer-events-none absolute left-1/2 top-full z-40 mt-3 w-[420px] -translate-x-1/2 rounded-2xl border border-slate-200 bg-white/95 p-4 text-left shadow-2xl backdrop-blur-md transition-all duration-300 origin-top ${
+      className={`absolute left-1/2 top-full z-40 mt-3 w-[420px] -translate-x-1/2 rounded-2xl border border-slate-200 bg-white/95 p-4 text-left shadow-2xl backdrop-blur-md transition-all duration-300 origin-top ${
         open 
-          ? "opacity-100 translate-y-0 scale-100 visible" 
-          : "opacity-0 -translate-y-2 scale-95 invisible"
+          ? "opacity-100 translate-y-0 scale-100 visible pointer-events-auto" 
+          : "opacity-0 -translate-y-2 scale-95 invisible pointer-events-none"
       }`}
     >
       <div className="mb-3 flex items-center justify-between border-b border-slate-100 pb-2.5">
@@ -400,14 +400,14 @@ function HardFilterHoverCard({
           {details.length} Questions
         </span>
       </div>
-      <div className="space-y-2.5 max-h-[450px] overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-slate-200">
+      <div className="space-y-2.5 max-h-[380px] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-200">
         {details.map((item, index) => (
           <div 
             key={`${item.question}-${index}`} 
             className="group/item rounded-xl border border-slate-200 bg-slate-50/50 p-3 hover:border-indigo-200 hover:bg-white transition-all duration-200"
           >
             <div className="mb-2 flex items-start justify-between gap-3">
-              <div className="text-[13px] font-semibold leading-relaxed text-slate-800 flex-1 break-words">
+              <div className="text-[13px] font-semibold leading-relaxed text-slate-800 flex-1 break-words whitespace-normal">
                 {item.question}
               </div>
               <span
