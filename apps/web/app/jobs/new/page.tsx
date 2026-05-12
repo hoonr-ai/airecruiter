@@ -5724,7 +5724,12 @@ function NewJobPageContent() {
               // Source mode = re-launch on an Active job; backend gates the
               // job-posting team email + applicant sync on this flag.
               isInitialLaunch: wizardMode !== 'source',
-              dryRun: true, // Disables phone calls but keeps recruiter notification emails
+              // Fire the recruiter launch email from the wizard flow.
+              // Pre-fix we used dryRun=true for this, but dryRun also
+              // skipped the pairbot call entirely, so candidates never got
+              // created in pairbot. notify_recruiters is the explicit
+              // signal for the email; dryRun stays false so pairbot is hit.
+              notifyRecruiters: true,
             });
           }
         } catch (engageErr) {
