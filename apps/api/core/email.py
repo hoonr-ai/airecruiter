@@ -49,6 +49,11 @@ SMTP_USER     = _cfg("SMTP_USER") or _cfg("EMAIL_FROM")
 SMTP_PASSWORD = _cfg("SMTP_PASSWORD") or _cfg("EMAIL_PASSWORD")
 SMTP_FROM     = _cfg("SMTP_FROM") or _cfg("EMAIL_FROM") or SMTP_USER
 
+MS_GRAPH_TENANT_ID = _cfg("MS_GRAPH_TENANT_ID")
+MS_GRAPH_CLIENT_ID = _cfg("MS_GRAPH_CLIENT_ID")
+MS_GRAPH_CLIENT_SECRET = _cfg("MS_GRAPH_CLIENT_SECRET")
+MS_GRAPH_SENDER_EMAIL = _cfg("MS_GRAPH_SENDER_EMAIL") or SMTP_FROM
+
 # PAIR-specific (not SMTP credentials)
 PAIR_TEAM_EMAIL    = _cfg("PAIR_TEAM_EMAIL",    "pair-recruiting@pyramidci.com")
 JOB_POSTING_EMAIL  = _cfg("JOB_POSTING_EMAIL",  "Jobposting@pyramidci.com")
@@ -71,6 +76,86 @@ def _smtp_configured() -> bool:
     """Return True only when enough SMTP settings are present to attempt a send."""
     return bool(SMTP_HOST and SMTP_USER and SMTP_PASSWORD)
 
+def _ms_graph_configured() -> bool:
+    """Return True if Microsoft Graph API credentials are present."""
+    return bool(MS_GRAPH_TENANT_ID and MS_GRAPH_CLIENT_ID and MS_GRAPH_CLIENT_SECRET and MS_GRAPH_SENDER_EMAIL)
+
+def _get_ms_graph_token() -> Optional[str]:
+    """Fetch an OAuth2 token for Microsoft Graph using Client Credentials flow."""
+    url = f"https://login.microsoftonline.com/{MS_GRAPH_TENANT_ID}/oauth2/v2.0/token"
+    data = {
+        "client_id": MS_GRAPH_CLIENT_ID,
+        "client_secret": MS_GRAPH_CLIENT_SECRET,
+        "scope": "https://graph.microsoft.com/.default",
+        "grant_type": "client_credentials"
+    }
+    try:
+        import httpx
+        with httpx.Client() as client:
+            response = client.post(url, data=data, timeout=10.0)
+            response.raise_for_status()
+            return response.json().get("access_token")
+    except Exception as e:
+        logger.error("📧 Failed to acquire MS Graph token: %s", e)
+        return None
+
+def _send_via_msgraph(
+    to_addresses: List[str],
+    subject: str,
+    html_body: str,
+    text_body: str = "",
+    attachments: Optional[List[dict]] = None
+) -> bool:
+    """Send email via Microsoft Graph API."""
+    token = _get_ms_graph_token()
+    if not token:
+        logger.error("📧 MS Graph token acquisition failed.")
+        return False
+
+    url = f"https://graph.microsoft.com/v1.0/users/{MS_GRAPH_SENDER_EMAIL}/sendMail"
+    
+    message = {
+        "subject": subject,
+        "body": {
+            "contentType": "HTML",
+            "content": html_body or text_body
+        },
+        "toRecipients": [{"emailAddress": {"address": email.strip()}} for email in to_addresses if email.strip()]
+    }
+    
+    if attachments:
+        message["attachments"] = []
+        for att in attachments:
+            filename = att.get("filename", "attachment")
+            content = att.get("content")
+            content_type = att.get("content_type", "application/octet-stream")
+            if not content:
+                continue
+            import base64
+            b64_content = base64.b64encode(content).decode('utf-8')
+            message["attachments"].append({
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "name": filename,
+                "contentType": content_type,
+                "contentBytes": b64_content
+            })
+            
+    payload = {"message": message, "saveToSentItems": "true"}
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    
+    try:
+        import httpx
+        with httpx.Client() as client:
+            response = client.post(url, json=payload, headers=headers, timeout=15.0)
+            response.raise_for_status()
+            logger.info("📧 MS Graph Email sent successfully: '%s' → %s", subject, to_addresses)
+            return True
+    except httpx.HTTPStatusError as e:
+        logger.error("📧 MS Graph API Error: %s - %s", e.response.status_code, e.response.text)
+        return False
+    except Exception as e:
+        logger.error("📧 MS Graph Request Exception: %s", e, exc_info=True)
+        return False
 
 def _send(
     to_addresses: List[str],
@@ -80,17 +165,26 @@ def _send(
     attachments: Optional[List[dict]] = None  # List of {"filename": str, "content": bytes, "content_type"?: str}
 ) -> bool:
     """
-    Low-level send helper.  Returns True on success, False on any failure.
+    Low-level send helper. Attempts Microsoft Graph API if configured, otherwise falls back to SMTP.
+    Returns True on success, False on any failure.
     """
-    if not _smtp_configured():
-        logger.warning(
-            "📧 SMTP not configured — skipping email '%s' to %s",
-            subject, to_addresses,
-        )
-        return False
-
     if not to_addresses:
         logger.warning("📧 No recipients — skipping email '%s'", subject)
+        return False
+
+    # Attempt MS Graph API first if configured
+    if _ms_graph_configured():
+        success = _send_via_msgraph(to_addresses, subject, html_body, text_body, attachments)
+        if success:
+            return True
+        logger.warning("📧 MS Graph send failed. Falling back to SMTP...")
+
+    # Fallback to SMTP
+    if not _smtp_configured():
+        logger.warning(
+            "📧 SMTP and MS Graph not configured — skipping email '%s' to %s",
+            subject, to_addresses,
+        )
         return False
 
     msg = MIMEMultipart("alternative")
@@ -131,11 +225,11 @@ def _send(
                 server.login(SMTP_USER, SMTP_PASSWORD)
                 server.sendmail(SMTP_FROM, to_addresses, msg.as_string())
 
-        logger.info("📧 Email sent: '%s' → %s", subject, to_addresses)
+        logger.info("📧 Email sent via SMTP: '%s' → %s", subject, to_addresses)
         return True
 
     except Exception as exc:
-        logger.error("📧 Email send failed: %s", exc, exc_info=True)
+        logger.error("📧 Email send failed via SMTP: %s", exc, exc_info=True)
         return False
 
 
