@@ -444,6 +444,10 @@ class AutoAssignService:
 
             # 4. Process candidates
             total_assigned = 0
+            # Track IDs of rows we INSERTed (not updates) so the caller can
+            # auto-launch interviews only for genuinely new applicants. We
+            # never want to re-engage someone who's already been engaged.
+            newly_inserted_ids: List[str] = []
             with self._get_db_connection() as conn:
                 with conn.cursor() as cur:
                     async for event in unified_search_service.search_candidates(criteria):
@@ -536,6 +540,8 @@ class AutoAssignService:
                                     cand.get("match_score") or 0,
                                  ))
                                 total_assigned += 1
+                                if candidate_id:
+                                    newly_inserted_ids.append(candidate_id)
 
                             # Populate normalized tables
                             try:
@@ -554,6 +560,28 @@ class AutoAssignService:
 
             # 5. Update performance metrics (Time to First Pass, External Subs, etc.)
             await self.refresh_job_performance_metrics(target_job_id)
+
+            # 6. Auto-launch interviews for newly-inserted applicants. Pre-fix,
+            #    this step was missing entirely — the cron pulled JobDiva
+            #    applicants into sourced_candidates but no code ever pushed
+            #    them to pairbot, so they sat with engage_status NULL until a
+            #    recruiter manually clicked Engage on each row. The helper
+            #    enforces its own guards (job must have been launched once,
+            #    outreach not stopped, DNC honored, batch capped).
+            #    Late import to avoid circular import at module load:
+            #    engagement.py imports auto_assign_service.
+            if newly_inserted_ids:
+                try:
+                    from routers.engagement import auto_launch_for_candidates
+                    import asyncio as _asyncio
+                    _asyncio.create_task(
+                        auto_launch_for_candidates(newly_inserted_ids, target_job_id)
+                    )
+                except Exception as launch_err:  # noqa: BLE001
+                    logger.warning(
+                        f"[AutoAssignService] Failed to schedule auto-launch for job "
+                        f"{target_job_id}: {launch_err}"
+                    )
 
             return total_assigned
 
