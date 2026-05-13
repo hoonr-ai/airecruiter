@@ -346,43 +346,6 @@ export default function NewJobPage() {
 
 type WizardMode = 'edit' | 'source' | 'view';
 
-// Stage keys for the staged Launch PAIR flow. The orchestrator walks them in
-// order; each may drop candidates into the next stage if its inputs are still
-// missing contact info.
-type LaunchStageKey = "ready" | "zoominfo" | "apollo" | "manual";
-type CandidateLaunchStatus =
-  | "pending"
-  | "enriching"
-  | "launched"
-  | "no_contact"
-  | "failed"
-  | "skipped";
-
-type LaunchCandidateProgress = {
-  id: string;
-  name: string;
-  phone?: string;
-  email?: string;
-  status: CandidateLaunchStatus;
-  launchedAt?: LaunchStageKey;
-  message?: string;
-};
-
-type LaunchStageSummary = {
-  status: "idle" | "running" | "done" | "skipped";
-  attempted: number;
-  launched: number;
-  failed: number;
-};
-
-type LaunchProgress = {
-  activeStage: LaunchStageKey | "done";
-  candidates: Record<string, LaunchCandidateProgress>;
-  stages: Record<LaunchStageKey, LaunchStageSummary>;
-};
-
-const EMPTY_STAGE: LaunchStageSummary = { status: "idle", attempted: 0, launched: 0, failed: 0 };
-
 function NewJobPageContent() {
   const router = useRouter();
   const engagement = useEngagementFlow();
@@ -672,12 +635,7 @@ function NewJobPageContent() {
   // and post-LLM (parsed years_of_experience).
   const [minExperienceYears, setMinExperienceYears] = useState<number | null>(null);
   const [isSearching, setIsSearching] = useState(false);
-  // Staged Launch PAIR flow. `launchProgress` is non-null while the staged
-  // launch modal is open; the active stage cycles through ready → zoominfo →
-  // apollo → manual → done. `manualInputs` carries the phone/email the user
-  // types in stage 4 for candidates the enrichment providers couldn't resolve.
-  const [launchProgress, setLaunchProgress] = useState<LaunchProgress | null>(null);
-  const [manualInputs, setManualInputs] = useState<Record<string, { phone: string; email: string }>>({});
+  const [isEnrichingContacts, setIsEnrichingContacts] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [booleanStringOpen, setBooleanStringOpen] = useState(false);
   const [generatedBoolean, setGeneratedBoolean] = useState("");
@@ -5595,201 +5553,151 @@ function NewJobPageContent() {
     </div>
   );
 
-  // Build the standard /candidates/save payload row from a candidate object.
-  // Centralized so every batch the staged launch emits has the same shape.
-  const buildCandidatePayloadEntry = (c: any) => {
-    const displayName = getCandidateDisplayName(c);
-    let skillList: any[] = [];
-    if (Array.isArray(c.skills)) {
-      skillList = c.skills;
-    } else if (typeof c.skills === 'string' && c.skills.trim()) {
-      try {
-        const parsed = JSON.parse(c.skills);
-        skillList = Array.isArray(parsed) ? parsed : [c.skills];
-      } catch {
-        skillList = [c.skills];
-      }
-    }
-    return {
-      candidate_id: String(c.candidate_id || c.id || "unknown"),
-      name: displayName || "Unnamed Candidate",
-      email: c.email || null,
-      phone: c.phone || null,
-      skills: skillList,
-      experience_years: c.yearsExtracted || c.experience_years || 0,
-      source: c.source || "JobDiva-Applicants",
-      headline: c.title || c.headline || "",
-      location: c.location || "",
-      profile_url: c.profile_url || null,
-      image_url: c.image_url || null,
-      resume_text: c.resume_text || c.resumeText || "",
-      resume_id: String(c.resumeId || c.resume_id || ""),
-      is_selected: true,
-      education: Array.isArray(c.education || c.candidate_education) ? (c.education || c.candidate_education) : [],
-      certifications: Array.isArray(c.certifications || c.candidate_certification) ? (c.certifications || c.candidate_certification) : [],
-      company_experience: Array.isArray(c.company_experience || c.enhanced_info?.company_experience) ? (c.company_experience || c.enhanced_info?.company_experience) : [],
-      urls: (c.urls && typeof c.urls === 'object' && !Array.isArray(c.urls)) ? c.urls : (c.enhanced_info?.urls || {}),
-      match_score: typeof c.match_score === 'number' ? c.match_score : 0,
-      enhanced_info: (c.enhanced_info && typeof c.enhanced_info === 'object' && !Array.isArray(c.enhanced_info)) ? c.enhanced_info : null,
-    };
-  };
-
-  // Save and dispatch one batch of candidates. Returns the ids that landed
-  // (excludes DNC drops and backend idempotency skips) and the ones that
-  // failed outright. No navigation — the staged orchestrator owns that.
-  const launchBatch = async (
-    candidateObjects: any[],
-  ): Promise<{ launched: string[]; failed: string[]; skippedAlreadySent: string[] }> => {
-    if (candidateObjects.length === 0) {
-      return { launched: [], failed: [], skippedAlreadySent: [] };
-    }
-    const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
-    const filtered = candidateObjects.filter(c => {
-      if (dncPhones.size === 0) return true;
-      const np = normalizePhone(c.phone);
-      return !(np && dncPhones.has(np));
-    });
-    const candidatesPayload = filtered.map(buildCandidatePayloadEntry);
-    const candidateIds = candidatesPayload.map(c => c.candidate_id);
-    if (candidateIds.length === 0) {
-      const droppedIds = candidateObjects.map(c => String(c.candidate_id || c.id || "")).filter(Boolean);
-      return { launched: [], failed: droppedIds, skippedAlreadySent: [] };
-    }
+  // Launch PAIR consumes selected candidates (with optional contact overrides
+  // from enrichment) and persists them to sourced_candidates.
+  const runLaunchPair = async (contactOverrides?: Record<string, { phone?: string; email?: string }>) => {
+    if (selectedCandidates.size === 0) return;
     try {
-      const saveRes = await fetch(`${API_BASE}/candidates/save`, {
+      const effective = contactOverrides
+        ? candidates.map(c => {
+          const id = c.candidate_id || c.id;
+          const override = contactOverrides[id];
+          return override
+            ? {
+              ...c,
+              phone: override.phone || c.phone,
+              email: override.email || c.email,
+            }
+            : c;
+        })
+        : candidates;
+
+      if (contactOverrides) {
+        setCandidates(effective);
+      }
+
+      // Final DNC safety net: drop any selected candidate whose normalized
+      // phone is on the DNC list, even if React state hasn't yet flushed
+      // the auto-deselect from handleLaunchPairClick. The backend repeats
+      // this check at /candidates/save — defense in depth.
+      const candidatesPayload = effective
+        .filter(c => selectedCandidates.has(c.candidate_id || c.id))
+        .filter(c => {
+          if (dncPhones.size === 0) return true;
+          const np = normalizePhone(c.phone);
+          return !(np && dncPhones.has(np));
+        })
+        .map(c => {
+          const displayName = getCandidateDisplayName(c);
+          let skillList: any[] = [];
+          if (Array.isArray(c.skills)) {
+            skillList = c.skills;
+          } else if (typeof c.skills === 'string' && c.skills.trim()) {
+            try {
+              const parsed = JSON.parse(c.skills);
+              skillList = Array.isArray(parsed) ? parsed : [c.skills];
+            } catch (e) {
+              skillList = [c.skills];
+            }
+          }
+          return {
+            candidate_id: String(c.candidate_id || c.id || "unknown"),
+            name: displayName || "Unnamed Candidate",
+            email: c.email || null,
+            phone: c.phone || null,
+            skills: skillList,
+            experience_years: c.yearsExtracted || c.experience_years || 0,
+            source: c.source || "JobDiva-Applicants",
+            headline: c.title || c.headline || "",
+            location: c.location || "",
+            profile_url: c.profile_url || null,
+            image_url: c.image_url || null,
+            resume_text: c.resume_text || c.resumeText || "",
+            resume_id: String(c.resumeId || c.resume_id || ""),
+            is_selected: true,
+            education: Array.isArray(c.education || c.candidate_education) ? (c.education || c.candidate_education) : [],
+            certifications: Array.isArray(c.certifications || c.candidate_certification) ? (c.certifications || c.candidate_certification) : [],
+            company_experience: Array.isArray(c.company_experience || c.enhanced_info?.company_experience) ? (c.company_experience || c.enhanced_info?.company_experience) : [],
+            urls: (c.urls && typeof c.urls === 'object' && !Array.isArray(c.urls)) ? c.urls : (c.enhanced_info?.urls || {}),
+            match_score: typeof c.match_score === 'number' ? c.match_score : 0,
+            enhanced_info: (c.enhanced_info && typeof c.enhanced_info === 'object' && !Array.isArray(c.enhanced_info)) ? c.enhanced_info : null
+          };
+        });
+
+      const selectedCount = candidatesPayload.filter(c => c.is_selected).length;
+      console.log(`🚀 Launching Hoonr-Curate with ${selectedCount} selected candidates out of ${candidatesPayload.length} total`);
+
+      const response = await fetch(`${API_BASE}/candidates/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          jobdiva_id: jobIdForEngage,
-          candidates: candidatesPayload,
-        }),
+          jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId,
+          candidates: candidatesPayload
+        })
       });
-      const saveResult = await saveRes.json().catch(() => ({}));
-      if (!saveRes.ok || saveResult.status !== 'success') {
-        console.error("launchBatch save failed", saveResult);
-        return { launched: [], failed: candidateIds, skippedAlreadySent: [] };
-      }
-      const engageData = await engagement.generatePayload({
-        candidateIds,
-        jobId: jobIdForEngage,
-      });
-      if (!engageData?.payload) {
-        return { launched: [], failed: candidateIds, skippedAlreadySent: [] };
-      }
-      const sendResult = await engagement.sendBulkInterview({
-        payload: engageData.payload,
-        realCandidateIds: candidateIds,
-        isInitialLaunch: wizardMode !== 'source',
-        dryRun: true,
-      });
-      const skippedAlreadySent = sendResult.skipped_already_sent || [];
-      const skipSet = new Set<string>(skippedAlreadySent);
-      if (!sendResult.success) {
-        return { launched: [], failed: candidateIds.filter(id => !skipSet.has(id)), skippedAlreadySent };
-      }
-      const launched = candidateIds.filter(id => !skipSet.has(id));
-      return { launched, failed: [], skippedAlreadySent };
-    } catch (e) {
-      console.error("launchBatch threw", e);
-      return { launched: [], failed: candidateIds, skippedAlreadySent: [] };
-    }
-  };
 
-  // Provider-scoped enrichment so the orchestrator can drive ZoomInfo and
-  // Apollo as separate, visible stages.
-  const enrichOneCandidate = async (
-    c: any,
-    provider: "zoominfo" | "apollo",
-  ): Promise<{ phone: string; email: string; ok: boolean; reason?: string }> => {
-    const id = String(c.candidate_id || c.id || "").trim();
-    if (!id) return { phone: "", email: "", ok: false, reason: "missing_id" };
-    const linkedinUrlCandidates = [
-      c.profile_url,
-      c.linkedin_url,
-      c.urls?.linkedin,
-      c.urls?.linkedin_url,
-      c.data?.urls?.linkedin,
-      c.data?.urls?.linkedin_url,
-      extractLinkedInFromText(c.resume_text || c.resumeText || c.data?.resume_text),
-    ]
-      .map((v: any) => String(v || "").trim())
-      .filter(Boolean);
-    const linkedinUrl = linkedinUrlCandidates.find((u: string) => looksLikeLinkedInProfile(u)) || "";
-    if (!linkedinUrl) {
-      return { phone: "", email: "", ok: false, reason: "no_linkedin" };
-    }
-    try {
-      const res = await fetch(`${API_BASE}/candidates/enrich-contact`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          candidate_id: id,
-          jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId || undefined,
-          source: c.source || undefined,
-          linkedin_url: linkedinUrl,
-          provider,
-        }),
-      });
-      if (!res.ok) return { phone: "", email: "", ok: false, reason: "http_error" };
-      const enriched = await res.json();
-      const phone = enriched?.phone || enriched?.mobilePhone || enriched?.workPhone || "";
-      const email = enriched?.email || "";
-      return { phone, email, ok: Boolean(phone || email) };
-    } catch {
-      return { phone: "", email: "", ok: false, reason: "exception" };
-    }
-  };
+      const result = await response.json();
 
-  const hasFullContact = (c: { phone?: string; email?: string }) => {
-    const digits = String(c.phone || "").replace(/\D/g, "");
-    return digits.length >= 7 && Boolean(String(c.email || "").trim());
-  };
+      if (response.ok && result.status === 'success') {
+        const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
+        const selectedIds = candidatesPayload.map(c => c.candidate_id);
 
-  // Functional setter helpers so concurrent stage updates don't clobber state.
-  const patchProgressCandidate = (id: string, patch: Partial<LaunchCandidateProgress>) => {
-    setLaunchProgress(prev => {
-      if (!prev) return prev;
-      const current = prev.candidates[id];
-      if (!current) return prev;
-      return {
-        ...prev,
-        candidates: { ...prev.candidates, [id]: { ...current, ...patch } },
-      };
-    });
-  };
-
-  const patchStage = (
-    stage: LaunchStageKey,
-    patch: Partial<LaunchStageSummary>,
-    activeStage?: LaunchStageKey | "done",
-  ) => {
-    setLaunchProgress(prev => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        activeStage: activeStage ?? prev.activeStage,
-        stages: { ...prev.stages, [stage]: { ...prev.stages[stage], ...patch } },
-      };
-    });
-  };
-
-  const incrementStage = (
-    stage: LaunchStageKey,
-    delta: Partial<Record<keyof LaunchStageSummary, number>>,
-  ) => {
-    setLaunchProgress(prev => {
-      if (!prev) return prev;
-      const current = prev.stages[stage];
-      const next: LaunchStageSummary = { ...current };
-      for (const [key, value] of Object.entries(delta)) {
-        if (typeof value === "number" && typeof (next as any)[key] === "number") {
-          (next as any)[key] = ((next as any)[key] || 0) + value;
+        // Surface backend-side DNC skips. Frontend filters first, so this
+        // should typically be 0; if non-zero it usually means the user's
+        // browser cache of /dnc/keys is stale relative to the DB.
+        const backendDncSkipped = Number(result?.dnc_skipped_count || 0);
+        if (backendDncSkipped > 0) {
+          showToast(
+            `${backendDncSkipped} candidate${backendDncSkipped === 1 ? "" : "s"} blocked at save (Do Not Contact)`,
+            "info",
+          );
         }
+
+        // ── Fire Emails Immediately ──────────────────────────────────────────
+        try {
+          const engageData = await engagement.generatePayload({
+            candidateIds: selectedIds,
+            jobId: jobIdForEngage,
+          });
+
+          if (engageData?.payload) {
+            await engagement.sendBulkInterview({
+              payload: engageData.payload,
+              realCandidateIds: selectedIds,
+              // Source mode = re-launch on an Active job; backend gates the
+              // job-posting team email + applicant sync on this flag.
+              isInitialLaunch: wizardMode !== 'source',
+              dryRun: true, // Disables phone calls but keeps recruiter notification emails
+            });
+          }
+        } catch (engageErr) {
+          console.warn("Engagement emails failed to fire, but candidates saved:", engageErr);
+        }
+        // ─────────────────────────────────────────────────────────────────────
+
+        const saved = result.saved_count || selectedCount;
+        setTimeout(() => {
+          if (jobIdForEngage) {
+            router.push(`/jobs/${encodeURIComponent(jobIdForEngage)}/rankings`);
+          } else {
+            router.push(`/`);
+          }
+        }, 1000);
+      } else {
+        console.error('Save failed details:', JSON.stringify(result, null, 2));
+        const errorMsg = result.detail
+          ? (Array.isArray(result.detail) ? JSON.stringify(result.detail) : result.detail)
+          : (result.message || 'Unknown error');
+        showToast(`Error saving candidates: ${errorMsg}`, "error");
       }
-      return { ...prev, stages: { ...prev.stages, [stage]: next } };
-    });
+    } catch (e) {
+      console.error("Failed to save candidates:", e);
+      showToast("Failed to save candidates. Please try again.", "error");
+    }
   };
 
+  // Entry point wired to Launch PAIR. Before save, auto-enrich selected
+  // candidates missing phone via ZoomInfo using LinkedIn URL.
   const handleLaunchPairClick = async () => {
     if (!hasSearched) {
       showToast("Run Search first to source candidates.", "info");
@@ -5803,307 +5711,157 @@ function NewJobPageContent() {
       step: 5,
       selected_candidates_count: selectedCandidates.size,
     });
-
-    // Snapshot selected candidates so React state churn doesn't race the
-    // orchestrator.
-    const selectedList = candidates.filter(c => selectedCandidates.has(c.candidate_id || c.id));
-    const candidateMap: Record<string, any> = {};
-    const initialCandidates: Record<string, LaunchCandidateProgress> = {};
-    for (const c of selectedList) {
-      const id = String(c.candidate_id || c.id || "").trim();
-      if (!id) continue;
-      candidateMap[id] = c;
-      initialCandidates[id] = {
-        id,
-        name: getCandidateDisplayName(c) || "Unnamed Candidate",
-        phone: c.phone || "",
-        email: c.email || "",
-        status: "pending",
-      };
-    }
-
-    setManualInputs({});
-    setLaunchProgress({
-      activeStage: "ready",
-      candidates: initialCandidates,
-      stages: {
-        ready: { ...EMPTY_STAGE },
-        zoominfo: { ...EMPTY_STAGE },
-        apollo: { ...EMPTY_STAGE },
-        manual: { ...EMPTY_STAGE },
-      },
-    });
-
-    const launchedSet = new Set<string>();
-
-    // Stage 1 — Ready: candidates already with phone + email
-    const haveBoth = selectedList.filter(hasFullContact);
-    if (haveBoth.length > 0) {
-      patchStage("ready", { status: "running", attempted: haveBoth.length }, "ready");
-      const result = await launchBatch(haveBoth);
-      for (const id of result.launched) {
-        launchedSet.add(id);
-        patchProgressCandidate(id, { status: "launched", launchedAt: "ready" });
-      }
-      for (const id of result.failed) {
-        patchProgressCandidate(id, { status: "failed", message: "Launch failed" });
-      }
-      for (const id of result.skippedAlreadySent) {
-        launchedSet.add(id);
-        patchProgressCandidate(id, { status: "launched", launchedAt: "ready", message: "Already launched earlier" });
-      }
-      patchStage("ready", {
-        status: "done",
-        launched: result.launched.length + result.skippedAlreadySent.length,
-        failed: result.failed.length,
-      });
-    } else {
-      patchStage("ready", { status: "skipped" });
-    }
-
-    // Stage 2 — ZoomInfo enrichment for the still-missing
-    const missingAfterReady = selectedList.filter(c => {
-      const id = String(c.candidate_id || c.id || "").trim();
-      return id && !launchedSet.has(id) && !hasFullContact(c);
-    });
-    if (missingAfterReady.length === 0) {
-      patchStage("zoominfo", { status: "skipped" });
-    } else {
-      patchStage("zoominfo", { status: "running", attempted: missingAfterReady.length }, "zoominfo");
-      const resolved: any[] = [];
-      for (const c of missingAfterReady) {
-        const id = String(c.candidate_id || c.id || "").trim();
-        patchProgressCandidate(id, { status: "enriching" });
-        const enriched = await enrichOneCandidate(c, "zoominfo");
-        if (enriched.ok) {
-          const merged = { ...c, phone: enriched.phone || c.phone, email: enriched.email || c.email };
-          candidateMap[id] = merged;
-          if (hasFullContact(merged)) {
-            resolved.push(merged);
-            patchProgressCandidate(id, { status: "pending", phone: merged.phone, email: merged.email });
-          } else {
-            patchProgressCandidate(id, {
-              status: "no_contact",
-              phone: merged.phone,
-              email: merged.email,
-              message: "Partial contact from ZoomInfo",
-            });
-          }
-        } else {
-          patchProgressCandidate(id, { status: "no_contact", message: enriched.reason });
-        }
-      }
-      if (resolved.length > 0) {
-        const result = await launchBatch(resolved);
-        for (const id of result.launched) {
-          launchedSet.add(id);
-          patchProgressCandidate(id, { status: "launched", launchedAt: "zoominfo" });
-        }
-        for (const id of result.failed) {
-          patchProgressCandidate(id, { status: "failed", message: "Launch failed" });
-        }
-        for (const id of result.skippedAlreadySent) {
-          launchedSet.add(id);
-          patchProgressCandidate(id, { status: "launched", launchedAt: "zoominfo", message: "Already launched earlier" });
-        }
-        patchStage("zoominfo", {
-          status: "done",
-          launched: result.launched.length + result.skippedAlreadySent.length,
-          failed: result.failed.length,
-        });
-      } else {
-        patchStage("zoominfo", { status: "done" });
-      }
-    }
-
-    // Stage 3 — Apollo enrichment for the still-still-missing
-    const missingAfterZoominfo = missingAfterReady.filter(c => {
-      const id = String(c.candidate_id || c.id || "").trim();
-      return id && !launchedSet.has(id) && !hasFullContact(candidateMap[id] || c);
-    });
-    if (missingAfterZoominfo.length === 0) {
-      patchStage("apollo", { status: "skipped" });
-    } else {
-      patchStage("apollo", { status: "running", attempted: missingAfterZoominfo.length }, "apollo");
-      const resolved: any[] = [];
-      for (const c of missingAfterZoominfo) {
-        const id = String(c.candidate_id || c.id || "").trim();
-        const base = candidateMap[id] || c;
-        patchProgressCandidate(id, { status: "enriching" });
-        const enriched = await enrichOneCandidate(base, "apollo");
-        if (enriched.ok) {
-          const merged = { ...base, phone: enriched.phone || base.phone, email: enriched.email || base.email };
-          candidateMap[id] = merged;
-          if (hasFullContact(merged)) {
-            resolved.push(merged);
-            patchProgressCandidate(id, { status: "pending", phone: merged.phone, email: merged.email });
-          } else {
-            patchProgressCandidate(id, {
-              status: "no_contact",
-              phone: merged.phone,
-              email: merged.email,
-              message: "Partial contact from Apollo",
-            });
-          }
-        } else {
-          patchProgressCandidate(id, { status: "no_contact", message: enriched.reason });
-        }
-      }
-      if (resolved.length > 0) {
-        const result = await launchBatch(resolved);
-        for (const id of result.launched) {
-          launchedSet.add(id);
-          patchProgressCandidate(id, { status: "launched", launchedAt: "apollo" });
-        }
-        for (const id of result.failed) {
-          patchProgressCandidate(id, { status: "failed", message: "Launch failed" });
-        }
-        for (const id of result.skippedAlreadySent) {
-          launchedSet.add(id);
-          patchProgressCandidate(id, { status: "launched", launchedAt: "apollo", message: "Already launched earlier" });
-        }
-        patchStage("apollo", {
-          status: "done",
-          launched: result.launched.length + result.skippedAlreadySent.length,
-          failed: result.failed.length,
-        });
-      } else {
-        patchStage("apollo", { status: "done" });
-      }
-    }
-
-    // Stage 4 — Manual: collect phone + email from the recruiter for the
-    // ones neither enrichment provider resolved.
-    const stillMissing = missingAfterZoominfo.filter(c => {
-      const id = String(c.candidate_id || c.id || "").trim();
-      return id && !launchedSet.has(id);
-    });
-    if (stillMissing.length === 0) {
-      patchStage("manual", { status: "skipped" }, "done");
-    } else {
-      const seeds: Record<string, { phone: string; email: string }> = {};
-      for (const c of stillMissing) {
-        const id = String(c.candidate_id || c.id || "").trim();
-        const merged = candidateMap[id] || c;
-        seeds[id] = { phone: merged.phone || "", email: merged.email || "" };
-      }
-      setManualInputs(seeds);
-      patchStage("manual", { status: "running", attempted: stillMissing.length }, "manual");
-    }
-
-    // Persist any enrichment results back to the table so later retries see
-    // them without re-fetching.
-    setCandidates(prev =>
-      prev.map(c => {
-        const id = String(c.candidate_id || c.id || "").trim();
-        const merged = candidateMap[id];
-        if (!merged) return c;
-        return { ...c, phone: merged.phone || c.phone, email: merged.email || c.email };
-      }),
-    );
-  };
-
-  // Manual stage: PATCH the candidate row with user-typed phone + email, then
-  // run that candidate through launchBatch like any other.
-  const handleManualLaunchCandidate = async (id: string) => {
-    const inputs = manualInputs[id];
-    if (!inputs) return;
-    const phone = (inputs.phone || "").trim();
-    const email = (inputs.email || "").trim();
-    if (!email) {
-      showToast("Email is required to launch PAIR.", "info");
-      return;
-    }
-    const digits = phone.replace(/\D/g, "");
-    if (phone && digits.length < 7) {
-      showToast("Phone must contain at least 7 digits.", "info");
-      return;
-    }
-    patchProgressCandidate(id, { status: "enriching" });
-    const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
+    setIsEnrichingContacts(true);
     try {
-      const patchRes = await fetch(`${API_BASE}/candidates/${encodeURIComponent(id)}/phone`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          candidate_id: id,
-          jobdiva_id: jobIdForEngage || undefined,
-          phone: phone || undefined,
-          email: email || undefined,
-        }),
+      const candidatesMissingPhone = candidates.filter(c => {
+        const id = c.candidate_id || c.id;
+        if (!selectedCandidates.has(id)) return false;
+        const digits = String(c.phone || "").replace(/\D/g, "");
+        return digits.length < 7;
       });
-      if (!patchRes.ok) {
-        const body = await patchRes.json().catch(() => ({}));
-        patchProgressCandidate(id, { status: "failed", message: body.detail || "Update failed" });
-        incrementStage("manual", { failed: 1 });
-        return;
-      }
-    } catch {
-      patchProgressCandidate(id, { status: "failed", message: "Update failed" });
-      incrementStage("manual", { failed: 1 });
-      return;
-    }
 
-    const baseCandidate = candidates.find(c => String(c.candidate_id || c.id || "") === id) || { candidate_id: id };
-    const merged = { ...baseCandidate, phone, email };
-    const result = await launchBatch([merged]);
-    if (result.launched.length > 0 || result.skippedAlreadySent.length > 0) {
-      patchProgressCandidate(id, { status: "launched", launchedAt: "manual", phone, email });
-      incrementStage("manual", { launched: 1 });
-    } else {
-      patchProgressCandidate(id, { status: "failed", message: "Launch failed" });
-      incrementStage("manual", { failed: 1 });
-    }
-  };
+      const contactOverrides: Record<string, { phone?: string; email?: string }> = {};
+      let enrichedCount = 0;
+      let enrichedMobileCount = 0;
+      let enrichedWorkPhoneCount = 0;
+      let missingLinkedInCount = 0;
+      let enrichFailedCount = 0;
+      let noContactFoundCount = 0;
 
-  const handleManualSkipRemaining = () => {
-    setLaunchProgress(prev => {
-      if (!prev) return prev;
-      const nextCandidates: Record<string, LaunchCandidateProgress> = { ...prev.candidates };
-      for (const [id, info] of Object.entries(prev.candidates)) {
-        if (info.status !== "launched") {
-          nextCandidates[id] = { ...info, status: "skipped" };
+      for (const c of candidatesMissingPhone) {
+        const id = String(c.candidate_id || c.id || "").trim();
+        if (!id) continue;
+
+        const linkedinUrlCandidates = [
+          c.profile_url,
+          c.linkedin_url,
+          c.urls?.linkedin,
+          c.urls?.linkedin_url,
+          c.data?.urls?.linkedin,
+          c.data?.urls?.linkedin_url,
+          extractLinkedInFromText(c.resume_text || c.resumeText || c.data?.resume_text),
+        ].map((v: any) => String(v || "").trim()).filter(Boolean);
+
+        const linkedinUrl = linkedinUrlCandidates.find((u: string) => looksLikeLinkedInProfile(u)) || "";
+
+        if (!linkedinUrl) {
+          missingLinkedInCount += 1;
+          continue;
+        }
+
+        try {
+          const res = await fetch(`${API_BASE}/candidates/enrich-contact`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              candidate_id: id,
+              jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId || undefined,
+              source: c.source || undefined,
+              linkedin_url: linkedinUrl,
+            }),
+          });
+
+          if (!res.ok) {
+            enrichFailedCount += 1;
+            continue;
+          }
+          const enriched = await res.json();
+          const nextPhone = enriched?.phone || enriched?.mobilePhone || enriched?.workPhone || "";
+          const nextEmail = enriched?.email || "";
+          const phoneSource = String(enriched?.phone_source || "").trim();
+          if (nextPhone || nextEmail) {
+            contactOverrides[id] = {
+              phone: nextPhone || undefined,
+              email: nextEmail || undefined,
+            };
+            enrichedCount += 1;
+            if (phoneSource === "mobilePhone") {
+              enrichedMobileCount += 1;
+            } else if (phoneSource === "workPhone") {
+              enrichedWorkPhoneCount += 1;
+            }
+          } else {
+            noContactFoundCount += 1;
+          }
+        } catch {
+          // Best-effort enrichment; keep launch flow moving.
+          enrichFailedCount += 1;
         }
       }
-      return {
-        ...prev,
-        activeStage: "done",
-        candidates: nextCandidates,
-        stages: { ...prev.stages, manual: { ...prev.stages.manual, status: "done" } },
-      };
-    });
-  };
 
-  const handleCloseLaunchModal = () => {
-    const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
-    setLaunchProgress(null);
-    setManualInputs({});
-    if (jobIdForEngage) {
-      router.push(`/jobs/${encodeURIComponent(jobIdForEngage)}/rankings`);
-    } else {
-      router.push("/");
+      if (enrichedCount > 0) {
+        setCandidates(prev => prev.map(c => {
+          const cid = String(c.candidate_id || c.id || "").trim();
+          const override = contactOverrides[cid];
+          if (!override) return c;
+          return {
+            ...c,
+            phone: override.phone || c.phone,
+            email: override.email || c.email,
+          };
+        }));
+        const parts = [
+          `${enrichedCount} candidate${enrichedCount === 1 ? "" : "s"}`,
+          enrichedMobileCount > 0 ? `${enrichedMobileCount} mobile` : "",
+          enrichedWorkPhoneCount > 0 ? `${enrichedWorkPhoneCount} work phone` : "",
+        ].filter(Boolean);
+        showToast(`ZoomInfo enriched: ${parts.join(" · ")}.`, "success");
+      }
+
+      const unresolvedMissing = candidatesMissingPhone.filter(c => {
+        const cid = String(c.candidate_id || c.id || "").trim();
+        const overridePhone = contactOverrides[cid]?.phone || c.phone || "";
+        const digits = String(overridePhone).replace(/\D/g, "");
+        return digits.length < 7;
+      }).length;
+
+      if (unresolvedMissing > 0) {
+        showToast(`${unresolvedMissing} selected candidate${unresolvedMissing === 1 ? "" : "s"} still missing phone after enrichment.`, "info");
+      }
+
+      if (missingLinkedInCount > 0 || enrichFailedCount > 0 || noContactFoundCount > 0) {
+        const bits = [
+          missingLinkedInCount > 0 ? `${missingLinkedInCount} missing LinkedIn URL` : "",
+          noContactFoundCount > 0 ? `${noContactFoundCount} no ZoomInfo contact found` : "",
+          enrichFailedCount > 0 ? `${enrichFailedCount} enrichment call failed` : "",
+        ].filter(Boolean);
+        showToast(`Enrichment summary: ${bits.join(" · ")}`, "info");
+      }
+
+      // DNC re-check after enrichment: a candidate without a phone in search
+      // results may now have one via ZoomInfo, and that phone may match the
+      // DNC list. Auto-deselect any matches and surface a toast so the user
+      // sees why the count dropped before the POST fires.
+      if (dncPhones.size > 0) {
+        const dncSelectedIds = new Set<string>();
+        for (const c of candidates) {
+          const id = String(c.candidate_id || c.id || "").trim();
+          if (!id || !selectedCandidates.has(id)) continue;
+          const overridePhone = contactOverrides[id]?.phone;
+          const phoneToCheck = overridePhone || c.phone;
+          const np = normalizePhone(phoneToCheck);
+          if (np && dncPhones.has(np)) {
+            dncSelectedIds.add(id);
+          }
+        }
+        if (dncSelectedIds.size > 0) {
+          setSelectedCandidates(prev => {
+            const next = new Set(prev);
+            for (const id of dncSelectedIds) next.delete(id);
+            return next;
+          });
+          showToast(
+            `${dncSelectedIds.size} candidate${dncSelectedIds.size === 1 ? "" : "s"} skipped — Do Not Contact list match`,
+            "info",
+          );
+        }
+      }
+
+      await runLaunchPair(contactOverrides);
+    } finally {
+      setIsEnrichingContacts(false);
     }
   };
-
-  // Auto-flip the manual stage to "done" once every manual candidate has been
-  // resolved (launched or failed) so the recruiter sees the "Done" button
-  // without needing to click "Skip remaining".
-  useEffect(() => {
-    if (!launchProgress) return;
-    const m = launchProgress.stages.manual;
-    if (launchProgress.activeStage !== "manual") return;
-    if (m.status !== "running") return;
-    if (m.attempted === 0) return;
-    if (m.launched + m.failed < m.attempted) return;
-    setLaunchProgress(prev => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        activeStage: "done",
-        stages: { ...prev.stages, manual: { ...prev.stages.manual, status: "done" } },
-      };
-    });
-  }, [launchProgress]);
 
   const sourceStep = (
     <div className="space-y-6">
@@ -7590,15 +7348,15 @@ function NewJobPageContent() {
               <Button
                 className="h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98] disabled:bg-slate-300 disabled:cursor-not-allowed disabled:hover:translate-y-0"
                 onClick={handleLaunchPairClick}
-                disabled={isSearching || !!launchProgress || isViewOnly}
+                disabled={isSearching || isEnrichingContacts || isViewOnly}
                 title={isViewOnly ? "Job activity has been stopped" : undefined}
               >
-                {launchProgress ? (
+                {isEnrichingContacts ? (
                   <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
                 ) : (
                   <Rocket className="w-4 h-4 fill-white" />
                 )}
-                {launchProgress ? "Launching PAIR…" : "Launch PAIR"}
+                {isEnrichingContacts ? "Enriching Contacts..." : "Launch PAIR"}
               </Button>
             </div>
           </div>
@@ -8051,175 +7809,6 @@ return (
         }}
       />
     )}
-
-    {launchProgress && (() => {
-      const stageMeta: Record<LaunchStageKey, { label: string; description: string }> = {
-        ready: {
-          label: "Ready to launch",
-          description: "Candidates that already have phone and email — launching PAIR for them first.",
-        },
-        zoominfo: {
-          label: "ZoomInfo enrichment",
-          description: "Looking up missing phone/email via ZoomInfo, then launching the newly-complete batch.",
-        },
-        apollo: {
-          label: "Apollo enrichment",
-          description: "For anyone ZoomInfo didn't resolve, trying Apollo next.",
-        },
-        manual: {
-          label: "Manual contact entry",
-          description: "Anyone neither provider resolved — enter contact info to launch.",
-        },
-      };
-      const totalCandidates = Object.keys(launchProgress.candidates).length;
-      const launchedCount = Object.values(launchProgress.candidates).filter(c => c.status === "launched").length;
-      const isDone = launchProgress.activeStage === "done";
-      return (
-        <div className="fixed inset-0 z-[100] bg-black/50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden">
-            <div className="p-6 border-b border-slate-200">
-              <div className="flex items-center gap-3">
-                <Rocket className="w-5 h-5 text-indigo-600" />
-                <h2 className="text-xl font-semibold text-slate-900">Launching PAIR</h2>
-              </div>
-              <p className="text-sm text-slate-500 mt-1">
-                {isDone
-                  ? "Finished. Review the summary below."
-                  : "Working through candidates by stage. This modal stays open until the launch settles."}
-              </p>
-            </div>
-
-            <div className="p-6 space-y-3 overflow-y-auto flex-1">
-              {(["ready", "zoominfo", "apollo", "manual"] as LaunchStageKey[]).map(stageKey => {
-                const stage = launchProgress.stages[stageKey];
-                const isActive = launchProgress.activeStage === stageKey;
-                const { label, description } = stageMeta[stageKey];
-                const statusBadge = (() => {
-                  if (stage.status === "running") {
-                    return <span className="text-xs font-medium text-indigo-600">Running…</span>;
-                  }
-                  if (stage.status === "done") {
-                    return <span className="text-xs font-medium text-emerald-600">Done</span>;
-                  }
-                  if (stage.status === "skipped") {
-                    return <span className="text-xs font-medium text-slate-400">Skipped</span>;
-                  }
-                  return <span className="text-xs font-medium text-slate-400">Pending</span>;
-                })();
-
-                let manualForm: ReactNode = null;
-                if (stageKey === "manual" && (stage.status === "running" || stage.status === "done")) {
-                  const manualCandidates = Object.values(launchProgress.candidates).filter(c => {
-                    if (c.launchedAt === "ready" || c.launchedAt === "zoominfo" || c.launchedAt === "apollo") return false;
-                    return true;
-                  });
-                  if (manualCandidates.length > 0) {
-                    manualForm = (
-                      <div className="mt-3 space-y-2">
-                        {manualCandidates.map(c => {
-                          const inputs = manualInputs[c.id] || { phone: c.phone || "", email: c.email || "" };
-                          const disabled = c.status === "launched" || c.status === "enriching" || c.status === "skipped";
-                          return (
-                            <div key={c.id} className="flex items-center gap-2 bg-slate-50 rounded-lg p-3">
-                              <div className="flex-1 min-w-0">
-                                <div className="text-sm font-medium text-slate-900 truncate">{c.name}</div>
-                                {c.status === "launched" ? (
-                                  <div className="text-xs text-emerald-600">Launched</div>
-                                ) : c.status === "failed" ? (
-                                  <div className="text-xs text-rose-600">{c.message || "Launch failed"}</div>
-                                ) : c.status === "enriching" ? (
-                                  <div className="text-xs text-indigo-600">Launching…</div>
-                                ) : c.status === "skipped" ? (
-                                  <div className="text-xs text-slate-400">Skipped</div>
-                                ) : null}
-                              </div>
-                              <input
-                                type="tel"
-                                placeholder="Phone"
-                                className="h-8 px-2 text-xs border border-slate-300 rounded w-32 disabled:bg-slate-100"
-                                value={inputs.phone}
-                                onChange={e => setManualInputs(prev => ({ ...prev, [c.id]: { ...inputs, phone: e.target.value } }))}
-                                disabled={disabled}
-                              />
-                              <input
-                                type="email"
-                                placeholder="Email"
-                                className="h-8 px-2 text-xs border border-slate-300 rounded w-44 disabled:bg-slate-100"
-                                value={inputs.email}
-                                onChange={e => setManualInputs(prev => ({ ...prev, [c.id]: { ...inputs, email: e.target.value } }))}
-                                disabled={disabled}
-                              />
-                              <button
-                                type="button"
-                                onClick={() => handleManualLaunchCandidate(c.id)}
-                                disabled={disabled}
-                                className="h-8 px-3 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 disabled:cursor-not-allowed rounded"
-                              >
-                                Launch
-                              </button>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    );
-                  }
-                }
-
-                return (
-                  <div
-                    key={stageKey}
-                    className={`border rounded-lg p-4 ${isActive ? "border-indigo-300 bg-indigo-50/40" : "border-slate-200 bg-white"}`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-semibold text-slate-900">{label}</span>
-                          {statusBadge}
-                        </div>
-                        <div className="text-xs text-slate-500 mt-1">{description}</div>
-                        {(stage.attempted > 0 || stage.launched > 0 || stage.failed > 0) && (
-                          <div className="text-xs text-slate-600 mt-2 flex gap-3 flex-wrap">
-                            <span>Attempted: <b className="text-slate-900">{stage.attempted}</b></span>
-                            <span>Launched: <b className="text-emerald-700">{stage.launched}</b></span>
-                            {stage.failed > 0 && (
-                              <span>Failed: <b className="text-rose-700">{stage.failed}</b></span>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                      {stage.status === "running" && (
-                        <Loader2 className="w-4 h-4 text-indigo-600 animate-spin flex-shrink-0 mt-1" />
-                      )}
-                    </div>
-                    {manualForm}
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="p-6 border-t border-slate-200 flex justify-between items-center">
-              <div className="text-xs text-slate-500">
-                {launchedCount} of {totalCandidates} launched
-              </div>
-              <div className="flex gap-2">
-                {launchProgress.activeStage === "manual" && launchProgress.stages.manual.status === "running" && (
-                  <Button variant="outline" onClick={handleManualSkipRemaining}>
-                    Skip remaining
-                  </Button>
-                )}
-                <Button
-                  onClick={handleCloseLaunchModal}
-                  disabled={!isDone}
-                  className="bg-indigo-600 hover:bg-indigo-700 text-white disabled:bg-slate-300"
-                >
-                  {isDone ? "Done · View rankings" : "Working…"}
-                </Button>
-              </div>
-            </div>
-          </div>
-        </div>
-      );
-    })()}
   </div>
 );
 };
