@@ -1275,6 +1275,10 @@ async def trigger_phase2(interview_id: str):
 async def get_transcriptions(interview_id: str):
     return await _proxy_get(f"/api/interviews/{interview_id}/transcriptions")
 
+@router.get("/interviews/{interview_id}/activity-logs")
+async def get_activity_logs(interview_id: str):
+    return await _proxy_get(f"/api/interviews/{interview_id}/activity-logs")
+
 from fastapi.responses import StreamingResponse
 
 @router.get("/interviews/{interview_id}/transcriptions/download")

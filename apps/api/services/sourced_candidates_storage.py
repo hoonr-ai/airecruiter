@@ -484,6 +484,10 @@ class SourcedCandidatesStorage:
                                 c_dict['engage_score'] = data['engage_score']
                             if 'engage_status' in data and c_dict.get('engage_status') is None:
                                 c_dict['engage_status'] = data['engage_status']
+                            if 'engage_interview_id' in data and c_dict.get('engage_interview_id') is None:
+                                c_dict['engage_interview_id'] = data['engage_interview_id']
+                            if 'engage_hard_filter_status' in data and c_dict.get('engage_hard_filter_status') is None:
+                                c_dict['engage_hard_filter_status'] = data['engage_hard_filter_status']
                             if data.get('work_city'):
                                 c_dict['work_city'] = data['work_city']
                             if data.get('work_state'):
@@ -680,6 +684,10 @@ class SourcedCandidatesStorage:
                                 c_dict["engage_score"] = data["engage_score"]
                             if data.get("engage_status") and c_dict.get("engage_status") is None:
                                 c_dict["engage_status"] = data["engage_status"]
+                            if data.get("engage_interview_id") and c_dict.get("engage_interview_id") is None:
+                                c_dict["engage_interview_id"] = data["engage_interview_id"]
+                            if data.get("engage_hard_filter_status") and c_dict.get("engage_hard_filter_status") is None:
+                                c_dict["engage_hard_filter_status"] = data["engage_hard_filter_status"]
                             if data.get("work_city"):
                                 c_dict["work_city"] = data["work_city"]
                             if data.get("work_state"):
