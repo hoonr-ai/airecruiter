@@ -37,6 +37,9 @@ export type SendBulkInterviewResult = {
     session_token?: string;
     created_at?: string;
   }>;
+  // Candidates the backend dropped because engage_status='sent' already.
+  // Populated when staged Launch PAIR retries a batch with already-launched ids.
+  skipped_already_sent?: string[];
 };
 
 export type LatestInterviewResult = {
