@@ -1507,7 +1507,8 @@ async def save_candidates(request: CandidatesSaveRequest):
 # malformed numbers, which is the root cause of most "launch pair failed"
 # errors for candidates sourced from Unipile/Exa (neither returns phone).
 class UpdateCandidatePhoneRequest(BaseModel):
-    phone: str
+    phone: Optional[str] = None
+    email: Optional[str] = None
     jobdiva_id: Optional[str] = None
     candidate_id: Optional[str] = None
 
@@ -1521,6 +1522,11 @@ class EnrichCandidateContactRequest(BaseModel):
     company_name: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
+    # Controls which provider to use. None = ZoomInfo then Apollo fallback
+    # (legacy behavior). "zoominfo" = ZoomInfo only, no Apollo fallback or
+    # supplement. "apollo" = skip ZoomInfo, call Apollo directly. Drives the
+    # staged Launch PAIR flow on the frontend.
+    provider: Optional[str] = None
 
 
 def _normalise_phone(raw: str) -> str:
@@ -1857,20 +1863,53 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             "updated_rows": 0,
         }
 
+    provider_pref = (request.provider or "").strip().lower() or None
+    if provider_pref not in (None, "zoominfo", "apollo"):
+        provider_pref = None
+    allow_apollo_fallback = provider_pref != "zoominfo"
+
     provider_used = "zoominfo"
     extracted: Dict[str, Any] = {}
     zres: Optional[httpx.Response] = None
     zoominfo_data: Dict[str, Any] = {}
 
-    if not ZOOMINFO_BEARER_TOKEN:
-        logger.warning("ZoomInfo token missing for %s, attempting Apollo fallback", candidate_id)
+    if provider_pref == "apollo":
+        provider_used = "apollo"
         apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
         if apollo_result.get("ok"):
-            provider_used = "apollo"
             extracted = apollo_result.get("fields") or {}
-            logger.info("Apollo fallback succeeded for %s when ZoomInfo token missing", candidate_id)
+            logger.info("Apollo-only enrich succeeded for %s", candidate_id)
         else:
-            raise HTTPException(status_code=500, detail="ZOOMINFO_BEARER_TOKEN is not configured and Apollo fallback failed")
+            logger.info("Apollo-only enrich returned no contact for %s", candidate_id)
+            return {
+                "status": "success",
+                "candidate_id": candidate_id,
+                "linkedin_url": linkedin_url,
+                "phone_source": "none",
+                "phone": None,
+                "phoneCandidates": [],
+                "email": None,
+                "workPhone": None,
+                "mobilePhone": None,
+                "workEmail": None,
+                "personalEmail": None,
+                "provider": "none",
+                "updated_rows": 0,
+                "message": "Apollo enrichment returned no contact.",
+            }
+
+    elif not ZOOMINFO_BEARER_TOKEN:
+        if allow_apollo_fallback:
+            logger.warning("ZoomInfo token missing for %s, attempting Apollo fallback", candidate_id)
+            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+            if apollo_result.get("ok"):
+                provider_used = "apollo"
+                extracted = apollo_result.get("fields") or {}
+                logger.info("Apollo fallback succeeded for %s when ZoomInfo token missing", candidate_id)
+            else:
+                raise HTTPException(status_code=500, detail="ZOOMINFO_BEARER_TOKEN is not configured and Apollo fallback failed")
+        else:
+            raise HTTPException(status_code=500, detail="ZOOMINFO_BEARER_TOKEN is not configured")
 
     headers = {
         "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
@@ -1951,7 +1990,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                 zres = await client.post(ZOOMINFO_ENRICH_URL, headers=headers, json=zoominfo_payload)
         except Exception as e:
             logger.error(f"ZoomInfo enrich request failed for {candidate_id}: {e}")
-            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url) if allow_apollo_fallback else {"ok": False}
             if apollo_result.get("ok"):
                 provider_used = "apollo"
                 extracted = apollo_result.get("fields") or {}
@@ -2056,7 +2095,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                 "ZoomInfo fallback insufficient inputs for %s; returning no-contact result",
                 candidate_id,
             )
-            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url) if allow_apollo_fallback else {"ok": False}
             if apollo_result.get("ok"):
                 provider_used = "apollo"
                 extracted = apollo_result.get("fields") or {}
@@ -2100,7 +2139,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                     new_res = await client.post(zoominfo_new_enrich_url, headers=new_headers, json=new_payload)
             except Exception as e:
                 logger.error(f"ZoomInfo new API fallback request failed for {candidate_id}: {e}")
-                apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+                apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url) if allow_apollo_fallback else {"ok": False}
                 if apollo_result.get("ok"):
                     provider_used = "apollo"
                     extracted = apollo_result.get("fields") or {}
@@ -2115,7 +2154,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                 new_res.status_code,
                 new_res.text[:300],
             )
-            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url) if allow_apollo_fallback else {"ok": False}
             if apollo_result.get("ok"):
                 provider_used = "apollo"
                 extracted = apollo_result.get("fields") or {}
@@ -2151,7 +2190,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         logger.warning(
             f"ZoomInfo enrich non-2xx for {candidate_id}: {zres.status_code} {response_text[:300]}"
         )
-        apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
+        apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url) if allow_apollo_fallback else {"ok": False}
         if apollo_result.get("ok"):
             provider_used = "apollo"
             extracted = apollo_result.get("fields") or {}
@@ -2184,7 +2223,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         seed_phone = ""
     seed_email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip().lower()
 
-    if (seed_email and not seed_phone) or (seed_phone and not seed_email):
+    if provider_pref != "apollo" and ((seed_email and not seed_phone) or (seed_phone and not seed_email)):
         supplemental = await _zoominfo_crossfill_from_email_or_phone(seed_email, seed_phone)
         if supplemental:
             for key in ("mobilePhone", "workPhone", "workEmail", "personalEmail"):
@@ -2215,7 +2254,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                 bool(seed_phone),
             )
 
-    if provider_used == "zoominfo":
+    if provider_used == "zoominfo" and allow_apollo_fallback:
         probe_phone = _normalise_phone((extracted.get("mobilePhone") or extracted.get("workPhone") or ""))
         probe_email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip().lower()
         if sum(1 for ch in probe_phone if ch.isdigit()) < 7:
@@ -2421,43 +2460,64 @@ async def enrich_candidate_contact(candidate_id: str, request: EnrichCandidateCo
 @router.patch("/candidates/{candidate_id:path}/phone")
 async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhoneRequest):
     actual_candidate_id = request.candidate_id or candidate_id
-    
+
     import urllib.parse
     actual_candidate_id = urllib.parse.unquote(actual_candidate_id)
-    
-    normalised = _normalise_phone(request.phone)
-    digit_count = sum(1 for ch in normalised if ch.isdigit())
-    if digit_count < 7:
-        raise HTTPException(status_code=400, detail="Phone number must contain at least 7 digits")
+
+    phone_raw = (request.phone or "").strip()
+    email_raw = (request.email or "").strip().lower()
+
+    normalised_phone: Optional[str] = None
+    if phone_raw:
+        normalised_phone = _normalise_phone(phone_raw)
+        digit_count = sum(1 for ch in normalised_phone if ch.isdigit())
+        if digit_count < 7:
+            raise HTTPException(status_code=400, detail="Phone number must contain at least 7 digits")
+
+    if not normalised_phone and not email_raw:
+        raise HTTPException(status_code=400, detail="At least one of phone or email must be provided")
+
+    set_clauses: List[str] = []
+    set_values: List[Any] = []
+    if normalised_phone:
+        set_clauses.append("phone = %s")
+        set_values.append(normalised_phone)
+    if email_raw:
+        set_clauses.append("email = %s")
+        set_values.append(email_raw)
+    set_clauses.append("updated_at = CURRENT_TIMESTAMP")
+    set_sql = ", ".join(set_clauses)
 
     try:
-        logger.info(f"update_candidate_phone called with candidate_id='{actual_candidate_id}', request.jobdiva_id='{request.jobdiva_id}', phone='{normalised}'")
+        logger.info(
+            f"update_candidate_phone called with candidate_id='{actual_candidate_id}', "
+            f"request.jobdiva_id='{request.jobdiva_id}', phone='{normalised_phone or ''}', "
+            f"email='{_mask_email_for_log(email_raw)}'"
+        )
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
                 if request.jobdiva_id:
                     cur.execute(
-                        """
-                        UPDATE sourced_candidates
-                        SET phone = %s, updated_at = CURRENT_TIMESTAMP
-                        WHERE candidate_id = %s AND jobdiva_id = %s
-                        """,
-                        (normalised, actual_candidate_id, request.jobdiva_id),
+                        f"UPDATE sourced_candidates SET {set_sql} WHERE candidate_id = %s AND jobdiva_id = %s",
+                        (*set_values, actual_candidate_id, request.jobdiva_id),
                     )
                 else:
                     cur.execute(
-                        """
-                        UPDATE sourced_candidates
-                        SET phone = %s, updated_at = CURRENT_TIMESTAMP
-                        WHERE candidate_id = %s
-                        """,
-                        (normalised, actual_candidate_id),
+                        f"UPDATE sourced_candidates SET {set_sql} WHERE candidate_id = %s",
+                        (*set_values, actual_candidate_id),
                     )
                 updated = cur.rowcount
             conn.commit()
         finally:
             conn.close()
-        return {"status": "success", "candidate_id": candidate_id, "phone": normalised, "updated_rows": updated}
+        return {
+            "status": "success",
+            "candidate_id": candidate_id,
+            "phone": normalised_phone,
+            "email": email_raw or None,
+            "updated_rows": updated,
+        }
     except HTTPException:
         raise
     except Exception as e:
