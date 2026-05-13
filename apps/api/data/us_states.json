@@ -1,0 +1,398 @@
+{
+  "version": 1,
+  "country": "US",
+  "states": [
+    {
+      "name": "Alaska",
+      "code": "AK",
+      "type": "state",
+      "lat": 64.2008413,
+      "lng": -149.4936733
+    },
+    {
+      "name": "Alabama",
+      "code": "AL",
+      "type": "state",
+      "lat": 32.3182314,
+      "lng": -86.902298
+    },
+    {
+      "name": "Arkansas",
+      "code": "AR",
+      "type": "state",
+      "lat": 35.20105,
+      "lng": -91.8318334
+    },
+    {
+      "name": "American Samoa",
+      "code": "AS",
+      "type": "outlying area",
+      "lat": -14.270972,
+      "lng": -170.132217
+    },
+    {
+      "name": "Arizona",
+      "code": "AZ",
+      "type": "state",
+      "lat": 34.0489281,
+      "lng": -111.0937311
+    },
+    {
+      "name": "California",
+      "code": "CA",
+      "type": "state",
+      "lat": 36.778261,
+      "lng": -119.4179324
+    },
+    {
+      "name": "Colorado",
+      "code": "CO",
+      "type": "state",
+      "lat": 39.5500507,
+      "lng": -105.7820674
+    },
+    {
+      "name": "Connecticut",
+      "code": "CT",
+      "type": "state",
+      "lat": 41.6032207,
+      "lng": -73.087749
+    },
+    {
+      "name": "District of Columbia",
+      "code": "DC",
+      "type": "district",
+      "lat": 38.9071923,
+      "lng": -77.0368707
+    },
+    {
+      "name": "Delaware",
+      "code": "DE",
+      "type": "state",
+      "lat": 38.9108325,
+      "lng": -75.5276699
+    },
+    {
+      "name": "Florida",
+      "code": "FL",
+      "type": "state",
+      "lat": 27.2109089,
+      "lng": -94.4121691
+    },
+    {
+      "name": "Georgia",
+      "code": "GA",
+      "type": "state",
+      "lat": 32.1656221,
+      "lng": -82.9000751
+    },
+    {
+      "name": "Guam",
+      "code": "GU",
+      "type": "outlying area",
+      "lat": 13.444304,
+      "lng": 144.793731
+    },
+    {
+      "name": "Hawaii",
+      "code": "HI",
+      "type": "state",
+      "lat": 19.8967662,
+      "lng": -155.5827818
+    },
+    {
+      "name": "Iowa",
+      "code": "IA",
+      "type": "state",
+      "lat": 41.8780025,
+      "lng": -93.097702
+    },
+    {
+      "name": "Idaho",
+      "code": "ID",
+      "type": "state",
+      "lat": 44.0682019,
+      "lng": -114.7420408
+    },
+    {
+      "name": "Illinois",
+      "code": "IL",
+      "type": "state",
+      "lat": 40.6331249,
+      "lng": -89.3985283
+    },
+    {
+      "name": "Indiana",
+      "code": "IN",
+      "type": "state",
+      "lat": 40.2671941,
+      "lng": -86.1349019
+    },
+    {
+      "name": "Kansas",
+      "code": "KS",
+      "type": "state",
+      "lat": 39.011902,
+      "lng": -98.4842465
+    },
+    {
+      "name": "Kentucky",
+      "code": "KY",
+      "type": "state",
+      "lat": 37.8393332,
+      "lng": -84.2700179
+    },
+    {
+      "name": "Louisiana",
+      "code": "LA",
+      "type": "state",
+      "lat": 30.9842977,
+      "lng": -91.9623327
+    },
+    {
+      "name": "Massachusetts",
+      "code": "MA",
+      "type": "state",
+      "lat": 42.4072107,
+      "lng": -71.3824374
+    },
+    {
+      "name": "Maryland",
+      "code": "MD",
+      "type": "state",
+      "lat": 38.7795251,
+      "lng": -79.8713715
+    },
+    {
+      "name": "Maine",
+      "code": "ME",
+      "type": "state",
+      "lat": 45.253783,
+      "lng": -69.4454689
+    },
+    {
+      "name": "Michigan",
+      "code": "MI",
+      "type": "state",
+      "lat": 44.3148443,
+      "lng": -85.6023643
+    },
+    {
+      "name": "Minnesota",
+      "code": "MN",
+      "type": "state",
+      "lat": 46.729553,
+      "lng": -94.6858998
+    },
+    {
+      "name": "Missouri",
+      "code": "MO",
+      "type": "state",
+      "lat": 37.9642529,
+      "lng": -91.8318334
+    },
+    {
+      "name": "Northern Mariana Islands",
+      "code": "MP",
+      "type": "outlying area",
+      "lat": 15.0979,
+      "lng": 145.6739
+    },
+    {
+      "name": "Mississippi",
+      "code": "MS",
+      "type": "state",
+      "lat": 32.3546679,
+      "lng": -89.3985283
+    },
+    {
+      "name": "Montana",
+      "code": "MT",
+      "type": "state",
+      "lat": 46.8796822,
+      "lng": -110.3625658
+    },
+    {
+      "name": "North Carolina",
+      "code": "NC",
+      "type": "state",
+      "lat": 35.7595731,
+      "lng": -79.0192997
+    },
+    {
+      "name": "North Dakota",
+      "code": "ND",
+      "type": "state",
+      "lat": 47.5514926,
+      "lng": -101.0020119
+    },
+    {
+      "name": "Nebraska",
+      "code": "NE",
+      "type": "state",
+      "lat": 41.4925374,
+      "lng": -99.9018131
+    },
+    {
+      "name": "New Hampshire",
+      "code": "NH",
+      "type": "state",
+      "lat": 43.1938516,
+      "lng": -71.5723953
+    },
+    {
+      "name": "New Jersey",
+      "code": "NJ",
+      "type": "state",
+      "lat": 40.0583238,
+      "lng": -74.4056612
+    },
+    {
+      "name": "New Mexico",
+      "code": "NM",
+      "type": "state",
+      "lat": 34.5199402,
+      "lng": -105.8700901
+    },
+    {
+      "name": "Nevada",
+      "code": "NV",
+      "type": "state",
+      "lat": 38.8026097,
+      "lng": -116.419389
+    },
+    {
+      "name": "New York",
+      "code": "NY",
+      "type": "state",
+      "lat": 40.7127753,
+      "lng": -74.0059728
+    },
+    {
+      "name": "Ohio",
+      "code": "OH",
+      "type": "state",
+      "lat": 40.4172871,
+      "lng": -82.907123
+    },
+    {
+      "name": "Oklahoma",
+      "code": "OK",
+      "type": "state",
+      "lat": 35.4675602,
+      "lng": -97.5164276
+    },
+    {
+      "name": "Oregon",
+      "code": "OR",
+      "type": "state",
+      "lat": 43.8041334,
+      "lng": -120.5542012
+    },
+    {
+      "name": "Pennsylvania",
+      "code": "PA",
+      "type": "state",
+      "lat": 41.2033216,
+      "lng": -77.1945247
+    },
+    {
+      "name": "Puerto Rico",
+      "code": "PR",
+      "type": "outlying area",
+      "lat": 18.220833,
+      "lng": -66.590149
+    },
+    {
+      "name": "Rhode Island",
+      "code": "RI",
+      "type": "state",
+      "lat": 41.5800945,
+      "lng": -71.4774291
+    },
+    {
+      "name": "South Carolina",
+      "code": "SC",
+      "type": "state",
+      "lat": 33.836081,
+      "lng": -81.1637245
+    },
+    {
+      "name": "South Dakota",
+      "code": "SD",
+      "type": "state",
+      "lat": 43.9695148,
+      "lng": -99.9018131
+    },
+    {
+      "name": "Tennessee",
+      "code": "TN",
+      "type": "state",
+      "lat": 35.5174913,
+      "lng": -86.5804473
+    },
+    {
+      "name": "Texas",
+      "code": "TX",
+      "type": "state",
+      "lat": 31.9685988,
+      "lng": -99.9018131
+    },
+    {
+      "name": "Utah",
+      "code": "UT",
+      "type": "state",
+      "lat": 39.3209801,
+      "lng": -111.0937311
+    },
+    {
+      "name": "Virginia",
+      "code": "VA",
+      "type": "state",
+      "lat": 37.4315734,
+      "lng": -78.6568942
+    },
+    {
+      "name": "United States Virgin Islands",
+      "code": "VI",
+      "type": "outlying area",
+      "lat": 18.335765,
+      "lng": -64.896335
+    },
+    {
+      "name": "Vermont",
+      "code": "VT",
+      "type": "state",
+      "lat": 44.5588028,
+      "lng": -72.5778415
+    },
+    {
+      "name": "Washington",
+      "code": "WA",
+      "type": "state",
+      "lat": 47.7510741,
+      "lng": -120.7401385
+    },
+    {
+      "name": "Wisconsin",
+      "code": "WI",
+      "type": "state",
+      "lat": 43.7844397,
+      "lng": -88.7878678
+    },
+    {
+      "name": "West Virginia",
+      "code": "WV",
+      "type": "state",
+      "lat": 38.5976262,
+      "lng": -80.4549026
+    },
+    {
+      "name": "Wyoming",
+      "code": "WY",
+      "type": "state",
+      "lat": 43.0759678,
+      "lng": -107.2902839
+    }
+  ]
+}
