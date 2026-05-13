@@ -214,6 +214,46 @@ TITLE HINT (applies to SKILLS section below):
      - Use standard professional terminology: "Radiation Safety Standards" NOT "radiation safety practices"
      - Remove punctuation errors: "Patient Care" NOT "Patient Care,"
      - Keep skill names concise and professional (2-5 words typically)
+   - **RESUME-MATCHABILITY RULE (read this carefully — it is the single most important rule):**
+     Every extracted hard skill is used downstream as a substring search against
+     candidate resume text. If the phrase you choose does NOT literally appear
+     on a real resume's Skills / Certifications / Tools / Procedures section,
+     the candidate will be silently rejected.
+     - Extract CONCRETE NOUNS: certifications, credentials, tool/product/framework/
+       language names, equipment names, named procedures, named methodologies,
+       software titles, named regulations/standards.
+     - REJECT ABSTRACT COMPETENCY PHRASES that describe what someone CAN DO
+       rather than the proper nouns they would list as proof. The LLM has a
+       strong bias to extract these — actively resist it.
+       Bad → Good examples (always prefer the right column):
+         • "Critical Care Knowledge"        → "ACLS", "BLS", "CCRN", "ICU"
+         • "Invasive and Noninvasive Procedures" → "Intubation", "Bronchoscopy", "CPAP", "BiPAP"
+         • "Patient Assessment"             → "ABG Analysis", "EKG Interpretation", "Triage"
+         • "RRT Credentials"                → "RRT", "Registered Respiratory Therapist"
+         • "Documentation Skills" / "Documentation Compliance" → "Epic", "Cerner", "Meditech", "EMR"
+         • "Care Management"                → "Case Management", "CCM", "ACM"
+         • "Care Plan Development"          → "Care Plan", "ISP", "Treatment Plan"
+         • "Collaboration with Providers"   → "Interdisciplinary Team", "MDT"
+         • "Quality Assurance"              → "ISO 9001", "Six Sigma", "CQA", "ASQ", "AS9100"
+         • "Construction Quality Procedures"→ "ITP", "RFI", "Submittal Review", "Punchlist"
+         • "Vendor Management"              → "Procurement", "RFP", "Subcontractor Coordination"
+         • "Brand Voice Adaptation"         → "Copywriting", "Style Guide", "Brand Guidelines"
+         • "Concept Development"            → "Creative Brief", "Storyboarding"
+         • "Advertising Copywriting"        → "Copywriting", "Ad Copy", "Long-form Copy"
+         • "Editing and Rewriting"          → "Proofreading", "Line Editing", "Copyediting"
+         • "Project Management"             → "PMP", "Scrum", "Jira", "MS Project", "Primavera P6"
+     - HEURISTIC: if a skill name ends in "Knowledge", "Skills", "Compliance",
+       "Methodology", "Adaptation", "Development", "Best Practices",
+       "Procedures" (plural without a named procedure), or contains the words
+       "Collaboration", "Coordination", "Management" without a named domain or
+       tool — STOP and replace it with the underlying concrete noun a resume
+       would list. If you cannot find a concrete noun in the JD, scan the JD
+       for: tool/product names, certifications (often 3-5 letter caps like BLS,
+       ACLS, CCRN, PMP, AWS, ISO), software titles, named processes, equipment
+       names, or regulations — and extract those instead.
+     - IT EXCEPTION: For software engineering JDs, the right answer is the
+       specific tech stack (e.g. "Python", "AWS", "React", "Docker", "Kafka",
+       "Snowflake", "Databricks"). That path is already well-tuned.
    - COMPREHENSIVENESS: Extract the MOST IMPORTANT skills only.
    - TARGET: Return UP TO 8 HARD SKILLS FROM THE JD ITSELF. You may also return soft skills separately, but soft skills must NOT displace or reduce the number of hard skills.
    - The total number of items in the `skills` array may exceed 8 if that is needed to include soft skills in addition to up to 8 hard skills.
@@ -239,34 +279,69 @@ TITLE HINT (applies to SKILLS section below):
    - Return 0 if not explicitly mentioned.
 
 7. JOB ROLE:
-   - Extract the most appropriate standardized job title(s) for this position.
-   - IMPORTANT: All match types must be "Similar" - do not use any other match type.
+   - Output **3 to 5 resume-matchable title aliases** for this position, not
+     just one. Title is matched downstream by literal substring search against
+     candidate resume text, so a single internal/formal title catches almost
+     nobody (real candidates list "iOS Developer", not "Application Programmer III").
+   - **STRIP LEVEL SUFFIXES AND PREFIXES**. Remove trailing/leading I, II, III,
+     IV, V, Sr., Jr., Senior, Junior, Principal, Lead, Staff when they're
+     attached as grade markers. Examples:
+       • "Application Programmer III" → drop "III"
+       • "Sr. Data Engineer III" → "Data Engineer"
+       • "Copywriter IV" → "Copywriter"
+       • "QA/QC Program Engineer V" → "QA/QC Program Engineer"
+   - **CANONICALIZE using the SKILLS as authoritative evidence**. If the input
+     title is internal/generic but skills are role-specific, translate to the
+     canonical industry title and include common aliases:
+       • title="Application Programmer III", skills=[Swift, XCode, iOS, Kotlin, Appium]
+         → aliases: ["iOS Developer", "iOS Engineer", "Mobile Developer",
+                     "Mobile Engineer", "Application Programmer"]
+       • title="Engineer V", skills=[Snowflake, Airflow, dbt, Spark]
+         → aliases: ["Data Engineer", "Senior Data Engineer", "Analytics Engineer"]
+       • title="Specialist II", skills=[Care Management, RN, BSN]
+         → aliases: ["Registered Nurse Case Manager", "Care Manager",
+                     "Clinical Case Manager", "RN Care Coordinator"]
+   - **Always include common short forms / abbreviations of the role** when
+     real resumes use them. Examples:
+       • Respiratory Therapist → also include "RRT", "Respiratory Care Practitioner"
+       • Registered Nurse → also include "RN", "Staff Nurse"
+       • Quality Assurance Engineer → also include "QA Engineer", "QA Analyst"
+   - **All match types must be "Similar"**. Do not use Exact, Broad, etc.
+   - Order: put the most canonical / most common resume token FIRST. The rest
+     are alternatives.
 
 JD TEXT:
 {grounding_text}
 
 Return JSON:
-{{ 
-  "job_roles": [ {{ "name": "Role Title", "match_type": "Similar", "required": "Preferred" }} ],
-  "education": [], 
-  "domain": [], 
-  "customer_requirements": [], 
+{{
+  "job_roles": [
+    {{ "name": "Canonical Title", "match_type": "Similar", "required": "Preferred" }},
+    {{ "name": "Alias 1", "match_type": "Similar", "required": "Preferred" }},
+    {{ "name": "Alias 2", "match_type": "Similar", "required": "Preferred" }},
+    {{ "name": "Alias 3", "match_type": "Similar", "required": "Preferred" }}
+  ],
+  "education": [],
+  "domain": [],
+  "customer_requirements": [],
   "other_requirements": [],
   "min_years_experience": 0,
-  "skills": [ 
-     {{ "name": "Skill Name", "category": "hard/soft", "importance": "required/preferred", "min_years": 0, "evidence_type": "direct/inferred" }} 
+  "skills": [
+     {{ "name": "Skill Name", "category": "hard/soft", "importance": "required/preferred", "min_years": 0, "evidence_type": "direct/inferred" }}
   ]
 }}
 
-IMPORTANT: 
+IMPORTANT:
 - All job_roles MUST have "match_type": "Similar" - this is mandatory.
 - Do not use any other match type values like "Exact", "Broad", etc.
+- job_roles MUST contain 3 to 5 entries (not just one), with the most
+  resume-common token first.
 """
         try:
             p2_resp = await self.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "You are an expert recruiter and skills analyst. Extract up to 8 HARD skills from the JD itself, plus any truly important SOFT skills. HARD SKILLS ARE THE PRIORITY. Soft skills must never crowd out hard skills or reduce the hard-skill count. The skills array may contain more than 8 total items if needed, but no more than 8 should be hard skills. PRIORITY ORDER FOR HARD SKILLS: 1) Explicit skills listed in requirements/qualifications/tools/procedures (HIGHEST), 2) Direct skill mentions in duties or responsibilities (HIGH), 3) Strongly inferred hard skills from the JD only if fewer than 8 direct hard skills are available (MEDIUM). Patient Care, Communication, Teamwork, Flexibility, Attention to Detail, Empathy, Collaboration, and Customer Service are soft skills. Mark each skill with evidence_type = direct or inferred."},
+                    {"role": "system", "content": "You are an expert recruiter and skills analyst. Extract up to 8 HARD skills from the JD itself, plus any truly important SOFT skills. HARD SKILLS ARE THE PRIORITY. Soft skills must never crowd out hard skills or reduce the hard-skill count. The skills array may contain more than 8 total items if needed, but no more than 8 should be hard skills.\n\nTHE SINGLE MOST IMPORTANT RULE: every hard skill name must be a token that would appear verbatim on a real candidate's resume. Skills are matched downstream by literal substring search; abstract competency phrases (e.g. 'Critical Care Knowledge', 'Patient Assessment', 'Documentation Skills', 'Brand Voice Adaptation', 'Quality Assurance', 'Care Management') silently reject every candidate. Prefer concrete proper nouns: certifications (BLS, ACLS, CCRN, RRT, PMP, ISO 9001, AS9100, CQA), tool/product/framework names (Epic, Cerner, Primavera P6, AutoCAD, Bluebeam, Procore, Jira, AWS), equipment/procedure names (Ventilator, Intubation, CPAP, BiPAP, ABG, EKG), software titles, named regulations. If a skill name ends in 'Knowledge', 'Skills', 'Compliance', 'Methodology', 'Best Practices', 'Adaptation', or 'Development', replace it with the underlying concrete noun.\n\nPRIORITY ORDER FOR HARD SKILLS: 1) Explicit skills listed in requirements/qualifications/tools/procedures (HIGHEST), 2) Direct skill mentions in duties or responsibilities (HIGH), 3) Strongly inferred hard skills from the JD only if fewer than 8 direct hard skills are available (MEDIUM). Patient Care, Communication, Teamwork, Flexibility, Attention to Detail, Empathy, Collaboration, and Customer Service are soft skills. Mark each skill with evidence_type = direct or inferred."},
                     {"role": "user", "content": phase2_prompt}
                 ],
                 temperature=0.2,  # Slightly higher to encourage more comprehensive extraction
