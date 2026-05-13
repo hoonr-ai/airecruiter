@@ -1,0 +1,68 @@
+{
+  "variants": [
+    {
+      "name": "baseline_jobagent",
+      "endpoint": "jobagent",
+      "resume_count": 200
+    },
+    {
+      "name": "talentsearch_current_boolean",
+      "endpoint": "talentsearch_current",
+      "limit": 200
+    },
+    {
+      "name": "talentsearch_minimal",
+      "endpoint": "talentsearch_custom",
+      "boolean": "\"Databricks\"",
+      "countries": ["US"],
+      "states": ["CA"],
+      "limit": 200
+    },
+    {
+      "name": "talentsearch_strict",
+      "endpoint": "talentsearch_custom",
+      "boolean": "\"Databricks\" OVER 5 YRS AND \"PySpark\" OVER 3 YRS",
+      "countries": ["US"],
+      "states": ["CA"],
+      "limit": 200
+    },
+    {
+      "name": "talentsearch_no_skills",
+      "endpoint": "talentsearch_custom",
+      "boolean": "",
+      "countries": ["US"],
+      "states": ["CA"],
+      "limit": 200
+    },
+    {
+      "name": "pre_llm_gates_off",
+      "endpoint": "jobagent",
+      "resume_count": 200,
+      "env": {"POC_PRE_LLM_LOW_SCORE": "0", "POC_PRE_LLM_MID_SCORE": "0"}
+    },
+    {
+      "name": "embedding_match_on",
+      "endpoint": "jobagent",
+      "resume_count": 200,
+      "env": {"EMBEDDING_SKILL_MATCH": "true"}
+    },
+    {
+      "name": "parsing_gap_floor_low",
+      "endpoint": "jobagent",
+      "resume_count": 200,
+      "env": {"SCORING_PARSING_GAP_FLOOR": "0.45"}
+    },
+    {
+      "name": "source_tier_bonus_off",
+      "endpoint": "jobagent",
+      "resume_count": 200,
+      "env": {"SOURCE_TIER_BONUS_JOBDIVA_APPLICANTS": "0", "SOURCE_TIER_BONUS_JOBDIVA_TALENT": "0", "SOURCE_TIER_BONUS_VETTED": "0"}
+    },
+    {
+      "name": "no_location",
+      "endpoint": "jobagent",
+      "resume_count": 200,
+      "rubric_override": {"location": "", "within_miles": 0, "states": []}
+    }
+  ]
+}
