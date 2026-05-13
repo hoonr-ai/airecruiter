@@ -103,4 +103,10 @@ export const api = {
   chat: {
     send: (body: unknown) => req<any>(`/chat`, { method: "POST", body }),
   },
+  engagement: {
+    getActivityLogs: (interviewId: string) =>
+      req<any>(`/api/v1/engagement/interviews/${interviewId}/activity-logs`),
+    getAssessmentData: (interviewId: string) =>
+      req<any>(`/api/v1/engagement/assess/${interviewId}`),
+  },
 };

@@ -726,37 +726,39 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
             or job_id_str.startswith("EXT-")
         )
 
-        if is_external:
-            # Prefer the numeric PK already known; otherwise resolve from body/DB.
-            if job_id_str.lstrip("-").isdigit():
-                db_job_id = job_id_str
-                with get_db_connection() as conn:
-                    with conn.cursor() as cursor:
-                        cursor.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s", (db_job_id,))
-                        row = cursor.fetchone()
-                ref_code = (row[0] if row and row[0] else body_ref) or f"EXT-{abs(int(db_job_id))}"
-            else:
-                ref_code = body_ref or job_id_str
-                with get_db_connection() as conn:
-                    with conn.cursor() as cursor:
-                        cursor.execute("SELECT job_id FROM monitored_jobs WHERE jobdiva_id = %s", (ref_code,))
-                        row = cursor.fetchone()
-                db_job_id = row[0] if row else ref_code
-        elif "-" in job_id_str:
-            # JobDiva reference code flow
-            job_info = await jobdiva_service.get_job_by_id(job_id)
-            db_job_id = str(job_info.get("id")) if job_info else job_id
-            ref_code = job_id
-        else:
-            db_job_id = job_id
-            with get_db_connection() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s", (db_job_id,))
-                    row = cursor.fetchone()
-            ref_code = row[0] if row else db_job_id
+        # The JobDiva-reference branch needs an external HTTP lookup. Run
+        # it BEFORE borrowing a pool connection so we never hold a DB
+        # connection across an await. Everything else does its lookup
+        # inside the single `with get_db_connection()` block below — the
+        # endpoint borrows exactly one pool connection per request now
+        # (was two), which is what unblocks the wizard's step 4→5 save.
+        is_jobdiva_ref = (not is_external) and ("-" in job_id_str)
+        jobdiva_lookup = await jobdiva_service.get_job_by_id(job_id) if is_jobdiva_ref else None
 
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
+                # 0. Resolve db_job_id / ref_code in the same conn we'll
+                # use for the UPDATE/INSERT below.
+                if is_external:
+                    if job_id_str.lstrip("-").isdigit():
+                        db_job_id = job_id_str
+                        cursor.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s", (db_job_id,))
+                        row = cursor.fetchone()
+                        ref_code = (row[0] if row and row[0] else body_ref) or f"EXT-{abs(int(db_job_id))}"
+                    else:
+                        ref_code = body_ref or job_id_str
+                        cursor.execute("SELECT job_id FROM monitored_jobs WHERE jobdiva_id = %s", (ref_code,))
+                        row = cursor.fetchone()
+                        db_job_id = row[0] if row else ref_code
+                elif is_jobdiva_ref:
+                    db_job_id = str(jobdiva_lookup.get("id")) if jobdiva_lookup else job_id
+                    ref_code = job_id
+                else:
+                    db_job_id = job_id
+                    cursor.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s", (db_job_id,))
+                    row = cursor.fetchone()
+                    ref_code = row[0] if row else db_job_id
+
                 # 1. Update monitored_jobs using the NUMERIC ID as key (job_id)
                 logger.info(f"🔄 Updating monitored_jobs for Job {db_job_id} (Ref: {ref_code})...")
                 cursor.execute("""
