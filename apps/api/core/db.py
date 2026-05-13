@@ -3,12 +3,17 @@ from google.cloud.sql.connector import Connector, IPTypes
 import pg8000
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 from psycopg2.pool import ThreadedConnectionPool
 import json
+import logging
 import threading
+import time
 from .config import (
     INSTANCE_CONNECTION_NAME, DB_USER, DB_PASSWORD, DB_NAME, DATABASE_URL
 )
+
+logger = logging.getLogger(__name__)
 # Note: DB_PASS is mapped to DB_PASSWORD from config
 DB_PASS = DB_PASSWORD
 
@@ -24,7 +29,13 @@ DB_PASS = DB_PASSWORD
 # under Azure Postgres `max_connections` (typically 100–200). minconn=1 keeps
 # a warm socket per worker so the first request after idle isn't a cold start.
 _POOL_MIN = 1
-_POOL_MAX = 8
+_POOL_MAX = 20
+# ThreadedConnectionPool.getconn() raises PoolError immediately when full —
+# no queueing. _BORROW_WAIT_S bounds how long get_db_connection() will retry
+# on PoolError before giving up; absorbs micro-bursts when many requests
+# race for the pool (e.g. the wizard's step 4→5 save fan-out).
+_BORROW_WAIT_S = 3.0
+_BORROW_RETRY_SLEEP_S = 0.05
 _pool: "ThreadedConnectionPool | None" = None
 _pool_lock = threading.Lock()
 
@@ -109,6 +120,31 @@ class _PooledConnection:
             self.close()
 
 
+def _borrow_with_wait(pool: ThreadedConnectionPool):
+    """Borrow a raw conn from the pool, retrying briefly on PoolError.
+
+    ThreadedConnectionPool.getconn() raises psycopg2.pool.PoolError the
+    instant the pool is full. That used to surface to callers as the
+    "connection pool exhausted" 500 they hit on the wizard's step 4→5 save
+    whenever a background rubric write was still in flight. Sleep+retry up
+    to _BORROW_WAIT_S so transient contention waits instead of failing; a
+    true leak still surfaces after the bound, just later and louder.
+    """
+    deadline = time.monotonic() + _BORROW_WAIT_S
+    while True:
+        try:
+            return pool.getconn()
+        except psycopg2.pool.PoolError:
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "DB pool exhausted after %.1fs wait (max=%d)",
+                    _BORROW_WAIT_S,
+                    _POOL_MAX,
+                )
+                raise
+            time.sleep(_BORROW_RETRY_SLEEP_S)
+
+
 def get_db_connection():
     """Borrow a psycopg2 connection from the per-worker pool.
 
@@ -118,7 +154,7 @@ def get_db_connection():
     on the TCP default — same v21 QA failure mode that motivated the timeout.
     """
     pool = _get_pool()
-    return _PooledConnection(pool, pool.getconn())
+    return _PooledConnection(pool, _borrow_with_wait(pool))
 
 
 def get_dict_cursor_connection():
@@ -129,7 +165,7 @@ def get_dict_cursor_connection():
     `get_db_connection()` without leaking the dict-cursor default.
     """
     pool = _get_pool()
-    conn = pool.getconn()
+    conn = _borrow_with_wait(pool)
     conn.cursor_factory = psycopg2.extras.RealDictCursor
     return _PooledConnection(pool, conn)
 
