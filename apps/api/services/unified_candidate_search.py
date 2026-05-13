@@ -1,6 +1,8 @@
 import logging
 import asyncio
 import json
+import math
+import os
 import re
 import time
 from typing import List, Dict, Any, Optional, Tuple
@@ -235,21 +237,13 @@ class UnifiedCandidateSearch:
             }
 
         async def emit_candidate(cand, assessment, qualified_counter_key=None):
-            # Hard location gate: when the candidate's current residence is
-            # definitively outside the requested radius (or in the wrong
-            # state), drop them entirely instead of streaming through with a
-            # "failed" badge. This is what users mean by "filter by miles
-            # radius" — they want the candidates gone, not annotated.
-            #
-            # Soft-keep paths (geocode_failure, missing structured location,
-            # state_unknown) are intentionally allowed through so a Nominatim
-            # outage or a sparse JobDiva record doesn't silently filter out
-            # the entire pool.
+            # Policy 2026-05-13: only hard-drop on definitive non-US evidence.
+            # State-mismatch, outside-radius, and relocation-excluded-by-filter
+            # are softened to "show + score + let recruiter filter in UI" since
+            # the source-side metadata is often stale or the candidate is
+            # actively relocating.
             location_reason = assessment.get("location_failure_reason") if isinstance(assessment, dict) else None
             if not assessment.get("passes") and location_reason in {
-                "outside_radius",
-                "state_mismatch",
-                "relocation_excluded_by_filter",
                 "non_us_candidate",
             }:
                 distance = cand.get("distance_miles")
@@ -1119,11 +1113,11 @@ class UnifiedCandidateSearch:
             if any(group_matches(haystack, group) for group in exclude_groups):
                 continue
 
-            # Location is a hard source filter. JobDiva Talent Search can return
-            # candidates outside the location in the Boolean string, so we verify
-            # the returned candidate location before any LLM enrichment.
-            if enforce_location and not self._location_matches(candidate, criteria):
-                continue
+            # Location is no longer a hard pre-enrichment drop. Policy update
+            # 2026-05-13: when in doubt, surface the candidate with a score
+            # signal instead of silently rejecting. Recruiter's UI filter
+            # handles final location selection. Distance / state-mismatch
+            # still flow into screening_summary and the score dimension.
 
             # Titles are alternative labels for the role, so one matching title is
             # enough at the pre-enrichment stage.
@@ -1387,6 +1381,8 @@ class UnifiedCandidateSearch:
             "vermont": "vt", "virginia": "va", "washington": "wa", "west virginia": "wv",
             "wisconsin": "wi", "wyoming": "wy", "district of columbia": "dc",
         }
+        from services.us_state_index import resolve_state_code
+
         text = self._normalize_search_text(value)
         text = re.sub(r"\bwithin\s+\d+\s+mi\b", "", text)
         text = re.sub(r"\bmetro\b", "", text)
@@ -1399,7 +1395,16 @@ class UnifiedCandidateSearch:
             state = parts[1].split()[0]
         elif len(parts) == 1:
             tokens = parts[0].split()
-            if len(tokens) > 1 and len(tokens[-1]) == 2:
+            # Bare state input ("CA", "California", "Calif") — recognise via
+            # the local us_state_index so we hit the state-only fast path in
+            # _location_match_verdict instead of soft-keeping on a Nominatim
+            # miss. Bug F: production used to silently accept NC candidates
+            # for a "CA" job because geocoding "CA" was ambiguous.
+            bare_state = resolve_state_code(parts[0])
+            if bare_state:
+                city = ""
+                state = bare_state
+            elif len(tokens) > 1 and len(tokens[-1]) == 2:
                 city = " ".join(tokens[:-1])
                 state = tokens[-1]
 
@@ -1838,15 +1843,13 @@ class UnifiedCandidateSearch:
                 "location_failure_reason": "non_us_candidate",
             }
 
-        # PR-B: top-level minimum-years-of-experience floor.
-        # `years_of_experience > 0` matters: candidates whose YOE is
-        # unparseable (`0`) are kept and re-checked downstream once the
-        # enriched profile has real data — same soft-keep philosophy as
-        # the location gate. Pre-LLM heuristic enforcement happens in
-        # `_enrich_filtered_jobdiva_candidates` / `_process_external_single`
-        # so most failing candidates never reach this point.
+        # Minimum-years-of-experience floor. Only enforced when
+        # `enforce_years=True` (post-LLM stage), where `years_of_experience`
+        # reflects the LLM's resume parse rather than the source's
+        # heuristic default (which JobDiva can populate as a constant
+        # like 4 from title alone, killing real candidates pre-LLM).
         min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
-        if min_years > 0:
+        if enforce_years and min_years > 0:
             years = float(profile.get("years_of_experience") or 0)
             if 0 < years < min_years:
                 return {
@@ -1861,7 +1864,12 @@ class UnifiedCandidateSearch:
             location_ok, reason, distance = self._location_match_verdict(candidate, criteria)
             if distance is not None:
                 candidate["distance_miles"] = round(float(distance), 1)
-            if not location_ok:
+            # Policy 2026-05-13: location mismatches no longer fail the
+            # assessment outright. They surface as a soft signal via
+            # `location_failure_reason` so emit_candidate / the UI filter
+            # can decide. Only `non_us_candidate` (handled above as a
+            # top-level check) is still a hard reject.
+            if not location_ok and reason == "non_us_candidate":
                 return {
                     "passes": False,
                     "missing": [f"Location: {criteria.location}"],
@@ -1869,7 +1877,13 @@ class UnifiedCandidateSearch:
                     "excluded": self._dedupe_terms(excluded),
                     "location_failure_reason": reason,
                 }
+            if not location_ok:
+                # Record the soft reason so the UI/score knows about the
+                # mismatch but does not drop the candidate here.
+                missing.append(f"Location: {criteria.location}")
 
+        total_required = 0
+        matched_required = 0
         for dimension in self._collect_sourcing_dimensions(criteria):
             collections = dimension["collections"]
             # Check exclusions - these are ALWAYS hard filters
@@ -1877,14 +1891,19 @@ class UnifiedCandidateSearch:
                 if self._term_group_matches(profile, group, collections):
                     excluded.append(f"{dimension['label']}: {self._group_label(group)}")
 
-            # Check matches
-            all_groups = dimension.get("required_groups", []) + dimension.get("preferred_groups", [])
-            for group in all_groups:
+            # Count required matches/misses for the threshold gate below.
+            required_groups = dimension.get("required_groups", [])
+            preferred_groups = dimension.get("preferred_groups", [])
+            for group in required_groups:
+                total_required += 1
+                if self._term_group_matches(profile, group, collections):
+                    matched_required += 1
+                    matched.append(f"{dimension['label']}: {self._group_label(group)}")
+                else:
+                    missing.append(f"{dimension['label']}: {self._group_label(group)}")
+            for group in preferred_groups:
                 if self._term_group_matches(profile, group, collections):
                     matched.append(f"{dimension['label']}: {self._group_label(group)}")
-                elif any(rg["label"] == group["label"] for rg in dimension.get("required_groups", [])):
-                    # Only add to missing if it was a required group that didn't match
-                    missing.append(f"{dimension['label']}: {self._group_label(group)}")
 
         # Enforce hard exclusions
         if excluded:
@@ -1908,13 +1927,29 @@ class UnifiedCandidateSearch:
                 "location_failure_reason": None,
             }
 
-        # Otherwise, enforce required groups (Standard strict scoring/filtering)
+        # Stage-5 gate: replaced legacy `passes = not missing` (which required
+        # 100% of required groups to match — kills real candidates whose resume
+        # text doesn't enumerate every keyword). Pass when at least
+        # SCORING_REQUIRED_MATCH_RATIO of required groups are matched, or when
+        # there are no required groups. Default 0.5 (overridable via env).
+        # Rationale: a 35-year senior with a matching title and 2 of 6
+        # required skills should not be rejected by a binary gate.
+        required_ratio = float(
+            os.getenv("SCORING_REQUIRED_MATCH_RATIO", "0.5")
+        )
+        threshold = math.ceil(total_required * required_ratio)
+        if total_required == 0:
+            passes = True
+        else:
+            passes = matched_required >= threshold
         return {
-            "passes": not missing,
+            "passes": passes,
             "missing": self._dedupe_terms(missing),
             "matched": self._dedupe_terms(matched),
             "excluded": self._dedupe_terms(excluded),
             "location_failure_reason": None,
+            "matched_required": matched_required,
+            "total_required": total_required,
         }
 
     def _score_candidate(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Dict[str, Any]:
