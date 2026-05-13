@@ -24,7 +24,8 @@ import {
   Building2,
   Zap,
   Check,
-  X
+  X,
+  Activity
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -47,6 +48,7 @@ import {
 import { CandidateDetailsModal } from "@/components/CandidateDetailsModal";
 import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { EngageWizardModal } from "@/components/EngageWizardModal";
+import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
 import { API_BASE } from "@/lib/api";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
@@ -540,6 +542,11 @@ export default function CandidateRankingsPage() {
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [columnFilters, setColumnFilters] = useState<Record<string, ColumnFilter>>({});
   const [activeFilterField, setActiveFilterField] = useState<string | null>(null);
+  const [isActivityLogModalOpen, setIsActivityLogModalOpen] = useState(false);
+  const [selectedCandidateForActivity, setSelectedCandidateForActivity] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
 
   // Resume-matching completion status for filter + table labels.
   const deriveStatus = (c: Candidate): "completed" | "pending" => {
@@ -1965,6 +1972,23 @@ export default function CandidateRankingsPage() {
                           <span className="text-[12px] text-slate-500 block mb-0.5 text-center">
                             <Phone className="w-3.5 h-3.5 inline mr-1 opacity-70" /> {candidate.phone || <span className="font-normal opacity-50">—</span>}
                           </span>
+                          {deriveInterviewId(candidate) && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedCandidateForActivity({
+                                  id: deriveInterviewId(candidate)!,
+                                  name: candidate.name,
+                                });
+                                setIsActivityLogModalOpen(true);
+                              }}
+                              className="text-[12px] text-indigo-600 hover:bg-indigo-50 px-2 py-0.5 rounded-md inline-flex items-center justify-center gap-1 mt-1 font-bold border border-indigo-100 shadow-sm transition-colors"
+                              title="View user activity history"
+                            >
+                              <Activity className="w-3.5 h-3.5" />
+                              Activity History
+                            </button>
+                          )}
                           <button
                             type="button"
                             onClick={() => openCandidateProfileUrl(candidate)}
@@ -2419,6 +2443,14 @@ export default function CandidateRankingsPage() {
             {toast.message}
           </div>
         </div>
+      )}
+      {selectedCandidateForActivity && (
+        <UserActivityLogModal
+          isOpen={isActivityLogModalOpen}
+          onClose={() => setIsActivityLogModalOpen(false)}
+          interviewId={selectedCandidateForActivity.id}
+          candidateName={selectedCandidateForActivity.name}
+        />
       )}
     </div>
   );
