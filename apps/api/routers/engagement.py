@@ -807,20 +807,19 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             ]
 
             # ── TRIGGER PROVISIONING (JobDiva Application) ─────────────
-            # ONLY trigger if the interview was successfully sent.
-            # asyncio.gather() without await/create_task discards the
-            # coroutines silently — _provision_candidate_to_jobdiva would
-            # never actually run. Schedule it as a background task with
-            # return_exceptions=True so a single failure doesn't cancel
-            # the rest.
+            # Background-fire so JobDiva provisioning doesn't block the
+            # response. return_exceptions keeps a single failure from
+            # canceling siblings. create_task requires a coroutine, so
+            # wrap gather in an async helper rather than passing the
+            # gather Future directly.
             provision_tasks = [
                 _provision_candidate_to_jobdiva(cand_id, job_id_from_payload)
                 for cand_id in request.real_candidate_ids
             ]
             if provision_tasks:
-                asyncio.create_task(
-                    asyncio.gather(*provision_tasks, return_exceptions=True)
-                )
+                async def _run_provisioning() -> None:
+                    await asyncio.gather(*provision_tasks, return_exceptions=True)
+                asyncio.create_task(_run_provisioning())
 
             for idx, candidate_id in enumerate(request.real_candidate_ids):
                 submitted_email = (
