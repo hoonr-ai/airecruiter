@@ -6,6 +6,7 @@ import psycopg2.extras
 from typing import List, Dict, Optional
 from dataclasses import asdict
 from core.config import DATABASE_URL
+from core.db import get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +80,12 @@ class JobRubricDB:
             rubric = rubric_obj
 
         try:
-            with psycopg2.connect(self.db_url, connect_timeout=5) as conn:
+            # Route through the per-worker pool instead of opening a fresh
+            # socket per save. The raw psycopg2.connect pattern was the
+            # explicit follow-up from bf857e5: it bypasses _POOL_MAX, consumes
+            # Postgres-side max_connections, and never .close()s the socket on
+            # __exit__ (raw psycopg2 commits but does not close).
+            with get_db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         "SELECT title FROM monitored_jobs WHERE jobdiva_id = %s OR job_id = %s LIMIT 1",
@@ -227,7 +233,8 @@ class JobRubricDB:
             return None
 
         try:
-            with psycopg2.connect(self.db_url, connect_timeout=5) as conn:
+            # Route through the per-worker pool (see save_full_rubric note).
+            with get_db_connection() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     # Fetch domains and bot_introduction from monitored_jobs
                     cur.execute("SELECT domains, bot_introduction FROM monitored_jobs WHERE jobdiva_id = %s OR job_id = %s", (jobdiva_id, jobdiva_id))
