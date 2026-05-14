@@ -588,6 +588,31 @@ class UnifiedCandidateSearch:
                         f"(kept top {keep_top} by skill match)"
                     )
 
+            # JobAgent path: sort-only pre-rank (no candidate drops) so that
+            # the most skill-relevant candidates surface first in the stream.
+            # JobAgent already filtered for relevance; we just reorder.
+            # Without this the pipeline processes in JobDiva's return order
+            # and good matches can land deep in the stream — observed
+            # candidate at position 355 of 372 (~11 min into a 12-min stream)
+            # for job 26-11245 despite a match_score of 87.
+            if source_type == "JobDiva-JobAgent" and len(candidates) > 1:
+                must_terms = [
+                    str(item.get("value", "")).strip().lower()
+                    for item in (criteria.title_criteria or []) + (criteria.skill_criteria or [])
+                    if str(item.get("value", "")).strip()
+                    and item.get("match_type", "must") != "exclude"
+                ]
+                if must_terms:
+                    def _must_hits(c: Dict[str, Any]) -> int:
+                        hay = self._candidate_haystack(c)
+                        return sum(1 for t in must_terms if t and t in hay)
+                    candidates.sort(key=lambda c: -_must_hits(c))
+                    self._log_stage(
+                        "TalentSearch",
+                        f"JobAgent pre-rank: sorted {len(candidates)} by "
+                        f"must-skill hits (no drops)"
+                    )
+
             for c in candidates:
                 c.setdefault("source", source_type)
 
