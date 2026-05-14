@@ -911,6 +911,18 @@ class JobDivaService:
                 profile_only_results = [r for r in profile_only_results if r.get("resume_missing")]
                 dropped_no_resume = max(0, dropped_no_resume - len(promoted))
 
+        # core.sourcing_config.INCLUDE_PROFILE_ONLY: mirror the talent-pool
+        # path — always append unrescued profile-only candidates when set.
+        from core import sourcing_config
+        if require_resume and sourcing_config.INCLUDE_PROFILE_ONLY and profile_only_results:
+            jd_results.extend(profile_only_results)
+            logger.info(
+                f"sourcing_config.INCLUDE_PROFILE_ONLY: appended "
+                f"{len(profile_only_results)} profile-only candidate(s) (JobAgent)"
+            )
+            profile_only_results = []
+            dropped_no_resume = 0
+
         if require_resume and not jd_results and profile_only_results:
             jd_results = profile_only_results[: resume_count]
             logger.warning(
@@ -1233,6 +1245,19 @@ class JobDivaService:
                         jd_results.extend(promoted)
                         profile_only_results = [r for r in profile_only_results if r.get("resume_missing")]
                         dropped_no_resume = max(0, dropped_no_resume - len(promoted))
+
+                # core.sourcing_config.INCLUDE_PROFILE_ONLY: when set,
+                # always append still-resumeless profile_only_results so the
+                # downstream scorer can rank them too instead of dropping.
+                from core import sourcing_config
+                if require_resume and sourcing_config.INCLUDE_PROFILE_ONLY and profile_only_results:
+                    jd_results.extend(profile_only_results)
+                    logger.info(
+                        f"sourcing_config.INCLUDE_PROFILE_ONLY: appended "
+                        f"{len(profile_only_results)} profile-only candidate(s)"
+                    )
+                    profile_only_results = []
+                    dropped_no_resume = 0
 
                 if dropped_no_resume:
                     logger.info(
