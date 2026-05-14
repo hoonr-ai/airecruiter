@@ -49,6 +49,9 @@ def _combine_inside_quote(match: re.Match) -> str:
     return f'"{term}" OVER {years} YRS'
 
 
+_OVER_YRS_CLAUSE_RE = re.compile(r"\s*OVER\s+\d+\s+YRS\b", flags=re.IGNORECASE)
+
+
 def translate_for_jobdiva(
     boolean_str: str,
     *,
@@ -68,6 +71,13 @@ def translate_for_jobdiva(
     `recent_days` is accepted to avoid breaking existing call sites but
     is no longer applied here. Freshness, when reintroduced, belongs in
     a structured `talentSearchDef` field, not in string mutation.
+
+    core.sourcing_config.STRIP_YEARS_FROM_BOOLEAN: when set, every
+    `OVER N YRS` clause (both the rewritten ones and any the caller
+    inlined) is removed before returning. JobDiva's server-side YOE
+    parse is unreliable; deferring YOE entirely to our scorer surfaces
+    more real candidates and lets borderline matches degrade gracefully
+    instead of disappearing.
     """
     if not boolean_str or not boolean_str.strip():
         return ""
@@ -89,6 +99,13 @@ def translate_for_jobdiva(
                 translated,
                 count=1,
             )
+
+    # Local import so the diagnostic can monkey-patch sourcing_config
+    # between runs without restarting the interpreter.
+    from core import sourcing_config
+    if sourcing_config.STRIP_YEARS_FROM_BOOLEAN:
+        translated = _OVER_YRS_CLAUSE_RE.sub("", translated)
+        translated = re.sub(r"\s+", " ", translated).strip()
 
     return translated
 
