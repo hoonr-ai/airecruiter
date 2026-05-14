@@ -1930,13 +1930,12 @@ class UnifiedCandidateSearch:
         # Stage-5 gate: replaced legacy `passes = not missing` (which required
         # 100% of required groups to match — kills real candidates whose resume
         # text doesn't enumerate every keyword). Pass when at least
-        # SCORING_REQUIRED_MATCH_RATIO of required groups are matched, or when
-        # there are no required groups. Default 0.5 (overridable via env).
+        # `sourcing_config.REQUIRED_MATCH_RATIO` of required groups are matched,
+        # or when there are no required groups. Default 0.5.
         # Rationale: a 35-year senior with a matching title and 2 of 6
         # required skills should not be rejected by a binary gate.
-        required_ratio = float(
-            os.getenv("SCORING_REQUIRED_MATCH_RATIO", "0.5")
-        )
+        from core import sourcing_config
+        required_ratio = float(sourcing_config.REQUIRED_MATCH_RATIO)
         threshold = math.ceil(total_required * required_ratio)
         if total_required == 0:
             passes = True
@@ -2210,7 +2209,20 @@ class UnifiedCandidateSearch:
         head contains a parseable years number AND that number is below
         `criteria.min_experience_years`. Returns False when no number is
         found (deferred to the post-LLM gate via `_filter_assessment`).
+
+        core.sourcing_config.SKIP_JOBDIVA_YOE_PRECHECK: when set, skip the
+        heuristic entirely for JobDiva-sourced candidates. JobDiva's
+        experience_years can be a constant default per the comment at line
+        ~1849, and the regex pulls numbers out of "5+ years" copy that may
+        not reflect the actual resume. Defer YOE to the post-LLM gate
+        (Stage 5).
         """
+        from core import sourcing_config
+        if sourcing_config.SKIP_JOBDIVA_YOE_PRECHECK:
+            source = str(candidate.get("source") or "").lower()
+            if source.startswith("jobdiva"):
+                return False
+
         min_years = int(getattr(criteria, "min_experience_years", 0) or 0)
         if min_years <= 0:
             return False
