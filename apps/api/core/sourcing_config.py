@@ -18,7 +18,14 @@ giving up scoring or downstream filters.
 # set instead of being dropped after the CandidatesResumesDetail rescue
 # pass. They still show up with `resume_missing=True` so downstream can
 # downweight them, but they're not silently culled.
-INCLUDE_PROFILE_ONLY = False
+#
+# Default True (2026-05-14): the existing rescue at jobdiva.py:914 only
+# fires when the *entire* result set is empty. When some candidates have
+# resumes and some don't, the ones without get dropped — including the
+# job 26-11245 targets (sohitha716, vsne1519, adarshkt2025) whose JobAgent
+# records have `resume_id` but empty `resume_text` until the backfill
+# fetch completes. Flipping this to True closes that gap.
+INCLUDE_PROFILE_ONLY = True
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -51,4 +58,9 @@ SKIP_JOBDIVA_YOE_PRECHECK = False
 # when `matched_required / total_required >= REQUIRED_MATCH_RATIO`.
 # Lower = more lenient. Range 0.0–1.0. 0.5 was the historical default but
 # kills senior candidates whose resume doesn't enumerate every keyword.
-REQUIRED_MATCH_RATIO = 0.5
+#
+# Default 0.3 (2026-05-14): a senior with a matching title and 2 of 6
+# required skills should reach the recruiter and let them decide, not
+# get filtered by a binary gate. Surfaced borderline candidates still
+# carry the `missing` list so the UI can score-degrade them.
+REQUIRED_MATCH_RATIO = 0.3
