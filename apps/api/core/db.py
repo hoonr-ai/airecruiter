@@ -47,11 +47,17 @@ def _get_pool() -> ThreadedConnectionPool:
             if _pool is None:
                 if not DATABASE_URL:
                     raise Exception("DATABASE_URL not configured")
+                # statement_timeout=30s server-side caps any single statement
+                # so a slow query (e.g. unindexed monitored_jobs join) can't pin
+                # a pool slot indefinitely. Applies once at connect; persists
+                # across pool re-borrows. Bypass by SET LOCAL inside a txn if a
+                # specific job legitimately needs longer.
                 _pool = ThreadedConnectionPool(
                     minconn=_POOL_MIN,
                     maxconn=_POOL_MAX,
                     dsn=DATABASE_URL,
                     connect_timeout=5,
+                    options="-c statement_timeout=30000",
                 )
     return _pool
 
