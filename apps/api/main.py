@@ -168,6 +168,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:  # noqa: BLE001
             logger.error(f"monitored_jobs_schema_init_failed: {e}; continuing")
 
+    if jobs_router is not None and hasattr(jobs_router, "warm_monitored_jobs_cache"):
+        try:
+            await asyncio.wait_for(jobs_router.warm_monitored_jobs_cache(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error("monitored_jobs_cache_warm_timeout (10s); continuing")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"monitored_jobs_cache_warm_failed: {e}; continuing")
+
     # 5. Provision sourced_candidates + candidate_enhanced_info schema.
     # Pre-v22: `_ensure_table` ran CREATE TABLE + 6x ALTER on every save, and
     # `save_candidate_enhanced_info` ran its own CREATE TABLE + ALTER + CREATE
