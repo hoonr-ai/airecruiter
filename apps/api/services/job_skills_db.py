@@ -10,6 +10,7 @@ from typing import List, Dict
 import uuid
 from datetime import datetime
 from core.config import DATABASE_URL
+from core.db import get_db_connection
 
 class JobSkillsDB:
     """Handles database operations for job skills integrated with Ronak's ontology"""
@@ -21,7 +22,7 @@ class JobSkillsDB:
         """
         Saves extracted skills to job_skills table
         """
-        with psycopg2.connect(self.db_url, connect_timeout=5) as conn:
+        with get_db_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                 
                 # Clear existing skills for this job (if re-analyzing)
@@ -62,7 +63,7 @@ class JobSkillsDB:
     
     def get_job_skills(self, jobdiva_id: str) -> List[Dict]:
         """Retrieve all skills for a job"""
-        with psycopg2.connect(self.db_url, connect_timeout=5) as conn:
+        with get_db_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                 cursor.execute("""
                     SELECT 
@@ -80,7 +81,7 @@ class JobSkillsDB:
     
     def get_skills_summary(self, jobdiva_id: str) -> Dict:
         """Get summary of skills analysis for a job"""
-        with psycopg2.connect(self.db_url, connect_timeout=5) as conn:
+        with get_db_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
                 
                 # Skills count by importance

@@ -236,65 +236,83 @@ class JobRubricDB:
             # Route through the per-worker pool (see save_full_rubric note).
             with get_db_connection() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                    # Fetch domains and bot_introduction from monitored_jobs
-                    cur.execute("SELECT domains, bot_introduction FROM monitored_jobs WHERE jobdiva_id = %s OR job_id = %s", (jobdiva_id, jobdiva_id))
-                    job_row = cur.fetchone()
-                    domains_list = job_row['domains'] if job_row and job_row['domains'] else []
+                    # Single round trip: monitored_jobs lookup + jsonb_agg of
+                    # all five child tables. Pre-fix this issued six sequential
+                    # queries (one per child table + monitored_jobs) which
+                    # dominated job-detail and ranking latency on every load.
+                    cur.execute(
+                        """
+                        WITH job AS (
+                            SELECT domains, bot_introduction
+                            FROM monitored_jobs
+                            WHERE (jobdiva_id = %s OR job_id = %s)
+                            LIMIT 1
+                        )
+                        SELECT
+                            (SELECT domains FROM job) AS domains,
+                            (SELECT bot_introduction FROM job) AS bot_introduction,
+                            COALESCE((SELECT jsonb_agg(to_jsonb(s)) FROM job_skills s WHERE jobdiva_id = %s), '[]'::jsonb) AS skills_rows,
+                            COALESCE((SELECT jsonb_agg(to_jsonb(t)) FROM job_titles t WHERE jobdiva_id = %s), '[]'::jsonb) AS title_rows,
+                            COALESCE((SELECT jsonb_agg(to_jsonb(e)) FROM job_education e WHERE jobdiva_id = %s), '[]'::jsonb) AS education_rows,
+                            COALESCE((SELECT jsonb_agg(to_jsonb(c)) FROM job_customer_requirements c WHERE jobdiva_id = %s), '[]'::jsonb) AS customer_rows,
+                            COALESCE((SELECT jsonb_agg(to_jsonb(o)) FROM job_other_requirements o WHERE jobdiva_id = %s), '[]'::jsonb) AS other_rows
+                        """,
+                        (jobdiva_id, jobdiva_id, jobdiva_id, jobdiva_id, jobdiva_id, jobdiva_id, jobdiva_id),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return None
+
+                    domains_list = row.get('domains') or []
                     domain_objs = [{"value": d, "required": "Required"} for d in domains_list]
 
-                    # Fetch all sections
-                    # Fetch all skills
-                    cur.execute("SELECT * FROM job_skills WHERE jobdiva_id = %s", (jobdiva_id,))
-                    all_rows = cur.fetchall()
-                    
                     skills = []
                     soft_skills = []
-                    
-                    for r in all_rows:
+                    for r in (row.get('skills_rows') or []):
+                        match_type = r.get('match_type')
                         skill_obj = {
-                            "value": r['skill_name'],
-                            "minYears": r['min_years'],
-                            "recent": r['recent'],
-                            "matchType": 'Similar' if not r['match_type'] or r['match_type'].lower() == 'similar' else r['match_type'],
-                            "required": "Required" if r['is_required'] else "Preferred",
+                            "value": r.get('skill_name'),
+                            "minYears": r.get('min_years'),
+                            "recent": r.get('recent'),
+                            "matchType": 'Similar' if not match_type or match_type.lower() == 'similar' else match_type,
+                            "required": "Required" if r.get('is_required') else "Preferred",
                             "source": r.get('source') or 'Hoonr-Curate',
-                            "similar_skills": list(r['similar_skills']) if r.get('similar_skills') else []
+                            "similar_skills": list(r.get('similar_skills')) if r.get('similar_skills') else []
                         }
                         if r.get('category') == 'soft':
                             soft_skills.append(skill_obj)
                         else:
                             skills.append(skill_obj)
 
-                    cur.execute("SELECT * FROM job_titles WHERE jobdiva_id = %s", (jobdiva_id,))
-                    titles = [{
-                        "value": r['title'],
-                        "minYears": r['min_years'],
-                        "recent": r['recent'],
-                        "matchType": 'Similar' if not r['match_type'] or r['match_type'].lower() == 'similar' else r['match_type'],
-                        "required": "Required" if r['is_required'] else "Preferred",
-                        "source": r.get('source') or 'Hoonr-Curate',
-                        "similar_titles": list(r['similar_titles']) if r.get('similar_titles') else []
-                    } for r in cur.fetchall()]
+                    titles = []
+                    for r in (row.get('title_rows') or []):
+                        match_type = r.get('match_type')
+                        titles.append({
+                            "value": r.get('title'),
+                            "minYears": r.get('min_years'),
+                            "recent": r.get('recent'),
+                            "matchType": 'Similar' if not match_type or match_type.lower() == 'similar' else match_type,
+                            "required": "Required" if r.get('is_required') else "Preferred",
+                            "source": r.get('source') or 'Hoonr-Curate',
+                            "similar_titles": list(r.get('similar_titles')) if r.get('similar_titles') else []
+                        })
 
-                    cur.execute("SELECT * FROM job_education WHERE jobdiva_id = %s", (jobdiva_id,))
                     education = [{
-                        "degree": r['degree'],
-                        "field": r['field'],
-                        "required": "Required" if r['is_required'] else "Preferred",
+                        "degree": r.get('degree'),
+                        "field": r.get('field'),
+                        "required": "Required" if r.get('is_required') else "Preferred",
                         "source": r.get('source') or 'Hoonr-Curate'
-                    } for r in cur.fetchall()]
+                    } for r in (row.get('education_rows') or [])]
 
-                    cur.execute("SELECT * FROM job_customer_requirements WHERE jobdiva_id = %s", (jobdiva_id,))
                     customer_reqs = [
-                        _parse_customer_requirement(r['requirement'])
-                        for r in cur.fetchall()
+                        _parse_customer_requirement(r.get('requirement'))
+                        for r in (row.get('customer_rows') or [])
                     ]
 
-                    cur.execute("SELECT * FROM job_other_requirements WHERE jobdiva_id = %s", (jobdiva_id,))
                     other_reqs = [{
-                        "value": r['requirement'],
-                        "required": "Required" if r['is_required'] else "Preferred"
-                    } for r in cur.fetchall()]
+                        "value": r.get('requirement'),
+                        "required": "Required" if r.get('is_required') else "Preferred"
+                    } for r in (row.get('other_rows') or [])]
 
                     return {
                         "titles": titles,
@@ -304,7 +322,7 @@ class JobRubricDB:
                         "domain": domain_objs,
                         "customer_requirements": customer_reqs,
                         "other_requirements": other_reqs,
-                        "bot_introduction": job_row.get('bot_introduction') if job_row else None,
+                        "bot_introduction": row.get('bot_introduction'),
                         "screen_questions": self._get_screen_questions_internal(cur, jobdiva_id)
                     }
         except Exception as e:
