@@ -5,6 +5,7 @@ import psycopg2
 import psycopg2.extras
 import re
 from core.config import DATABASE_URL
+from core.db import get_db_connection
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 import asyncio
@@ -48,7 +49,7 @@ async def get_voice_job_context(job_id: str):
                 ref_id = job_context.get('jobdiva_id', job_id)
 
         # 2. Fetch Job Details from monitored_jobs
-        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with get_db_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("""
                     SELECT job_id, jobdiva_id, title, customer_name, city, state, location_type, 
@@ -141,7 +142,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
         target_candidate_id = payload.candidate_id
         
         # Update DB - similar to sync_interview_details
-        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with get_db_connection() as conn:
             with conn.cursor() as cur:
                 # 0. Lookup the real candidate_id and job_id from our audit logs using interview_id
                 # This ensures we don't need LiveKit to send candidate_id or jobdiva_id

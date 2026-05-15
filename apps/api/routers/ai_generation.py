@@ -116,9 +116,8 @@ def _lookup_job_ref_sync(job_id: str):
     ref_code = job_id
     numeric_job_id = job_id  # Default to whatever was passed in
     try:
-        import psycopg2
-        from core.config import DATABASE_URL
-        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        from core.db import get_db_connection
+        with get_db_connection() as conn:
             with conn.cursor() as cursor:
                 if "-" in str(job_id):
                     # job_id is a ref code (e.g. "26-06182") — look up the numeric ID

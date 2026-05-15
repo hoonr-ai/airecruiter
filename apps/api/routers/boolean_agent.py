@@ -4,6 +4,7 @@ from services.jobdiva import jobdiva_service
 import psycopg2
 import psycopg2.extras
 from core.config import DATABASE_URL
+from core.db import get_db_connection
 import json
 
 router = APIRouter(tags=["Boolean Agent Integration"])
@@ -24,14 +25,14 @@ async def get_boolean_agent_context(job_id: str):
                 ref_id = job_context.get('jobdiva_id', job_id)
         else:
              # If it's a ref code, try to find the numeric ID
-             with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+             with get_db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT job_id FROM monitored_jobs WHERE jobdiva_id = %s", (job_id,))
                     row = cur.fetchone()
                     if row: numeric_id = str(row[0])
 
         # 2. Fetch Job Details from monitored_jobs
-        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with get_db_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("""
                     SELECT job_id, jobdiva_id, title, customer_name, city, state, location_type, 
