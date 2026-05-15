@@ -13,7 +13,7 @@ export const msalConfig: Configuration = {
         redirectUri: process.env.NEXT_PUBLIC_AZURE_REDIRECT_URI || (typeof window !== "undefined" ? window.location.origin : "/"),
     },
     cache: {
-        cacheLocation: "sessionStorage", // This configures where your cache will be stored
+        cacheLocation: "localStorage", // Shared across tabs so a sign-in persists when the user opens a new tab
         storeAuthStateInCookie: false, // Set this to "true" if you are having issues on IE11 or Edge
     },
     system: {

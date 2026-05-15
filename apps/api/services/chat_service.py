@@ -14,6 +14,7 @@ import psycopg2.extras
 from openai import AsyncOpenAI
 
 from core.config import DATABASE_URL, OPENAI_API_KEY
+from core.db import get_dict_cursor_connection
 
 logger = logging.getLogger(__name__)
 
@@ -98,41 +99,82 @@ def _row_to_job_dict(row: Dict[str, Any]) -> Dict[str, Any]:
     return d
 
 
+def _candidate_counts_by_jobdiva_id(cur, keys: List[str]) -> Dict[str, Dict[str, int]]:
+    """One indexed lookup for total/shortlisted candidate counts across a set
+    of jobdiva_id values. Replaces the pre-fix `COUNT(*) ... GROUP BY mj2.job_id`
+    subquery whose `OR sc2.jobdiva_id = mj2.job_id::text` join forced a seq
+    scan on all of sourced_candidates per chat message.
+
+    Pass both alphanumeric `jobdiva_id` and `job_id::text` strings — rows for
+    one logical job may have been stored under either form. The caller sums
+    them per job.
+    """
+    if not keys:
+        return {}
+    cur.execute(
+        """
+        SELECT jobdiva_id,
+               COUNT(*)                                                  AS total,
+               COUNT(*) FILTER (WHERE resume_match_percentage >= 70)     AS shortlisted
+        FROM sourced_candidates
+        WHERE jobdiva_id = ANY(%s)
+        GROUP BY jobdiva_id
+        """,
+        (list({k for k in keys if k}),),
+    )
+    return {
+        r["jobdiva_id"]: {"total": int(r["total"]), "shortlisted": int(r["shortlisted"])}
+        for r in (cur.fetchall() or [])
+    }
+
+
+def _sum_counts_for_job(counts: Dict[str, Dict[str, int]], job: Dict[str, Any]) -> Dict[str, int]:
+    total = 0
+    shortlisted = 0
+    for key in (job.get("jobdiva_id"), str(job["job_id"]) if job.get("job_id") is not None else None):
+        if key and key in counts:
+            total += counts[key]["total"]
+            shortlisted += counts[key]["shortlisted"]
+    return {"total": total, "shortlisted": shortlisted}
+
+
 def _tool_get_job_status(job_ref: str) -> Dict[str, Any]:
     ref = (job_ref or "").strip()
     if not ref:
         return {"found": False, "error": "empty job_ref"}
     try:
-        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with get_dict_cursor_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # 1. Job lookup — covered by idx_monitored_jobs_jobdiva_id /
+                # idx_monitored_jobs_job_id.
                 cur.execute(
                     """
-                    SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.customer_name,
-                           mj.status, mj.city, mj.state, mj.openings,
-                           mj.max_allowed_submittals, mj.is_archived,
-                           mj.created_at, mj.updated_at,
-                           COALESCE(sc.total, 0)        AS candidates_sourced,
-                           COALESCE(sc.shortlisted, 0)  AS resumes_shortlisted
-                    FROM monitored_jobs mj
-                    LEFT JOIN (
-                        SELECT mj2.job_id AS mj_job_id,
-                               COUNT(*)                                                 AS total,
-                               COUNT(*) FILTER (WHERE sc2.resume_match_percentage >= 70) AS shortlisted
-                        FROM sourced_candidates sc2
-                        JOIN monitored_jobs mj2
-                          ON sc2.jobdiva_id = mj2.jobdiva_id
-                          OR sc2.jobdiva_id = mj2.job_id::text
-                        GROUP BY mj2.job_id
-                    ) sc ON sc.mj_job_id = mj.job_id
-                    WHERE mj.jobdiva_id = %s OR mj.job_id::text = %s
+                    SELECT job_id, jobdiva_id, title, customer_name,
+                           status, city, state, openings,
+                           max_allowed_submittals, is_archived,
+                           created_at, updated_at
+                    FROM monitored_jobs
+                    WHERE jobdiva_id = %s OR job_id::text = %s
                     LIMIT 1
                     """,
                     (ref, ref),
                 )
-                row = cur.fetchone()
-                if not row:
+                job = cur.fetchone()
+                if not job:
                     return {"found": False, "job_ref": ref}
-                return {"found": True, **_row_to_job_dict(row)}
+
+                # 2. Bounded count — single index scan on jobdiva_id, no JOIN.
+                counts = _candidate_counts_by_jobdiva_id(
+                    cur,
+                    [job.get("jobdiva_id"), str(job["job_id"]) if job.get("job_id") is not None else None],
+                )
+                summed = _sum_counts_for_job(counts, job)
+                enriched = {
+                    **dict(job),
+                    "candidates_sourced": summed["total"],
+                    "resumes_shortlisted": summed["shortlisted"],
+                }
+                return {"found": True, **_row_to_job_dict(enriched)}
     except Exception as e:
         logger.error(f"get_job_status({ref}) failed: {e}")
         return {"found": False, "error": str(e), "job_ref": ref}
@@ -141,36 +183,44 @@ def _tool_get_job_status(job_ref: str) -> Dict[str, Any]:
 def _tool_list_recent_jobs(limit: int = 10, include_archived: bool = False) -> Dict[str, Any]:
     limit = max(1, min(int(limit or 10), 25))
     try:
-        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with get_dict_cursor_connection() as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # 1. Cheap monitored_jobs scan, bounded by LIMIT.
                 cur.execute(
                     """
-                    SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.customer_name,
-                           mj.status, mj.is_archived, mj.updated_at,
-                           COALESCE(sc.total, 0)       AS candidates_sourced,
-                           COALESCE(sc.shortlisted, 0) AS resumes_shortlisted
-                    FROM monitored_jobs mj
-                    LEFT JOIN (
-                        SELECT mj2.job_id AS mj_job_id,
-                               COUNT(*)                                                 AS total,
-                               COUNT(*) FILTER (WHERE sc2.resume_match_percentage >= 70) AS shortlisted
-                        FROM sourced_candidates sc2
-                        JOIN monitored_jobs mj2
-                          ON sc2.jobdiva_id = mj2.jobdiva_id
-                          OR sc2.jobdiva_id = mj2.job_id::text
-                        GROUP BY mj2.job_id
-                    ) sc ON sc.mj_job_id = mj.job_id
-                    WHERE (%s OR mj.is_archived IS NOT TRUE)
-                    ORDER BY mj.updated_at DESC NULLS LAST
+                    SELECT job_id, jobdiva_id, title, customer_name,
+                           status, is_archived, updated_at
+                    FROM monitored_jobs
+                    WHERE (%s OR is_archived IS NOT TRUE)
+                    ORDER BY updated_at DESC NULLS LAST
                     LIMIT %s
                     """,
                     (bool(include_archived), limit),
                 )
-                rows = cur.fetchall() or []
-                return {
-                    "count": len(rows),
-                    "jobs": [_row_to_job_dict(r) for r in rows],
-                }
+                jobs = cur.fetchall() or []
+                if not jobs:
+                    return {"count": 0, "jobs": []}
+
+                # 2. Single GROUP BY scoped to the small set of keys we care
+                # about. With idx_sourced_candidates_jobdiva_id this is a
+                # bounded index scan, not a full-table aggregate.
+                keys: List[str] = []
+                for j in jobs:
+                    if j.get("jobdiva_id"):
+                        keys.append(j["jobdiva_id"])
+                    if j.get("job_id") is not None:
+                        keys.append(str(j["job_id"]))
+                counts = _candidate_counts_by_jobdiva_id(cur, keys)
+
+                enriched_jobs = []
+                for j in jobs:
+                    summed = _sum_counts_for_job(counts, j)
+                    enriched_jobs.append(_row_to_job_dict({
+                        **dict(j),
+                        "candidates_sourced": summed["total"],
+                        "resumes_shortlisted": summed["shortlisted"],
+                    }))
+                return {"count": len(enriched_jobs), "jobs": enriched_jobs}
     except Exception as e:
         logger.error(f"list_recent_jobs failed: {e}")
         return {"count": 0, "jobs": [], "error": str(e)}

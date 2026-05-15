@@ -11,6 +11,7 @@ from services.auto_assign_service import auto_assign_service
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from core.config import DATABASE_URL
+from core.db import get_db_connection
 
 # Setup Logging
 logging.basicConfig(
@@ -26,7 +27,7 @@ logger = logging.getLogger("JobDivaApplicantSync")
 def get_monitored_jobs():
     """Fetch all jobs that are not archived and have a jobdiva_id."""
     try:
-        with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+        with get_db_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # We target all jobs that have been 'monitored'. 
                 # If there's an is_archived column, we should use it.

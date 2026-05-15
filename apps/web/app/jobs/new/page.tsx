@@ -78,11 +78,20 @@ import { BulkUploadSection } from "@/components/jobs/BulkUploadSection";
 import { PhoneIndicator } from "@/components/phone-indicator";
 import { CandidateMatchTable, type CandidateMatchSortKey } from "@/components/candidate-match-table";
 import { MissingContactsModal, type MissingContactCandidate } from "@/components/missing-contacts-modal";
+import {
+  LaunchPairProgressModal,
+  initialLaunchProgress,
+  type LaunchPairProgress,
+  type LaunchBatchInfo,
+} from "@/components/launch-pair-progress-modal";
 import { normalizePhone } from "@/lib/phone";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { API_BASE } from "@/lib/api";
 import { trackEvent } from "@/lib/analytics";
 import { logger } from "@/lib/logger";
+
+const IS_QA_CURATE =
+  typeof window !== "undefined" && window.location.hostname === "qacurate.hoonr.ai";
 
 // Utility function to clean location_type values and filter out employment terms
 function cleanLocationType(locationType: string | null | undefined): string {
@@ -638,7 +647,14 @@ function NewJobPageContent() {
   const [isSearching, setIsSearching] = useState(false);
   const [isEnrichingContacts, setIsEnrichingContacts] = useState(false);
   const [missingContactsOpen, setMissingContactsOpen] = useState(false);
+  // Realtime progress for the batched Launch PAIR flow (enrichment + per-batch
+  // save/engage). Batches of 15 keep individual payloads small enough for the
+  // backend; the modal surfaces per-batch status so the recruiter can see
+  // what's happening on long runs.
+  const LAUNCH_BATCH_SIZE = 15;
+  const [launchProgress, setLaunchProgress] = useState<LaunchPairProgress>(initialLaunchProgress);
   const [missingContactCandidates, setMissingContactCandidates] = useState<MissingContactCandidate[]>([]);
+  const [missingContactsReviewMode, setMissingContactsReviewMode] = useState(false);
   const [pendingLaunchOverrides, setPendingLaunchOverrides] = useState<Record<string, { phone?: string; email?: string }>>({});
   const [readyLaunchedPendingRedirect, setReadyLaunchedPendingRedirect] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
@@ -707,6 +723,11 @@ function NewJobPageContent() {
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const [candidatesPerPage, setCandidatesPerPage] = useState(20);
+  // "Select Best N" — recruiter-tunable count for the bulk-select shortcut.
+  // Persists across selection changes so re-clicking the button uses the
+  // same N. The text input is the source of truth; the button reads it.
+  const [selectBestN, setSelectBestN] = useState<number>(100);
+  const [selectBestInput, setSelectBestInput] = useState<string>("100");
   const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "linkedin-unipile" | "linkedin-exa" | "dice" | "upload-resume" | "beyond">("all");
   const [locationFilter, setLocationFilter] = useState<Set<string>>(new Set());
   const [minScore, setMinScore] = useState<number>(0);
@@ -1336,6 +1357,12 @@ function NewJobPageContent() {
         if (sf.locations) setSourceLocations(sf.locations);
         if (sf.companies) setSourceCompanies(sf.companies);
         if (sf.keywords) setSourceKeywords(sf.keywords);
+        if (typeof sf.recentDaysFilter === "number") setRecentDaysFilter(sf.recentDaysFilter);
+        if (typeof sf.includeNoResume === "boolean") setIncludeNoResume(sf.includeNoResume);
+        if (sf.minExperienceYears === null || typeof sf.minExperienceYears === "number") {
+          setMinExperienceYears(sf.minExperienceYears);
+        }
+        if (typeof sf.sourceLocationMiles === "number") setSourceLocationMiles(sf.sourceLocationMiles);
         console.log('✅ Restored sourcing filters from database');
       }
 
@@ -1946,7 +1973,11 @@ function NewJobPageContent() {
             skills: sourceSkills,
             locations: sourceLocations,
             companies: sourceCompanies,
-            keywords: sourceKeywords
+            keywords: sourceKeywords,
+            recentDaysFilter,
+            includeNoResume,
+            minExperienceYears,
+            sourceLocationMiles,
           },
           step1_completed: stepData.currentStep >= 1,
           step2_completed: stepData.currentStep >= 2,
@@ -1976,6 +2007,36 @@ function NewJobPageContent() {
       return false;
     }
   };
+
+  // Step 5 has no Next button (the wizard hops straight to Launch PAIR), so
+  // recruiter edits to titles / skills / filter knobs never persist unless
+  // they happen to hit Save & Exit or toggle the boolean panel. Debounce a
+  // silent auto-save whenever Step 5 sourcing state changes so reloads
+  // restore everything.
+  useEffect(() => {
+    if (currentStep !== 5) return;
+    if (isReadOnly) return;
+    if (!jobData) return;
+    const handle = setTimeout(() => {
+      saveJobDraft({ currentStep: 5, saveType: "auto", skipToast: true });
+    }, 1500);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    currentStep,
+    isReadOnly,
+    jobData,
+    searchSources,
+    sourceTitles,
+    sourceSkills,
+    sourceLocations,
+    sourceCompanies,
+    sourceKeywords,
+    recentDaysFilter,
+    includeNoResume,
+    minExperienceYears,
+    sourceLocationMiles,
+  ]);
 
   const StepIndicator = () => (
     <div className="flex items-start mb-8 relative">
@@ -5602,6 +5663,12 @@ function NewJobPageContent() {
 
   // Launch PAIR consumes selected candidates (with optional contact overrides
   // from enrichment) and persists them to sourced_candidates.
+  //
+  // The full selection is split into batches of LAUNCH_BATCH_SIZE before
+  // hitting /candidates/save + the engagement endpoints — large bulk
+  // payloads (hundreds of resumes + full enhanced_info blobs) were
+  // timing out / OOMing the backend. Each batch's save/engage status is
+  // streamed into launchProgress so the modal can show realtime state.
   const runLaunchPair = async (
     contactOverrides?: Record<string, { phone?: string; email?: string }>,
     launchIdsOverride?: Set<string>,
@@ -5609,175 +5676,285 @@ function NewJobPageContent() {
   ): Promise<{ success: boolean; savedCount: number }> => {
     const launchIds = launchIdsOverride ?? selectedCandidates;
     if (launchIds.size === 0) return { success: false, savedCount: 0 };
-    try {
-      const effective = contactOverrides
-        ? candidates.map(c => {
-          const id = c.candidate_id || c.id;
-          const override = contactOverrides[id];
-          return override
-            ? {
-              ...c,
-              phone: override.phone || c.phone,
-              email: override.email || c.email,
-            }
-            : c;
-        })
-        : candidates;
 
-      if (contactOverrides) {
-        setCandidates(effective);
-      }
-
-      // Final DNC safety net: drop any selected candidate whose normalized
-      // phone is on the DNC list, even if React state hasn't yet flushed
-      // the auto-deselect from handleLaunchPairClick. The backend repeats
-      // this check at /candidates/save — defense in depth.
-      const candidatesPayload = effective
-        .filter(c => launchIds.has(c.candidate_id || c.id))
-        .filter(c => {
-          if (dncPhones.size === 0) return true;
-          const np = normalizePhone(c.phone);
-          return !(np && dncPhones.has(np));
-        })
-        .map(c => {
-          const displayName = getCandidateDisplayName(c);
-          let skillList: any[] = [];
-          if (Array.isArray(c.skills)) {
-            skillList = c.skills;
-          } else if (typeof c.skills === 'string' && c.skills.trim()) {
-            try {
-              const parsed = JSON.parse(c.skills);
-              skillList = Array.isArray(parsed) ? parsed : [c.skills];
-            } catch (e) {
-              skillList = [c.skills];
-            }
+    const effective = contactOverrides
+      ? candidates.map(c => {
+        const id = c.candidate_id || c.id;
+        const override = contactOverrides[id];
+        return override
+          ? {
+            ...c,
+            phone: override.phone || c.phone,
+            email: override.email || c.email,
           }
-          return {
-            candidate_id: String(c.candidate_id || c.id || "unknown"),
-            name: displayName || "Unnamed Candidate",
-            email: c.email || null,
-            phone: c.phone || null,
-            skills: skillList,
-            experience_years: c.yearsExtracted || c.experience_years || 0,
-            source: c.source || "JobDiva-Applicants",
-            headline: c.title || c.headline || "",
-            location: c.location || "",
-            profile_url: c.profile_url || null,
-            image_url: c.image_url || null,
-            resume_text: c.resume_text || c.resumeText || "",
-            resume_id: String(c.resumeId || c.resume_id || ""),
-            is_selected: true,
-            education: Array.isArray(c.education || c.candidate_education) ? (c.education || c.candidate_education) : [],
-            certifications: Array.isArray(c.certifications || c.candidate_certification) ? (c.certifications || c.candidate_certification) : [],
-            company_experience: Array.isArray(c.company_experience || c.enhanced_info?.company_experience) ? (c.company_experience || c.enhanced_info?.company_experience) : [],
-            urls: (c.urls && typeof c.urls === 'object' && !Array.isArray(c.urls)) ? c.urls : (c.enhanced_info?.urls || {}),
-            match_score: typeof c.match_score === 'number' ? c.match_score : 0,
-            matched_skills: Array.isArray(c.matched_skills) ? c.matched_skills : [],
-            missing_skills: Array.isArray(c.missing_skills) ? c.missing_skills : [],
-            match_score_details: (c.match_score_details && typeof c.match_score_details === 'object' && !Array.isArray(c.match_score_details)) ? c.match_score_details : {},
-            explainability: Array.isArray(c.explainability) ? c.explainability : [],
-            enhanced_info: (c.enhanced_info && typeof c.enhanced_info === 'object' && !Array.isArray(c.enhanced_info)) ? c.enhanced_info : null
-          };
-        });
+          : c;
+      })
+      : candidates;
 
-      const selectedCount = candidatesPayload.filter(c => c.is_selected).length;
-      console.log(`🚀 Launching Hoonr-Curate with ${selectedCount} selected candidates out of ${candidatesPayload.length} total`);
+    if (contactOverrides) {
+      setCandidates(effective);
+    }
 
-      const response = await fetch(`${API_BASE}/candidates/save`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId,
-          candidates: candidatesPayload
-        })
+    // Final DNC safety net: drop any selected candidate whose normalized
+    // phone is on the DNC list, even if React state hasn't yet flushed
+    // the auto-deselect from handleLaunchPairClick. The backend repeats
+    // this check at /candidates/save — defense in depth.
+    const candidatesPayload = effective
+      .filter(c => launchIds.has(c.candidate_id || c.id))
+      .filter(c => {
+        if (dncPhones.size === 0) return true;
+        const np = normalizePhone(c.phone);
+        return !(np && dncPhones.has(np));
+      })
+      .map(c => {
+        const displayName = getCandidateDisplayName(c);
+        let skillList: any[] = [];
+        if (Array.isArray(c.skills)) {
+          skillList = c.skills;
+        } else if (typeof c.skills === 'string' && c.skills.trim()) {
+          try {
+            const parsed = JSON.parse(c.skills);
+            skillList = Array.isArray(parsed) ? parsed : [c.skills];
+          } catch (e) {
+            skillList = [c.skills];
+          }
+        }
+        return {
+          candidate_id: String(c.candidate_id || c.id || "unknown"),
+          name: displayName || "Unnamed Candidate",
+          email: c.email || null,
+          phone: c.phone || null,
+          skills: skillList,
+          experience_years: c.yearsExtracted || c.experience_years || 0,
+          source: c.source || "JobDiva-Applicants",
+          headline: c.title || c.headline || "",
+          location: c.location || "",
+          profile_url: c.profile_url || null,
+          image_url: c.image_url || null,
+          resume_text: c.resume_text || c.resumeText || "",
+          resume_id: String(c.resumeId || c.resume_id || ""),
+          is_selected: true,
+          education: Array.isArray(c.education || c.candidate_education) ? (c.education || c.candidate_education) : [],
+          certifications: Array.isArray(c.certifications || c.candidate_certification) ? (c.certifications || c.candidate_certification) : [],
+          company_experience: Array.isArray(c.company_experience || c.enhanced_info?.company_experience) ? (c.company_experience || c.enhanced_info?.company_experience) : [],
+          urls: (c.urls && typeof c.urls === 'object' && !Array.isArray(c.urls)) ? c.urls : (c.enhanced_info?.urls || {}),
+          match_score: typeof c.match_score === 'number' ? c.match_score : 0,
+          matched_skills: Array.isArray(c.matched_skills) ? c.matched_skills : [],
+          missing_skills: Array.isArray(c.missing_skills) ? c.missing_skills : [],
+          match_score_details: (c.match_score_details && typeof c.match_score_details === 'object' && !Array.isArray(c.match_score_details)) ? c.match_score_details : {},
+          explainability: Array.isArray(c.explainability) ? c.explainability : [],
+          enhanced_info: (c.enhanced_info && typeof c.enhanced_info === 'object' && !Array.isArray(c.enhanced_info)) ? c.enhanced_info : null
+        };
       });
 
-      const result = await response.json();
-
-      if (response.ok && result.status === 'success') {
-        const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
-        const selectedIds = candidatesPayload.map(c => c.candidate_id);
-
-        // Surface backend-side DNC skips. Frontend filters first, so this
-        // should typically be 0; if non-zero it usually means the user's
-        // browser cache of /dnc/keys is stale relative to the DB.
-        const backendDncSkipped = Number(result?.dnc_skipped_count || 0);
-        if (backendDncSkipped > 0) {
-          showToast(
-            `${backendDncSkipped} candidate${backendDncSkipped === 1 ? "" : "s"} blocked at save (Do Not Contact)`,
-            "info",
-          );
-        }
-
-        // ── Fire Emails Immediately ──────────────────────────────────────────
-        let engageSendResult: { success?: boolean; message?: string } | null = null;
-        try {
-          const engageData = await engagement.generatePayload({
-            candidateIds: selectedIds,
-            jobId: jobIdForEngage,
-          });
-
-          if (engageData?.payload) {
-            engageSendResult = await engagement.sendBulkInterview({
-              payload: engageData.payload,
-              realCandidateIds: selectedIds,
-              // Source mode = re-launch on an Active job; backend gates the
-              // job-posting team email + applicant sync on this flag.
-              isInitialLaunch: wizardMode !== 'source',
-              // Fire the recruiter launch email from the wizard flow.
-              // Pre-fix we used dryRun=true for this, but dryRun also
-              // skipped the pairbot call entirely, so candidates never got
-              // created in pairbot. notify_recruiters is the explicit
-              // signal for the email; dryRun stays false so pairbot is hit.
-              notifyRecruiters: true,
-            });
-          }
-        } catch (engageErr) {
-          console.warn("Engagement emails failed to fire, but candidates saved:", engageErr);
-          engageSendResult = {
-            success: false,
-            message: engageErr instanceof Error ? engageErr.message : "Engagement call failed",
-          };
-        }
-        // ─────────────────────────────────────────────────────────────────────
-
-        const saved = result.saved_count || selectedCount;
-        const failed = Math.max(0, selectedCount - saved - backendDncSkipped);
-        const engageFailed = engageSendResult && engageSendResult.success === false;
-        if (engageFailed) {
-          const reason = engageSendResult?.message || "PAIR rejected the batch";
-          showToast(`Saved ${saved} but PAIR couldn't be reached: ${reason}`, "error");
-        } else if (failed > 0) {
-          showToast(
-            `Launched ${saved} · ${failed} failed (backend rejected — check phone/email)`,
-            "info",
-          );
-        } else {
-          showToast(`Launched PAIR for ${saved} candidate${saved === 1 ? "" : "s"}`, "success");
-        }
-        if (!options?.skipRedirect) {
-          setTimeout(() => {
-            if (jobIdForEngage) {
-              router.push(`/jobs/${encodeURIComponent(jobIdForEngage)}/rankings`);
-            } else {
-              router.push(`/`);
-            }
-          }, 1000);
-        }
-        return { success: true, savedCount: saved };
-      } else {
-        console.error('Save failed details:', JSON.stringify(result, null, 2));
-        const errorMsg = result.detail
-          ? (Array.isArray(result.detail) ? JSON.stringify(result.detail) : result.detail)
-          : (result.message || 'Unknown error');
-        showToast(`Error saving candidates: ${errorMsg}`, "error");
-        return { success: false, savedCount: 0 };
-      }
-    } catch (e) {
-      console.error("Failed to save candidates:", e);
-      showToast("Failed to save candidates. Please try again.", "error");
+    if (candidatesPayload.length === 0) {
       return { success: false, savedCount: 0 };
     }
+
+    const jobdivaIdForSave = jobdivaId || jobData?.jobdiva_id || numericJobId;
+    const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
+
+    // Slice into fixed-size batches; the modal already shows per-batch progress.
+    const batches: typeof candidatesPayload[] = [];
+    for (let i = 0; i < candidatesPayload.length; i += LAUNCH_BATCH_SIZE) {
+      batches.push(candidatesPayload.slice(i, i + LAUNCH_BATCH_SIZE));
+    }
+
+    const initialBatchInfo: LaunchBatchInfo[] = batches.map((batch, idx) => ({
+      index: idx,
+      size: batch.length,
+      status: "pending",
+      savedCount: 0,
+      dncSkipped: 0,
+      engageSent: 0,
+      alreadySent: 0,
+    }));
+
+    setLaunchProgress(prev => ({
+      ...prev,
+      open: true,
+      phase: "launching",
+      totalCandidates: candidatesPayload.length,
+      batchSize: LAUNCH_BATCH_SIZE,
+      batches: initialBatchInfo,
+      currentBatchIndex: 0,
+      totalSaved: 0,
+      totalEngaged: 0,
+      totalFailedBatches: 0,
+    }));
+
+    const updateBatch = (idx: number, patch: Partial<LaunchBatchInfo>) => {
+      setLaunchProgress(prev => ({
+        ...prev,
+        batches: prev.batches.map(b => (b.index === idx ? { ...b, ...patch } : b)),
+      }));
+    };
+
+    console.log(`🚀 Launching Hoonr-Curate with ${candidatesPayload.length} candidates in ${batches.length} batch(es) of ${LAUNCH_BATCH_SIZE}`);
+
+    let totalSaved = 0;
+    let totalEngaged = 0;
+    let totalDncSkipped = 0;
+    let totalFailedBatches = 0;
+    let engageFailureMessage: string | null = null;
+
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      const batchIds = batch.map(c => c.candidate_id);
+
+      setLaunchProgress(prev => ({ ...prev, currentBatchIndex: i }));
+      updateBatch(i, { status: "saving" });
+
+      // ── Save batch ────────────────────────────────────────────────────
+      let saveOk = false;
+      let batchSavedCount = 0;
+      let batchDncSkipped = 0;
+      try {
+        const response = await fetch(`${API_BASE}/candidates/save`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jobdiva_id: jobdivaIdForSave,
+            candidates: batch,
+          }),
+        });
+        const result = await response.json();
+        if (response.ok && result.status === 'success') {
+          saveOk = true;
+          batchSavedCount = Number(result.saved_count) || batch.length;
+          batchDncSkipped = Number(result?.dnc_skipped_count || 0);
+        } else {
+          console.error(`Batch ${i + 1} save failed:`, JSON.stringify(result, null, 2));
+          const errorMsg = result.detail
+            ? (Array.isArray(result.detail) ? JSON.stringify(result.detail) : result.detail)
+            : (result.message || 'Unknown error');
+          updateBatch(i, { status: "failed", errorMessage: `Save failed: ${errorMsg}` });
+          totalFailedBatches += 1;
+        }
+      } catch (e) {
+        console.error(`Batch ${i + 1} save threw:`, e);
+        updateBatch(i, {
+          status: "failed",
+          errorMessage: e instanceof Error ? `Save failed: ${e.message}` : "Save failed",
+        });
+        totalFailedBatches += 1;
+      }
+
+      if (!saveOk) {
+        continue; // skip engage for this batch; move on
+      }
+
+      totalSaved += batchSavedCount;
+      totalDncSkipped += batchDncSkipped;
+      updateBatch(i, {
+        status: "engaging",
+        savedCount: batchSavedCount,
+        dncSkipped: batchDncSkipped,
+      });
+
+      // ── Engage batch ─────────────────────────────────────────────────
+      let batchEngageSent = 0;
+      let batchAlreadySent = 0;
+      let batchEngageError: string | null = null;
+      try {
+        const engageData = await engagement.generatePayload({
+          candidateIds: batchIds,
+          jobId: jobIdForEngage,
+        });
+        if (engageData?.payload) {
+          const engageRes = await engagement.sendBulkInterview({
+            payload: engageData.payload,
+            realCandidateIds: batchIds,
+            isInitialLaunch: wizardMode !== 'source',
+            notifyRecruiters: true,
+          });
+          if (engageRes.success) {
+            batchEngageSent = Array.isArray(engageRes.data) ? engageRes.data.length : batchIds.length;
+            batchAlreadySent = Array.isArray(engageRes.skipped_already_sent)
+              ? engageRes.skipped_already_sent.length
+              : 0;
+          } else {
+            batchEngageError = engageRes.message || "PAIR rejected the batch";
+          }
+        } else {
+          batchEngageError = "Engagement payload missing";
+        }
+      } catch (engageErr) {
+        batchEngageError = engageErr instanceof Error ? engageErr.message : "Engagement call failed";
+        console.warn(`Batch ${i + 1} engage failed:`, engageErr);
+      }
+
+      if (batchEngageError) {
+        updateBatch(i, {
+          status: "failed",
+          engageSent: batchEngageSent,
+          alreadySent: batchAlreadySent,
+          errorMessage: `Engage failed: ${batchEngageError}`,
+        });
+        totalFailedBatches += 1;
+        engageFailureMessage = batchEngageError;
+      } else {
+        totalEngaged += batchEngageSent;
+        updateBatch(i, {
+          status: "completed",
+          engageSent: batchEngageSent,
+          alreadySent: batchAlreadySent,
+        });
+      }
+
+      setLaunchProgress(prev => ({
+        ...prev,
+        totalSaved,
+        totalEngaged,
+        totalFailedBatches,
+      }));
+    }
+
+    if (totalDncSkipped > 0) {
+      showToast(
+        `${totalDncSkipped} candidate${totalDncSkipped === 1 ? "" : "s"} blocked at save (Do Not Contact)`,
+        "info",
+      );
+    }
+
+    const success = totalSaved > 0 && totalFailedBatches === 0;
+    const partial = totalSaved > 0 && totalFailedBatches > 0;
+
+    if (success) {
+      showToast(`Launched PAIR for ${totalSaved} candidate${totalSaved === 1 ? "" : "s"}`, "success");
+    } else if (partial) {
+      showToast(
+        `Launched ${totalSaved} · ${totalFailedBatches} batch${totalFailedBatches === 1 ? "" : "es"} failed${engageFailureMessage ? ` (${engageFailureMessage})` : ""}`,
+        "info",
+      );
+    } else {
+      showToast(
+        `Launch PAIR failed${engageFailureMessage ? `: ${engageFailureMessage}` : ""}`,
+        "error",
+      );
+    }
+
+    setLaunchProgress(prev => ({
+      ...prev,
+      phase: totalFailedBatches === 0 ? "completed" : (totalSaved > 0 ? "completed" : "failed"),
+      totalSaved,
+      totalEngaged,
+      totalFailedBatches,
+      finalMessage: engageFailureMessage ?? undefined,
+    }));
+
+    if (totalSaved > 0 && !options?.skipRedirect) {
+      setTimeout(() => {
+        setLaunchProgress(initialLaunchProgress);
+        if (jobIdForEngage) {
+          router.push(`/jobs/${encodeURIComponent(jobIdForEngage)}/rankings`);
+        } else {
+          router.push(`/`);
+        }
+      }, 1500);
+    }
+
+    return { success: totalSaved > 0, savedCount: totalSaved };
   };
 
   // Entry point wired to Launch PAIR. Before save, auto-enrich selected
@@ -5795,13 +5972,63 @@ function NewJobPageContent() {
       step: 5,
       selected_candidates_count: selectedCandidates.size,
     });
+
+    // Persist the latest Step-5 sourcing state before launching so titles /
+    // skills / filter tweaks made just-now survive the launch round-trip.
+    await saveJobDraft({ currentStep: 5, saveType: "auto", skipToast: true });
+
     setIsEnrichingContacts(true);
     try {
+      if (IS_QA_CURATE) {
+        // QA mode: skip ZoomInfo auto-enrichment and the immediate launch path.
+        // Open the contact modal for EVERY selected candidate so QA can review
+        // and override mobile / email before anything fires.
+        const reviewList: MissingContactCandidate[] = [];
+        const launchJobdivaId = jobdivaId || jobData?.jobdiva_id || numericJobId || undefined;
+        for (const c of candidates) {
+          const id = String(c.candidate_id || c.id || "").trim();
+          if (!id || !selectedCandidates.has(id)) continue;
+          reviewList.push({
+            candidate_id: id,
+            name: getCandidateDisplayName(c) || c.name || "Unnamed",
+            headline: c.title || c.headline || "",
+            location: c.location || "",
+            source: c.source || "",
+            jobdiva_id: launchJobdivaId ? String(launchJobdivaId) : undefined,
+            needsPhone: true,
+            needsEmail: true,
+            currentPhone: c.phone || "",
+            currentEmail: c.email || "",
+          });
+        }
+        if (reviewList.length === 0) {
+          showToast("No candidates available to launch.", "info");
+          return;
+        }
+        setPendingLaunchOverrides({});
+        setMissingContactCandidates(reviewList);
+        setMissingContactsReviewMode(true);
+        setMissingContactsOpen(true);
+        return;
+      }
+
       const candidatesMissingPhone = candidates.filter(c => {
         const id = c.candidate_id || c.id;
         if (!selectedCandidates.has(id)) return false;
         const digits = String(c.phone || "").replace(/\D/g, "");
         return digits.length < 7;
+      });
+
+      // Open the progress modal upfront so the recruiter sees enrichment
+      // streaming. runLaunchPair will flip phase to "launching" and fill in
+      // the per-batch list once enrichment is done.
+      setLaunchProgress({
+        ...initialLaunchProgress,
+        open: true,
+        phase: candidatesMissingPhone.length > 0 ? "enriching" : "launching",
+        totalCandidates: selectedCandidates.size,
+        batchSize: LAUNCH_BATCH_SIZE,
+        enrichTotal: candidatesMissingPhone.length,
       });
 
       const contactOverrides: Record<string, { phone?: string; email?: string }> = {};
@@ -5830,6 +6057,11 @@ function NewJobPageContent() {
 
         if (!linkedinUrl) {
           missingLinkedInCount += 1;
+          setLaunchProgress(prev => ({
+            ...prev,
+            enrichDone: prev.enrichDone + 1,
+            enrichMissingLinkedIn: prev.enrichMissingLinkedIn + 1,
+          }));
           continue;
         }
 
@@ -5847,6 +6079,11 @@ function NewJobPageContent() {
 
           if (!res.ok) {
             enrichFailedCount += 1;
+            setLaunchProgress(prev => ({
+              ...prev,
+              enrichDone: prev.enrichDone + 1,
+              enrichFailed: prev.enrichFailed + 1,
+            }));
             continue;
           }
           const enriched = await res.json();
@@ -5864,12 +6101,27 @@ function NewJobPageContent() {
             } else if (phoneSource === "workPhone") {
               enrichedWorkPhoneCount += 1;
             }
+            setLaunchProgress(prev => ({
+              ...prev,
+              enrichDone: prev.enrichDone + 1,
+              enrichSucceeded: prev.enrichSucceeded + 1,
+            }));
           } else {
             noContactFoundCount += 1;
+            setLaunchProgress(prev => ({
+              ...prev,
+              enrichDone: prev.enrichDone + 1,
+              enrichNoContact: prev.enrichNoContact + 1,
+            }));
           }
         } catch {
           // Best-effort enrichment; keep launch flow moving.
           enrichFailedCount += 1;
+          setLaunchProgress(prev => ({
+            ...prev,
+            enrichDone: prev.enrichDone + 1,
+            enrichFailed: prev.enrichFailed + 1,
+          }));
         }
       }
 
@@ -5981,13 +6233,24 @@ function NewJobPageContent() {
           skipRedirect: hasNeeds,
         });
         setReadyLaunchedPendingRedirect(hasNeeds && result.success);
+        // If a needs-info pass follows, hand the screen off to
+        // MissingContactsModal — close the progress modal so the recruiter
+        // can fill in details for the rest. A second runLaunchPair call
+        // will re-open it.
+        if (hasNeeds) {
+          setLaunchProgress(initialLaunchProgress);
+        }
       } else {
         setReadyLaunchedPendingRedirect(false);
+        // No ready candidates: nothing for runLaunchPair to do, so drop
+        // the progress modal we opened upfront.
+        setLaunchProgress(initialLaunchProgress);
       }
 
       if (hasNeeds) {
         setPendingLaunchOverrides(contactOverrides);
         setMissingContactCandidates(needsInfo);
+        setMissingContactsReviewMode(false);
         setMissingContactsOpen(true);
       } else if (!hasReady) {
         showToast("No candidates available to launch.", "info");
@@ -6015,11 +6278,13 @@ function NewJobPageContent() {
     setReadyLaunchedPendingRedirect(false);
     setPendingLaunchOverrides({});
     setMissingContactCandidates([]);
+    setMissingContactsReviewMode(false);
   };
 
   const handleMissingContactsClose = () => {
     setMissingContactsOpen(false);
     setMissingContactCandidates([]);
+    setMissingContactsReviewMode(false);
     setPendingLaunchOverrides({});
     if (readyLaunchedPendingRedirect) {
       const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
@@ -7073,31 +7338,29 @@ function NewJobPageContent() {
                       variant="outline"
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50"
                       onClick={() => {
-                        const first150 = candidates
+                        const n = Math.max(1, selectBestN);
+                        const firstN = candidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
                             return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
                           })
-                          .slice(0, 150);
+                          .slice(0, n);
 
-                        // Check if all first 150 are already selected
-                        const allFirst150Selected = first150.length > 0 && first150.every(c => selectedCandidates.has(c.candidate_id || c.id));
+                        const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.id));
 
-                        if (allFirst150Selected) {
-                          // Deselect all first 150
+                        if (allFirstNSelected) {
                           setSelectedCandidates(prev => {
                             const next = new Set(prev);
-                            first150.forEach(c => {
+                            firstN.forEach(c => {
                               const id = c.candidate_id || c.id;
                               next.delete(id);
                             });
                             return next;
                           });
                         } else {
-                          // Select all first 150
                           setSelectedCandidates(prev => {
                             const next = new Set(prev);
-                            first150.forEach(c => {
+                            firstN.forEach(c => {
                               const id = c.candidate_id || c.id;
                               next.add(id);
                             });
@@ -7108,17 +7371,42 @@ function NewJobPageContent() {
                     >
                       <Star className="w-3.5 h-3.5 fill-slate-700" />
                       {(() => {
-                        const first150 = candidates
+                        const n = Math.max(1, selectBestN);
+                        const firstN = candidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
                             return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
                           })
-                          .slice(0, 150);
-                        const allFirst150Selected = first150.length > 0 && first150.every(c => selectedCandidates.has(c.candidate_id || c.id));
-                        return allFirst150Selected ? 'Deselect Best 150' : 'Select Best 150';
+                          .slice(0, n);
+                        const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.id));
+                        return allFirstNSelected ? 'Deselect Best' : 'Select Best';
                       })()
                       }
                     </Button>
+                    <input
+                      type="number"
+                      min={1}
+                      value={selectBestInput}
+                      onChange={(e) => {
+                        const raw = e.target.value;
+                        setSelectBestInput(raw);
+                        const parsed = parseInt(raw, 10);
+                        if (!isNaN(parsed) && parsed > 0) {
+                          setSelectBestN(parsed);
+                        }
+                      }}
+                      onBlur={() => {
+                        const parsed = parseInt(selectBestInput, 10);
+                        if (isNaN(parsed) || parsed <= 0) {
+                          setSelectBestN(100);
+                          setSelectBestInput("100");
+                        } else {
+                          setSelectBestInput(String(parsed));
+                        }
+                      }}
+                      aria-label="Number of best candidates to select"
+                      className="h-8 w-16 px-2 text-[13px] font-bold text-slate-700 border border-slate-200 rounded-md bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-[#6366f1]/40 focus:border-[#6366f1]"
+                    />
                     <Button
                       variant="outline"
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white"
@@ -7519,7 +7807,7 @@ function NewJobPageContent() {
               <Button
                 className="h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98] disabled:bg-slate-300 disabled:cursor-not-allowed disabled:hover:translate-y-0"
                 onClick={handleLaunchPairClick}
-                disabled={isSearching || isEnrichingContacts || isViewOnly}
+                disabled={isSearching || isEnrichingContacts || isViewOnly || launchProgress.open}
                 title={isViewOnly ? "Job activity has been stopped" : undefined}
               >
                 {isEnrichingContacts ? (
@@ -7948,6 +8236,24 @@ return (
       candidates={missingContactCandidates}
       onClose={handleMissingContactsClose}
       onAllProvided={handleMissingContactsProvided}
+      title={
+        missingContactsReviewMode
+          ? "Review candidate contacts before launch"
+          : undefined
+      }
+      description={
+        missingContactsReviewMode
+          ? "PAIR is gated in this environment — confirm or override the mobile number and email for each candidate before launching."
+          : undefined
+      }
+      primaryLabel={
+        missingContactsReviewMode ? "Confirm & launch PAIR" : undefined
+      }
+    />
+
+    <LaunchPairProgressModal
+      progress={launchProgress}
+      onClose={() => setLaunchProgress(initialLaunchProgress)}
     />
 
     {/* Paste Resume Modal (External requirement) */}

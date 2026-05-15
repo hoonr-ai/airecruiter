@@ -17,6 +17,7 @@ from core.config import (
 import httpx
 from models import SourcedCandidate
 from services.candidate_profiles_db import candidate_profiles_db
+from core.db import get_db_connection
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,15 @@ def _ensure_sourced_candidates_schema() -> None:
 
             # Hot read-path indexes for /candidates/list and /candidates/filter-options.
             # These are idempotent and run once at startup.
+            #
+            # The trio of functional indexes at the bottom (idx_sc_jobdiva_jcid,
+            # idx_sc_jobdiva_email_lc, idx_sc_jobdiva_data_email_lc) are the
+            # safety net for the N+1 hot query that was pinning Postgres at
+            # 95% CPU during auto-sync — see auto_assign_service._find_in_index
+            # for the primary fix (bulk pre-fetch + in-memory match). The
+            # indexes make any remaining or future code path that hits the
+            # same JSONB/LOWER predicates sargable, instead of seq-scanning
+            # the jobdiva_id slice.
             for stmt in (
                 "CREATE INDEX IF NOT EXISTS idx_sourced_candidates_candidate_created_at "
                 "ON sourced_candidates (candidate_id, created_at DESC)",
@@ -147,6 +157,12 @@ def _ensure_sourced_candidates_schema() -> None:
                 "ON monitored_jobs (jobdiva_id)",
                 "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_job_id "
                 "ON monitored_jobs (job_id)",
+                "CREATE INDEX IF NOT EXISTS idx_sc_jobdiva_jcid "
+                "ON sourced_candidates (jobdiva_id, ((data->>'jobdiva_candidate_id')))",
+                "CREATE INDEX IF NOT EXISTS idx_sc_jobdiva_email_lc "
+                "ON sourced_candidates (jobdiva_id, LOWER(email))",
+                "CREATE INDEX IF NOT EXISTS idx_sc_jobdiva_data_email_lc "
+                "ON sourced_candidates (jobdiva_id, (LOWER(data->>'email')))",
             ):
                 try:
                     conn.execute(text(stmt))
@@ -445,14 +461,13 @@ class SourcedCandidatesStorage:
             return []
             
         try:
-            import psycopg2
             import psycopg2.extras
             import json
-            
-            conn = psycopg2.connect(self.db_url, connect_timeout=5)
+
+            conn = get_db_connection()
             conn.autocommit = True
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-            
+
             # Robust query that handles the mapping logic in SQL
             # Same logic as get_all_candidates but filtered by job_id
             query = """
@@ -555,10 +570,9 @@ class SourcedCandidatesStorage:
             return {"candidates": [], "total": 0}
 
         try:
-            import psycopg2
             import psycopg2.extras
 
-            conn = psycopg2.connect(self.db_url, connect_timeout=5)
+            conn = get_db_connection()
             conn.autocommit = True
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
@@ -723,10 +737,9 @@ class SourcedCandidatesStorage:
             return {"jobs": [], "sources": [], "locations": []}
 
         try:
-            import psycopg2
             import psycopg2.extras
 
-            conn = psycopg2.connect(self.db_url, connect_timeout=5)
+            conn = get_db_connection()
             conn.autocommit = True
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
