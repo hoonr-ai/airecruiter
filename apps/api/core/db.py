@@ -85,8 +85,17 @@ class _PooledConnection:
         try:
             # Reset session state so the next borrower starts clean. Rollback
             # on an idle connection is a no-op; cursor_factory reset undoes
-            # any per-borrow override (e.g. RealDictCursor below).
+            # any per-borrow override (e.g. RealDictCursor below). autocommit
+            # reset prevents a borrower that flipped autocommit=True (e.g. the
+            # sourced_candidates_storage filter queries) from leaking that
+            # setting to the next borrower, which would silently break
+            # transactional callers.
             self._conn.rollback()
+        except Exception:
+            pass
+        try:
+            if getattr(self._conn, "autocommit", False):
+                self._conn.autocommit = False
         except Exception:
             pass
         try:
@@ -102,6 +111,18 @@ class _PooledConnection:
                 self._conn.close()
             except Exception:
                 pass
+
+    def __del__(self):
+        # Defensive net for callers that forget to close (no try/finally
+        # around a long block, etc.). Without this, an un-closed wrapper
+        # leaves the underlying psycopg2 conn marked "in use" by the pool
+        # forever, eventually exhausting _POOL_MAX. With this, GC reclaims
+        # the slot — late but recoverable.
+        try:
+            if not self._closed:
+                self.close()
+        except Exception:
+            pass
 
     def __getattr__(self, name):
         return getattr(self._conn, name)

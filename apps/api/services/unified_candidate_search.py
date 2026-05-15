@@ -2917,11 +2917,10 @@ class UnifiedCandidateSearch:
             return
 
         try:
-            import psycopg2
             import psycopg2.extras
-            from core.config import DATABASE_URL
+            from core.db import get_db_connection
 
-            with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+            with get_db_connection() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     cur.execute("""
                         SELECT candidate_id, candidate_name, email, phone, job_title,
