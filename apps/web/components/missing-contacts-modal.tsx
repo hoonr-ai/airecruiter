@@ -24,6 +24,8 @@ export interface MissingContactCandidate {
   jobdiva_id?: string;
   needsPhone: boolean;
   needsEmail: boolean;
+  currentPhone?: string;
+  currentEmail?: string;
 }
 
 function locationDisplay(c: { location?: string; work_location?: string }): string {
@@ -81,8 +83,14 @@ export function MissingContactsModal({
 
   useEffect(() => {
     if (open) {
-      setPhones({});
-      setEmails({});
+      const seedPhones: Record<string, string> = {};
+      const seedEmails: Record<string, string> = {};
+      for (const c of candidates) {
+        if (c.currentPhone) seedPhones[c.candidate_id] = c.currentPhone;
+        if (c.currentEmail) seedEmails[c.candidate_id] = c.currentEmail;
+      }
+      setPhones(seedPhones);
+      setEmails(seedEmails);
       setSavingPhone({});
       setSavingEmail({});
       setPhoneSavedAt({});
