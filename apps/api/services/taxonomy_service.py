@@ -94,9 +94,13 @@ def _get_conn():
     if not DATABASE_URL:
         logger.error("❌ DATABASE_URL not set in environment.")
         raise RuntimeError("DATABASE_URL is missing")
-    
-    # psycopg2 can connect directly via the DATABASE_URL string (DSN)
-    return psycopg2.connect(DATABASE_URL, connect_timeout=5)
+
+    # Route through the per-worker pool so this cache-warming step doesn't
+    # consume a Postgres-side slot outside _POOL_MAX. _PooledConnection.close()
+    # returns the slot, so the existing `try: ... finally: conn.close()`
+    # pattern at the call site (line ~129) works unchanged.
+    from core.db import get_db_connection
+    return get_db_connection()
 
 def _load_master_caches():
     """Initializes in-memory master taxonomies."""

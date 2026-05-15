@@ -2550,10 +2550,9 @@ class JobDivaService:
                 resume_id = None
                 
                 if resume_text and resume_text.strip():
-                    import psycopg2
-                    from core.config import DATABASE_URL
-                    
-                    with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
+                    from core.db import get_db_connection
+
+                    with get_db_connection() as conn:
                         with conn.cursor() as cur:
                             cur.execute("""
                                 UPDATE sourced_candidates
