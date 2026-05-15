@@ -25,6 +25,7 @@ from models import (
     ExternalJobCreateRequest,
 )
 from routers._helpers import get_db_connection, get_dict_cursor_connection
+from services.metrics_service import metrics_service
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -48,21 +49,27 @@ def _monitored_jobs_cache_key(include_archived: bool, view: str) -> str:
 def _get_cached_monitored_jobs(include_archived: bool, view: str, allow_stale: bool = False) -> Optional[Dict[str, Any]]:
     key = _monitored_jobs_cache_key(include_archived, view)
     now = time.time()
+    cached_entry = None
     with _monitored_jobs_cache_lock:
-        cached = _monitored_jobs_cache.get(key)
-        if not cached:
+        cached_entry = _monitored_jobs_cache.get(key)
+        if not cached_entry:
             return None
-        if not allow_stale and now - cached.get("ts", 0) > _MONITORED_JOBS_CACHE_TTL_SECONDS:
+        if not allow_stale and now - cached_entry.get("ts", 0) > _MONITORED_JOBS_CACHE_TTL_SECONDS:
             return None
-        return copy.deepcopy(cached.get("data"))
+        # Capture reference under lock, copy outside to avoid GIL contention
+        data_ref = cached_entry.get("data")
+    
+    return copy.deepcopy(data_ref) if data_ref is not None else None
 
 
 def _set_cached_monitored_jobs(include_archived: bool, view: str, payload: Dict[str, Any]) -> None:
     key = _monitored_jobs_cache_key(include_archived, view)
+    # Deepcopy outside lock
+    payload_copy = copy.deepcopy(payload)
     with _monitored_jobs_cache_lock:
         _monitored_jobs_cache[key] = {
             "ts": time.time(),
-            "data": copy.deepcopy(payload),
+            "data": payload_copy,
         }
 
 
@@ -162,6 +169,7 @@ def _ensure_monitored_jobs_schema() -> None:
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS user_session TEXT",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS ai_enhanced BOOLEAN DEFAULT FALSE",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS processing_stage TEXT",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS candidates_launched INTEGER DEFAULT 0",
 
             # v28: hot-path read optimizations for GET /jobs/monitored
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_active_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS NOT TRUE",
@@ -1788,10 +1796,8 @@ def _sum_metrics_for_job(
 
 def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
     """
-    Sync body for the /jobs/monitored endpoint. Runs off the event loop via
-    asyncio.to_thread so the psycopg2 round-trip does not stall concurrent
-    requests on the same worker. The DDL that used to live here moved to
-    `_ensure_monitored_jobs_schema` (called once at startup from lifespan).
+    Sync body for the /jobs/monitored endpoint. Optimized to read metrics 
+    directly from monitored_jobs columns (Read-Model pattern).
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -1805,25 +1811,11 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
         if view == "full":
             select_sql = "SELECT * FROM monitored_jobs"
         else:
-            # Summary view for dashboard/read-heavy lists. Avoid shipping heavy text/json
-            # blobs (jobdiva_description, ai_description, notes, filters, etc.) when
-            # only list-level metadata is needed.
-            #
-            # Pre-fix this query LEFT JOINed against a subquery that did
-            # `GROUP BY sc.jobdiva_id` over the entire sourced_candidates
-            # table on every dashboard load — and the join predicate's
-            # `OR metrics.sc_jobdiva_id = mj.job_id::text` cast killed any
-            # chance of using an index. The 8s statement_timeout above
-            # turned that scan into "dashboard times out under load". Now
-            # we pull `monitored_jobs` alone (covered by the existing
-            # is_archived + created_at indexes) and aggregate
-            # sourced_candidates separately, keyed by the small set of jobs
-            # we actually need — see `_aggregate_candidate_metrics`.
             select_sql = (
                 "SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name, mj.status, "
                 "mj.city, mj.state, mj.zip_code, mj.location_type, mj.priority, mj.program_duration, mj.max_allowed_submittals, "
                 "mj.processing_status, mj.is_archived, "
-                "mj.resumes_shortlisted, "
+                "mj.candidates_sourced, mj.candidates_launched, mj.complete_submissions, mj.pass_submissions, "
                 "mj.pair_external_subs, mj.feedback_completed, "
                 "mj.pair_launched_at, mj.outreach_stopped_at, mj.time_to_first_pass, mj.created_at, mj.updated_at "
                 "FROM monitored_jobs mj"
@@ -1841,35 +1833,18 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
         columns = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
 
-        # Phase 2 of the summary-view fix: bounded metrics aggregation.
-        # Gather every jobdiva_id / job_id::text key for the jobs we just
-        # fetched, then issue ONE indexed aggregate against sourced_candidates.
-        metrics_by_key: Dict[str, Dict[str, int]] = {}
-        if view != "full":
-            metric_keys: List[str] = []
-            jobdiva_col = columns.index("jobdiva_id") if "jobdiva_id" in columns else -1
-            job_id_col = columns.index("job_id") if "job_id" in columns else -1
-            for row in rows:
-                if jobdiva_col >= 0 and row[jobdiva_col]:
-                    metric_keys.append(str(row[jobdiva_col]))
-                if job_id_col >= 0 and row[job_id_col] is not None:
-                    metric_keys.append(str(row[job_id_col]))
-            metrics_by_key = _aggregate_candidate_metrics(cursor, metric_keys)
+        # Phase 2: Metrics are now pulled directly from monitored_jobs columns
+        # (Read-Model Optimization). On-the-fly aggregation is removed from the
+        # request path to eliminate the 1s-8s lag bottleneck.
 
         jobs = {}
         for row in rows:
             job_data = dict(zip(columns, row))
-            if view != "full":
-                summed = _sum_metrics_for_job(
-                    metrics_by_key,
-                    job_data.get("jobdiva_id"),
-                    job_data.get("job_id"),
-                )
-                job_data["candidates_sourced"] = summed["candidates_sourced"]
-                job_data["candidates_launched"] = summed["candidates_launched"]
-                job_data["complete_submissions"] = summed["complete_submissions"]
-                job_data["pass_submissions"] = summed["pass_submissions"]
             jid = str(job_data.get("jobdiva_id") or job_data.get("job_id"))
+            
+            # Use cached metrics from the table (Read-Model Optimization)
+            for k in ["candidates_sourced", "candidates_launched", "complete_submissions", "pass_submissions"]:
+                job_data[k] = job_data.get(k) or 0
 
             if job_data.get("created_at") and hasattr(job_data["created_at"], "isoformat"):
                 job_data["created_at"] = job_data["created_at"].isoformat()
@@ -1878,10 +1853,7 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
             if job_data.get("outreach_stopped_at") and hasattr(job_data["outreach_stopped_at"], "isoformat"):
                 job_data["outreach_stopped_at"] = job_data["outreach_stopped_at"].isoformat()
 
-            # PAIR Status Logic:
-            # - Unpublished: Job has not been launched (pair_launched_at is NULL)
-            # - Active: Job is launched, JobDiva status is OPEN, and outreach is not stopped
-            # - Inactive: Job is launched AND (outreach manually stopped OR JobDiva status non-OPEN)
+            # PAIR Status Logic
             is_published = job_data.get("pair_launched_at") is not None
             is_stopped = job_data.get("outreach_stopped_at") is not None
             raw_status = str(job_data.get("status") or "OPEN").strip().upper()
@@ -1922,6 +1894,10 @@ async def get_monitored_jobs(
     try:
         payload = await asyncio.to_thread(_get_monitored_jobs_sync, include_archived, view)
         _set_cached_monitored_jobs(include_archived, view, payload)
+        
+        # Trigger background refresh to keep the read-model fresh
+        background_tasks.add_task(metrics_service.refresh_all_active_metrics)
+        
         return payload
     except Exception as e:
         logger.error(f"Error fetching monitored jobs from DB: {e}")
