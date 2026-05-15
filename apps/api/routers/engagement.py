@@ -692,6 +692,59 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             except Exception as _stop_check_err:
                 logger.warning(f"Could not check outreach_stopped_at for job {job_id_from_payload}: {_stop_check_err}")
 
+        # Idempotency: drop candidates already at engage_status='sent' so retries
+        # or staged-launch races don't create duplicate interviews on the PAIR
+        # side. We keep their candidate_ids in skipped_already_sent so the caller
+        # can show them as already-launched in the UI.
+        skipped_already_sent: List[str] = []
+        if request.real_candidate_ids:
+            try:
+                _idem_conn = _get_db_connection()
+                try:
+                    _idem_cur = _idem_conn.cursor()
+                    _idem_cur.execute(
+                        """
+                        SELECT DISTINCT candidate_id
+                        FROM sourced_candidates
+                        WHERE candidate_id = ANY(%s)
+                          AND (jobdiva_id = %s OR jobdiva_id = %s)
+                          AND data ->> 'engage_status' = 'sent'
+                        """,
+                        (
+                            list(request.real_candidate_ids),
+                            str(job_id_from_payload or ""),
+                            str(payload_obj.get("jd", {}).get("jobdiva_id") or ""),
+                        ),
+                    )
+                    skipped_already_sent = [r[0] for r in _idem_cur.fetchall() or []]
+                    _idem_cur.close()
+                finally:
+                    _idem_conn.close()
+            except Exception as _idem_err:
+                logger.warning(f"engage idempotency check failed for job {job_id_from_payload}: {_idem_err}")
+
+        if skipped_already_sent:
+            skip_set = set(skipped_already_sent)
+            kept_indices = [
+                idx for idx, cid in enumerate(request.real_candidate_ids) if cid not in skip_set
+            ]
+            request.real_candidate_ids = [request.real_candidate_ids[i] for i in kept_indices]
+            existing_resumes = payload_obj.get("resumes") if isinstance(payload_obj, dict) else None
+            if isinstance(existing_resumes, list) and len(existing_resumes) >= max(kept_indices, default=-1) + 1:
+                payload_obj["resumes"] = [existing_resumes[i] for i in kept_indices]
+            logger.info(
+                f"engage idempotency: skipped {len(skipped_already_sent)} already-sent candidates for job {job_id_from_payload}"
+            )
+
+        if not request.real_candidate_ids:
+            return {
+                "success": True,
+                "message": "All requested candidates were already launched; nothing to send.",
+                "data": [],
+                "skipped_already_sent": skipped_already_sent,
+                "raw_response": {},
+            }
+
         is_success = False
         response_data = {}
 
@@ -973,6 +1026,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 "success": True,
                 "message": "Interview(s) sent successfully",
                 "data": interview_results,
+                "skipped_already_sent": skipped_already_sent,
                 "raw_response": response_data
             }
         else:
@@ -980,6 +1034,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 "success": False,
                 "message": response_data.get("message", f"PAIR API returned status {response.status_code}"),
                 "data": [],
+                "skipped_already_sent": skipped_already_sent,
                 "raw_response": response_data
             }
 

@@ -1,0 +1,110 @@
+{
+    "job_id": "26-11245",
+    "title_criteria": [
+        {
+            "value": "Data Engineer",
+            "match_type": "must",
+            "years": 3,
+            "recent": false,
+            "similar_terms": []
+        }
+    ],
+    "skill_criteria": [
+        {
+            "value": "Hadoop",
+            "match_type": "must",
+            "years": 4,
+            "recent": false,
+            "similar_terms": []
+        },
+        {
+            "value": "PySpark",
+            "match_type": "must",
+            "years": 4,
+            "recent": false,
+            "similar_terms": []
+        },
+        {
+            "value": "Python",
+            "match_type": "must",
+            "years": 4,
+            "recent": false,
+            "similar_terms": []
+        },
+        {
+            "value": "Spark",
+            "match_type": "must",
+            "years": 4,
+            "recent": false,
+            "similar_terms": []
+        }
+    ],
+    "keywords": [],
+    "companies": [],
+    "resume_match_filters": [
+        {
+            "category": "Required Title",
+            "value": "Data Engineer — 3+ yrs, Similar match",
+            "active": true,
+            "weight": 1
+        },
+        {
+            "category": "Required Skill",
+            "value": "Hadoop — 4+ yrs, Similar match",
+            "active": true,
+            "weight": 1
+        },
+        {
+            "category": "Required Skill",
+            "value": "PySpark — 4+ yrs, Similar match",
+            "active": true,
+            "weight": 1
+        },
+        {
+            "category": "Required Skill",
+            "value": "Python — 4+ yrs, Similar match",
+            "active": true,
+            "weight": 1
+        },
+        {
+            "category": "Required Skill",
+            "value": "Spark — 4+ yrs, Similar match",
+            "active": true,
+            "weight": 1
+        },
+        {
+            "category": "Domain",
+            "value": "Banking",
+            "active": true,
+            "weight": 1
+        },
+        {
+            "category": "Customer Req.",
+            "value": "Must not be employed by: Bank Of America",
+            "active": true,
+            "weight": 1
+        },
+        {
+            "category": "Requirement",
+            "value": "W2",
+            "active": true,
+            "weight": 1
+        },
+        {
+            "category": "Requirement",
+            "value": "Location: Jersey City, NJ.",
+            "active": true,
+            "weight": 1
+        }
+    ],
+    "location": "Jersey City, NJ",
+    "within_miles": 25,
+    "sources": [
+        "JobDiva"
+    ],
+    "boolean_string": "\"DATA ENGINEER\" OVER 3 YRS AND \"HADOOP\" OVER 4 YRS AND \"PYSPARK\" OVER 4 YRS AND \"PYTHON\" OVER 4 YRS AND \"SPARK\" OVER 4 YRS AND \"JERSEY CITY, NJ\" within 25 mi",
+    "recent_days": 90,
+    "require_resume": true,
+    "page": 1,
+    "page_size": 100
+}
