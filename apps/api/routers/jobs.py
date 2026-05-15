@@ -1700,6 +1700,92 @@ async def remove_job_from_monitoring(job_id: str):
     else:
         raise HTTPException(status_code=404, detail="Job not in monitoring list")
 
+_METRICS_ZERO = {
+    "candidates_sourced": 0,
+    "candidates_launched": 0,
+    "complete_submissions": 0,
+    "pass_submissions": 0,
+}
+
+
+def _aggregate_candidate_metrics(cursor, jobdiva_keys: List[str]) -> Dict[str, Dict[str, int]]:
+    """One bounded aggregation across the candidate-side metrics surfaced on
+    the dashboard. Replaces the pre-fix LEFT JOIN whose subquery
+    `GROUP BY sc.jobdiva_id` ran across the entire sourced_candidates table
+    on every load — and whose join predicate
+    `ON metrics.sc_jobdiva_id = mj.jobdiva_id OR metrics.sc_jobdiva_id = mj.job_id::text`
+    forced a seq scan because the `::text` cast made the second branch
+    non-sargable. With `WHERE jobdiva_id = ANY(%s)` keyed on the small set
+    of jobs we actually want, Postgres can use idx_sourced_candidates_jobdiva_id
+    and the per-row JSONB CASE WHENs only fire on the bounded slice.
+
+    Returns {key: counters} where key is whichever of `jobdiva_id`
+    (alphanumeric ref) or `job_id::text` (numeric PK) the candidate row
+    happened to be stored under. Caller sums both for each monitored job.
+    """
+    if not jobdiva_keys:
+        return {}
+    unique_keys = list({k for k in jobdiva_keys if k})
+    if not unique_keys:
+        return {}
+    cursor.execute(
+        """
+        SELECT
+            jobdiva_id,
+            COUNT(DISTINCT candidate_id)                                              AS candidates_sourced,
+            COUNT(DISTINCT candidate_id)                                              AS candidates_launched,
+            COUNT(DISTINCT CASE
+                WHEN data->>'engage_status' IN ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
+                THEN candidate_id
+            END)                                                                       AS complete_submissions,
+            COUNT(DISTINCT CASE
+                WHEN (data->>'engage_status' IN ('passed', 'pass', 'completed'))
+                  OR (LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
+                      AND (NULLIF(data->>'engage_score', '')::float >= 70))
+                THEN candidate_id
+            END)                                                                       AS pass_submissions
+        FROM sourced_candidates
+        WHERE jobdiva_id = ANY(%s)
+        GROUP BY jobdiva_id
+        """,
+        (unique_keys,),
+    )
+    out: Dict[str, Dict[str, int]] = {}
+    for row in cursor.fetchall() or []:
+        out[str(row[0])] = {
+            "candidates_sourced": int(row[1] or 0),
+            "candidates_launched": int(row[2] or 0),
+            "complete_submissions": int(row[3] or 0),
+            "pass_submissions": int(row[4] or 0),
+        }
+    return out
+
+
+def _sum_metrics_for_job(
+    metrics_by_key: Dict[str, Dict[str, int]],
+    jobdiva_id: Any,
+    job_id: Any,
+) -> Dict[str, int]:
+    """Sum counters from both possible storage keys for a single monitored job.
+    Mirrors `chat_service._sum_counts_for_job` semantics — some sourced_candidates
+    rows were written under `jobdiva_id` (alphanumeric ref), others under the
+    numeric `job_id::text`. Without summing both, dashboard counts under-count.
+    """
+    summed = dict(_METRICS_ZERO)
+    candidates = []
+    if jobdiva_id is not None and str(jobdiva_id) != "":
+        candidates.append(str(jobdiva_id))
+    if job_id is not None and str(job_id) != "":
+        candidates.append(str(job_id))
+    for key in candidates:
+        m = metrics_by_key.get(key)
+        if not m:
+            continue
+        for field in summed:
+            summed[field] += m[field]
+    return summed
+
+
 def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
     """
     Sync body for the /jobs/monitored endpoint. Runs off the event loop via
@@ -1722,36 +1808,25 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
             # Summary view for dashboard/read-heavy lists. Avoid shipping heavy text/json
             # blobs (jobdiva_description, ai_description, notes, filters, etc.) when
             # only list-level metadata is needed.
+            #
+            # Pre-fix this query LEFT JOINed against a subquery that did
+            # `GROUP BY sc.jobdiva_id` over the entire sourced_candidates
+            # table on every dashboard load — and the join predicate's
+            # `OR metrics.sc_jobdiva_id = mj.job_id::text` cast killed any
+            # chance of using an index. The 8s statement_timeout above
+            # turned that scan into "dashboard times out under load". Now
+            # we pull `monitored_jobs` alone (covered by the existing
+            # is_archived + created_at indexes) and aggregate
+            # sourced_candidates separately, keyed by the small set of jobs
+            # we actually need — see `_aggregate_candidate_metrics`.
             select_sql = (
                 "SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name, mj.status, "
                 "mj.city, mj.state, mj.zip_code, mj.location_type, mj.priority, mj.program_duration, mj.max_allowed_submittals, "
                 "mj.processing_status, mj.is_archived, "
-                "COALESCE(metrics.candidates_sourced, 0) AS candidates_sourced, "
-                "COALESCE(metrics.candidates_launched, 0) AS candidates_launched, "
                 "mj.resumes_shortlisted, "
-                "COALESCE(metrics.complete_submissions, 0) AS complete_submissions, "
-                "COALESCE(metrics.pass_submissions, 0) AS pass_submissions, "
                 "mj.pair_external_subs, mj.feedback_completed, "
                 "mj.pair_launched_at, mj.outreach_stopped_at, mj.time_to_first_pass, mj.created_at, mj.updated_at "
-                "FROM monitored_jobs mj "
-                "LEFT JOIN ("
-                "    SELECT "
-                "        sc.jobdiva_id AS sc_jobdiva_id, "
-                "        COUNT(DISTINCT sc.candidate_id) AS candidates_sourced, "
-                "        COUNT(DISTINCT sc.candidate_id) AS candidates_launched, "
-                "        COUNT(DISTINCT CASE "
-                "            WHEN sc.data->>'engage_status' IN ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail') "
-                "            THEN sc.candidate_id "
-                "        END) AS complete_submissions, "
-                "        COUNT(DISTINCT CASE "
-                "            WHEN (sc.data->>'engage_status' IN ('passed', 'pass', 'completed')) "
-                "              OR (LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed') "
-                "                  AND (NULLIF(sc.data->>'engage_score', '')::float >= 70)) "
-                "            THEN sc.candidate_id "
-                "        END) AS pass_submissions "
-                "    FROM sourced_candidates sc "
-                "    GROUP BY sc.jobdiva_id "
-                ") metrics ON metrics.sc_jobdiva_id = mj.jobdiva_id OR metrics.sc_jobdiva_id = mj.job_id::text"
+                "FROM monitored_jobs mj"
             )
 
         if include_archived:
@@ -1766,9 +1841,34 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
         columns = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
 
+        # Phase 2 of the summary-view fix: bounded metrics aggregation.
+        # Gather every jobdiva_id / job_id::text key for the jobs we just
+        # fetched, then issue ONE indexed aggregate against sourced_candidates.
+        metrics_by_key: Dict[str, Dict[str, int]] = {}
+        if view != "full":
+            metric_keys: List[str] = []
+            jobdiva_col = columns.index("jobdiva_id") if "jobdiva_id" in columns else -1
+            job_id_col = columns.index("job_id") if "job_id" in columns else -1
+            for row in rows:
+                if jobdiva_col >= 0 and row[jobdiva_col]:
+                    metric_keys.append(str(row[jobdiva_col]))
+                if job_id_col >= 0 and row[job_id_col] is not None:
+                    metric_keys.append(str(row[job_id_col]))
+            metrics_by_key = _aggregate_candidate_metrics(cursor, metric_keys)
+
         jobs = {}
         for row in rows:
             job_data = dict(zip(columns, row))
+            if view != "full":
+                summed = _sum_metrics_for_job(
+                    metrics_by_key,
+                    job_data.get("jobdiva_id"),
+                    job_data.get("job_id"),
+                )
+                job_data["candidates_sourced"] = summed["candidates_sourced"]
+                job_data["candidates_launched"] = summed["candidates_launched"]
+                job_data["complete_submissions"] = summed["complete_submissions"]
+                job_data["pass_submissions"] = summed["pass_submissions"]
             jid = str(job_data.get("jobdiva_id") or job_data.get("job_id"))
 
             if job_data.get("created_at") and hasattr(job_data["created_at"], "isoformat"):
