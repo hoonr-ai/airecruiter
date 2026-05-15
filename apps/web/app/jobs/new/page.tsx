@@ -90,6 +90,9 @@ import { API_BASE } from "@/lib/api";
 import { trackEvent } from "@/lib/analytics";
 import { logger } from "@/lib/logger";
 
+const IS_QA_CURATE =
+  typeof window !== "undefined" && window.location.hostname === "qacurate.hoonr.ai";
+
 // Utility function to clean location_type values and filter out employment terms
 function cleanLocationType(locationType: string | null | undefined): string {
   if (!locationType) return "";
@@ -651,6 +654,7 @@ function NewJobPageContent() {
   const LAUNCH_BATCH_SIZE = 15;
   const [launchProgress, setLaunchProgress] = useState<LaunchPairProgress>(initialLaunchProgress);
   const [missingContactCandidates, setMissingContactCandidates] = useState<MissingContactCandidate[]>([]);
+  const [missingContactsReviewMode, setMissingContactsReviewMode] = useState(false);
   const [pendingLaunchOverrides, setPendingLaunchOverrides] = useState<Record<string, { phone?: string; email?: string }>>({});
   const [readyLaunchedPendingRedirect, setReadyLaunchedPendingRedirect] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
@@ -1353,6 +1357,12 @@ function NewJobPageContent() {
         if (sf.locations) setSourceLocations(sf.locations);
         if (sf.companies) setSourceCompanies(sf.companies);
         if (sf.keywords) setSourceKeywords(sf.keywords);
+        if (typeof sf.recentDaysFilter === "number") setRecentDaysFilter(sf.recentDaysFilter);
+        if (typeof sf.includeNoResume === "boolean") setIncludeNoResume(sf.includeNoResume);
+        if (sf.minExperienceYears === null || typeof sf.minExperienceYears === "number") {
+          setMinExperienceYears(sf.minExperienceYears);
+        }
+        if (typeof sf.sourceLocationMiles === "number") setSourceLocationMiles(sf.sourceLocationMiles);
         console.log('✅ Restored sourcing filters from database');
       }
 
@@ -1963,7 +1973,11 @@ function NewJobPageContent() {
             skills: sourceSkills,
             locations: sourceLocations,
             companies: sourceCompanies,
-            keywords: sourceKeywords
+            keywords: sourceKeywords,
+            recentDaysFilter,
+            includeNoResume,
+            minExperienceYears,
+            sourceLocationMiles,
           },
           step1_completed: stepData.currentStep >= 1,
           step2_completed: stepData.currentStep >= 2,
@@ -1993,6 +2007,36 @@ function NewJobPageContent() {
       return false;
     }
   };
+
+  // Step 5 has no Next button (the wizard hops straight to Launch PAIR), so
+  // recruiter edits to titles / skills / filter knobs never persist unless
+  // they happen to hit Save & Exit or toggle the boolean panel. Debounce a
+  // silent auto-save whenever Step 5 sourcing state changes so reloads
+  // restore everything.
+  useEffect(() => {
+    if (currentStep !== 5) return;
+    if (isReadOnly) return;
+    if (!jobData) return;
+    const handle = setTimeout(() => {
+      saveJobDraft({ currentStep: 5, saveType: "auto", skipToast: true });
+    }, 1500);
+    return () => clearTimeout(handle);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    currentStep,
+    isReadOnly,
+    jobData,
+    searchSources,
+    sourceTitles,
+    sourceSkills,
+    sourceLocations,
+    sourceCompanies,
+    sourceKeywords,
+    recentDaysFilter,
+    includeNoResume,
+    minExperienceYears,
+    sourceLocationMiles,
+  ]);
 
   const StepIndicator = () => (
     <div className="flex items-start mb-8 relative">
@@ -5928,8 +5972,46 @@ function NewJobPageContent() {
       step: 5,
       selected_candidates_count: selectedCandidates.size,
     });
+
+    // Persist the latest Step-5 sourcing state before launching so titles /
+    // skills / filter tweaks made just-now survive the launch round-trip.
+    await saveJobDraft({ currentStep: 5, saveType: "auto", skipToast: true });
+
     setIsEnrichingContacts(true);
     try {
+      if (IS_QA_CURATE) {
+        // QA mode: skip ZoomInfo auto-enrichment and the immediate launch path.
+        // Open the contact modal for EVERY selected candidate so QA can review
+        // and override mobile / email before anything fires.
+        const reviewList: MissingContactCandidate[] = [];
+        const launchJobdivaId = jobdivaId || jobData?.jobdiva_id || numericJobId || undefined;
+        for (const c of candidates) {
+          const id = String(c.candidate_id || c.id || "").trim();
+          if (!id || !selectedCandidates.has(id)) continue;
+          reviewList.push({
+            candidate_id: id,
+            name: getCandidateDisplayName(c) || c.name || "Unnamed",
+            headline: c.title || c.headline || "",
+            location: c.location || "",
+            source: c.source || "",
+            jobdiva_id: launchJobdivaId ? String(launchJobdivaId) : undefined,
+            needsPhone: true,
+            needsEmail: true,
+            currentPhone: c.phone || "",
+            currentEmail: c.email || "",
+          });
+        }
+        if (reviewList.length === 0) {
+          showToast("No candidates available to launch.", "info");
+          return;
+        }
+        setPendingLaunchOverrides({});
+        setMissingContactCandidates(reviewList);
+        setMissingContactsReviewMode(true);
+        setMissingContactsOpen(true);
+        return;
+      }
+
       const candidatesMissingPhone = candidates.filter(c => {
         const id = c.candidate_id || c.id;
         if (!selectedCandidates.has(id)) return false;
@@ -6168,6 +6250,7 @@ function NewJobPageContent() {
       if (hasNeeds) {
         setPendingLaunchOverrides(contactOverrides);
         setMissingContactCandidates(needsInfo);
+        setMissingContactsReviewMode(false);
         setMissingContactsOpen(true);
       } else if (!hasReady) {
         showToast("No candidates available to launch.", "info");
@@ -6195,11 +6278,13 @@ function NewJobPageContent() {
     setReadyLaunchedPendingRedirect(false);
     setPendingLaunchOverrides({});
     setMissingContactCandidates([]);
+    setMissingContactsReviewMode(false);
   };
 
   const handleMissingContactsClose = () => {
     setMissingContactsOpen(false);
     setMissingContactCandidates([]);
+    setMissingContactsReviewMode(false);
     setPendingLaunchOverrides({});
     if (readyLaunchedPendingRedirect) {
       const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
@@ -8151,6 +8236,19 @@ return (
       candidates={missingContactCandidates}
       onClose={handleMissingContactsClose}
       onAllProvided={handleMissingContactsProvided}
+      title={
+        missingContactsReviewMode
+          ? "Review candidate contacts before launch"
+          : undefined
+      }
+      description={
+        missingContactsReviewMode
+          ? "PAIR is gated in this environment — confirm or override the mobile number and email for each candidate before launching."
+          : undefined
+      }
+      primaryLabel={
+        missingContactsReviewMode ? "Confirm & launch PAIR" : undefined
+      }
     />
 
     <LaunchPairProgressModal
