@@ -31,6 +31,7 @@ from core.email import (
 )
 from services.jobdiva import jobdiva_service
 from services.auto_assign_service import auto_assign_service
+from services.metrics_service import metrics_service
 from core import (
     JOBDIVA_PAIR_RECRUITER_ID,
     JOBDIVA_PAIR_QUALIFICATION_NAME,
@@ -1006,6 +1007,9 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 # Applicants are assigned to rankings with match_score=0 (N/A).
                 logger.info(f"🚀 [Engagement] Initial launch detected for job {job_id_from_payload}. Triggering applicant sync.")
                 asyncio.create_task(auto_assign_service.synchronize_job_applicants(job_id_from_payload))
+            
+            # Refresh recruitment counts (Launched, etc.) for the dashboard
+            asyncio.create_task(asyncio.to_thread(metrics_service.refresh_job_metrics, job_id_from_payload))
 
             # Manual rankings Screen sends should create the interview only.
             # Wizard Launch/re-source flows pass notify_recruiters=True so the
