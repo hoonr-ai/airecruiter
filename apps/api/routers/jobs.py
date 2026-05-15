@@ -1879,6 +1879,7 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
 
 @router.get("/jobs/monitored")
 async def get_monitored_jobs(
+    background_tasks: BackgroundTasks,
     include_archived: bool = False,
     view: str = Query("summary", pattern="^(summary|full)$")
 ):
