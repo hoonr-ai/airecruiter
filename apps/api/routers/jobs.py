@@ -37,10 +37,6 @@ logger = logging.getLogger(__name__)
 # in-memory data instead of waiting 60-90s for lock release.
 _monitored_jobs_cache: Dict[str, Dict[str, Any]] = {}
 _monitored_jobs_cache_lock = threading.Lock()
-_monitored_jobs_metrics_refresh_lock = threading.Lock()
-_monitored_jobs_metrics_refresh_state_lock = threading.Lock()
-_monitored_jobs_metrics_refresh_started_at = 0.0
-_MONITORED_JOBS_METRICS_REFRESH_INTERVAL_SECONDS = 30.0
 _MONITORED_JOBS_CACHE_TTL_SECONDS = 30
 _MONITORED_JOBS_LOCK_TIMEOUT_MS = 2000
 _MONITORED_JOBS_STATEMENT_TIMEOUT_MS = 8000
@@ -85,50 +81,6 @@ def invalidate_monitored_jobs_cache() -> None:
     """
     with _monitored_jobs_cache_lock:
         _monitored_jobs_cache.clear()
-
-def _run_monitored_jobs_metrics_refresh() -> None:
-    """Refresh cached dashboard counters out of band, but never let request
-    traffic trigger overlapping global recomputes.
-    """
-    started_at = time.perf_counter()
-    logger.info("monitored_jobs.metrics_refresh.started")
-    try:
-        metrics_service.refresh_all_active_metrics()
-        logger.info(
-            "monitored_jobs.metrics_refresh.completed duration_ms=%d",
-            round((time.perf_counter() - started_at) * 1000),
-        )
-    except Exception:
-        logger.exception("monitored_jobs.metrics_refresh.failed")
-        raise
-    finally:
-        invalidate_monitored_jobs_cache()
-        _monitored_jobs_metrics_refresh_lock.release()
-
-def _schedule_monitored_jobs_metrics_refresh(background_tasks: BackgroundTasks) -> None:
-    """Throttle full-table metrics refreshes so page loads stay read-heavy."""
-    global _monitored_jobs_metrics_refresh_started_at
-
-    now = time.time()
-    with _monitored_jobs_metrics_refresh_state_lock:
-        last_started_at = _monitored_jobs_metrics_refresh_started_at
-
-    if now - last_started_at < _MONITORED_JOBS_METRICS_REFRESH_INTERVAL_SECONDS:
-        logger.info(
-            "monitored_jobs.metrics_refresh.skipped reason=throttled seconds_since_last=%d",
-            round(now - last_started_at),
-        )
-        return
-
-    if not _monitored_jobs_metrics_refresh_lock.acquire(blocking=False):
-        logger.info("monitored_jobs.metrics_refresh.skipped reason=already_running")
-        return
-
-    with _monitored_jobs_metrics_refresh_state_lock:
-        _monitored_jobs_metrics_refresh_started_at = now
-
-    logger.info("monitored_jobs.metrics_refresh.scheduled")
-    background_tasks.add_task(_run_monitored_jobs_metrics_refresh)
 
 
 # Proxies to scheduler-tangled helpers that remain in main.py.
@@ -1944,8 +1896,8 @@ async def get_monitored_jobs(
         payload = await asyncio.to_thread(_get_monitored_jobs_sync, include_archived, view)
         _set_cached_monitored_jobs(include_archived, view, payload)
         
-        # Throttle background refreshes to prevent QA database starvation
-        _schedule_monitored_jobs_metrics_refresh(background_tasks)
+        # Trigger background refresh to keep the read-model fresh
+        background_tasks.add_task(metrics_service.refresh_all_active_metrics)
         
         return payload
     except Exception as e:
