@@ -136,49 +136,39 @@ class MetricsService:
                 if not jobs:
                     return
 
-                # Process in batches of 10 to prevent 100% CPU spikes on smaller databases (like QA)
-                batch_size = 10
-                for i in range(0, len(jobs), batch_size):
-                    batch = jobs[i:i + batch_size]
-                    
-                    batch_keys = []
-                    for j in batch:
-                        if j["jobdiva_id"]: batch_keys.append(str(j["jobdiva_id"]))
-                        if j["job_id"]: batch_keys.append(str(j["job_id"]))
-                    
-                    if not batch_keys:
-                        continue
-                        
-                    # 1. Aggregate metrics in bulk for this batch
-                    metrics = self._aggregate_candidate_metrics(cur, list(set(batch_keys)))
-                    
-                    # 2. Prepare data for bulk update
-                    update_data = []
-                    for j in batch:
-                        jid, jdid = j["job_id"], j["jobdiva_id"]
-                        stats = self._sum_metrics_for_job(metrics, jdid, jid)
-                        update_data.append((
-                            jid,
-                            stats["candidates_sourced"],
-                            stats["candidates_launched"],
-                            stats["complete_submissions"],
-                            stats["pass_submissions"]
-                        ))
+                all_keys = []
+                for j in jobs:
+                    if j["jobdiva_id"]: all_keys.append(str(j["jobdiva_id"]))
+                    if j["job_id"]: all_keys.append(str(j["job_id"]))
+                
+                # 1. Aggregate metrics in bulk
+                metrics = self._aggregate_candidate_metrics(cur, list(set(all_keys)))
+                
+                # 2. Prepare data for bulk update
+                update_data = []
+                for j in jobs:
+                    jid, jdid = j["job_id"], j["jobdiva_id"]
+                    stats = self._sum_metrics_for_job(metrics, jdid, jid)
+                    update_data.append((
+                        jid,
+                        stats["candidates_sourced"],
+                        stats["candidates_launched"],
+                        stats["complete_submissions"],
+                        stats["pass_submissions"]
+                    ))
 
-                    # 3. Perform bulk update using execute_values
-                    if update_data:
-                        execute_values(cur, """
-                            UPDATE monitored_jobs AS mj SET
-                                candidates_sourced = stats.cs,
-                                candidates_launched = stats.cl,
-                                complete_submissions = stats.cms,
-                                pass_submissions = stats.ps
-                            FROM (VALUES %s) AS stats(jid, cs, cl, cms, ps)
-                            WHERE mj.job_id = stats.jid::uuid
-                        """, update_data)
-                        
-                        conn.commit()
-                        
+                # 3. Perform bulk update using execute_values
+                execute_values(cur, """
+                    UPDATE monitored_jobs AS mj SET
+                        candidates_sourced = stats.cs,
+                        candidates_launched = stats.cl,
+                        complete_submissions = stats.cms,
+                        pass_submissions = stats.ps
+                    FROM (VALUES %s) AS stats(jid, cs, cl, cms, ps)
+                    WHERE mj.job_id = stats.jid::uuid
+                """, update_data)
+                
+                conn.commit()
             logger.info(f"📊 Global recruitment metrics refresh complete for {len(jobs)} jobs")
         except Exception as e:
             logger.error(f"Failed global metrics refresh: {e}", exc_info=True)
