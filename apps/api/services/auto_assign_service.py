@@ -189,33 +189,6 @@ class AutoAssignService:
             payload["jobdiva_candidate_id"] = candidate_id
         return payload
 
-    async def _defer_normalized_candidate_upserts(
-        self,
-        target_job_id: str,
-        candidates: List[Dict[str, Any]],
-    ) -> None:
-        """Persist normalized candidate tables after the hot sync loop.
-
-        These writes are useful, but they are not needed for the jobs
-        dashboard request path, so keep them off the critical portion of
-        applicant sync.
-        """
-        if not candidates:
-            return
-        try:
-            await asyncio.to_thread(
-                candidate_profiles_db.bulk_upsert_candidates,
-                target_job_id,
-                candidates,
-                "JobDiva-Applicants",
-            )
-        except Exception as e:
-            logger.warning(
-                "[AutoAssignService] Deferred normalized upsert failed for job %s: %s",
-                target_job_id,
-                e,
-            )
-
     async def _count_external_curate_submittals(self, numeric_job_id) -> int:
         """
         Count external curate submittals for a job.
@@ -539,7 +512,6 @@ class AutoAssignService:
             # _PooledConnection wrapper makes borrow/release cheap (no
             # reconnect — just a list pop on the warm pool).
             total_assigned = 0
-            normalized_candidates: List[Dict[str, Any]] = []
             # Track IDs of rows we INSERTed (not updates) so the caller can
             # auto-launch interviews only for genuinely new applicants. We
             # never want to re-engage someone who's already been engaged.
@@ -643,19 +615,15 @@ class AutoAssignService:
                             newly_inserted_ids.append(candidate_id)
                             existing_ids.add(candidate_id)
 
-                    normalized_candidates.append(cand)
+                    # Populate normalized tables
+                    try:
+                        candidate_profiles_db.upsert_candidate(target_job_id, cand, cand.get("source", "JobDiva-Applicants"))
+                    except Exception as norm_err:
+                        logger.warning(f"[AutoAssignService] Failed normalized upsert for {candidate_id}: {norm_err}")
                 except Exception as row_err:
                     logger.warning(f"[AutoAssignService] Failed upsert for {cand.get('candidate_id')}: {row_err}")
 
             logger.info(f"✅ [AutoAssignService] Completed. Total assigned: {total_assigned} for job {target_job_id}")
-
-            if normalized_candidates:
-                asyncio.create_task(
-                    self._defer_normalized_candidate_upserts(
-                        target_job_id,
-                        normalized_candidates,
-                    )
-                )
 
             # 5. Update performance metrics (Time to First Pass, External Subs, etc.)
             await self.refresh_job_performance_metrics(target_job_id)

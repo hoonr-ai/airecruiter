@@ -37,7 +37,6 @@ logger = logging.getLogger(__name__)
 # in-memory data instead of waiting 60-90s for lock release.
 _monitored_jobs_cache: Dict[str, Dict[str, Any]] = {}
 _monitored_jobs_cache_lock = threading.Lock()
-_monitored_jobs_cache_refresh_lock = threading.Lock()
 _monitored_jobs_metrics_refresh_lock = threading.Lock()
 _monitored_jobs_metrics_refresh_state_lock = threading.Lock()
 _monitored_jobs_metrics_refresh_started_at = 0.0
@@ -86,38 +85,6 @@ def invalidate_monitored_jobs_cache() -> None:
     """
     with _monitored_jobs_cache_lock:
         _monitored_jobs_cache.clear()
-
-
-def _refresh_monitored_jobs_cache(include_archived: bool, view: str) -> None:
-    """Best-effort cache refresh for dashboard reads.
-
-    Only one refresh runs at a time so multiple stale reads do not stampede
-    the DB during contention windows.
-    """
-    if not _monitored_jobs_cache_refresh_lock.acquire(blocking=False):
-        return
-    try:
-        payload = _get_monitored_jobs_sync(include_archived, view)
-        _set_cached_monitored_jobs(include_archived, view, payload)
-    except Exception as e:
-        logger.warning(
-            "monitored_jobs.cache_refresh_failed include_archived=%s view=%s error=%s",
-            include_archived,
-            view,
-            e,
-        )
-    finally:
-        _monitored_jobs_cache_refresh_lock.release()
-
-
-async def warm_monitored_jobs_cache() -> None:
-    """Preload the summary dashboard cache so cold starts do not block the
-    first recruiter behind a contested DB read.
-    """
-    await asyncio.gather(
-        asyncio.to_thread(_refresh_monitored_jobs_cache, False, "summary"),
-        asyncio.to_thread(_refresh_monitored_jobs_cache, True, "summary"),
-    )
 
 def _run_monitored_jobs_metrics_refresh() -> None:
     """Refresh cached dashboard counters out of band, but never let request
@@ -1972,14 +1939,6 @@ async def get_monitored_jobs(
     if cached is not None:
         cached["source"] = "cache"
         return cached
-
-    stale_cached = _get_cached_monitored_jobs(include_archived, view, allow_stale=True)
-    if stale_cached is not None:
-        stale_cached["source"] = "cache_stale"
-        stale_cached["warning"] = "Returned stale cache while refreshing monitored jobs"
-        background_tasks.add_task(_refresh_monitored_jobs_cache, include_archived, view)
-        _schedule_monitored_jobs_metrics_refresh(background_tasks)
-        return stale_cached
 
     try:
         payload = await asyncio.to_thread(_get_monitored_jobs_sync, include_archived, view)
