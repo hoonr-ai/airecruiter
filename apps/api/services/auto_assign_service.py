@@ -8,7 +8,6 @@ from core.config import DATABASE_URL, JOBDIVA_PAIR_QUALIFICATION_NAME, JOBDIVA_P
 from core.db import get_db_connection
 from services.unified_candidate_search import SearchCriteria, unified_search_service
 from services.candidate_profiles_db import candidate_profiles_db
-from services.metrics_service import metrics_service
 
 logger = logging.getLogger(__name__)
 
@@ -686,10 +685,6 @@ class AutoAssignService:
                         (ext_subs, feedback_count, time_to_pass, str(target_job_id), str(target_job_id))
                     )
                     conn.commit()
-            
-            # Refresh recruitment counts (sourced, launched, etc.)
-            metrics_service.refresh_job_metrics(target_job_id)
-            
             logger.info(f"📊 [AutoAssignService] Metrics refreshed for {target_job_id}: pass_time={time_to_pass}min, ext_subs={ext_subs}, feedback={feedback_count}")
         except Exception as e:
             logger.warning(f"[AutoAssignService] Metrics refresh failed for job {target_job_id}: {e}")
