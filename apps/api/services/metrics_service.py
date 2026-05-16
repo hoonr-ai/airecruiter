@@ -81,7 +81,6 @@ class MetricsService:
 
     def refresh_job_metrics(self, job_id_or_jobdiva_id: str) -> None:
         """Recalculate and update metrics for a single job."""
-        conn = None
         try:
             conn = get_db_connection()
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -115,25 +114,19 @@ class MetricsService:
                     jid
                 ))
                 conn.commit()
+            conn.close()
         except Exception as e:
             logger.error(f"Failed to refresh metrics for job {job_id_or_jobdiva_id}: {e}")
-        finally:
-            if conn:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-
 
     def refresh_all_active_metrics(self) -> None:
         """Recalculate and update metrics for all non-archived jobs in a single batch update."""
-        conn = None
         try:
             conn = get_db_connection()
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute("SELECT job_id, jobdiva_id FROM monitored_jobs WHERE is_archived IS NOT TRUE")
                 jobs = cur.fetchall()
                 if not jobs:
+                    conn.close()
                     return
 
                 all_keys = []
@@ -169,14 +162,9 @@ class MetricsService:
                 """, update_data)
                 
                 conn.commit()
+            conn.close()
             logger.info(f"📊 Global recruitment metrics refresh complete for {len(jobs)} jobs")
         except Exception as e:
-            logger.error(f"Failed global metrics refresh: {e}", exc_info=True)
-        finally:
-            if conn:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+            logger.error(f"Failed global metrics refresh: {e}")
 
 metrics_service = MetricsService()
