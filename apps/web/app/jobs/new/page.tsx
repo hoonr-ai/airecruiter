@@ -1933,12 +1933,20 @@ function NewJobPageContent() {
       return false;
     }
 
+    // Bound the save fetch — the backend save now caps its transaction at
+    // 10s (lock_timeout=2s, statement_timeout=10s in save_job_draft), so 20s
+    // gives the server a comfortable window to either succeed or return a
+    // 500 with a real error. Without this, a hung backend (e.g. row-lock
+    // contention pre-fix) left the user staring at a silent spinner.
+    const saveController = new AbortController();
+    const saveTimeoutId = setTimeout(() => saveController.abort(), 20000);
     try {
       const apiUrl = API_BASE;
       // Use the new endpoint that saves directly to monitored_jobs
       const response = await fetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: saveController.signal,
         body: JSON.stringify({
           job_id: numericJobId || jobdivaId,
           jobdiva_id: jobdivaId || jobData?.jobdiva_id || jobData?.id?.toString(),
@@ -2001,10 +2009,15 @@ function NewJobPageContent() {
     } catch (error) {
       console.error("Error saving job to monitored jobs:", error);
       if (!stepData.skipToast) {
-        const errorMsg = error instanceof Error ? error.message : "Failed to save. Please try again.";
+        const isAbort = error instanceof DOMException && error.name === "AbortError";
+        const errorMsg = isAbort
+          ? "Save timed out — please retry."
+          : error instanceof Error ? error.message : "Failed to save. Please try again.";
         showToast(errorMsg, "error");
       }
       return false;
+    } finally {
+      clearTimeout(saveTimeoutId);
     }
   };
 

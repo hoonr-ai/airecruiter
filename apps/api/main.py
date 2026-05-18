@@ -187,8 +187,14 @@ async def lifespan(app: FastAPI):
                 payload = await asyncio.to_thread(sync_fn, include_archived, "summary")
                 setter(include_archived, "summary", payload)
             except Exception as e:  # noqa: BLE001
-                logger.warning(
-                    f"monitored_jobs_cache_warmer skipped (include_archived={include_archived}): {e}"
+                # Escalated from warning → error with traceback. A failing
+                # warmer is the upstream cause of cold-cache → frontend
+                # AbortError on the dashboard; on qacurate it stayed buried
+                # at warning level and the actual DB/schema fault was
+                # invisible. Surface it loudly so monitoring catches it.
+                logger.error(
+                    f"monitored_jobs_cache_warmer failed (include_archived={include_archived}): {e}",
+                    exc_info=True,
                 )
 
     scheduler.add_job(

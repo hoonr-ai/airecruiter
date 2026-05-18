@@ -56,6 +56,11 @@ export default function DashboardPage() {
   // (the latest attempt timed out or errored). The list still renders so
   // the user never sees a blank dashboard during a backend slow spike.
   const [isStale, setIsStale] = useState(false);
+  // True when the fetch failed AND we have no prior data to show — i.e.
+  // first-load failure or 200-empty fallback from the backend. Renders an
+  // explicit "Couldn't load — retry" banner instead of leaving the page
+  // silently blank.
+  const [loadFailed, setLoadFailed] = useState(false);
 
   // Archive dialog state
   const [archiveDialogOpen, setArchiveDialogOpen] = useState(false);
@@ -91,11 +96,14 @@ export default function DashboardPage() {
 
   const fetchJobs = async () => {
     setIsLoading(true);
-    // Bound the fetch — backend `/jobs/monitored` can spike to 20-30s during
-    // poll-loop lock contention. Aborting after 8s and falling back to the
-    // last successful list keeps the dashboard from going blank.
+    // Bound the fetch at 15s. Backend statement_timeout is 5s, so the live
+    // query either succeeds, fails-fast, or falls through to the 200-empty
+    // path well inside this window. The previous 8s budget raced the
+    // server's own 8s statement_timeout — under contention the server would
+    // return a 200-empty around the 8-9s mark but the client had already
+    // aborted, so the dashboard rendered blank with no signal to the user.
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
     try {
       const includeArchived = activeTab === "archived";
       const response = await fetch(
@@ -144,12 +152,18 @@ export default function DashboardPage() {
       setAllJobs(jobs);
       setFilteredJobs(jobs);
       setIsStale(false);
+      // Backend's 200-empty fallback signals via `source: "error"`. Treat
+      // the same as a fetch failure UX-wise — empty list + retry banner —
+      // since the underlying DB/cache failed even though HTTP succeeded.
+      setLoadFailed(data?.source === "error");
     } catch (error) {
       console.error("Error fetching jobs:", error);
       // Keep showing whatever we had before. Mark the list as stale so the
       // user sees something is off, instead of a blank "No job results" pane.
       if (allJobs.length > 0) {
         setIsStale(true);
+      } else {
+        setLoadFailed(true);
       }
     } finally {
       clearTimeout(timeoutId);
@@ -304,6 +318,22 @@ export default function DashboardPage() {
             <button
               type="button"
               className="font-semibold underline decoration-amber-400 underline-offset-2 hover:text-amber-900"
+              onClick={fetchJobs}
+            >
+              Retry
+            </button>
+          </span>
+        </div>
+      )}
+
+      {loadFailed && !isStale && (
+        <div className="mt-2 flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-800">
+          <AlertTriangle className="h-4 w-4" />
+          <span>
+            Couldn’t load jobs.{" "}
+            <button
+              type="button"
+              className="font-semibold underline decoration-red-400 underline-offset-2 hover:text-red-900"
               onClick={fetchJobs}
             >
               Retry
