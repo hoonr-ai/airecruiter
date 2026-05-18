@@ -464,7 +464,15 @@ class AutoAssignService:
                 companies=sourcing_filters.get("companies") or [],
                 resume_match_filters=resume_match_filters,
                 location=primary_location,
-                page_size=500,
+                # Capped at 100 (was 500). The 15-min auto-sync doesn't need
+                # to pull half a thousand applicants per cycle — JobDiva
+                # typically returns <50 fresh hits between cycles, and the
+                # per-candidate upsert loop below was the dominant source of
+                # pool contention and row-lock collisions with concurrent
+                # wizard saves. The earlier 100-cap hotfix capped *after*
+                # fetch; doing it here at the criteria level avoids the
+                # wasted network/LLM work too.
+                page_size=100,
                 # Explicit applicants source so auto-sync remains applicant-only
                 # even though Step-5 "JobDiva" now maps to talent search only.
                 sources=["JobDiva Applicants"],
@@ -501,20 +509,128 @@ class AutoAssignService:
                 | set(candidate_index["by_jcid"].keys())
             )
 
-            # 4. Process candidates.
-            # Borrow + commit + release per candidate rather than holding one
-            # connection (and one open txn) for the entire streaming search.
-            # The pre-fix shape parked a pool slot for 30s–2min while awaiting
-            # LLM/JobDiva/Exa between events, accumulated row locks across
-            # every ON CONFLICT DO UPDATE, and grew WAL as one giant txn.
-            # With per-row commit the slot is held for ms of DB work; the
-            # _PooledConnection wrapper makes borrow/release cheap (no
-            # reconnect — just a list pop on the warm pool).
+            # 4. Process candidates in BATCHES.
+            # Pre-fix this was a per-candidate borrow loop: for 500 candidates
+            # the sync paid ~1000 pool borrows (one for sourced_candidates +
+            # one for candidate_profiles_db.upsert_candidate) and acquired
+            # ~1000 row locks across two tables — and that ran for every
+            # active job every 15min. With a 20-slot pool and 8 workers, that
+            # was the dominant trigger of the wizard's "save hangs" symptom:
+            # whenever a save tried to UPDATE monitored_jobs WHERE job_id=X,
+            # the sync's metrics refresh for X was holding the same row, and
+            # the pool was saturated by candidate writes from other jobs.
+            #
+            # Now we accumulate updates / inserts / profile-upserts into
+            # lists and flush in chunks of _CANDIDATE_BATCH_SIZE via
+            # execute_values. Cuts pool borrows from ~1000 to ~6 per job,
+            # and the rows touched in any one transaction stay bounded so
+            # the row-lock window for any single sourced_candidates row is
+            # measured in ms, not seconds.
+            _CANDIDATE_BATCH_SIZE = 50
             total_assigned = 0
             # Track IDs of rows we INSERTed (not updates) so the caller can
             # auto-launch interviews only for genuinely new applicants. We
             # never want to re-engage someone who's already been engaged.
             newly_inserted_ids: List[str] = []
+
+            update_batch: List[tuple] = []
+            insert_batch: List[tuple] = []
+            profile_batch: List[Dict[str, Any]] = []
+
+            def _flush_batches() -> None:
+                """Flush the accumulated update / insert / profile batches.
+
+                Each flush is one connection borrow per table touched —
+                three at most: one for sourced_candidates updates, one for
+                sourced_candidates inserts, one for the candidate_profiles
+                family. All three carry SET LOCAL timeouts so a single
+                slow batch can't pin a pool slot.
+                """
+                if update_batch:
+                    try:
+                        with self._get_db_connection() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("SET LOCAL lock_timeout = '2000ms'")
+                                cur.execute("SET LOCAL statement_timeout = '10000ms'")
+                                psycopg2.extras.execute_values(
+                                    cur,
+                                    """
+                                    UPDATE sourced_candidates AS sc SET
+                                        email       = COALESCE(NULLIF(sc.email, ''), v.email),
+                                        phone       = COALESCE(NULLIF(sc.phone, ''), v.phone),
+                                        headline    = COALESCE(NULLIF(sc.headline, ''), v.headline),
+                                        location    = COALESCE(NULLIF(sc.location, ''), v.location),
+                                        profile_url = COALESCE(NULLIF(sc.profile_url, ''), v.profile_url),
+                                        resume_text = COALESCE(NULLIF(sc.resume_text, ''), v.resume_text),
+                                        data        = v.data,
+                                        updated_at  = CURRENT_TIMESTAMP
+                                    FROM (VALUES %s) AS v (
+                                        id, email, phone, headline, location,
+                                        profile_url, resume_text, data
+                                    )
+                                    WHERE sc.id = v.id
+                                    """,
+                                    update_batch,
+                                    template="(%s, %s, %s, %s, %s, %s, %s, %s::jsonb)",
+                                )
+                    except Exception as upd_err:
+                        logger.warning(
+                            f"[AutoAssignService] Update batch failed for {target_job_id}: {upd_err}"
+                        )
+                    update_batch.clear()
+
+                if insert_batch:
+                    try:
+                        with self._get_db_connection() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("SET LOCAL lock_timeout = '2000ms'")
+                                cur.execute("SET LOCAL statement_timeout = '10000ms'")
+                                psycopg2.extras.execute_values(
+                                    cur,
+                                    """
+                                    INSERT INTO sourced_candidates (
+                                        jobdiva_id, candidate_id, source, name, email, phone,
+                                        headline, location, profile_url, resume_text, data,
+                                        status, resume_match_percentage, updated_at
+                                    ) VALUES %s
+                                    ON CONFLICT (jobdiva_id, candidate_id, source) DO UPDATE SET
+                                        name        = EXCLUDED.name,
+                                        email       = EXCLUDED.email,
+                                        phone       = EXCLUDED.phone,
+                                        headline    = EXCLUDED.headline,
+                                        location    = EXCLUDED.location,
+                                        profile_url = EXCLUDED.profile_url,
+                                        resume_text = EXCLUDED.resume_text,
+                                        data        = EXCLUDED.data,
+                                        status      = EXCLUDED.status,
+                                        resume_match_percentage = EXCLUDED.resume_match_percentage,
+                                        updated_at  = CURRENT_TIMESTAMP
+                                    """,
+                                    insert_batch,
+                                    template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, CURRENT_TIMESTAMP)",
+                                )
+                    except Exception as ins_err:
+                        logger.warning(
+                            f"[AutoAssignService] Insert batch failed for {target_job_id}: {ins_err}"
+                        )
+                    insert_batch.clear()
+
+                if profile_batch:
+                    try:
+                        # bulk_upsert_candidates now uses one connection per
+                        # call (was one per candidate), so passing the full
+                        # batch costs a single pool borrow.
+                        candidate_profiles_db.bulk_upsert_candidates(
+                            target_job_id,
+                            list(profile_batch),
+                            source="JobDiva-Applicants",
+                        )
+                    except Exception as norm_err:
+                        logger.warning(
+                            f"[AutoAssignService] Profile batch failed for {target_job_id}: {norm_err}"
+                        )
+                    profile_batch.clear()
+
             async for event in unified_search_service.search_candidates(criteria):
                 if event.get("type") == "stage":
                     logger.debug(f"🤖 [AutoAssignService] Sync Stage for {target_job_id}: {event.get('data')}")
@@ -534,33 +650,16 @@ class AutoAssignService:
                             except Exception:
                                 existing_data = {}
                         merged_data = self._build_candidate_payload(cand, candidate_id, existing_data)
-                        with self._get_db_connection() as conn:
-                            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                                cur.execute(
-                                    """
-                                    UPDATE sourced_candidates
-                                    SET
-                                        email = COALESCE(NULLIF(email, ''), %s),
-                                        phone = COALESCE(NULLIF(phone, ''), %s),
-                                        headline = COALESCE(NULLIF(headline, ''), %s),
-                                        location = COALESCE(NULLIF(location, ''), %s),
-                                        profile_url = COALESCE(NULLIF(profile_url, ''), %s),
-                                        resume_text = COALESCE(NULLIF(resume_text, ''), %s),
-                                        data = %s,
-                                        updated_at = CURRENT_TIMESTAMP
-                                    WHERE id = %s
-                                    """,
-                                    (
-                                        cand.get("email"),
-                                        cand.get("phone"),
-                                        cand.get("headline") or cand.get("title"),
-                                        cand.get("location"),
-                                        cand.get("profile_url"),
-                                        cand.get("resume_text"),
-                                        json.dumps(merged_data),
-                                        existing_row["id"],
-                                    ),
-                                )
+                        update_batch.append((
+                            existing_row["id"],
+                            cand.get("email"),
+                            cand.get("phone"),
+                            cand.get("headline") or cand.get("title"),
+                            cand.get("location"),
+                            cand.get("profile_url"),
+                            cand.get("resume_text"),
+                            json.dumps(merged_data),
+                        ))
                         existing_ids.add(candidate_id)
                     else:
                         if candidate_id in existing_ids:
@@ -570,57 +669,42 @@ class AutoAssignService:
                             self._build_candidate_payload(cand, candidate_id)
                         )
 
-                        with self._get_db_connection() as conn:
-                            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                                cur.execute("""
-                                    INSERT INTO sourced_candidates (
-                                        jobdiva_id, candidate_id, source, name, email, phone,
-                                        headline, location, profile_url, resume_text, data, status,
-                                        resume_match_percentage, updated_at
-                                    ) VALUES (
-                                        %s, %s, %s, %s, %s, %s,
-                                        %s, %s, %s, %s, %s, %s,
-                                        %s, CURRENT_TIMESTAMP
-                                    )
-                                    ON CONFLICT (jobdiva_id, candidate_id, source) DO UPDATE SET
-                                        name       = EXCLUDED.name,
-                                        email      = EXCLUDED.email,
-                                        phone      = EXCLUDED.phone,
-                                        headline   = EXCLUDED.headline,
-                                        location   = EXCLUDED.location,
-                                        profile_url= EXCLUDED.profile_url,
-                                        resume_text= EXCLUDED.resume_text,
-                                        data       = EXCLUDED.data,
-                                        status     = EXCLUDED.status,
-                                        resume_match_percentage= EXCLUDED.resume_match_percentage,
-                                        updated_at = CURRENT_TIMESTAMP
-                                """, (
-                                    target_job_id,
-                                    candidate_id,
-                                    cand.get("source", "JobDiva-Applicants"),
-                                    cand.get("name") or "",
-                                    cand.get("email"),
-                                    cand.get("phone"),
-                                    cand.get("headline") or cand.get("title"),
-                                    cand.get("location"),
-                                    cand.get("profile_url"),
-                                    cand.get("resume_text"),
-                                    candidate_data_json,
-                                    "sourced",
-                                    cand.get("match_score") or 0,
-                                 ))
+                        insert_batch.append((
+                            target_job_id,
+                            candidate_id,
+                            cand.get("source", "JobDiva-Applicants"),
+                            cand.get("name") or "",
+                            cand.get("email"),
+                            cand.get("phone"),
+                            cand.get("headline") or cand.get("title"),
+                            cand.get("location"),
+                            cand.get("profile_url"),
+                            cand.get("resume_text"),
+                            candidate_data_json,
+                            "sourced",
+                            cand.get("match_score") or 0,
+                        ))
                         total_assigned += 1
                         if candidate_id:
                             newly_inserted_ids.append(candidate_id)
                             existing_ids.add(candidate_id)
 
-                    # Populate normalized tables
-                    try:
-                        candidate_profiles_db.upsert_candidate(target_job_id, cand, cand.get("source", "JobDiva-Applicants"))
-                    except Exception as norm_err:
-                        logger.warning(f"[AutoAssignService] Failed normalized upsert for {candidate_id}: {norm_err}")
+                    # Populate normalized tables in the same batch
+                    profile_batch.append(cand)
                 except Exception as row_err:
-                    logger.warning(f"[AutoAssignService] Failed upsert for {cand.get('candidate_id')}: {row_err}")
+                    logger.warning(f"[AutoAssignService] Failed to stage upsert for {cand.get('candidate_id')}: {row_err}")
+
+                # Flush whenever any single batch fills up. Keeps the
+                # transaction working set bounded.
+                if (
+                    len(update_batch) >= _CANDIDATE_BATCH_SIZE
+                    or len(insert_batch) >= _CANDIDATE_BATCH_SIZE
+                    or len(profile_batch) >= _CANDIDATE_BATCH_SIZE
+                ):
+                    _flush_batches()
+
+            # Drain whatever's left after the stream ends.
+            _flush_batches()
 
             logger.info(f"✅ [AutoAssignService] Completed. Total assigned: {total_assigned} for job {target_job_id}")
 
@@ -678,11 +762,39 @@ class AutoAssignService:
 
             with self._get_db_connection() as conn:
                 with conn.cursor() as cur:
+                    # Parity with save_job_draft and monitor_job_locally:
+                    # bound this write so a contested monitored_jobs row
+                    # can't pin a pool slot indefinitely. Without this,
+                    # auto-sync's metrics refresh was the most common
+                    # culprit holding the row that save_job_draft tried to
+                    # UPDATE on step 3.
+                    cur.execute("SET LOCAL lock_timeout = '2000ms'")
+                    cur.execute("SET LOCAL statement_timeout = '5000ms'")
+                    # Resolve the PK once up front instead of issuing an
+                    # `OR jobdiva_id = %s` predicate at write time. The OR
+                    # forces Postgres to consider two index paths under the
+                    # row lock and (depending on planner choice) can touch
+                    # more rows than intended. A single PK lookup followed
+                    # by an UPDATE WHERE job_id = %s is one indexed path,
+                    # one row, deterministic.
+                    cur.execute(
+                        "SELECT job_id FROM monitored_jobs "
+                        "WHERE job_id = %s OR jobdiva_id = %s "
+                        "LIMIT 1",
+                        (str(target_job_id), str(target_job_id)),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        logger.debug(
+                            f"[AutoAssignService] No monitored_jobs row for {target_job_id} — skipping metrics update"
+                        )
+                        return
+                    resolved_job_id = row[0]
                     cur.execute(
                         "UPDATE monitored_jobs SET pair_external_subs = %s, feedback_completed = %s, "
                         "time_to_first_pass = %s, updated_at = NOW() "
-                        "WHERE job_id = %s OR jobdiva_id = %s",
-                        (ext_subs, feedback_count, time_to_pass, str(target_job_id), str(target_job_id))
+                        "WHERE job_id = %s",
+                        (ext_subs, feedback_count, time_to_pass, resolved_job_id),
                     )
                     conn.commit()
             logger.info(f"📊 [AutoAssignService] Metrics refreshed for {target_job_id}: pass_time={time_to_pass}min, ext_subs={ext_subs}, feedback={feedback_count}")

@@ -38,7 +38,10 @@ _monitored_jobs_cache: Dict[str, Dict[str, Any]] = {}
 _monitored_jobs_cache_lock = threading.Lock()
 _MONITORED_JOBS_CACHE_TTL_SECONDS = 30
 _MONITORED_JOBS_LOCK_TIMEOUT_MS = 2000
-_MONITORED_JOBS_STATEMENT_TIMEOUT_MS = 8000
+# Dropped from 8000ms to 5000ms in tandem with bumping the frontend
+# AbortController to 15s. The pair guarantees the server always responds
+# (success, stale cache, or 200-empty) before the client aborts.
+_MONITORED_JOBS_STATEMENT_TIMEOUT_MS = 5000
 
 
 def _monitored_jobs_cache_key(include_archived: bool, view: str) -> str:
@@ -737,6 +740,15 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
 
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
+                # Bound the save transaction so a contested row lock can't
+                # hang the wizard indefinitely. Mirrors the read-side budget
+                # in _get_monitored_jobs_sync; without this, the frontend
+                # save fetch (now also AbortControllered at 20s) would never
+                # see a 4xx/5xx and the spinner would spin until the FastAPI
+                # worker timeout fired.
+                cursor.execute("SET LOCAL lock_timeout = '2000ms'")
+                cursor.execute("SET LOCAL statement_timeout = '10000ms'")
+
                 # 0. Resolve db_job_id / ref_code in the same conn we'll
                 # use for the UPDATE/INSERT below.
                 if is_external:
