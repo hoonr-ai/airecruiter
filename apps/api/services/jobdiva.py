@@ -36,6 +36,41 @@ def readable_ist_now() -> str:
     ist = timezone(timedelta(hours=5, minutes=30))
     return datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
 
+
+# JobDiva occasionally returns 2FA / dialog UI text inside firstName/lastName
+# fields (observed: "Confirm Verification" / "Code" across 23+ records in a
+# single response). These pollute the candidate table with non-person rows.
+# This validator rejects names that look like UI strings, not human names.
+_NAME_POLLUTION_TOKENS = (
+    "verification", "captcha", "confirm", "submit", "continue",
+    "please click", "sign in", "log in", "login", "enter code",
+)
+_NAME_POLLUTION_EXACT = {
+    "confirm verification", "code", "ok", "cancel", "yes", "no",
+}
+
+
+def is_valid_candidate_name(first: str, last: str) -> bool:
+    """Return False for obvious JobDiva UI-string pollution disguised as a name.
+
+    Conservative on purpose — only triggers on clearly non-person values. A real
+    person named "Code" (unlikely but possible) would currently get rejected
+    via the EXACT set; that risk is preferred over admitting another batch of
+    "Confirm Verification Code" rows.
+    """
+    f = (first or "").strip()
+    l = (last or "").strip()
+    if not f and not l:
+        return False
+    combined = f"{f} {l}".strip().lower()
+    if combined in _NAME_POLLUTION_EXACT or f.lower() in _NAME_POLLUTION_EXACT or l.lower() in _NAME_POLLUTION_EXACT:
+        return False
+    if any(tok in combined for tok in _NAME_POLLUTION_TOKENS):
+        return False
+    if len(f) > 30 or len(l) > 30:
+        return False
+    return True
+
 def get_field(data: Dict[str, Any], keys: List[str], default: Any = None) -> Any:
     """
     Safely extract a value from a dictionary by checking multiple potential keys
@@ -631,8 +666,11 @@ class JobDivaService:
                         # Use correct field names from JobApplicantsDetail response
                         first_name = get_field(c, ["FIRSTNAME", "firstName", "firstname"]) or "Unknown"
                         last_name = get_field(c, ["LASTNAME", "lastName", "lastname"]) or "Candidate"
+                        if not is_valid_candidate_name(first_name, last_name):
+                            logger.warning("Dropping JobDiva applicant with invalid name: first=%r last=%r id=%r", first_name, last_name, get_field(c, ["CANDIDATEID", "candidateId", "id", "ID", "canId"]))
+                            continue
                         full_name = f"{first_name} {last_name}".strip()
-                        
+
                         # Extract candidate ID using correct field name
                         candidate_id = get_field(c, ["CANDIDATEID", "candidateId", "id", "ID", "canId"]) or "Unknown"
                         
@@ -823,6 +861,9 @@ class JobDivaService:
 
             first_name = get_field(c, ["firstName", "firstname", "FIRSTNAME"]) or "Unknown"
             last_name = get_field(c, ["lastName", "lastname", "LASTNAME"]) or "Candidate"
+            if not is_valid_candidate_name(first_name, last_name):
+                logger.warning("Dropping JobAgent candidate with invalid name: first=%r last=%r id=%r", first_name, last_name, candidate_id)
+                continue
             full_name = f"{first_name} {last_name}".strip()
 
             # PROVINCE is JobAgentSearch's name for state.
@@ -1042,6 +1083,9 @@ class JobDivaService:
 
                     first_name = get_field(c, ["firstName", "firstname", "FIRSTNAME"]) or "Unknown"
                     last_name = get_field(c, ["lastName", "lastname", "LASTNAME"]) or "Candidate"
+                    if not is_valid_candidate_name(first_name, last_name):
+                        logger.warning("Dropping TalentSearch candidate with invalid name: first=%r last=%r id=%r", first_name, last_name, candidate_id)
+                        continue
                     full_name = f"{first_name} {last_name}".strip()
 
                     resume_text = self._extract_resume_text(c)
@@ -3457,6 +3501,9 @@ class JobDivaService:
             
             first_name = get_field(candidate_data, ["firstName", "firstname", "FIRSTNAME"]) or ""
             last_name = get_field(candidate_data, ["lastName", "lastname", "LASTNAME"]) or ""
+            if not is_valid_candidate_name(first_name, last_name):
+                logger.warning("Standardize rejecting invalid name: first=%r last=%r id=%r", first_name, last_name, candidate_id)
+                return None
             name = f"{first_name} {last_name}".strip() or "Unknown Candidate"
             
             # Extract location

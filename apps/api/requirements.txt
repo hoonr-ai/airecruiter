@@ -16,3 +16,4 @@ pypdf
 python-docx
 python-multipart
 openpyxl
+rapidfuzz

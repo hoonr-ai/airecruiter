@@ -25,6 +25,8 @@ import time
 import random
 from typing import List, Dict, Optional
 
+from services import role_taxonomy
+
 logger = logging.getLogger(__name__)
 
 # Global semaphore to enforce max 1 concurrent Azure Agent call
@@ -277,17 +279,35 @@ class AzureAgentService:
                     logger.warning(f"⚠️ Error processing role column {col}: {e}")
                     continue
 
-        # Convert grouping back to list
+        # Convert grouping back to list, augmenting similar_titles with sibling
+        # K17000 leaves from the role_taxonomy. Azure Agent only returns the
+        # upward hierarchy chain for each title; the taxonomy adds peer roles
+        # in the same K5000/K1500 family ("Strategic Project Manager", "Cloud
+        # Program Manager", etc. for a Program Manager search). Deterministic,
+        # no extra LLM call.
         result = []
         for key, data in grouping.items():
+            canonical = data.get("value", "")
+            existing_similar = list(data.get("similar_titles", []) or [])
+            siblings: List[str] = []
+            try:
+                expansions = role_taxonomy.expand_title(canonical, max_results=30)
+            except Exception as e:
+                logger.warning("role_taxonomy.expand_title failed for %r: %s", canonical, e)
+                expansions = []
+            for entry in expansions:
+                title = entry.get("title") if isinstance(entry, dict) else None
+                if title and title != canonical and title not in existing_similar and title not in siblings:
+                    siblings.append(title)
+            merged = existing_similar + siblings
             result.append({
-                "value":          data.get("value", ""),
+                "value":          canonical,
                 "minYears":       0,
                 "recent":         False,
-                "matchType":      "Similar", 
+                "matchType":      "Similar",
                 "required":       "Required",
                 "source":         "PAIR",
-                "similar_titles": data.get("similar_titles", []) or []
+                "similar_titles": merged[:30]
             })
 
         return result
