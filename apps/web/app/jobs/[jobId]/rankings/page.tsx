@@ -236,6 +236,7 @@ interface AppliedCriterion {
 interface Candidate {
   id: number;
   jobdiva_id?: string;
+  jobdiva_candidate_id?: string;
   candidate_id?: string;
   engage_interview_id?: string;
   name: string;
@@ -2250,7 +2251,7 @@ export default function CandidateRankingsPage() {
           matchedSkills={selectedCandidate.data?.matched_skills}
           missingSkills={selectedCandidate.data?.missing_skills}
           explainability={selectedCandidate.data?.explainability}
-          candidateId={selectedCandidate.candidate_id}
+          jobdivaCandidateId={selectedCandidate.jobdiva_candidate_id || selectedCandidate.data?.jobdiva_candidate_id}
           source={selectedCandidate.source}
         />
       )}
