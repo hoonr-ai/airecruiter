@@ -12,18 +12,56 @@ logger = logging.getLogger(__name__)
 
 
 def _ensure_rubric_schema_sync() -> None:
-    """Add `source` columns to rubric tables. Idempotent. Recruiter-added vs
-    AI-extracted rubric items need to round-trip provenance so the chip in
-    Step 3 ("Recruiter" / "Hoonr-Curate") survives save+reload.
+    """Provision schema for rubric tables. Idempotent.
 
-    `job_titles.source` already existed pre-change. `job_skills.source` and
-    `job_education.source` are new — added here as nullable TEXT so legacy
-    rows are read as Hoonr-Curate by the reader's COALESCE.
+    1. `source` columns — recruiter-added vs AI-extracted rubric items need
+       to round-trip provenance so the chip in Step 3 ("Recruiter" /
+       "Hoonr-Curate") survives save+reload. `job_titles.source` already
+       existed pre-change; `job_skills.source` and `job_education.source`
+       are added here as nullable TEXT so legacy rows are read as
+       Hoonr-Curate by the reader's COALESCE.
+
+    2. Unique indexes on (jobdiva_id, LOWER(skill_name)) and
+       (jobdiva_id, LOWER(title)) — defense-in-depth against duplicate
+       rubric items per job. The Step 5 wizard now dedupes on add, but the
+       DB constraint catches any path that bypasses the in-memory
+       seen_skills set in save_full_rubric.
     """
     with psycopg2.connect(DATABASE_URL, connect_timeout=5) as conn:
         with conn.cursor() as cur:
             cur.execute("ALTER TABLE job_skills ADD COLUMN IF NOT EXISTS source TEXT")
             cur.execute("ALTER TABLE job_education ADD COLUMN IF NOT EXISTS source TEXT")
+
+            # One-time dedup so the unique index below can be created without
+            # failing. The save path already DELETEs-then-INSERTs with an
+            # in-memory seen_skills set, so accumulated dupes only exist from
+            # historical writes or non-rubric writers. Keep the row with the
+            # highest ctid (latest physical insert).
+            cur.execute("""
+                DELETE FROM job_skills s1
+                USING job_skills s2
+                WHERE s1.ctid < s2.ctid
+                  AND s1.jobdiva_id = s2.jobdiva_id
+                  AND LOWER(s1.skill_name) = LOWER(s2.skill_name)
+            """)
+            cur.execute("""
+                DELETE FROM job_titles t1
+                USING job_titles t2
+                WHERE t1.ctid < t2.ctid
+                  AND t1.jobdiva_id = t2.jobdiva_id
+                  AND LOWER(t1.title) = LOWER(t2.title)
+            """)
+            # Defense-in-depth against duplicate rubric items per job. LOWER()
+            # matches the case-insensitive frontend dedup and the backend's
+            # seen_skills.upper() check in save_full_rubric.
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS job_skills_unique_per_job
+                ON job_skills (jobdiva_id, LOWER(skill_name))
+            """)
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS job_titles_unique_per_job
+                ON job_titles (jobdiva_id, LOWER(title))
+            """)
         conn.commit()
 
 
