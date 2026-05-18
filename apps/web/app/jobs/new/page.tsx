@@ -7726,8 +7726,8 @@ function NewJobPageContent() {
                           explainability: candidate.explainability,
                           matchScoreDetails: candidate.match_score_details,
                           matchedSkills: candidate.matched_skills,
-                          candidateId:
-                            candidate.candidate_id || candidate.jobdiva_candidate_id || candidate.id,
+                          jobdivaCandidateId:
+                            candidate.jobdiva_candidate_id ?? candidate.data?.jobdiva_candidate_id,
                           source: candidate.source,
                         });
                         setDetailsModalOpen(true);
@@ -8362,7 +8362,7 @@ return (
         matchedSkills={selectedCandidateForDetails.matchedSkills}
         matchScoreDetails={selectedCandidateForDetails.matchScoreDetails}
         explainability={selectedCandidateForDetails.explainability}
-        candidateId={selectedCandidateForDetails.candidateId}
+        jobdivaCandidateId={selectedCandidateForDetails.jobdivaCandidateId}
         source={selectedCandidateForDetails.source}
         onClose={() => {
           setDetailsModalOpen(false);
