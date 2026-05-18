@@ -103,6 +103,11 @@ ZOOMINFO_ENRICH_URL = get_env_with_default("ZOOMINFO_ENRICH_URL", "https://api.z
 ZOOMINFO_BEARER_TOKEN = get_env_with_default("ZOOMINFO_BEARER_TOKEN", "")
 ZOOMINFO_CLIENT_ID = get_env_with_default("ZOOMINFO_CLIENT_ID", "")
 
+# ---- Apollo Contact Enrichment ----
+# Fallback provider when ZoomInfo returns no match. Empty => routes that call
+# Apollo will short-circuit with a logged warning.
+APOLLO_API_KEY = get_env_with_default("APOLLO_API_KEY", "")
+
 # ---- Amplitude Telemetry ----
 AMPLITUDE_API_KEY = get_env_with_default("AMPLITUDE_API_KEY", "")
 AMPLITUDE_API_URL = get_env_with_default("AMPLITUDE_API_URL", "https://api2.amplitude.com/2/httpapi")

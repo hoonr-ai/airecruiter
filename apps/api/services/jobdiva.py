@@ -884,7 +884,8 @@ class JobDivaService:
         # Same enrichment + rescue flow as _search_talent_pool.
         merge_targets = jd_results + profile_only_results
         ids_to_enrich = [r["candidate_id"] for r in merge_targets if r.get("candidate_id")]
-        if ids_to_enrich:
+        from core import sourcing_config as _sc
+        if ids_to_enrich and not _sc.FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH:
             detail_t0 = time.time()
             detail_map = await self._fetch_candidate_details_batch(token, ids_to_enrich)
             detail_ms = int((time.time() - detail_t0) * 1000)
@@ -902,6 +903,11 @@ class JobDivaService:
                 f"JobAgent CandidatesDetail enrichment: "
                 f"{len(detail_map)}/{len(ids_to_enrich)} matched in {detail_ms}ms, "
                 f"rescued={rescued}, fields_from_detail={counters}"
+            )
+        elif ids_to_enrich:
+            logger.info(
+                "FAST_PATH_SKIP_DETAIL: JobAgent path skipping inline CandidatesDetail for %d candidates; background hydration will follow.",
+                len(ids_to_enrich),
             )
 
         if require_resume:
@@ -1183,7 +1189,8 @@ class JobDivaService:
                 # supplied resume can rescue an otherwise-filtered candidate.
                 merge_targets = jd_results + profile_only_results
                 ids_to_enrich = [r["candidate_id"] for r in merge_targets if r.get("candidate_id")]
-                if ids_to_enrich:
+                from core import sourcing_config as _sc
+                if ids_to_enrich and not _sc.FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH:
                     detail_t0 = time.time()
                     detail_map = await self._fetch_candidate_details_batch(token, ids_to_enrich)
                     detail_ms = int((time.time() - detail_t0) * 1000)
@@ -1202,16 +1209,23 @@ class JobDivaService:
                         f"in {detail_ms}ms, rescued={rescued}, "
                         f"fields_from_detail={fields_from_detail}"
                     )
+                elif ids_to_enrich:
+                    logger.info(
+                        "FAST_PATH_SKIP_DETAIL: TalentSearch path skipping inline CandidatesDetail for %d candidates; background hydration will follow.",
+                        len(ids_to_enrich),
+                    )
 
                 # Second-pass: TalentSearch + CandidatesDetail still leave
                 # `resume_text` empty for most candidates because resume bodies
                 # live in CandidatesResumesDetail / ResumesTextDetail. Without
                 # resume text the downstream skill scorer has nothing to match.
                 # Fetch concurrently for the remaining empty-resume candidates.
+                # When fast-path is on we defer resume fetch too — it's the
+                # other big rate-limit consumer; background hydration handles it.
                 empty_resume_ids = [
                     r["candidate_id"] for r in (jd_results + profile_only_results)
                     if r.get("candidate_id") and not (r.get("resume_text") or "").strip()
-                ]
+                ] if not _sc.FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH else []
                 if empty_resume_ids:
                     resume_t0 = time.time()
                     resume_map = await self._fetch_resume_text_batch(
