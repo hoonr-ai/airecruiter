@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import json
 import psycopg2
@@ -745,6 +746,13 @@ class AutoAssignService:
         - Time to First Pass (minutes)
         - External Curate Submittals (from JobDiva)
         - Feedback Completed (local actions)
+        - Candidate counters (sourced/launched/complete_submissions/pass_submissions)
+
+        The candidate counters used to be computed live on every dashboard
+        load via `_aggregate_candidate_metrics`. That JOIN + JSONB extraction
+        was the dominant cause of dashboard slowness on qacurate. Now they
+        live as plain INTEGER columns on monitored_jobs, refreshed here, so
+        the dashboard becomes a single indexed SELECT.
         """
         try:
             from services.jobdiva import jobdiva_service
@@ -759,6 +767,12 @@ class AutoAssignService:
             feedback_count = await self._count_feedback_completed(target_job_id)
             # 3. Calculate time to first PASS candidate (in minutes)
             time_to_pass = await self._calculate_time_to_first_pass(target_job_id)
+            # 4. Compute candidate counters via the bounded aggregate.
+            #    Lives here (background) rather than in the user-facing
+            #    dashboard request path.
+            counters = await asyncio.to_thread(
+                self._compute_candidate_counters, str(target_job_id)
+            )
 
             with self._get_db_connection() as conn:
                 with conn.cursor() as cur:
@@ -791,15 +805,94 @@ class AutoAssignService:
                         return
                     resolved_job_id = row[0]
                     cur.execute(
-                        "UPDATE monitored_jobs SET pair_external_subs = %s, feedback_completed = %s, "
-                        "time_to_first_pass = %s, updated_at = NOW() "
+                        "UPDATE monitored_jobs SET "
+                        "  pair_external_subs = %s, "
+                        "  feedback_completed = %s, "
+                        "  time_to_first_pass = %s, "
+                        "  candidates_sourced = %s, "
+                        "  candidates_launched = %s, "
+                        "  complete_submissions = %s, "
+                        "  pass_submissions = %s, "
+                        "  updated_at = NOW() "
                         "WHERE job_id = %s",
-                        (ext_subs, feedback_count, time_to_pass, resolved_job_id),
+                        (
+                            ext_subs,
+                            feedback_count,
+                            time_to_pass,
+                            counters["candidates_sourced"],
+                            counters["candidates_launched"],
+                            counters["complete_submissions"],
+                            counters["pass_submissions"],
+                            resolved_job_id,
+                        ),
                     )
                     conn.commit()
-            logger.info(f"📊 [AutoAssignService] Metrics refreshed for {target_job_id}: pass_time={time_to_pass}min, ext_subs={ext_subs}, feedback={feedback_count}")
+            logger.info(
+                f"📊 [AutoAssignService] Metrics refreshed for {target_job_id}: "
+                f"pass_time={time_to_pass}min ext_subs={ext_subs} feedback={feedback_count} "
+                f"sourced={counters['candidates_sourced']} pass={counters['pass_submissions']}"
+            )
         except Exception as e:
             logger.warning(f"[AutoAssignService] Metrics refresh failed for job {target_job_id}: {e}")
+
+    def _compute_candidate_counters(self, target_job_id: str) -> Dict[str, int]:
+        """Compute the four candidate counters for a single job.
+
+        Uses the same aggregate logic as `_aggregate_candidate_metrics` in
+        routers/jobs.py but scoped to one job and called from a background
+        path so a slow query never blocks the dashboard. Bounded with
+        statement_timeout=10s — generous because this is async and not in
+        the user request path; if 10s still isn't enough on a degenerate
+        row count, the warning is logged and we leave the counters as their
+        last-known value.
+        """
+        zero = {
+            "candidates_sourced": 0,
+            "candidates_launched": 0,
+            "complete_submissions": 0,
+            "pass_submissions": 0,
+        }
+        try:
+            with self._get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SET LOCAL statement_timeout = '10000ms'")
+                    # Match both storage shapes — some rows are keyed by
+                    # jobdiva_id (alphanumeric ref), others by job_id::text.
+                    cur.execute(
+                        """
+                        SELECT
+                            COUNT(DISTINCT candidate_id)                                 AS candidates_sourced,
+                            COUNT(DISTINCT candidate_id)                                 AS candidates_launched,
+                            COUNT(DISTINCT CASE
+                                WHEN data->>'engage_status' IN
+                                    ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
+                                THEN candidate_id
+                            END)                                                          AS complete_submissions,
+                            COUNT(DISTINCT CASE
+                                WHEN (data->>'engage_status' IN ('passed', 'pass', 'completed'))
+                                  OR (LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
+                                      AND (NULLIF(data->>'engage_score', '')::float >= 70))
+                                THEN candidate_id
+                            END)                                                          AS pass_submissions
+                        FROM sourced_candidates
+                        WHERE jobdiva_id = %s
+                        """,
+                        (target_job_id,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        return zero
+                    return {
+                        "candidates_sourced": int(row[0] or 0),
+                        "candidates_launched": int(row[1] or 0),
+                        "complete_submissions": int(row[2] or 0),
+                        "pass_submissions": int(row[3] or 0),
+                    }
+        except Exception as e:
+            logger.warning(
+                f"[AutoAssignService] _compute_candidate_counters failed for {target_job_id}: {e}"
+            )
+            return zero
 
 
 auto_assign_service = AutoAssignService()

@@ -161,6 +161,17 @@ def _ensure_monitored_jobs_schema() -> None:
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS time_to_first_pass DOUBLE PRECISION",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS candidates_sourced INTEGER DEFAULT 0",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS resumes_shortlisted INTEGER DEFAULT 0",
+            # v30: denormalize the four counters previously computed live by
+            # `_aggregate_candidate_metrics`. The aggregate JOIN + JSONB
+            # extraction across `sourced_candidates` was the dominant cause
+            # of dashboard slowness on qacurate — even the 25s cache warmer
+            # couldn't reliably finish it under the 5s statement_timeout.
+            # By writing these via `refresh_job_performance_metrics`, the
+            # dashboard SELECT stays inside monitored_jobs and runs in
+            # tens of ms.
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS candidates_launched INTEGER DEFAULT 0",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS complete_submissions INTEGER DEFAULT 0",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS pass_submissions INTEGER DEFAULT 0",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS current_step INTEGER",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS user_session TEXT",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS ai_enhanced BOOLEAN DEFAULT FALSE",
@@ -188,6 +199,70 @@ def _ensure_monitored_jobs_schema() -> None:
 async def init_monitored_jobs_schema() -> None:
     """Async wrapper — main.py lifespan awaits this with a timeout."""
     await asyncio.to_thread(_ensure_monitored_jobs_schema)
+
+
+def _backfill_monitored_jobs_counters_sync() -> None:
+    """One-time backfill of the four denormalized counter columns.
+
+    Without this, immediately after deploy the dashboard would show zeros
+    for candidates_sourced/launched/complete_submissions/pass_submissions
+    until the next 15-min auto-sync cycle filled them in per-job.
+
+    Lives OUTSIDE the schema init because the schema init has a tight 10s
+    lifespan timeout — this aggregate can take 30-60s on a populated DB.
+    main.py fires it as a background asyncio task at startup so a slow
+    backfill never blocks boot or any request path.
+
+    Idempotent: re-running it just overwrites with fresh counts.
+    """
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # Generous 90s — this is async, off the request path.
+                cur.execute("SET LOCAL statement_timeout = '90000ms'")
+                cur.execute(
+                    """
+                    UPDATE monitored_jobs mj SET
+                        candidates_sourced   = COALESCE(sub.cs, 0),
+                        candidates_launched  = COALESCE(sub.cl, 0),
+                        complete_submissions = COALESCE(sub.cm, 0),
+                        pass_submissions     = COALESCE(sub.ps, 0)
+                    FROM (
+                        SELECT
+                            jobdiva_id,
+                            COUNT(DISTINCT candidate_id) AS cs,
+                            COUNT(DISTINCT candidate_id) AS cl,
+                            COUNT(DISTINCT CASE
+                                WHEN data->>'engage_status' IN
+                                    ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
+                                THEN candidate_id
+                            END) AS cm,
+                            COUNT(DISTINCT CASE
+                                WHEN (data->>'engage_status' IN ('passed', 'pass', 'completed'))
+                                  OR (LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
+                                      AND (NULLIF(data->>'engage_score', '')::float >= 70))
+                                THEN candidate_id
+                            END) AS ps
+                        FROM sourced_candidates
+                        GROUP BY jobdiva_id
+                    ) sub
+                    WHERE mj.jobdiva_id = sub.jobdiva_id
+                       OR mj.job_id::text = sub.jobdiva_id
+                    """
+                )
+                conn.commit()
+                rowcount = cur.rowcount
+            logger.info(f"monitored_jobs counter backfill complete: {rowcount} rows updated")
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"monitored_jobs counter backfill failed: {e}", exc_info=True)
+
+
+async def backfill_monitored_jobs_counters() -> None:
+    """Async wrapper — main.py lifespan fires this as a background task."""
+    await asyncio.to_thread(_backfill_monitored_jobs_counters_sync)
 
 
 @router.post("/jobs/parse", response_model=ParsedJobResponse)
@@ -1831,12 +1906,23 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
             # is_archived + created_at indexes) and aggregate
             # sourced_candidates separately, keyed by the small set of jobs
             # we actually need — see `_aggregate_candidate_metrics`.
+            # v30: include the four candidate counters directly. Previously
+            # we computed these live via `_aggregate_candidate_metrics` on
+            # every dashboard load — that JOIN + JSONB-CASE-WHEN aggregate
+            # was the dominant cause of qacurate dashboard slowness, even
+            # under the cache warmer. Now they live as plain INTEGER columns
+            # on monitored_jobs, refreshed by
+            # `auto_assign_service.refresh_job_performance_metrics` during
+            # every auto-sync cycle. Dashboard reads are now a single
+            # indexed SELECT — no JOIN, no aggregate, no JSONB extraction.
             select_sql = (
                 "SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name, mj.status, "
                 "mj.city, mj.state, mj.zip_code, mj.location_type, mj.priority, mj.program_duration, mj.max_allowed_submittals, "
                 "mj.processing_status, mj.is_archived, "
                 "mj.resumes_shortlisted, "
                 "mj.pair_external_subs, mj.feedback_completed, "
+                "mj.candidates_sourced, mj.candidates_launched, "
+                "mj.complete_submissions, mj.pass_submissions, "
                 "mj.pair_launched_at, mj.outreach_stopped_at, mj.time_to_first_pass, mj.created_at, mj.updated_at "
                 "FROM monitored_jobs mj"
             )
@@ -1853,34 +1939,15 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
         columns = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
 
-        # Phase 2 of the summary-view fix: bounded metrics aggregation.
-        # Gather every jobdiva_id / job_id::text key for the jobs we just
-        # fetched, then issue ONE indexed aggregate against sourced_candidates.
-        metrics_by_key: Dict[str, Dict[str, int]] = {}
-        if view != "full":
-            metric_keys: List[str] = []
-            jobdiva_col = columns.index("jobdiva_id") if "jobdiva_id" in columns else -1
-            job_id_col = columns.index("job_id") if "job_id" in columns else -1
-            for row in rows:
-                if jobdiva_col >= 0 and row[jobdiva_col]:
-                    metric_keys.append(str(row[jobdiva_col]))
-                if job_id_col >= 0 and row[job_id_col] is not None:
-                    metric_keys.append(str(row[job_id_col]))
-            metrics_by_key = _aggregate_candidate_metrics(cursor, metric_keys)
+        # v30: counters now come from monitored_jobs columns directly
+        # (refreshed by auto_assign_service.refresh_job_performance_metrics).
+        # The previous `_aggregate_candidate_metrics` JOIN + JSONB-CASE-WHEN
+        # was the dominant cause of qacurate dashboard slowness — even the
+        # cache warmer couldn't reliably finish it. Skipping it here.
 
         jobs = {}
         for row in rows:
             job_data = dict(zip(columns, row))
-            if view != "full":
-                summed = _sum_metrics_for_job(
-                    metrics_by_key,
-                    job_data.get("jobdiva_id"),
-                    job_data.get("job_id"),
-                )
-                job_data["candidates_sourced"] = summed["candidates_sourced"]
-                job_data["candidates_launched"] = summed["candidates_launched"]
-                job_data["complete_submissions"] = summed["complete_submissions"]
-                job_data["pass_submissions"] = summed["pass_submissions"]
             jid = str(job_data.get("jobdiva_id") or job_data.get("job_id"))
 
             if job_data.get("created_at") and hasattr(job_data["created_at"], "isoformat"):
