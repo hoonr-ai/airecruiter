@@ -756,9 +756,22 @@ function NewJobPageContent() {
   }, [sourceLocations]);
 
   const isBeyondRadius = (cand: any): boolean => {
+    const reason = String(cand?.location_match_reason || "");
+    if (
+      reason === "candidate_location_missing_keep" ||
+      reason === "geocode_unavailable_keep" ||
+      reason === "outside_radius_soft_keep"
+    ) {
+      return true;
+    }
     const d = cand?.distance_miles;
     if (typeof d !== "number" || !Number.isFinite(d)) return false;
     return d > currentWithinMiles;
+  };
+
+  const hasUnknownLocation = (cand: any): boolean => {
+    const reason = String(cand?.location_match_reason || "");
+    return reason === "candidate_location_missing_keep" || reason === "geocode_unavailable_keep";
   };
 
   const matchesSourceFilter = (cand: any) => {
@@ -843,6 +856,12 @@ function NewJobPageContent() {
   const buildJobdivaAgentString = () => {
     const groups: string[] = [];
 
+    // JobDiva agent input parses each parenthesised group as an exact phrase
+    // when wrapped in quotes — without the quotes "PROGRAM MANAGEMENT"
+    // tokenises as two separate words. Matches the boolean string format
+    // sent through the API (`("TERM")` per PR #159).
+    const wrapTerm = (term: string) => `"${term}"`;
+
     const nonExcludedSkills = sourceSkills.filter((skill) => skill.matchType !== "exclude");
     if (nonExcludedSkills.length > 0) {
       nonExcludedSkills.forEach((skill) => {
@@ -855,14 +874,14 @@ function NewJobPageContent() {
 
         groups.push(
           uniqueTerms.length === 1
-            ? `(${uniqueTerms[0]})`
-            : `(${uniqueTerms.join(" OR ")})`
+            ? `(${wrapTerm(uniqueTerms[0])})`
+            : `(${uniqueTerms.map(wrapTerm).join(" OR ")})`
         );
       });
     } else {
       jobdivaSkillsToUse.forEach((skill) => {
         const token = toAgentToken(skill);
-        if (token) groups.push(`(${token})`);
+        if (token) groups.push(`(${wrapTerm(token)})`);
       });
     }
 
@@ -4007,8 +4026,16 @@ function NewJobPageContent() {
         .map(filter => filter.rubricKey as string)
     );
 
+    // Per-category prefix index so a missing category (e.g. Step 4 has no
+    // "Required Title" filters but does have "Required Skill" ones) lets all
+    // titles through instead of filtering them to zero.
+    const activeRubricCategories = new Set(
+      Array.from(activeRubricFilterKeys).map(key => key.split("|")[0])
+    );
+
     const shouldIncludeRubricItem = (category: string, value: string) => {
       if (activeRubricFilterKeys.size === 0) return true;
+      if (!activeRubricCategories.has(category)) return true;
       return activeRubricFilterKeys.has(rubricKeyFor(category, value));
     };
 
@@ -4034,7 +4061,9 @@ function NewJobPageContent() {
               selectedSimilarTitles: existing?.selectedSimilarTitles?.filter((item: string) =>
                 (title.similar_titles || []).includes(item)
               ) ?? (title.similar_titles || []),
-              similarExpanded: existing?.similarExpanded ?? false,
+              // Default expanded so recruiters see the related titles the
+              // taxonomy is searching for without having to click "Similar".
+              similarExpanded: existing?.similarExpanded ?? true,
               fromRubric: true
             };
           });
@@ -4541,7 +4570,15 @@ function NewJobPageContent() {
       addUnique(orGroups.get(gid)!, orGroupSeen.get(gid)!, clause, keyValue);
     };
 
-    sourceTitles.forEach(title => {
+    // Boolean string sent to JobDiva uses only the top 2 titles. Adding
+    // every rubric-derived title would over-narrow the JobDiva search
+    // (5 ANDed title clauses ≈ 0 results). The remaining titles still flow
+    // through `title_criteria` in the API payload below, where they feed
+    // the in-app title-boost scoring without affecting what JobDiva returns.
+    // Exclude titles are always emitted (they only narrow the JobDiva search).
+    const includedTitles = sourceTitles.filter(t => t.matchType !== "exclude").slice(0, 2);
+    const excludeTitles = sourceTitles.filter(t => t.matchType === "exclude");
+    [...includedTitles, ...excludeTitles].forEach(title => {
       const group = criterionGroup(title.value, title.selectedSimilarTitles || [], title.years, title.recent);
       if (!group) return;
       if (title.matchType === "exclude") addUnique(exclude, seenExclude, group, title.value);
