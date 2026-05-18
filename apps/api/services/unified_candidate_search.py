@@ -310,6 +310,21 @@ class UnifiedCandidateSearch:
                 applicants = applicants_res.get("candidates", [])
                 summary["job_applicants_count"] = len(applicants)
 
+                # HOTFIX: Hard cap at 100 to prevent database locking & latency
+                # loops. The downstream enrichment + per-candidate upsert path
+                # is the dominant source of pool contention during auto-sync
+                # cycles; without a hard cap a single job returning 500+
+                # applicants can pin the API for minutes. Applied at the
+                # search-service layer so every caller (auto-sync, manual
+                # source, UI preview) gets the bound regardless of what
+                # criteria.page_size the caller requested.
+                if applicants and len(applicants) > 100:
+                    self._log_stage(
+                        "Applicants",
+                        f"Capping {len(applicants)} applicants to 100 to prevent system lag.",
+                    )
+                    applicants = applicants[:100]
+
                 if not applicants:
                     self._log_stage("Applicants", "No applicants found.")
                     return
@@ -354,6 +369,15 @@ class UnifiedCandidateSearch:
                 summary["talent_search_count"] = len(talent_pool)
                 if talent_res.get("jobdiva_criteria_unconfigured"):
                     summary["jobdiva_criteria_unconfigured"] = True
+
+                # HOTFIX: Hard cap at 100 — see Applicants stage above.
+                if talent_pool and len(talent_pool) > 100:
+                    self._log_stage(
+                        "TalentSearch",
+                        f"Capping {len(talent_pool)} talent profiles to 100 to prevent system lag.",
+                    )
+                    talent_pool = talent_pool[:100]
+
                 if not talent_pool:
                     self._log_stage("TalentSearch", "No talent-pool candidates returned.")
                     return
@@ -380,6 +404,15 @@ class UnifiedCandidateSearch:
                 ext_candidates = res.get("candidates", [])
                 source_type = res.get("source_type", name)
                 summary[f"{source_type.lower()}_count"] = len(ext_candidates)
+
+                # HOTFIX: Hard cap at 100 — see Applicants stage above.
+                if ext_candidates and len(ext_candidates) > 100:
+                    self._log_stage(
+                        source_type,
+                        f"Capping {len(ext_candidates)} {source_type} profiles to 100 to prevent system lag.",
+                    )
+                    ext_candidates = ext_candidates[:100]
+
                 self._log_stage(source_type, f"Found {len(ext_candidates)} profiles; starting streaming enrichment...")
 
                 semaphore = asyncio.Semaphore(5)
