@@ -1933,12 +1933,22 @@ async def get_monitored_jobs(
             stale_cached["warning"] = "Returned stale cache due DB contention"
             return stale_cached
 
-        # Fail fast when DB and cache are both unavailable. Surface the real
-        # error so schema mismatches don't get masked as "contention".
-        raise HTTPException(
-            status_code=503,
-            detail=f"Monitored jobs temporarily unavailable: {e}",
-        )
+        # Both DB and cache are unavailable. Returning 503 here would cause
+        # the dashboard to render blank with an AbortError toast — the
+        # frontend's 8s controller fires before the user sees any data and
+        # then trips the !response.ok branch. With the 25s cache warmer
+        # running in main.py lifespan, this branch is rare (warmer + live
+        # query both failing), so a 200 with empty jobs + explicit
+        # `source: "error"` is a better UX than a hard 503. The original
+        # exception is already logged above (logger.error at the top of
+        # this except), so schema mismatches and other root causes remain
+        # debuggable from the API logs.
+        return {
+            "jobs": {},
+            "total_count": 0,
+            "source": "error",
+            "warning": f"Monitored jobs temporarily unavailable: {e}",
+        }
 
 @router.post("/jobs/poll-now")
 async def trigger_manual_poll(background_tasks: BackgroundTasks):
