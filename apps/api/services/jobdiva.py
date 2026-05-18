@@ -2715,9 +2715,24 @@ class JobDivaService:
         
         try:
             with self.engine.connect() as conn:
+                # Fail fast on row-lock and slow-statement contention.
+                # monitor_job_locally is called from the 5-min poll loop, the
+                # 15-min auto-sync, the /jobs/fetch handler, and several other
+                # paths. The dashboard's `_get_monitored_jobs_sync` runs with a
+                # 2s lock_timeout / 8s statement_timeout — without matching
+                # caps on writers, a contested poll cycle can keep a pool slot
+                # occupied for tens of seconds and starve concurrent reads.
+                # The writes here are simple SELECT-then-UPDATE/INSERT on a
+                # single monitored_jobs row; 500ms / 5s caps are well above
+                # the steady-state cost but bounded enough that failures
+                # surface in logs (return False, next cycle retries) instead
+                # of compounding into dashboard 503s.
+                conn.execute(text("SET LOCAL lock_timeout = '500ms'"))
+                conn.execute(text("SET LOCAL statement_timeout = '5s'"))
+
                 # Extract recruiter emails for job_configuration
                 recruiter_emails = data.get("recruiter_emails", [])
-                
+
                 # Check if job exists in monitored_jobs by job_id OR jobdiva_id
                 res = conn.execute(text("SELECT 1 FROM monitored_jobs WHERE job_id = :job_id OR jobdiva_id = :job_id"), {"job_id": job_id})
                 exists = res.fetchone()
