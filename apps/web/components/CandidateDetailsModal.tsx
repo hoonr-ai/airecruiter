@@ -38,7 +38,7 @@ interface CandidateDetailsModalProps {
   matchedSkills?: string[];
   matchScoreDetails?: Record<string, any>;
   explainability?: string[];
-  candidateId?: string;
+  jobdivaCandidateId?: string;
   source?: string;
 }
 
@@ -152,13 +152,13 @@ function CandidateDetailsModalBase({
   matchedSkills,
   matchScoreDetails,
   explainability,
-  candidateId,
+  jobdivaCandidateId,
   source,
 }: CandidateDetailsModalProps) {
   const isLinkedIn = profileUrl?.includes("linkedin.com");
-  const showJobDivaLink = !!candidateId && !!source && source.startsWith("JobDiva");
+  const showJobDivaLink = !!jobdivaCandidateId && !!source && source.startsWith("JobDiva");
   const jobDivaUrl = showJobDivaLink
-    ? `https://www1.jobdiva.com/employers/myreports/viewcandidate2_real.jsp?docids=-1&candidateid=${encodeURIComponent(candidateId!)}`
+    ? `https://www1.jobdiva.com/employers/myreports/viewcandidate2_real.jsp?docids=-1&candidateid=${encodeURIComponent(jobdivaCandidateId!)}`
     : null;
 
   const formattedTitle = toTitleCase(jobTitle || "");
