@@ -756,9 +756,22 @@ function NewJobPageContent() {
   }, [sourceLocations]);
 
   const isBeyondRadius = (cand: any): boolean => {
+    const reason = String(cand?.location_match_reason || "");
+    if (
+      reason === "candidate_location_missing_keep" ||
+      reason === "geocode_unavailable_keep" ||
+      reason === "outside_radius_soft_keep"
+    ) {
+      return true;
+    }
     const d = cand?.distance_miles;
     if (typeof d !== "number" || !Number.isFinite(d)) return false;
     return d > currentWithinMiles;
+  };
+
+  const hasUnknownLocation = (cand: any): boolean => {
+    const reason = String(cand?.location_match_reason || "");
+    return reason === "candidate_location_missing_keep" || reason === "geocode_unavailable_keep";
   };
 
   const matchesSourceFilter = (cand: any) => {
@@ -843,6 +856,12 @@ function NewJobPageContent() {
   const buildJobdivaAgentString = () => {
     const groups: string[] = [];
 
+    // JobDiva agent input parses each parenthesised group as an exact phrase
+    // when wrapped in quotes — without the quotes "PROGRAM MANAGEMENT"
+    // tokenises as two separate words. Matches the boolean string format
+    // sent through the API (`("TERM")` per PR #159).
+    const wrapTerm = (term: string) => `"${term}"`;
+
     const nonExcludedSkills = sourceSkills.filter((skill) => skill.matchType !== "exclude");
     if (nonExcludedSkills.length > 0) {
       nonExcludedSkills.forEach((skill) => {
@@ -855,14 +874,14 @@ function NewJobPageContent() {
 
         groups.push(
           uniqueTerms.length === 1
-            ? `(${uniqueTerms[0]})`
-            : `(${uniqueTerms.join(" OR ")})`
+            ? `(${wrapTerm(uniqueTerms[0])})`
+            : `(${uniqueTerms.map(wrapTerm).join(" OR ")})`
         );
       });
     } else {
       jobdivaSkillsToUse.forEach((skill) => {
         const token = toAgentToken(skill);
-        if (token) groups.push(`(${token})`);
+        if (token) groups.push(`(${wrapTerm(token)})`);
       });
     }
 
@@ -1933,12 +1952,20 @@ function NewJobPageContent() {
       return false;
     }
 
+    // Bound the save fetch — the backend save now caps its transaction at
+    // 10s (lock_timeout=2s, statement_timeout=10s in save_job_draft), so 20s
+    // gives the server a comfortable window to either succeed or return a
+    // 500 with a real error. Without this, a hung backend (e.g. row-lock
+    // contention pre-fix) left the user staring at a silent spinner.
+    const saveController = new AbortController();
+    const saveTimeoutId = setTimeout(() => saveController.abort(), 20000);
     try {
       const apiUrl = API_BASE;
       // Use the new endpoint that saves directly to monitored_jobs
       const response = await fetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: saveController.signal,
         body: JSON.stringify({
           job_id: numericJobId || jobdivaId,
           jobdiva_id: jobdivaId || jobData?.jobdiva_id || jobData?.id?.toString(),
@@ -2001,10 +2028,15 @@ function NewJobPageContent() {
     } catch (error) {
       console.error("Error saving job to monitored jobs:", error);
       if (!stepData.skipToast) {
-        const errorMsg = error instanceof Error ? error.message : "Failed to save. Please try again.";
+        const isAbort = error instanceof DOMException && error.name === "AbortError";
+        const errorMsg = isAbort
+          ? "Save timed out — please retry."
+          : error instanceof Error ? error.message : "Failed to save. Please try again.";
         showToast(errorMsg, "error");
       }
       return false;
+    } finally {
+      clearTimeout(saveTimeoutId);
     }
   };
 
@@ -2013,12 +2045,19 @@ function NewJobPageContent() {
   // they happen to hit Save & Exit or toggle the boolean panel. Debounce a
   // silent auto-save whenever Step 5 sourcing state changes so reloads
   // restore everything.
+  // step5DirtyRef tracks whether the user has made edits that the 1.5s
+  // debounce hasn't flushed yet — if they click a different step indicator
+  // within that window the cleanup below would clearTimeout, dropping the
+  // edit. The currentStep-keyed effect further down catches that case.
+  const step5DirtyRef = useRef(false);
   useEffect(() => {
     if (currentStep !== 5) return;
     if (isReadOnly) return;
     if (!jobData) return;
-    const handle = setTimeout(() => {
-      saveJobDraft({ currentStep: 5, saveType: "auto", skipToast: true });
+    step5DirtyRef.current = true;
+    const handle = setTimeout(async () => {
+      const ok = await saveJobDraft({ currentStep: 5, saveType: "auto", skipToast: true });
+      if (ok) step5DirtyRef.current = false;
     }, 1500);
     return () => clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2037,6 +2076,18 @@ function NewJobPageContent() {
     minExperienceYears,
     sourceLocationMiles,
   ]);
+
+  // Flush a pending Step 5 save when the user navigates away from Step 5
+  // (e.g., clicks the Step 4 indicator before the 1.5s debounce fires).
+  useEffect(() => {
+    if (currentStep === 5) return;
+    if (!step5DirtyRef.current) return;
+    if (isReadOnly) return;
+    if (!jobData) return;
+    step5DirtyRef.current = false;
+    saveJobDraft({ currentStep: 5, saveType: "auto", skipToast: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep]);
 
   const StepIndicator = () => (
     <div className="flex items-start mb-8 relative">
@@ -3988,8 +4039,16 @@ function NewJobPageContent() {
         .map(filter => filter.rubricKey as string)
     );
 
+    // Per-category prefix index so a missing category (e.g. Step 4 has no
+    // "Required Title" filters but does have "Required Skill" ones) lets all
+    // titles through instead of filtering them to zero.
+    const activeRubricCategories = new Set(
+      Array.from(activeRubricFilterKeys).map(key => key.split("|")[0])
+    );
+
     const shouldIncludeRubricItem = (category: string, value: string) => {
       if (activeRubricFilterKeys.size === 0) return true;
+      if (!activeRubricCategories.has(category)) return true;
       return activeRubricFilterKeys.has(rubricKeyFor(category, value));
     };
 
@@ -4015,7 +4074,9 @@ function NewJobPageContent() {
               selectedSimilarTitles: existing?.selectedSimilarTitles?.filter((item: string) =>
                 (title.similar_titles || []).includes(item)
               ) ?? (title.similar_titles || []),
-              similarExpanded: existing?.similarExpanded ?? false,
+              // Default expanded so recruiters see the related titles the
+              // taxonomy is searching for without having to click "Similar".
+              similarExpanded: existing?.similarExpanded ?? true,
               fromRubric: true
             };
           });
@@ -4062,7 +4123,14 @@ function NewJobPageContent() {
     if (!hasSeededSourceLocation) {
       setHasSeededSourceLocation(true);
       if (jobData && sourceLocations.length === 0) {
-        const loc = `${jobData.city || ""}, ${jobData.state || ""}`.trim().replace(/^, |, $/g, "");
+        // Format: "City, State Zip" (e.g. "Tempe, AZ 85281"). Including the
+        // zip narrows sourcing-provider matches that mishandle short state
+        // codes alone. Falls back to "City, State" when the zip is missing.
+        const city = (jobData.city || "").trim();
+        const state = (jobData.state || "").trim();
+        const zip = (jobData.zip_code || "").trim();
+        const cityState = [city, state].filter(Boolean).join(", ");
+        const loc = [cityState, zip].filter(Boolean).join(" ");
         if (loc) {
           setSourceLocations([{
             id: 1,
@@ -4333,6 +4401,11 @@ function NewJobPageContent() {
   const addSourceTitle = (value: string) => {
     const cleanValue = value.trim();
     if (!cleanValue) return;
+    const normalized = cleanValue.toLowerCase();
+    if (sourceTitles.some(t => t.value.trim().toLowerCase() === normalized)) {
+      setSourceTitleInput("");
+      return;
+    }
     setSourceTitles(prev => [
       ...prev,
       {
@@ -4359,6 +4432,11 @@ function NewJobPageContent() {
   const addSourceSkill = (value: string) => {
     const cleanValue = value.trim();
     if (!cleanValue) return;
+    const normalized = cleanValue.toLowerCase();
+    if (sourceSkills.some(s => s.value.trim().toLowerCase() === normalized)) {
+      setSourceSkillInput("");
+      return;
+    }
     setSourceSkills(prev => [
       ...prev,
       {
@@ -4467,7 +4545,12 @@ function NewJobPageContent() {
       addSourceKey(value);
       similar.forEach(addSourceKey);
       const terms = [value, ...similar].map(term => term.trim()).filter(Boolean).map(quote);
-      const base = terms.length > 1 ? `(${terms.join(" OR ")})` : terms[0];
+      // JobDiva's Talent Search parser requires every skill/title term to be
+      // wrapped in parens — bare `(SKILL)` fails recognition, `("SKILL")`
+      // works. Always wrap for JobDiva even when the term has no similars.
+      const base = isJobDiva || terms.length > 1
+        ? `(${terms.join(" OR ")})`
+        : terms[0];
       if (!base) return "";
       const experienceClause = years > 0
         ? (isJobDiva ? ` OVER ${years} YRS` : ` AND "${years}+ years"`)
@@ -4500,7 +4583,15 @@ function NewJobPageContent() {
       addUnique(orGroups.get(gid)!, orGroupSeen.get(gid)!, clause, keyValue);
     };
 
-    sourceTitles.forEach(title => {
+    // Boolean string sent to JobDiva uses only the top 2 titles. Adding
+    // every rubric-derived title would over-narrow the JobDiva search
+    // (5 ANDed title clauses ≈ 0 results). The remaining titles still flow
+    // through `title_criteria` in the API payload below, where they feed
+    // the in-app title-boost scoring without affecting what JobDiva returns.
+    // Exclude titles are always emitted (they only narrow the JobDiva search).
+    const includedTitles = sourceTitles.filter(t => t.matchType !== "exclude").slice(0, 2);
+    const excludeTitles = sourceTitles.filter(t => t.matchType === "exclude");
+    [...includedTitles, ...excludeTitles].forEach(title => {
       const group = criterionGroup(title.value, title.selectedSimilarTitles || [], title.years, title.recent);
       if (!group) return;
       if (title.matchType === "exclude") addUnique(exclude, seenExclude, group, title.value);
@@ -4524,12 +4615,26 @@ function NewJobPageContent() {
       addSourceKey(company);
       addUnique(must, seenMust, quote(company), company);
     });
+    // Multiple sourcing locations are always alternatives — a candidate in
+    // any of them satisfies the location criterion — so OR them together
+    // inside a single clause instead of pushing each into `must` (which
+    // would AND them and reject every candidate that isn't in all).
+    const locationClauses: string[] = [];
+    const seenLocations = new Set<string>();
     sourceLocations
       .filter(location => location.value)
       .forEach(location => {
+        const key = normalizeTerm(location.value);
+        if (!key || seenLocations.has(key)) return;
+        seenLocations.add(key);
         addSourceKey(location.value);
-        addUnique(must, seenMust, `${quote(location.value)} ${location.radius}`, location.value);
+        locationClauses.push(`${quote(location.value)} ${location.radius}`);
       });
+    if (locationClauses.length === 1) {
+      must.push(locationClauses[0]);
+    } else if (locationClauses.length > 1) {
+      must.push(`(${locationClauses.join(" OR ")})`);
+    }
 
     const parts = [...must];
     // Render OR-groups in ascending group-id order so the string is stable
@@ -4966,6 +5071,28 @@ function NewJobPageContent() {
               } else if (foundCount % 5 === 0) {
                 setSearchStatus(`Found ${foundCount} profiles from ${activePortal}. Matching resumes against the rubric...`);
               }
+            } else if (event.type === "candidate_detail") {
+              // Fast-path hydration: a thin row that was streamed earlier
+              // now has its email/phone/linkedin_url/resume_text/etc filled
+              // in by the background CandidatesDetail pager. Merge the patch
+              // into the matching row by candidate_id.
+              const targetId = String(event.candidate_id || "");
+              const patch = (event.patch && typeof event.patch === "object")
+                ? event.patch
+                : {};
+              if (!targetId || Object.keys(patch).length === 0) continue;
+              // Update local runList copy used elsewhere in this run.
+              for (const r of runList) {
+                if (String(r.candidate_id || r.id || "") === targetId) {
+                  Object.assign(r, patch);
+                  break;
+                }
+              }
+              setCandidates(prev => prev.map(c => (
+                String(c.candidate_id || c.id || "") === targetId
+                  ? { ...c, ...patch }
+                  : c
+              )));
             } else if (event.type === "stage") {
               const rawStage = String(event.data || "");
               const mapped = mapStageToStatus(rawStage);
@@ -7649,8 +7776,8 @@ function NewJobPageContent() {
                           explainability: candidate.explainability,
                           matchScoreDetails: candidate.match_score_details,
                           matchedSkills: candidate.matched_skills,
-                          candidateId:
-                            candidate.candidate_id || candidate.jobdiva_candidate_id || candidate.id,
+                          jobdivaCandidateId:
+                            candidate.jobdiva_candidate_id ?? candidate.data?.jobdiva_candidate_id,
                           source: candidate.source,
                         });
                         setDetailsModalOpen(true);
@@ -8285,7 +8412,7 @@ return (
         matchedSkills={selectedCandidateForDetails.matchedSkills}
         matchScoreDetails={selectedCandidateForDetails.matchScoreDetails}
         explainability={selectedCandidateForDetails.explainability}
-        candidateId={selectedCandidateForDetails.candidateId}
+        jobdivaCandidateId={selectedCandidateForDetails.jobdivaCandidateId}
         source={selectedCandidateForDetails.source}
         onClose={() => {
           setDetailsModalOpen(false);

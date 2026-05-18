@@ -38,7 +38,10 @@ _monitored_jobs_cache: Dict[str, Dict[str, Any]] = {}
 _monitored_jobs_cache_lock = threading.Lock()
 _MONITORED_JOBS_CACHE_TTL_SECONDS = 30
 _MONITORED_JOBS_LOCK_TIMEOUT_MS = 2000
-_MONITORED_JOBS_STATEMENT_TIMEOUT_MS = 8000
+# Dropped from 8000ms to 5000ms in tandem with bumping the frontend
+# AbortController to 15s. The pair guarantees the server always responds
+# (success, stale cache, or 200-empty) before the client aborts.
+_MONITORED_JOBS_STATEMENT_TIMEOUT_MS = 5000
 
 
 def _monitored_jobs_cache_key(include_archived: bool, view: str) -> str:
@@ -158,6 +161,17 @@ def _ensure_monitored_jobs_schema() -> None:
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS time_to_first_pass DOUBLE PRECISION",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS candidates_sourced INTEGER DEFAULT 0",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS resumes_shortlisted INTEGER DEFAULT 0",
+            # v30: denormalize the four counters previously computed live by
+            # `_aggregate_candidate_metrics`. The aggregate JOIN + JSONB
+            # extraction across `sourced_candidates` was the dominant cause
+            # of dashboard slowness on qacurate — even the 25s cache warmer
+            # couldn't reliably finish it under the 5s statement_timeout.
+            # By writing these via `refresh_job_performance_metrics`, the
+            # dashboard SELECT stays inside monitored_jobs and runs in
+            # tens of ms.
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS candidates_launched INTEGER DEFAULT 0",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS complete_submissions INTEGER DEFAULT 0",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS pass_submissions INTEGER DEFAULT 0",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS current_step INTEGER",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS user_session TEXT",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS ai_enhanced BOOLEAN DEFAULT FALSE",
@@ -185,6 +199,70 @@ def _ensure_monitored_jobs_schema() -> None:
 async def init_monitored_jobs_schema() -> None:
     """Async wrapper — main.py lifespan awaits this with a timeout."""
     await asyncio.to_thread(_ensure_monitored_jobs_schema)
+
+
+def _backfill_monitored_jobs_counters_sync() -> None:
+    """One-time backfill of the four denormalized counter columns.
+
+    Without this, immediately after deploy the dashboard would show zeros
+    for candidates_sourced/launched/complete_submissions/pass_submissions
+    until the next 15-min auto-sync cycle filled them in per-job.
+
+    Lives OUTSIDE the schema init because the schema init has a tight 10s
+    lifespan timeout — this aggregate can take 30-60s on a populated DB.
+    main.py fires it as a background asyncio task at startup so a slow
+    backfill never blocks boot or any request path.
+
+    Idempotent: re-running it just overwrites with fresh counts.
+    """
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # Generous 90s — this is async, off the request path.
+                cur.execute("SET LOCAL statement_timeout = '90000ms'")
+                cur.execute(
+                    """
+                    UPDATE monitored_jobs mj SET
+                        candidates_sourced   = COALESCE(sub.cs, 0),
+                        candidates_launched  = COALESCE(sub.cl, 0),
+                        complete_submissions = COALESCE(sub.cm, 0),
+                        pass_submissions     = COALESCE(sub.ps, 0)
+                    FROM (
+                        SELECT
+                            jobdiva_id,
+                            COUNT(DISTINCT candidate_id) AS cs,
+                            COUNT(DISTINCT candidate_id) AS cl,
+                            COUNT(DISTINCT CASE
+                                WHEN data->>'engage_status' IN
+                                    ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
+                                THEN candidate_id
+                            END) AS cm,
+                            COUNT(DISTINCT CASE
+                                WHEN (data->>'engage_status' IN ('passed', 'pass', 'completed'))
+                                  OR (LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
+                                      AND (NULLIF(data->>'engage_score', '')::float >= 70))
+                                THEN candidate_id
+                            END) AS ps
+                        FROM sourced_candidates
+                        GROUP BY jobdiva_id
+                    ) sub
+                    WHERE mj.jobdiva_id = sub.jobdiva_id
+                       OR mj.job_id::text = sub.jobdiva_id
+                    """
+                )
+                conn.commit()
+                rowcount = cur.rowcount
+            logger.info(f"monitored_jobs counter backfill complete: {rowcount} rows updated")
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"monitored_jobs counter backfill failed: {e}", exc_info=True)
+
+
+async def backfill_monitored_jobs_counters() -> None:
+    """Async wrapper — main.py lifespan fires this as a background task."""
+    await asyncio.to_thread(_backfill_monitored_jobs_counters_sync)
 
 
 @router.post("/jobs/parse", response_model=ParsedJobResponse)
@@ -737,6 +815,15 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
 
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
+                # Bound the save transaction so a contested row lock can't
+                # hang the wizard indefinitely. Mirrors the read-side budget
+                # in _get_monitored_jobs_sync; without this, the frontend
+                # save fetch (now also AbortControllered at 20s) would never
+                # see a 4xx/5xx and the spinner would spin until the FastAPI
+                # worker timeout fired.
+                cursor.execute("SET LOCAL lock_timeout = '2000ms'")
+                cursor.execute("SET LOCAL statement_timeout = '10000ms'")
+
                 # 0. Resolve db_job_id / ref_code in the same conn we'll
                 # use for the UPDATE/INSERT below.
                 if is_external:
@@ -1819,12 +1906,23 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
             # is_archived + created_at indexes) and aggregate
             # sourced_candidates separately, keyed by the small set of jobs
             # we actually need — see `_aggregate_candidate_metrics`.
+            # v30: include the four candidate counters directly. Previously
+            # we computed these live via `_aggregate_candidate_metrics` on
+            # every dashboard load — that JOIN + JSONB-CASE-WHEN aggregate
+            # was the dominant cause of qacurate dashboard slowness, even
+            # under the cache warmer. Now they live as plain INTEGER columns
+            # on monitored_jobs, refreshed by
+            # `auto_assign_service.refresh_job_performance_metrics` during
+            # every auto-sync cycle. Dashboard reads are now a single
+            # indexed SELECT — no JOIN, no aggregate, no JSONB extraction.
             select_sql = (
                 "SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name, mj.status, "
                 "mj.city, mj.state, mj.zip_code, mj.location_type, mj.priority, mj.program_duration, mj.max_allowed_submittals, "
                 "mj.processing_status, mj.is_archived, "
                 "mj.resumes_shortlisted, "
                 "mj.pair_external_subs, mj.feedback_completed, "
+                "mj.candidates_sourced, mj.candidates_launched, "
+                "mj.complete_submissions, mj.pass_submissions, "
                 "mj.pair_launched_at, mj.outreach_stopped_at, mj.time_to_first_pass, mj.created_at, mj.updated_at "
                 "FROM monitored_jobs mj"
             )
@@ -1841,34 +1939,15 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
         columns = [desc[0] for desc in cursor.description]
         rows = cursor.fetchall()
 
-        # Phase 2 of the summary-view fix: bounded metrics aggregation.
-        # Gather every jobdiva_id / job_id::text key for the jobs we just
-        # fetched, then issue ONE indexed aggregate against sourced_candidates.
-        metrics_by_key: Dict[str, Dict[str, int]] = {}
-        if view != "full":
-            metric_keys: List[str] = []
-            jobdiva_col = columns.index("jobdiva_id") if "jobdiva_id" in columns else -1
-            job_id_col = columns.index("job_id") if "job_id" in columns else -1
-            for row in rows:
-                if jobdiva_col >= 0 and row[jobdiva_col]:
-                    metric_keys.append(str(row[jobdiva_col]))
-                if job_id_col >= 0 and row[job_id_col] is not None:
-                    metric_keys.append(str(row[job_id_col]))
-            metrics_by_key = _aggregate_candidate_metrics(cursor, metric_keys)
+        # v30: counters now come from monitored_jobs columns directly
+        # (refreshed by auto_assign_service.refresh_job_performance_metrics).
+        # The previous `_aggregate_candidate_metrics` JOIN + JSONB-CASE-WHEN
+        # was the dominant cause of qacurate dashboard slowness — even the
+        # cache warmer couldn't reliably finish it. Skipping it here.
 
         jobs = {}
         for row in rows:
             job_data = dict(zip(columns, row))
-            if view != "full":
-                summed = _sum_metrics_for_job(
-                    metrics_by_key,
-                    job_data.get("jobdiva_id"),
-                    job_data.get("job_id"),
-                )
-                job_data["candidates_sourced"] = summed["candidates_sourced"]
-                job_data["candidates_launched"] = summed["candidates_launched"]
-                job_data["complete_submissions"] = summed["complete_submissions"]
-                job_data["pass_submissions"] = summed["pass_submissions"]
             jid = str(job_data.get("jobdiva_id") or job_data.get("job_id"))
 
             if job_data.get("created_at") and hasattr(job_data["created_at"], "isoformat"):
@@ -1920,11 +1999,25 @@ async def get_monitored_jobs(
         return cached
 
     try:
-        payload = await asyncio.to_thread(_get_monitored_jobs_sync, include_archived, view)
+        # Hard wall-clock cap of 7s on the live query path. The inner
+        # SET LOCAL statement_timeout (5s) covers the SQL, but the request
+        # can still be slow due to pool wait, thread-pool saturation, or
+        # post-query Python serialization. asyncio.wait_for guarantees
+        # this endpoint returns inside the frontend's 15s AbortController
+        # window every single time — even when something we didn't
+        # anticipate is wedged downstream. On timeout we fall through to
+        # the same stale-cache / 200-empty handler as any other failure.
+        payload = await asyncio.wait_for(
+            asyncio.to_thread(_get_monitored_jobs_sync, include_archived, view),
+            timeout=7.0,
+        )
         _set_cached_monitored_jobs(include_archived, view, payload)
         return payload
-    except Exception as e:
-        logger.error(f"Error fetching monitored jobs from DB: {e}")
+    except (asyncio.TimeoutError, Exception) as e:
+        if isinstance(e, asyncio.TimeoutError):
+            logger.error(f"monitored_jobs wall-clock timeout (7s) — include_archived={include_archived}")
+        else:
+            logger.error(f"Error fetching monitored jobs from DB: {e}")
         # Serve stale cache if available to avoid long blank-loads during
         # transient lock contention/timeouts.
         stale_cached = _get_cached_monitored_jobs(include_archived, view, allow_stale=True)
@@ -1933,12 +2026,22 @@ async def get_monitored_jobs(
             stale_cached["warning"] = "Returned stale cache due DB contention"
             return stale_cached
 
-        # Fail fast when DB and cache are both unavailable. Surface the real
-        # error so schema mismatches don't get masked as "contention".
-        raise HTTPException(
-            status_code=503,
-            detail=f"Monitored jobs temporarily unavailable: {e}",
-        )
+        # Both DB and cache are unavailable. Returning 503 here would cause
+        # the dashboard to render blank with an AbortError toast — the
+        # frontend's 15s controller fires before the user sees any data and
+        # then trips the !response.ok branch. With the 25s cache warmer
+        # running in main.py lifespan, this branch is rare (warmer + live
+        # query both failing), so a 200 with empty jobs + explicit
+        # `source: "error"` is a better UX than a hard 503. The original
+        # exception is already logged above (logger.error at the top of
+        # this except), so schema mismatches and other root causes remain
+        # debuggable from the API logs.
+        return {
+            "jobs": {},
+            "total_count": 0,
+            "source": "error",
+            "warning": f"Monitored jobs temporarily unavailable: {e}",
+        }
 
 @router.post("/jobs/poll-now")
 async def trigger_manual_poll(background_tasks: BackgroundTasks):

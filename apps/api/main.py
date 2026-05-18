@@ -168,6 +168,56 @@ async def lifespan(app: FastAPI):
         except Exception as e:  # noqa: BLE001
             logger.error(f"monitored_jobs_schema_init_failed: {e}; continuing")
 
+    # 4b. Keep the /jobs/monitored cache warm. Per-worker in-memory cache
+    # has a 30s TTL, but the live query can spike to 20-30s during
+    # poll-loop lock contention — long enough that the frontend's 8s
+    # AbortController fires and the dashboard goes blank. Running a 25s
+    # interval warmer keeps each worker's cache populated under all but
+    # the most severe DB outages; combined with the empty-payload
+    # fallback in get_monitored_jobs, the dashboard never goes blank.
+    async def warm_monitored_jobs_cache():
+        if jobs_router is None:
+            return
+        sync_fn = getattr(jobs_router, "_get_monitored_jobs_sync", None)
+        setter = getattr(jobs_router, "_set_cached_monitored_jobs", None)
+        if sync_fn is None or setter is None:
+            return
+        for include_archived in (False, True):
+            try:
+                payload = await asyncio.to_thread(sync_fn, include_archived, "summary")
+                setter(include_archived, "summary", payload)
+            except Exception as e:  # noqa: BLE001
+                # Escalated from warning → error with traceback. A failing
+                # warmer is the upstream cause of cold-cache → frontend
+                # AbortError on the dashboard; on qacurate it stayed buried
+                # at warning level and the actual DB/schema fault was
+                # invisible. Surface it loudly so monitoring catches it.
+                logger.error(
+                    f"monitored_jobs_cache_warmer failed (include_archived={include_archived}): {e}",
+                    exc_info=True,
+                )
+
+    scheduler.add_job(
+        warm_monitored_jobs_cache,
+        "interval",
+        seconds=25,
+        id="monitored_jobs_cache_warmer",
+        replace_existing=True,
+    )
+    # Prime cache once at startup so the first dashboard request after
+    # deploy hits warm cache instead of a cold DB. Fire-and-forget — any
+    # failure is logged inside the warmer and never blocks boot.
+    asyncio.create_task(warm_monitored_jobs_cache())
+
+    # v30: one-time backfill of the denormalized counter columns. After
+    # the column-add ALTER above, candidates_sourced/launched/
+    # complete_submissions/pass_submissions default to 0 — the backfill
+    # populates them from sourced_candidates aggregates so the dashboard
+    # shows real numbers without waiting for the next 15-min sync cycle.
+    # Fire-and-forget so a slow aggregate never blocks boot.
+    if jobs_router is not None and hasattr(jobs_router, "backfill_monitored_jobs_counters"):
+        asyncio.create_task(jobs_router.backfill_monitored_jobs_counters())
+
     # 5. Provision sourced_candidates + candidate_enhanced_info schema.
     # Pre-v22: `_ensure_table` ran CREATE TABLE + 6x ALTER on every save, and
     # `save_candidate_enhanced_info` ran its own CREATE TABLE + ALTER + CREATE

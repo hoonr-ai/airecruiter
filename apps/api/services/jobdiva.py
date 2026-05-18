@@ -36,6 +36,41 @@ def readable_ist_now() -> str:
     ist = timezone(timedelta(hours=5, minutes=30))
     return datetime.now(ist).strftime("%Y-%m-%d %H:%M:%S IST")
 
+
+# JobDiva occasionally returns 2FA / dialog UI text inside firstName/lastName
+# fields (observed: "Confirm Verification" / "Code" across 23+ records in a
+# single response). These pollute the candidate table with non-person rows.
+# This validator rejects names that look like UI strings, not human names.
+_NAME_POLLUTION_TOKENS = (
+    "verification", "captcha", "confirm", "submit", "continue",
+    "please click", "sign in", "log in", "login", "enter code",
+)
+_NAME_POLLUTION_EXACT = {
+    "confirm verification", "code", "ok", "cancel", "yes", "no",
+}
+
+
+def is_valid_candidate_name(first: str, last: str) -> bool:
+    """Return False for obvious JobDiva UI-string pollution disguised as a name.
+
+    Conservative on purpose — only triggers on clearly non-person values. A real
+    person named "Code" (unlikely but possible) would currently get rejected
+    via the EXACT set; that risk is preferred over admitting another batch of
+    "Confirm Verification Code" rows.
+    """
+    f = (first or "").strip()
+    l = (last or "").strip()
+    if not f and not l:
+        return False
+    combined = f"{f} {l}".strip().lower()
+    if combined in _NAME_POLLUTION_EXACT or f.lower() in _NAME_POLLUTION_EXACT or l.lower() in _NAME_POLLUTION_EXACT:
+        return False
+    if any(tok in combined for tok in _NAME_POLLUTION_TOKENS):
+        return False
+    if len(f) > 30 or len(l) > 30:
+        return False
+    return True
+
 def get_field(data: Dict[str, Any], keys: List[str], default: Any = None) -> Any:
     """
     Safely extract a value from a dictionary by checking multiple potential keys
@@ -631,8 +666,11 @@ class JobDivaService:
                         # Use correct field names from JobApplicantsDetail response
                         first_name = get_field(c, ["FIRSTNAME", "firstName", "firstname"]) or "Unknown"
                         last_name = get_field(c, ["LASTNAME", "lastName", "lastname"]) or "Candidate"
+                        if not is_valid_candidate_name(first_name, last_name):
+                            logger.warning("Dropping JobDiva applicant with invalid name: first=%r last=%r id=%r", first_name, last_name, get_field(c, ["CANDIDATEID", "candidateId", "id", "ID", "canId"]))
+                            continue
                         full_name = f"{first_name} {last_name}".strip()
-                        
+
                         # Extract candidate ID using correct field name
                         candidate_id = get_field(c, ["CANDIDATEID", "candidateId", "id", "ID", "canId"]) or "Unknown"
                         
@@ -823,6 +861,9 @@ class JobDivaService:
 
             first_name = get_field(c, ["firstName", "firstname", "FIRSTNAME"]) or "Unknown"
             last_name = get_field(c, ["lastName", "lastname", "LASTNAME"]) or "Candidate"
+            if not is_valid_candidate_name(first_name, last_name):
+                logger.warning("Dropping JobAgent candidate with invalid name: first=%r last=%r id=%r", first_name, last_name, candidate_id)
+                continue
             full_name = f"{first_name} {last_name}".strip()
 
             # PROVINCE is JobAgentSearch's name for state.
@@ -884,7 +925,8 @@ class JobDivaService:
         # Same enrichment + rescue flow as _search_talent_pool.
         merge_targets = jd_results + profile_only_results
         ids_to_enrich = [r["candidate_id"] for r in merge_targets if r.get("candidate_id")]
-        if ids_to_enrich:
+        from core import sourcing_config as _sc
+        if ids_to_enrich and not _sc.FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH:
             detail_t0 = time.time()
             detail_map = await self._fetch_candidate_details_batch(token, ids_to_enrich)
             detail_ms = int((time.time() - detail_t0) * 1000)
@@ -902,6 +944,11 @@ class JobDivaService:
                 f"JobAgent CandidatesDetail enrichment: "
                 f"{len(detail_map)}/{len(ids_to_enrich)} matched in {detail_ms}ms, "
                 f"rescued={rescued}, fields_from_detail={counters}"
+            )
+        elif ids_to_enrich:
+            logger.info(
+                "FAST_PATH_SKIP_DETAIL: JobAgent path skipping inline CandidatesDetail for %d candidates; background hydration will follow.",
+                len(ids_to_enrich),
             )
 
         if require_resume:
@@ -1036,6 +1083,9 @@ class JobDivaService:
 
                     first_name = get_field(c, ["firstName", "firstname", "FIRSTNAME"]) or "Unknown"
                     last_name = get_field(c, ["lastName", "lastname", "LASTNAME"]) or "Candidate"
+                    if not is_valid_candidate_name(first_name, last_name):
+                        logger.warning("Dropping TalentSearch candidate with invalid name: first=%r last=%r id=%r", first_name, last_name, candidate_id)
+                        continue
                     full_name = f"{first_name} {last_name}".strip()
 
                     resume_text = self._extract_resume_text(c)
@@ -1183,7 +1233,8 @@ class JobDivaService:
                 # supplied resume can rescue an otherwise-filtered candidate.
                 merge_targets = jd_results + profile_only_results
                 ids_to_enrich = [r["candidate_id"] for r in merge_targets if r.get("candidate_id")]
-                if ids_to_enrich:
+                from core import sourcing_config as _sc
+                if ids_to_enrich and not _sc.FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH:
                     detail_t0 = time.time()
                     detail_map = await self._fetch_candidate_details_batch(token, ids_to_enrich)
                     detail_ms = int((time.time() - detail_t0) * 1000)
@@ -1202,16 +1253,23 @@ class JobDivaService:
                         f"in {detail_ms}ms, rescued={rescued}, "
                         f"fields_from_detail={fields_from_detail}"
                     )
+                elif ids_to_enrich:
+                    logger.info(
+                        "FAST_PATH_SKIP_DETAIL: TalentSearch path skipping inline CandidatesDetail for %d candidates; background hydration will follow.",
+                        len(ids_to_enrich),
+                    )
 
                 # Second-pass: TalentSearch + CandidatesDetail still leave
                 # `resume_text` empty for most candidates because resume bodies
                 # live in CandidatesResumesDetail / ResumesTextDetail. Without
                 # resume text the downstream skill scorer has nothing to match.
                 # Fetch concurrently for the remaining empty-resume candidates.
+                # When fast-path is on we defer resume fetch too — it's the
+                # other big rate-limit consumer; background hydration handles it.
                 empty_resume_ids = [
                     r["candidate_id"] for r in (jd_results + profile_only_results)
                     if r.get("candidate_id") and not (r.get("resume_text") or "").strip()
-                ]
+                ] if not _sc.FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH else []
                 if empty_resume_ids:
                     resume_t0 = time.time()
                     resume_map = await self._fetch_resume_text_batch(
@@ -2701,9 +2759,24 @@ class JobDivaService:
         
         try:
             with self.engine.connect() as conn:
+                # Fail fast on row-lock and slow-statement contention.
+                # monitor_job_locally is called from the 5-min poll loop, the
+                # 15-min auto-sync, the /jobs/fetch handler, and several other
+                # paths. The dashboard's `_get_monitored_jobs_sync` runs with a
+                # 2s lock_timeout / 8s statement_timeout — without matching
+                # caps on writers, a contested poll cycle can keep a pool slot
+                # occupied for tens of seconds and starve concurrent reads.
+                # The writes here are simple SELECT-then-UPDATE/INSERT on a
+                # single monitored_jobs row; 500ms / 5s caps are well above
+                # the steady-state cost but bounded enough that failures
+                # surface in logs (return False, next cycle retries) instead
+                # of compounding into dashboard 503s.
+                conn.execute(text("SET LOCAL lock_timeout = '500ms'"))
+                conn.execute(text("SET LOCAL statement_timeout = '5s'"))
+
                 # Extract recruiter emails for job_configuration
                 recruiter_emails = data.get("recruiter_emails", [])
-                
+
                 # Check if job exists in monitored_jobs by job_id OR jobdiva_id
                 res = conn.execute(text("SELECT 1 FROM monitored_jobs WHERE job_id = :job_id OR jobdiva_id = :job_id"), {"job_id": job_id})
                 exists = res.fetchone()
@@ -3428,6 +3501,9 @@ class JobDivaService:
             
             first_name = get_field(candidate_data, ["firstName", "firstname", "FIRSTNAME"]) or ""
             last_name = get_field(candidate_data, ["lastName", "lastname", "LASTNAME"]) or ""
+            if not is_valid_candidate_name(first_name, last_name):
+                logger.warning("Standardize rejecting invalid name: first=%r last=%r id=%r", first_name, last_name, candidate_id)
+                return None
             name = f"{first_name} {last_name}".strip() or "Unknown Candidate"
             
             # Extract location
