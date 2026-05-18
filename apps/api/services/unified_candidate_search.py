@@ -33,9 +33,81 @@ from core.config import (
     embedding_skill_match_for_family,
 )
 from services import skill_embeddings
+from services import role_taxonomy
 from services.role_family import detect_role_family
 
+
+_TITLE_BOOST_BY_RELEVANCE = {"exact": 30, "similar": 20, "related": 10}
+
+
+_TITLE_SEPARATORS = re.compile(r"[/|·,;]+")
+
+
+def _candidate_titles(cand: Dict[str, Any]) -> List[str]:
+    """Pull every plausible title field off a candidate dict, split on common
+    separators ("/", "|", "·", ",", ";") so multi-title strings like
+    "BI Developer/SQL Server Developer/Power BI" become three lookups, deduped."""
+    raw: List[str] = []
+    for key in ("title", "current_title", "most_recent_title", "headline"):
+        val = cand.get(key)
+        if isinstance(val, str) and val.strip():
+            raw.append(val.strip())
+    enhanced = cand.get("enhanced_info")
+    if isinstance(enhanced, dict):
+        for key in ("current_title", "most_recent_title", "headline"):
+            val = enhanced.get(key)
+            if isinstance(val, str) and val.strip():
+                raw.append(val.strip())
+    out: List[str] = []
+    for combined in raw:
+        for part in _TITLE_SEPARATORS.split(combined):
+            part = part.strip()
+            if part and part not in out:
+                out.append(part)
+    return out
+
+
+def _compute_title_boost(cand: Dict[str, Any], title_criteria: List[Dict[str, Any]]) -> int:
+    """Score how well a candidate's title matches the searched titles via taxonomy.
+
+    Returns the strongest tier across (searched_title × candidate_title): exact=30,
+    similar=20, related=10, none=0. Each searched title contributes its primary
+    `value` plus any `similar_terms` already attached upstream.
+    """
+    candidate_titles = _candidate_titles(cand)
+    if not candidate_titles:
+        return 0
+    best = 0
+    best_pair: Optional[Tuple[str, str, str]] = None
+    for item in title_criteria:
+        searched_values = [str(item.get("value", "")).strip()]
+        for t in item.get("similar_terms", []) or []:
+            t = str(t).strip()
+            if t:
+                searched_values.append(t)
+        for searched in searched_values:
+            if not searched:
+                continue
+            for cand_title in candidate_titles:
+                tier = role_taxonomy.compare(searched, cand_title)
+                points = _TITLE_BOOST_BY_RELEVANCE.get(tier, 0)
+                if points > best:
+                    best = points
+                    best_pair = (searched, cand_title, tier)
+                    if best >= 30:
+                        cand["title_match_source"] = {"searched": searched, "candidate": cand_title, "relevance": tier}
+                        return best
+    if best > 0 and best_pair:
+        cand["title_match_source"] = {"searched": best_pair[0], "candidate": best_pair[1], "relevance": best_pair[2]}
+    return best
+
 logger = logging.getLogger(__name__)
+
+# Sentinel distance for candidates with no usable location data. Big enough
+# to always exceed the UI's within_miles radius so the BEYOND 25MI badge
+# counts these rows instead of silently passing them as in-radius.
+_UNKNOWN_DISTANCE_SENTINEL = 9999.0
+
 
 class SearchCriteria(BaseModel):
     job_id: str
@@ -209,6 +281,17 @@ class UnifiedCandidateSearch:
                     "bonus": bonus,
                     "base_score": base_score,
                 }
+
+            # Title-match boost via role taxonomy. Without this, a SQL dev
+            # whose resume happens to mention "program management" can outrank
+            # a Senior Program Manager whose title actually matches the search.
+            if base_score > 0 and criteria.title_criteria:
+                title_boost = _compute_title_boost(cand, criteria.title_criteria)
+                if title_boost > 0:
+                    prev_score = cand["match_score"]
+                    cand["match_score"] = min(100, prev_score + title_boost)
+                    cand["match_score_details"]["title_boost"] = title_boost
+
             return cand
 
         # JobDiva is split into two explicit sources:
@@ -1002,6 +1085,8 @@ class UnifiedCandidateSearch:
             is_match, reason, distance = self._location_match_verdict(c, criteria)
             if distance is not None:
                 c["distance_miles"] = round(float(distance), 1)
+            if reason:
+                c["location_match_reason"] = reason
             if is_match:
                 kept.append(c)
             else:
@@ -1507,10 +1592,11 @@ class UnifiedCandidateSearch:
         if not candidate_locs:
             if relocation_flag and not include_relocation:
                 return False, "relocation_excluded_by_filter", None
-            # Soft-keep: missing structured location is a data-quality
-            # issue, not a reason to drop. Downstream LLM enrichment can
-            # re-screen with the full resume text.
-            return True, "candidate_location_missing_keep", None
+            # Soft-keep with sentinel distance so the UI counts these under
+            # BEYOND 25MI instead of silently treating them as in-radius.
+            # Common with JobDiva-JobAgent applicants whose city/state field
+            # is blank in the API response (data quality, not a remote signal).
+            return True, "candidate_location_missing_keep", _UNKNOWN_DISTANCE_SENTINEL
 
         # If search is state-only, enforce state equality without geocoding.
         if required["state"] and not required["city"]:
@@ -1534,6 +1620,56 @@ class UnifiedCandidateSearch:
         geocode_failure = False
         closest_distance: Optional[float] = None
 
+        # OFFLINE FAST-PATH: zip / city+state normalized match. JobAgent
+        # locations are noisy ("PLANO, TX 75024" vs "Plano, TX" vs "Plano TX")
+        # and Nominatim is rate-limited, so doing a string-level normalized
+        # match catches the obvious in-radius cases without an HTTP call.
+        # Falls through to Nominatim for anything not directly resolvable.
+        try:
+            from services.us_state_index import state_centroid_distance_miles
+        except Exception:
+            state_centroid_distance_miles = None  # type: ignore[assignment]
+
+        offline_state_mismatch_distance: Optional[float] = None
+        for candidate_loc in candidate_locs:
+            parsed = self._parse_location(candidate_loc)
+            cand_city = parsed.get("city", "")
+            cand_state = parsed.get("state", "")
+            cand_zip = parsed.get("zip", "")
+
+            # Exact zip match → same point, ~0 mi.
+            if cand_zip and required.get("zip") and cand_zip == required["zip"]:
+                return True, "zip_match", 0.0
+
+            # Exact city + state match → same metro, treat as 0 mi.
+            if (
+                cand_city and cand_state
+                and required.get("city") and required.get("state")
+                and cand_city == required["city"]
+                and cand_state == required["state"]
+            ):
+                return True, "city_state_match", 0.0
+
+            # State-centroid distance as a cheap upper-bound check. If the
+            # candidate's state centroid is already far beyond the radius,
+            # we can skip the Nominatim call and report the cross-state
+            # distance as the candidate's offline-estimated distance. (We
+            # only short-circuit reject when the gap is large enough that
+            # any in-state metro pair would also be outside the radius.)
+            if (
+                state_centroid_distance_miles is not None
+                and cand_state and required.get("state")
+                and cand_state.upper() != required["state"].upper()
+            ):
+                centroid_d = state_centroid_distance_miles(
+                    cand_state.upper(), required["state"].upper()
+                )
+                if centroid_d is not None:
+                    if offline_state_mismatch_distance is None or centroid_d < offline_state_mismatch_distance:
+                        offline_state_mismatch_distance = float(centroid_d)
+
+        # Network path: defer to Nominatim for any candidate we couldn't
+        # resolve offline.
         for candidate_loc in candidate_locs:
             is_within, reason, distance = within_radius(candidate_loc, target, miles)
             if isinstance(distance, (int, float)) and distance >= 0:
@@ -1544,13 +1680,22 @@ class UnifiedCandidateSearch:
             if reason in {"candidate_ungeocodable", "target_ungeocodable"}:
                 geocode_failure = True
 
+        # Prefer offline cross-state estimate when Nominatim couldn't pin a
+        # distance — at least the UI can render a real number under BEYOND.
+        if closest_distance is None and offline_state_mismatch_distance is not None:
+            closest_distance = offline_state_mismatch_distance
+
         if geocode_failure:
             # Nominatim is best-effort and rate-limited. A geocode miss is
-            # not evidence the candidate is outside the radius — soft-keep.
-            return True, "geocode_unavailable_keep", closest_distance
+            # not evidence the candidate is outside the radius — soft-keep
+            # but report the sentinel distance so BEYOND 25MI counts them.
+            return True, "geocode_unavailable_keep", closest_distance if closest_distance is not None else _UNKNOWN_DISTANCE_SENTINEL
         if relocation_flag and not include_relocation:
             return False, "relocation_excluded_by_filter", closest_distance
-        return False, "outside_radius", closest_distance
+        # No hard filter: a candidate geocoded as outside the radius is
+        # still kept and shown under BEYOND 25MI with the real distance.
+        # The recruiter decides whether to widen radius or skip them.
+        return True, "outside_radius_soft_keep", closest_distance if closest_distance is not None else _UNKNOWN_DISTANCE_SENTINEL
 
     def _should_enforce_location(self, criteria: SearchCriteria) -> bool:
         normalized_location = self._normalize_term(criteria.location)
@@ -1578,6 +1723,16 @@ class UnifiedCandidateSearch:
         text = re.sub(r"\bwithin\s+\d+\s+mi\b", "", text)
         text = re.sub(r"\bmetro\b", "", text)
         text = re.sub(r"^must be local to\s+", "", text).strip(" ,")
+
+        # Extract a 5-digit US zip (with optional ZIP+4 suffix) before
+        # splitting on comma. This is a normalization fix for inputs like
+        # "Plano, TX 75024" / "PLANO TX 75024-1234" / "75024" — zip stays
+        # accessible for downstream offline match instead of being stripped.
+        zip_match = re.search(r"\b(\d{5})(?:-\d{4})?\b", text)
+        zip_code = zip_match.group(1) if zip_match else ""
+        if zip_code:
+            text = (text[:zip_match.start()] + text[zip_match.end():]).strip(" ,")
+
         parts = [part.strip() for part in re.split(r",|\\|/", text) if part.strip()]
 
         city = parts[0] if parts else ""
@@ -1598,10 +1753,21 @@ class UnifiedCandidateSearch:
             elif len(tokens) > 1 and len(tokens[-1]) == 2:
                 city = " ".join(tokens[:-1])
                 state = tokens[-1]
+            elif len(tokens) > 1:
+                # "City State" (no comma, full or abbreviated). Try resolving
+                # the trailing token(s) as a state name.
+                for n in (2, 1):
+                    if len(tokens) > n:
+                        candidate_state = resolve_state_code(" ".join(tokens[-n:]))
+                        if candidate_state:
+                            city = " ".join(tokens[:-n])
+                            state = candidate_state
+                            break
 
         return {
             "city": self._normalize_term(city),
             "state": state_aliases.get(self._normalize_term(state), self._normalize_term(state)),
+            "zip": zip_code,
         }
 
     def _resume_filter_term(self, filter_item: Dict[str, Any]) -> str:

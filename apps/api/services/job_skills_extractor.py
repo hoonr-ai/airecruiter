@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from core.graph import ontology
 from services.role_family import detect_role_family
 from services.taxonomy_service import extract_grounded_rubric
+from services import role_taxonomy
 import openai
 
 logger = logging.getLogger(__name__)
@@ -468,6 +469,23 @@ IMPORTANT:
                 r['matchType'] = 'Similar'  # Always use Similar for job titles
                 r['required'] = r.get('required', 'Preferred')
                 final_titles.append(r)
+
+        # Augment each title with similar_titles from the role taxonomy.
+        # Source: apps/api/data/job_role_taxonomy.json (17k roles, 9-level hierarchy).
+        # Adds K17000 siblings in the same K5000/K1500 family, giving Step 5
+        # a useful expansion (~10-30 chips per title) without an LLM call.
+        for t in final_titles:
+            try:
+                expansions = role_taxonomy.expand_title(t.get("value", ""), max_results=30)
+            except Exception as e:
+                logger.warning("role_taxonomy.expand_title failed for %r: %s", t.get("value"), e)
+                expansions = []
+            existing = list(t.get("similar_titles") or [])
+            for entry in expansions:
+                title = entry.get("title") if isinstance(entry, dict) else None
+                if title and title != t.get("value") and title not in existing:
+                    existing.append(title)
+            t["similar_titles"] = existing[:30]
 
         # Normalise additional education items
         education_raw = phase2_result.get("education", [])
