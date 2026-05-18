@@ -209,6 +209,15 @@ async def lifespan(app: FastAPI):
     # failure is logged inside the warmer and never blocks boot.
     asyncio.create_task(warm_monitored_jobs_cache())
 
+    # v30: one-time backfill of the denormalized counter columns. After
+    # the column-add ALTER above, candidates_sourced/launched/
+    # complete_submissions/pass_submissions default to 0 — the backfill
+    # populates them from sourced_candidates aggregates so the dashboard
+    # shows real numbers without waiting for the next 15-min sync cycle.
+    # Fire-and-forget so a slow aggregate never blocks boot.
+    if jobs_router is not None and hasattr(jobs_router, "backfill_monitored_jobs_counters"):
+        asyncio.create_task(jobs_router.backfill_monitored_jobs_counters())
+
     # 5. Provision sourced_candidates + candidate_enhanced_info schema.
     # Pre-v22: `_ensure_table` ran CREATE TABLE + 6x ALTER on every save, and
     # `save_candidate_enhanced_info` ran its own CREATE TABLE + ALTER + CREATE
