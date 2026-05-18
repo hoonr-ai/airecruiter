@@ -38,43 +38,59 @@ class CandidateProfilesDB:
         self.bulk_upsert_candidates(jobdiva_id, [candidate], source)
 
     def bulk_upsert_candidates(self, jobdiva_id: str, candidates: List[Dict[str, Any]], source: str = "JobDiva") -> int:
-        """One transaction per candidate. Child-table writes (skills,
-        education, positions) used to be DELETE-then-loop-INSERT — for a
-        candidate with 10 skills / 4 educations / 5 positions that was ~19
-        round-trips, multiplied by every candidate in an auto-sync batch.
-        Replaced with `execute_values` for one round-trip per child table.
+        """Upsert profile + child tables for a list of candidates, reusing
+        ONE pool connection for the whole batch.
+
+        Pre-fix this method opened a fresh `get_db_connection()` inside the
+        per-candidate loop. With auto-sync feeding ~100 candidates per job
+        and 8 workers contending on a 20-slot pool, those per-row borrows
+        were the dominant source of pool churn — and a frequent trigger
+        for the wizard's step-3 save hanging while waiting for a free
+        connection slot.
+
+        Now: one borrow per call, statement_timeout per candidate so a
+        single misbehaving row can't stall the whole batch.
+
+        Child-table writes (skills, education, positions) batch their own
+        rows via `execute_values`, so each candidate still costs a small
+        constant number of round-trips inside the shared connection.
         """
         if not candidates:
             return 0
 
         saved = 0
-        for c in candidates:
-            try:
-                cid = self._resolve_candidate_id(c, source)
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # Bound each candidate's child-table churn. Without this,
+                # one unindexed lookup on a child table can stall the
+                # batch.
+                cur.execute("SET LOCAL lock_timeout = '2000ms'")
+                cur.execute("SET LOCAL statement_timeout = '10000ms'")
+                for c in candidates:
+                    try:
+                        cid = self._resolve_candidate_id(c, source)
 
-                # Normalize candidate fields
-                name = c.get("candidate_name") or c.get("name") or "Unknown"
-                parts = name.split(" ", 1)
-                first = parts[0]
-                last = parts[1] if len(parts) > 1 else ""
+                        # Normalize candidate fields
+                        name = c.get("candidate_name") or c.get("name") or "Unknown"
+                        parts = name.split(" ", 1)
+                        first = parts[0]
+                        last = parts[1] if len(parts) > 1 else ""
 
-                email = c.get("email")
-                if isinstance(email, list):
-                    email = email[0] if email else None
-                phone = c.get("phone")
-                if isinstance(phone, list):
-                    phone = phone[0] if phone else None
+                        email = c.get("email")
+                        if isinstance(email, list):
+                            email = email[0] if email else None
+                        phone = c.get("phone")
+                        if isinstance(phone, list):
+                            phone = phone[0] if phone else None
 
-                title = c.get("job_title") or c.get("title") or c.get("headline")
-                location = c.get("current_location") or c.get("location") or c.get("city")
+                        title = c.get("job_title") or c.get("title") or c.get("headline")
+                        location = c.get("current_location") or c.get("location") or c.get("city")
 
-                skill_source = "reported" if source != "JobDiva" else "predicted"
-                skills_raw = c.get("structured_skills") or c.get("skills") or []
-                edu_raw = c.get("candidate_education") or c.get("education") or []
-                exp_raw = c.get("company_experience") or c.get("experience") or []
+                        skill_source = "reported" if source != "JobDiva" else "predicted"
+                        skills_raw = c.get("structured_skills") or c.get("skills") or []
+                        edu_raw = c.get("candidate_education") or c.get("education") or []
+                        exp_raw = c.get("company_experience") or c.get("experience") or []
 
-                with get_db_connection() as conn:
-                    with conn.cursor() as cur:
                         # 1. UPSERT PROFILE
                         cur.execute(
                             """
@@ -168,9 +184,9 @@ class CandidateProfilesDB:
                                     pos_rows,
                                 )
 
-                saved += 1
-            except Exception as e:
-                logger.error(f"[CandidateProfilesDB] Error upserting candidate {c.get('candidate_id')}: {e}")
+                        saved += 1
+                    except Exception as e:
+                        logger.error(f"[CandidateProfilesDB] Error upserting candidate {c.get('candidate_id')}: {e}")
 
         return saved
 
