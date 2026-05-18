@@ -1932,11 +1932,25 @@ async def get_monitored_jobs(
         return cached
 
     try:
-        payload = await asyncio.to_thread(_get_monitored_jobs_sync, include_archived, view)
+        # Hard wall-clock cap of 7s on the live query path. The inner
+        # SET LOCAL statement_timeout (5s) covers the SQL, but the request
+        # can still be slow due to pool wait, thread-pool saturation, or
+        # post-query Python serialization. asyncio.wait_for guarantees
+        # this endpoint returns inside the frontend's 15s AbortController
+        # window every single time — even when something we didn't
+        # anticipate is wedged downstream. On timeout we fall through to
+        # the same stale-cache / 200-empty handler as any other failure.
+        payload = await asyncio.wait_for(
+            asyncio.to_thread(_get_monitored_jobs_sync, include_archived, view),
+            timeout=7.0,
+        )
         _set_cached_monitored_jobs(include_archived, view, payload)
         return payload
-    except Exception as e:
-        logger.error(f"Error fetching monitored jobs from DB: {e}")
+    except (asyncio.TimeoutError, Exception) as e:
+        if isinstance(e, asyncio.TimeoutError):
+            logger.error(f"monitored_jobs wall-clock timeout (7s) — include_archived={include_archived}")
+        else:
+            logger.error(f"Error fetching monitored jobs from DB: {e}")
         # Serve stale cache if available to avoid long blank-loads during
         # transient lock contention/timeouts.
         stale_cached = _get_cached_monitored_jobs(include_archived, view, allow_stale=True)
@@ -1947,7 +1961,7 @@ async def get_monitored_jobs(
 
         # Both DB and cache are unavailable. Returning 503 here would cause
         # the dashboard to render blank with an AbortError toast — the
-        # frontend's 8s controller fires before the user sees any data and
+        # frontend's 15s controller fires before the user sees any data and
         # then trips the !response.ok branch. With the 25s cache warmer
         # running in main.py lifespan, this branch is rare (warmer + live
         # query both failing), so a 200 with empty jobs + explicit
