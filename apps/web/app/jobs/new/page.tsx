@@ -4081,7 +4081,14 @@ function NewJobPageContent() {
     if (!hasSeededSourceLocation) {
       setHasSeededSourceLocation(true);
       if (jobData && sourceLocations.length === 0) {
-        const loc = `${jobData.city || ""}, ${jobData.state || ""}`.trim().replace(/^, |, $/g, "");
+        // Format: "City, State Zip" (e.g. "Tempe, AZ 85281"). Including the
+        // zip narrows sourcing-provider matches that mishandle short state
+        // codes alone. Falls back to "City, State" when the zip is missing.
+        const city = (jobData.city || "").trim();
+        const state = (jobData.state || "").trim();
+        const zip = (jobData.zip_code || "").trim();
+        const cityState = [city, state].filter(Boolean).join(", ");
+        const loc = [cityState, zip].filter(Boolean).join(" ");
         if (loc) {
           setSourceLocations([{
             id: 1,
@@ -4496,7 +4503,12 @@ function NewJobPageContent() {
       addSourceKey(value);
       similar.forEach(addSourceKey);
       const terms = [value, ...similar].map(term => term.trim()).filter(Boolean).map(quote);
-      const base = terms.length > 1 ? `(${terms.join(" OR ")})` : terms[0];
+      // JobDiva's Talent Search parser requires every skill/title term to be
+      // wrapped in parens — bare `(SKILL)` fails recognition, `("SKILL")`
+      // works. Always wrap for JobDiva even when the term has no similars.
+      const base = isJobDiva || terms.length > 1
+        ? `(${terms.join(" OR ")})`
+        : terms[0];
       if (!base) return "";
       const experienceClause = years > 0
         ? (isJobDiva ? ` OVER ${years} YRS` : ` AND "${years}+ years"`)
@@ -4553,12 +4565,26 @@ function NewJobPageContent() {
       addSourceKey(company);
       addUnique(must, seenMust, quote(company), company);
     });
+    // Multiple sourcing locations are always alternatives — a candidate in
+    // any of them satisfies the location criterion — so OR them together
+    // inside a single clause instead of pushing each into `must` (which
+    // would AND them and reject every candidate that isn't in all).
+    const locationClauses: string[] = [];
+    const seenLocations = new Set<string>();
     sourceLocations
       .filter(location => location.value)
       .forEach(location => {
+        const key = normalizeTerm(location.value);
+        if (!key || seenLocations.has(key)) return;
+        seenLocations.add(key);
         addSourceKey(location.value);
-        addUnique(must, seenMust, `${quote(location.value)} ${location.radius}`, location.value);
+        locationClauses.push(`${quote(location.value)} ${location.radius}`);
       });
+    if (locationClauses.length === 1) {
+      must.push(locationClauses[0]);
+    } else if (locationClauses.length > 1) {
+      must.push(`(${locationClauses.join(" OR ")})`);
+    }
 
     const parts = [...must];
     // Render OR-groups in ascending group-id order so the string is stable
