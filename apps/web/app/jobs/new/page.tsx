@@ -4966,6 +4966,28 @@ function NewJobPageContent() {
               } else if (foundCount % 5 === 0) {
                 setSearchStatus(`Found ${foundCount} profiles from ${activePortal}. Matching resumes against the rubric...`);
               }
+            } else if (event.type === "candidate_detail") {
+              // Fast-path hydration: a thin row that was streamed earlier
+              // now has its email/phone/linkedin_url/resume_text/etc filled
+              // in by the background CandidatesDetail pager. Merge the patch
+              // into the matching row by candidate_id.
+              const targetId = String(event.candidate_id || "");
+              const patch = (event.patch && typeof event.patch === "object")
+                ? event.patch
+                : {};
+              if (!targetId || Object.keys(patch).length === 0) continue;
+              // Update local runList copy used elsewhere in this run.
+              for (const r of runList) {
+                if (String(r.candidate_id || r.id || "") === targetId) {
+                  Object.assign(r, patch);
+                  break;
+                }
+              }
+              setCandidates(prev => prev.map(c => (
+                String(c.candidate_id || c.id || "") === targetId
+                  ? { ...c, ...patch }
+                  : c
+              )));
             } else if (event.type === "stage") {
               const rawStage = String(event.data || "");
               const mapped = mapStageToStatus(rawStage);

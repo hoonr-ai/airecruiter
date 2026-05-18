@@ -461,24 +461,62 @@ class UnifiedCandidateSearch:
             if ext_name in criteria.sources:
                 producers.append(asyncio.create_task(produce_external(ext_name, ext_method)))
 
-        # Drain the queue until every producer emits its SENTINEL
+        # Drain the queue until every producer emits its SENTINEL.
+        # Accumulate JobDiva-sourced candidates so we can hydrate them in
+        # the background after producers finish (fast-path mode only).
         active = len(producers)
+        hydration_targets: List[Dict[str, Any]] = []
+        hydration_task: Optional[asyncio.Task] = None
         try:
             while active > 0:
                 event = await queue.get()
                 if event is SENTINEL:
                     active -= 1
                     continue
+                if event.get("type") == "candidate":
+                    cand_payload = event.get("data") or {}
+                    src = str(cand_payload.get("source") or "")
+                    if src.startswith("JobDiva"):
+                        hydration_targets.append(cand_payload)
                 yield event
+
+            # Phase 4 of fast-path: now that the foreground list is streamed,
+            # hydrate the top of the locally-sorted JobDiva pool with
+            # CandidatesDetail. Each page emits per-candidate "candidate_detail"
+            # events into the same SSE stream so the UI can merge in place.
+            from core import sourcing_config as _sc
+            if hydration_targets and _sc.FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH:
+                hydration_targets.sort(
+                    key=lambda c: c.get("match_score", 0) or 0, reverse=True
+                )
+                hydration_targets = hydration_targets[
+                    : _sc.FAST_PATH_DETAIL_BACKGROUND_MAX_CANDIDATES
+                ]
+                hydration_task = asyncio.create_task(
+                    self._hydrate_jobdiva_in_background(
+                        hydration_targets, queue, SENTINEL
+                    )
+                )
+                # Drain hydration events. Hydration emits SENTINEL when done.
+                while True:
+                    event = await queue.get()
+                    if event is SENTINEL:
+                        break
+                    yield event
         finally:
-            # If the generator is closed (e.g. client disconnect), cancel all background producers
+            # If the generator is closed (e.g. client disconnect), cancel
+            # all background work — producers and hydration alike.
             for task in producers:
                 if not task.done():
                     task.cancel()
-            
-            if producers:
-                # Wait for tasks to acknowledge cancellation (optional but good practice)
-                await asyncio.gather(*producers, return_exceptions=True)
+            if hydration_task and not hydration_task.done():
+                hydration_task.cancel()
+
+            pending = list(producers)
+            if hydration_task:
+                pending.append(hydration_task)
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
 
         duration = time.time() - start_time
         yield {
@@ -491,7 +529,135 @@ class UnifiedCandidateSearch:
         }
         self._log_stage("Done", f"Search complete for job {criteria.job_id} in {int(duration)}s. Streamed {summary['total_candidates']} candidates.")
 
-        
+
+    async def _hydrate_jobdiva_in_background(
+        self,
+        candidates: List[Dict[str, Any]],
+        queue: asyncio.Queue,
+        sentinel: Any,
+    ) -> None:
+        """Page through CandidatesDetail for the top-scored JobDiva candidates
+        and emit one ``candidate_detail`` event per hydrated row.
+
+        Paced to respect JobDiva's rate limit:
+        - Pages run serially (size = FAST_PATH_DETAIL_BACKGROUND_PAGE_SIZE).
+        - Within a page we let ``_fetch_candidate_details_batch`` use its
+          existing batching, which is one request per chunk.
+        - On exception we exponential-backoff (5s → 60s cap) and continue
+          to the next page rather than failing the whole search.
+        - A short sleep between pages spreads the load.
+
+        Emits ``sentinel`` on the queue exactly once when done so the
+        orchestrator's drain loop terminates cleanly.
+        """
+        try:
+            from core import sourcing_config as sc
+            from services.jobdiva import get_field
+
+            page_size = max(1, int(sc.FAST_PATH_DETAIL_BACKGROUND_PAGE_SIZE))
+            page_delay = max(0.0, float(sc.FAST_PATH_DETAIL_BACKGROUND_PAGE_DELAY_S))
+
+            token = await self.jobdiva_service.authenticate()
+            if not token:
+                logger.warning(
+                    "Hydration skipped: JobDiva authentication failed."
+                )
+                return
+
+            backoff_s = 5.0
+            total_pages = (len(candidates) + page_size - 1) // page_size
+            for page_idx in range(total_pages):
+                page = candidates[page_idx * page_size : (page_idx + 1) * page_size]
+                page_ids = [
+                    str(c.get("candidate_id") or c.get("id") or "")
+                    for c in page
+                    if c.get("candidate_id") or c.get("id")
+                ]
+                if not page_ids:
+                    continue
+
+                try:
+                    detail_map = await self.jobdiva_service._fetch_candidate_details_batch(
+                        token, page_ids
+                    )
+                    # Reset backoff on success.
+                    backoff_s = 5.0
+                except Exception as exc:
+                    logger.warning(
+                        "Hydration page %d/%d failed: %s — backing off %.1fs",
+                        page_idx + 1, total_pages, exc, backoff_s,
+                    )
+                    try:
+                        await asyncio.sleep(backoff_s)
+                    except asyncio.CancelledError:
+                        raise
+                    backoff_s = min(60.0, backoff_s * 2.0)
+                    continue
+
+                # Convert each detail record into a patch and emit.
+                hydrated = 0
+                for cand_id, detail in (detail_map or {}).items():
+                    if not detail:
+                        continue
+                    patch: Dict[str, Any] = {}
+                    email = (get_field(detail, ["email", "EMAIL", "emailAddress", "EMAILADDRESS"]) or "")
+                    phone = (get_field(detail, ["phone", "PHONE", "phoneNumber", "PHONENUMBER", "mobilePhone", "MOBILEPHONE"]) or "")
+                    address1 = (get_field(detail, ["address1", "ADDRESS1", "address", "ADDRESS"]) or "")
+                    linkedin = (get_field(detail, ["linkedinUrl", "LINKEDINURL", "linkedin", "LINKEDIN", "linkedIn", "LINKEDIN_URL"]) or "")
+                    resume_id = (get_field(detail, ["resumeId", "RESUMEID", "resume_id"]) or "")
+                    resume_text = self.jobdiva_service._extract_resume_text(detail) or ""
+                    city = (get_field(detail, ["city", "CITY", "locationCity", "LOCATIONCITY"]) or "")
+                    state = (get_field(detail, ["state", "STATE", "locationState", "LOCATIONSTATE"]) or "")
+                    if email:
+                        patch["email"] = str(email).strip()
+                    if phone:
+                        patch["phone"] = str(phone).strip()
+                    if address1:
+                        patch["address1"] = str(address1).strip()
+                    if linkedin:
+                        patch["linkedin_url"] = str(linkedin).strip()
+                    if resume_id:
+                        patch["resume_id"] = str(resume_id).strip()
+                    if resume_text:
+                        patch["resume_text"] = resume_text
+                        patch["abstract"] = resume_text[:240].replace("\n", " ").strip()
+                    if city:
+                        patch["city"] = str(city).strip()
+                    if state:
+                        patch["state"] = str(state).strip()
+
+                    if not patch:
+                        continue
+
+                    await queue.put({
+                        "type": "candidate_detail",
+                        "candidate_id": str(cand_id),
+                        "patch": patch,
+                    })
+                    hydrated += 1
+
+                logger.info(
+                    "Hydration page %d/%d: %d patches for %d ids",
+                    page_idx + 1, total_pages, hydrated, len(page_ids),
+                )
+
+                if page_delay > 0 and page_idx + 1 < total_pages:
+                    try:
+                        await asyncio.sleep(page_delay)
+                    except asyncio.CancelledError:
+                        raise
+        except asyncio.CancelledError:
+            # Caller closed the generator. Let the SENTINEL still fire in finally.
+            raise
+        except Exception as exc:
+            logger.exception("Hydration task failed: %s", exc)
+        finally:
+            try:
+                await queue.put(sentinel)
+            except Exception:
+                pass
+
+
     async def _search_jobdiva_talent(self, criteria: SearchCriteria) -> Dict[str, Any]:
         """JobDiva talent-pool sourcing.
 
