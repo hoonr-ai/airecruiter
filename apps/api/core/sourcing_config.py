@@ -64,3 +64,35 @@ SKIP_JOBDIVA_YOE_PRECHECK = False
 # get filtered by a binary gate. Surfaced borderline candidates still
 # carry the `missing` list so the UI can score-degrade them.
 REQUIRED_MATCH_RATIO = 0.3
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Fast-path TalentSearch (skip blocking CandidatesDetail, hydrate async)
+# ─────────────────────────────────────────────────────────────────────────
+# When True, `_search_talent_pool` and the JobAgent sibling path skip the
+# inline `_fetch_candidate_details_batch` call. The thin TalentSearch
+# record is returned/streamed as-is, scored locally on the cheap signals
+# (title, location, snippet-derived skills, recency), and the UI renders
+# in seconds instead of minutes.
+#
+# CandidatesDetail then runs in the background, page-by-page, paced to
+# respect JobDiva's rate limit. Each page emits per-candidate "detail"
+# SSE patches that hydrate already-rendered rows in place.
+#
+# Default True (2026-05-18): the blocking-detail path frequently stalls
+# under 429s. The fast path is reversible per-request via this flag.
+FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH = True
+
+# How many candidates per background CandidatesDetail page. Each page
+# runs serially; within a page we cap concurrency separately. Small
+# pages give the UI quick incremental hydration; larger pages amortize
+# per-batch overhead. 25 ≈ first visible Step-5 page.
+FAST_PATH_DETAIL_BACKGROUND_PAGE_SIZE = 25
+
+# Total candidates we'll background-hydrate. The long tail of the
+# locally-sorted result is left thin — recruiters never reach it, and
+# burning rate budget there blocks the rows that matter.
+FAST_PATH_DETAIL_BACKGROUND_MAX_CANDIDATES = 100
+
+# Sleep (seconds) between hydration pages to spread JobDiva load.
+FAST_PATH_DETAIL_BACKGROUND_PAGE_DELAY_S = 1.0
