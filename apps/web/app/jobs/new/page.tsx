@@ -2013,12 +2013,19 @@ function NewJobPageContent() {
   // they happen to hit Save & Exit or toggle the boolean panel. Debounce a
   // silent auto-save whenever Step 5 sourcing state changes so reloads
   // restore everything.
+  // step5DirtyRef tracks whether the user has made edits that the 1.5s
+  // debounce hasn't flushed yet — if they click a different step indicator
+  // within that window the cleanup below would clearTimeout, dropping the
+  // edit. The currentStep-keyed effect further down catches that case.
+  const step5DirtyRef = useRef(false);
   useEffect(() => {
     if (currentStep !== 5) return;
     if (isReadOnly) return;
     if (!jobData) return;
-    const handle = setTimeout(() => {
-      saveJobDraft({ currentStep: 5, saveType: "auto", skipToast: true });
+    step5DirtyRef.current = true;
+    const handle = setTimeout(async () => {
+      const ok = await saveJobDraft({ currentStep: 5, saveType: "auto", skipToast: true });
+      if (ok) step5DirtyRef.current = false;
     }, 1500);
     return () => clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2037,6 +2044,18 @@ function NewJobPageContent() {
     minExperienceYears,
     sourceLocationMiles,
   ]);
+
+  // Flush a pending Step 5 save when the user navigates away from Step 5
+  // (e.g., clicks the Step 4 indicator before the 1.5s debounce fires).
+  useEffect(() => {
+    if (currentStep === 5) return;
+    if (!step5DirtyRef.current) return;
+    if (isReadOnly) return;
+    if (!jobData) return;
+    step5DirtyRef.current = false;
+    saveJobDraft({ currentStep: 5, saveType: "auto", skipToast: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep]);
 
   const StepIndicator = () => (
     <div className="flex items-start mb-8 relative">
@@ -4333,6 +4352,11 @@ function NewJobPageContent() {
   const addSourceTitle = (value: string) => {
     const cleanValue = value.trim();
     if (!cleanValue) return;
+    const normalized = cleanValue.toLowerCase();
+    if (sourceTitles.some(t => t.value.trim().toLowerCase() === normalized)) {
+      setSourceTitleInput("");
+      return;
+    }
     setSourceTitles(prev => [
       ...prev,
       {
@@ -4359,6 +4383,11 @@ function NewJobPageContent() {
   const addSourceSkill = (value: string) => {
     const cleanValue = value.trim();
     if (!cleanValue) return;
+    const normalized = cleanValue.toLowerCase();
+    if (sourceSkills.some(s => s.value.trim().toLowerCase() === normalized)) {
+      setSourceSkillInput("");
+      return;
+    }
     setSourceSkills(prev => [
       ...prev,
       {
