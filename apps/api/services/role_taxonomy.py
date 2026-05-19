@@ -111,28 +111,84 @@ _load()
 
 
 @lru_cache(maxsize=4096)
-def _fuzzy_leaf(title: str, *, min_score: int = 72) -> str | None:
+def _fuzzy_leaf(title: str, *, min_score: int = 85) -> str | None:
     """Find the closest K17000 leaf for a free-text title. None if below threshold.
 
-    Threshold 72 captures common variants like "Global Program Manager" →
-    "Global Program Director" (same Program Manager K1500 family) without
-    drifting to wholly unrelated roles.
+    WRatio at 85 penalises token-bag matches that share only generic words like
+    "Developer" or "Manager" — those were the regression vector behind the
+    "Front End Developer" → loan-roles bug. token_sort_ratio at 72 (the prior
+    setting) accepted any pair that shared a couple of common tokens.
     """
     if not _LEAF_NAMES or not title:
         return None
-    match = process.extractOne(title, _LEAF_NAMES, scorer=fuzz.token_sort_ratio, score_cutoff=min_score)
+    match = process.extractOne(title, _LEAF_NAMES, scorer=fuzz.WRatio, score_cutoff=min_score)
     return match[0] if match else None
 
 
 def _exact_at_level(value: str) -> dict | None:
-    """If `value` appears as an exact value at K10000..K1000, return a representative record."""
+    """If `value` appears as an exact value at K10000 or K5000, return a representative record.
+
+    Restricted to the same levels `expand_title` uses for sibling collection.
+    K1500/K1000 were previously included but those broad families pick an
+    arbitrary representative leaf whose K10000/K5000 can be from a wholly
+    different sub-domain (the "Front End Developer" → loan-roles regression).
+    """
     if not value:
         return None
     key = _norm(value)
-    for level in ("ROLE_K10000", "ROLE_K5000", "ROLE_K1500", "ROLE_K1000"):
+    for level in ("ROLE_K10000", "ROLE_K5000"):
         leaves = _INDEX.get(level, {}).get(key)
         if leaves:
             return _BY_LEAF.get(_norm(leaves[0]))
+    return None
+
+
+_GENERIC_TOKENS = {
+    "manager", "engineer", "specialist", "developer", "analyst", "lead",
+    "senior", "junior", "associate", "director", "officer", "head", "chief",
+    "principal", "staff", "consultant", "coordinator", "administrator",
+    "executive", "representative", "assistant",
+}
+
+
+def _significant_tokens(text: str) -> set[str]:
+    return {
+        t for t in _norm(text).replace(",", " ").replace("-", " ").split()
+        if len(t) >= 4 and t not in _GENERIC_TOKENS
+    }
+
+
+def _share_significant_token(input_title: str, resolved_leaf: str) -> bool:
+    """True iff the input and the resolved leaf share a non-generic concept.
+
+    A "concept" is either:
+      - an identical ≥4-char non-generic token (e.g. "lending" in both), or
+      - one token is a prefix of the other and both have ≥4 chars (handles
+        "front end"/"frontend", "back end"/"backend", "ecomm"/"ecommerce").
+
+    Guards against e.g. "Front End Developer" resolving to a loan-family leaf
+    where the only shared token is "developer" (generic, on the stoplist).
+    """
+    a = _significant_tokens(input_title)
+    b = _significant_tokens(resolved_leaf)
+    if a & b:
+        return True
+    for x in a:
+        for y in b:
+            if x.startswith(y) or y.startswith(x):
+                return True
+    return False
+
+
+def _accept(rec: dict | None, input_title: str) -> dict | None:
+    """Return `rec` only if its K17000 leaf shares a significant token with the input."""
+    if not rec:
+        return None
+    leaf = rec.get("ROLE_K17000") or ""
+    if not leaf:
+        return None
+    if _share_significant_token(input_title, leaf):
+        return rec
     return None
 
 
@@ -140,11 +196,14 @@ def _resolve(title: str) -> dict | None:
     """Resolve a free-text title to its taxonomy record.
 
     Order:
-      1. Exact K17000 leaf match (raw and stripped)
-      2. Exact match at higher hierarchy level (K10000..K1000) — e.g. "Program Manager" is
-         not a leaf but is a K1500 family; treat it as that family.
-      3. Fuzzy match on K17000 leaves (lower threshold, token_sort_ratio)
-      4. Fuzzy match after stripping qualifiers
+      1. Exact K17000 leaf match (raw and stripped) — always accepted.
+      2. Exact match at K10000/K5000 family level — accepted only if the
+         representative leaf shares a significant token with the input.
+      3. Fuzzy K17000 leaf match (WRatio, cutoff 85) — same significant-token
+         gate. Tried on raw then on the qualifier-stripped form.
+
+    The significant-token gate is what prevents accidental cross-domain
+    resolution; the LRU cache on `_fuzzy_leaf` keeps the hot path cheap.
     """
     if not title:
         return None
@@ -154,13 +213,15 @@ def _resolve(title: str) -> dict | None:
     for key in (raw, stripped):
         if key and (rec := _BY_LEAF.get(key)):
             return rec
-        if key and (rec := _exact_at_level(key)):
+        if key and (rec := _accept(_exact_at_level(key), title)):
             return rec
 
     for candidate in (raw, stripped):
         leaf = _fuzzy_leaf(candidate)
-        if leaf:
-            return _BY_LEAF.get(_norm(leaf))
+        if leaf and (rec := _accept(_BY_LEAF.get(_norm(leaf)), title)):
+            return rec
+
+    logger.info("role_taxonomy: no confident match for %r", title)
     return None
 
 

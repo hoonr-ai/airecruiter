@@ -25,3 +25,7 @@ scripts/*.log
 *.sql
 *.sql.gz
 
+# Local probe / POC artifacts kept off-repo.
+apps/api/tmp/
+apps/api/scripts/smoke_launch_pair.py
+
