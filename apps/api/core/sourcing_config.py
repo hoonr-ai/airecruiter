@@ -84,10 +84,11 @@ REQUIRED_MATCH_RATIO = 0.3
 FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH = True
 
 # How many candidates per background CandidatesDetail page. Each page
-# runs serially; within a page we cap concurrency separately. Small
-# pages give the UI quick incremental hydration; larger pages amortize
-# per-batch overhead. 25 ≈ first visible Step-5 page.
-FAST_PATH_DETAIL_BACKGROUND_PAGE_SIZE = 25
+# runs serially; within a page we cap concurrency separately. JobDiva's
+# CandidatesDetail accepts up to 100 candidateIds per call, so one page
+# = one batch request — amortizes per-batch overhead and minimizes
+# request count against the rate limit.
+FAST_PATH_DETAIL_BACKGROUND_PAGE_SIZE = 100
 
 # Total candidates we'll background-hydrate. The long tail of the
 # locally-sorted result is left thin — recruiters never reach it, and

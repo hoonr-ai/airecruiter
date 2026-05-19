@@ -467,15 +467,13 @@ class UnifiedCandidateSearch:
                     summary["jobdiva_criteria_unconfigured"] = True
 
                 # HOTFIX: Hard cap at 100 — see Applicants stage above.
-                # F5 note: TalentSearch results are already skill-ranked by
-                # `_rank_candidates_by_skill` inside `_search_jobdiva_talent`
-                # (TalentSearch-fallback path) or sorted by must-skill hits
-                # (JobAgent path) before reaching here. The slice that follows
-                # is therefore a top-100-by-relevance cut, not FIFO.
+                # JobAgent results arrive in JobDiva's API rank order
+                # (preserved end-to-end via `api_rank`); this slice keeps the
+                # top-100 by JobDiva's own ranking.
                 if talent_pool and len(talent_pool) > 100:
                     self._log_stage(
                         "TalentSearch",
-                        f"Capping {len(talent_pool)} talent profiles to top-100 by skill rank.",
+                        f"Capping {len(talent_pool)} talent profiles to top-100 by JobAgent rank.",
                     )
                     talent_pool = talent_pool[:100]
 
@@ -699,14 +697,18 @@ class UnifiedCandidateSearch:
                 yield event
 
             # Phase 4 of fast-path: now that the foreground list is streamed,
-            # hydrate the top of the locally-sorted JobDiva pool with
-            # CandidatesDetail. Each page emits per-candidate "candidate_detail"
-            # events into the same SSE stream so the UI can merge in place.
+            # hydrate the top of the JobDiva pool with CandidatesDetail. Each
+            # page emits per-candidate "candidate_detail" events into the same
+            # SSE stream so the UI can merge in place. Order targets by
+            # api_rank ASC so top JobAgent results hydrate first — matches
+            # the UI display order. Records without api_rank (other sources)
+            # sort last.
             from core import sourcing_config as _sc
             if hydration_targets and _sc.FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH:
-                hydration_targets.sort(
-                    key=lambda c: c.get("match_score", 0) or 0, reverse=True
-                )
+                def _hydration_key(c: Dict[str, Any]) -> int:
+                    rank = c.get("api_rank")
+                    return rank if isinstance(rank, int) else 10**9
+                hydration_targets.sort(key=_hydration_key)
                 hydration_targets = hydration_targets[
                     : _sc.FAST_PATH_DETAIL_BACKGROUND_MAX_CANDIDATES
                 ]
@@ -877,21 +879,19 @@ class UnifiedCandidateSearch:
 
 
     async def _search_jobdiva_talent(self, criteria: SearchCriteria) -> Dict[str, Any]:
-        """JobDiva talent-pool sourcing.
+        """JobDiva talent-pool sourcing via JobAgentSearch.
 
-        Primary path uses JobAgentSearch (JobDiva's AI matcher) anchored to the
-        job's JobDiva ID — this returns a per-job ranked candidate set, unlike
-        TalentSearch which (live-tested) returns the same fixed pool for any
-        input. We then apply a client-side state filter to backstop the geo
-        precision JobDiva does not give us. TalentSearch remains a fallback
-        for ad-hoc searches with no resolvable jobId.
+        JobAgentSearch (JobDiva's AI matcher) is anchored to the job's JobDiva
+        ID and returns a per-job ranked candidate set. We then apply a
+        client-side state filter to backstop the geo precision JobDiva does
+        not give us.
 
         Surfaces `criteria_unconfigured: True` in the return when JobAgent
         responded with "Criteria Not Assigned" — frontend uses this to nudge
         the recruiter to set search criteria in JobDiva's web UI.
         """
+        source_type = "JobDiva-JobAgent"
         try:
-            source_type = "JobDiva-JobAgent"
             candidates: List[Dict[str, Any]] = []
             criteria_unconfigured = False
 
@@ -915,34 +915,11 @@ class UnifiedCandidateSearch:
                 )
 
             if not candidates:
-                # Fallback to TalentSearch (the broken-but-stable pool endpoint).
-                source_type = "JobDiva-TalentSearch"
-                countries, states = self._resolve_jobdiva_geo(criteria)
-                jobdiva_boolean = self._strip_location_from_boolean(
-                    criteria.boolean_string or self._build_boolean_string(criteria),
-                    criteria.location,
-                )
-                # Fetch a wider pool than the UI page_size so the state
-                # filter + skill scorer have room to rank — TalentSearch is
-                # the fallback path, candidate quality benefits from a bigger
-                # pre-filter pool.
-                fallback_limit = max(200, (criteria.page_size or 50) * 4)
-                candidates = await self.jobdiva_service.search_candidates(
-                    skills=self._jobdiva_search_terms(criteria),
-                    location=criteria.location,
-                    limit=fallback_limit,
-                    job_id=None,
-                    boolean_string=jobdiva_boolean,
-                    recent_days=getattr(criteria, "recent_days", None),
-                    require_resume=getattr(criteria, "require_resume", True),
-                    countries=countries,
-                    states=states,
-                    page_number=getattr(criteria, "page_number", 0) or 0,
-                )
-                self._log_stage(
-                    "TalentSearch",
-                    f"TalentSearch fallback fetched={fallback_limit} raw={len(candidates)}"
-                )
+                return {
+                    "candidates": [],
+                    "source_type": source_type,
+                    "jobdiva_criteria_unconfigured": criteria_unconfigured,
+                }
 
             before = len(candidates)
             candidates = self._filter_by_state(candidates, criteria)
@@ -953,49 +930,11 @@ class UnifiedCandidateSearch:
                     f"State filter: {before} → {after_state} (dropped {before - after_state})"
                 )
 
-            # On the TalentSearch fallback path the raw pool is JobDiva's
-            # broken fixed set — every search returns the same 1551 candidates
-            # regardless of skills. State filter narrows by geography, but
-            # without skill pre-ranking the LLM downstream sees a mostly
-            # irrelevant set and surfaces weak matches. Pre-rank here so the
-            # LLM gets the most skill-relevant candidates first.
-            if source_type == "JobDiva-TalentSearch":
-                keep_top = max(criteria.page_size or 50, 50)
-                before_rank = len(candidates)
-                candidates = self._rank_candidates_by_skill(
-                    candidates, criteria, keep_top=keep_top
-                )
-                if before_rank != len(candidates):
-                    self._log_stage(
-                        "TalentSearch",
-                        f"Skill rank: {before_rank} → {len(candidates)} "
-                        f"(kept top {keep_top} by skill match)"
-                    )
-
-            # JobAgent path: sort-only pre-rank (no candidate drops) so that
-            # the most skill-relevant candidates surface first in the stream.
-            # JobAgent already filtered for relevance; we just reorder.
-            # Without this the pipeline processes in JobDiva's return order
-            # and good matches can land deep in the stream — observed
-            # candidate at position 355 of 372 (~11 min into a 12-min stream)
-            # for job 26-11245 despite a match_score of 87.
-            if source_type == "JobDiva-JobAgent" and len(candidates) > 1:
-                must_terms = [
-                    str(item.get("value", "")).strip().lower()
-                    for item in (criteria.title_criteria or []) + (criteria.skill_criteria or [])
-                    if str(item.get("value", "")).strip()
-                    and item.get("match_type", "must") != "exclude"
-                ]
-                if must_terms:
-                    def _must_hits(c: Dict[str, Any]) -> int:
-                        hay = self._candidate_haystack(c)
-                        return sum(1 for t in must_terms if t and t in hay)
-                    candidates.sort(key=lambda c: -_must_hits(c))
-                    self._log_stage(
-                        "TalentSearch",
-                        f"JobAgent pre-rank: sorted {len(candidates)} by "
-                        f"must-skill hits (no drops)"
-                    )
+            # Preserve JobAgent's API rank order end-to-end. Each candidate
+            # carries `api_rank` (0-based position in JobDiva's response);
+            # the frontend renders sorted by api_rank so the UI matches the
+            # order JobDiva returned, even when LLM scoring later assigns
+            # different match_score values.
 
             for c in candidates:
                 c.setdefault("source", source_type)
