@@ -37,7 +37,7 @@ INCLUDE_PROFILE_ONLY = True
 # clauses can also trip the "no-match → return the full broken pool"
 # fallback that produces 4,000+ irrelevant candidates. Defer all YOE
 # enforcement to our own scorer.
-STRIP_YEARS_FROM_BOOLEAN = False
+STRIP_YEARS_FROM_BOOLEAN = True
 
 
 # ─────────────────────────────────────────────────────────────────────────

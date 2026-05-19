@@ -30,10 +30,44 @@ _US_STATE_CODES = {
     "WV", "WI", "WY", "PR",
 }
 
+# City: 1-3 capitalised words, allowing hyphens and single spaces, NO
+# embedded periods. Disallowing periods stops the regex from bridging
+# sentence boundaries ("Jane Doe - Product Manager. Plano" used to match
+# "Doe - Product Manager. Plano" as a city name).
+_CITY_PAT = r"[A-Z][a-zA-Z]+(?:[\- ][A-Z][a-zA-Z]+){0,2}"
 _LOCATED_IN_RE = re.compile(
-    r"\b(?:Located|Based|Lives|Living)\s+in\s+([A-Z][a-zA-Z\.\- ]{1,30}),\s*([A-Z]{2})\b"
+    r"\b(?:Located|Based|Lives|Living|Currently|Resides|Resident|From|Headquartered)"
+    r"(?:\s+(?:in|out\s+of|at|near))?\s+"
+    rf"({_CITY_PAT}),\s*([A-Z]{{2}})\b"
 )
-_CITY_STATE_RE = re.compile(r"\b([A-Z][a-zA-Z\.\- ]{1,30}),\s*([A-Z]{2})\b")
+_CITY_STATE_RE = re.compile(rf"\b({_CITY_PAT}),\s*([A-Z]{{2}})\b")
+# LinkedIn-style "City, State Area" (e.g., "Greater Denver Area", "Dallas, Texas Area").
+# Matched without anchoring to a verb so it catches the common header pattern
+# where the city sits alone with no "Located in" preamble.
+_AREA_RE = re.compile(
+    rf"\b(?:Greater\s+)?({_CITY_PAT})(?:,\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?))?\s+(?:Metropolitan\s+)?Area\b"
+)
+# Full state names → 2-letter codes, used when the highlight uses e.g.
+# "Dallas, Texas" instead of "Dallas, TX".
+_US_STATE_NAMES_TO_CODE = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+    "florida": "FL", "georgia": "GA", "hawaii": "HI", "idaho": "ID",
+    "illinois": "IL", "indiana": "IN", "iowa": "IA", "kansas": "KS",
+    "kentucky": "KY", "louisiana": "LA", "maine": "ME", "maryland": "MD",
+    "massachusetts": "MA", "michigan": "MI", "minnesota": "MN", "mississippi": "MS",
+    "missouri": "MO", "montana": "MT", "nebraska": "NE", "nevada": "NV",
+    "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM", "new york": "NY",
+    "north carolina": "NC", "north dakota": "ND", "ohio": "OH", "oklahoma": "OK",
+    "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI",
+    "south carolina": "SC", "south dakota": "SD", "tennessee": "TN", "texas": "TX",
+    "utah": "UT", "vermont": "VT", "virginia": "VA", "washington": "WA",
+    "west virginia": "WV", "wisconsin": "WI", "wyoming": "WY",
+    "district of columbia": "DC",
+}
+_CITY_STATE_NAME_RE = re.compile(
+    rf"\b({_CITY_PAT}),\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){{0,2}})\b"
+)
 
 
 def _detect_relocation(text: str) -> bool:
@@ -46,21 +80,61 @@ def _detect_relocation(text: str) -> bool:
 def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
     """Best-effort city/state extraction from Exa highlight text.
 
-    Priority: explicit "Located/Based/Lives in CITY, ST" phrasing. Fallback:
-    first "City, ST" hit in the first ~200 chars where ST is a US code.
+    Tries multiple LinkedIn-style patterns in order of confidence:
+      1. "Located/Based/Lives/Currently/Resides in CITY, ST"
+      2. "City, ST" with a real US state code in the first ~400 chars
+      3. "City, FullStateName" (e.g. "Dallas, Texas") — normalises to ST
+      4. "Greater <City> Area" / "<City>, <State> Area" — LinkedIn header
+      5. Fallback to `extract_us_location_from_text` and split its result
+
     Returns ("", "") on miss — callers MUST treat empty as "unknown" rather
     than substituting the query string.
     """
     if not text:
         return "", ""
+
+    # 1. Strict "Located/Based/Lives/etc. in CITY, ST"
     m = _LOCATED_IN_RE.search(text)
     if m:
-        return m.group(1).strip(), m.group(2).strip().upper()
-    head = text[:200]
+        st = m.group(2).strip().upper()
+        if st in _US_STATE_CODES:
+            return m.group(1).strip(), st
+
+    # 2. "City, ST" with a valid US state code — widened from 200 → 400 chars
+    head = text[:400]
     for cand in _CITY_STATE_RE.finditer(head):
         st = cand.group(2).strip().upper()
         if st in _US_STATE_CODES:
             return cand.group(1).strip(), st
+
+    # 3. "City, FullStateName" — normalise to (City, ST)
+    for cand in _CITY_STATE_NAME_RE.finditer(head):
+        state_name = cand.group(2).strip().lower()
+        code = _US_STATE_NAMES_TO_CODE.get(state_name)
+        if code:
+            return cand.group(1).strip(), code
+
+    # 4. "Greater <City> Area" / "<City>, <State> Area" (LinkedIn header)
+    for cand in _AREA_RE.finditer(head):
+        city = cand.group(1).strip()
+        state_token = (cand.group(2) or "").strip().lower()
+        code = _US_STATE_NAMES_TO_CODE.get(state_token) if state_token else ""
+        if city:
+            return city, code or ""
+
+    # 5. Delegate to the broader helper (used by Step-5 elsewhere) and split.
+    full = extract_us_location_from_text(text)
+    if full and "," in full:
+        city_part, state_part = full.split(",", 1)
+        state_token = state_part.strip()
+        # extract_us_location_from_text returns either "City, ST" (US) or
+        # "City, Country" (non-US). Only accept the US form here.
+        if state_token.upper() in _US_STATE_CODES:
+            return city_part.strip(), state_token.upper()
+        code = _US_STATE_NAMES_TO_CODE.get(state_token.lower())
+        if code:
+            return city_part.strip(), code
+
     return "", ""
 
 
@@ -97,7 +171,7 @@ class ExaService:
             except Exception as e:
                 logger.error(f"Failed to initialize Exa SDK: {e}")
 
-    async def search_candidates(self, skills: List[str], location: str, limit: int = 10, boolean_string: str = "") -> List[Dict[str, Any]]:
+    async def search_candidates(self, skills: List[str], location: str, limit: int = 10, boolean_string: str = "", role_hint: str = "") -> List[Dict[str, Any]]:
         if not self.exa:
             logger.warning("Exa API key is not set. Skipping Exa search.")
             return []
@@ -105,7 +179,7 @@ class ExaService:
         try:
             query = _exa_query_from_boolean(
                 boolean_string, skills, location,
-                role_hint="software engineer OR developer",
+                role_hint=role_hint,
             )
 
             logger.info(f"Executing Exa people search for query: {query}")
@@ -181,7 +255,7 @@ class ExaService:
             logger.error(f"Exa search failed: {e}")
             return []
 
-    async def search_dice_candidates(self, skills: List[str], location: str, limit: int = 10, boolean_string: str = "") -> List[Dict[str, Any]]:
+    async def search_dice_candidates(self, skills: List[str], location: str, limit: int = 10, boolean_string: str = "", role_hint: str = "") -> List[Dict[str, Any]]:
         """
         Search Dice (dice.com) profiles via Exa with domain filtering.
         Dice hosts tech candidate profiles publicly indexable by Exa; we scope
@@ -195,7 +269,7 @@ class ExaService:
             import asyncio
             query = _exa_query_from_boolean(
                 boolean_string, skills, location,
-                role_hint="resume profile",
+                role_hint=role_hint or "resume profile",
             )
 
             logger.info(f"Executing Dice (via Exa) search for query: {query}")

@@ -632,9 +632,21 @@ class AutoAssignService:
                         )
                     profile_batch.clear()
 
+            # F7: capture the final summary event so we can persist the
+            # `jobdiva_criteria_unconfigured` flag for the dashboard. Default
+            # to False — only the search emits a truthy value when JobDiva's
+            # JobAgent returned "Criteria Not Assigned" for this job.
+            jobdiva_criteria_unconfigured = False
             async for event in unified_search_service.search_candidates(criteria):
                 if event.get("type") == "stage":
                     logger.debug(f"🤖 [AutoAssignService] Sync Stage for {target_job_id}: {event.get('data')}")
+
+                if event.get("type") == "summary":
+                    summary_payload = (event.get("data") or {}).get("summary") or {}
+                    jobdiva_criteria_unconfigured = bool(
+                        summary_payload.get("jobdiva_criteria_unconfigured")
+                    )
+                    continue
 
                 if event.get("type") != "candidate":
                     continue
@@ -710,7 +722,10 @@ class AutoAssignService:
             logger.info(f"✅ [AutoAssignService] Completed. Total assigned: {total_assigned} for job {target_job_id}")
 
             # 5. Update performance metrics (Time to First Pass, External Subs, etc.)
-            await self.refresh_job_performance_metrics(target_job_id)
+            await self.refresh_job_performance_metrics(
+                target_job_id,
+                jobdiva_criteria_unconfigured=jobdiva_criteria_unconfigured,
+            )
 
             # 6. Auto-launch interviews for newly-inserted applicants. Pre-fix,
             #    this step was missing entirely — the cron pulled JobDiva
@@ -740,13 +755,21 @@ class AutoAssignService:
             logger.error(f"❌ [AutoAssignService] Sync failed for job {job_id}: {e}", exc_info=True)
             return 0
 
-    async def refresh_job_performance_metrics(self, target_job_id: str):
+    async def refresh_job_performance_metrics(
+        self,
+        target_job_id: str,
+        jobdiva_criteria_unconfigured: Optional[bool] = None,
+    ):
         """
         Recalculates and persists performance metrics for a specific job:
         - Time to First Pass (minutes)
         - External Curate Submittals (from JobDiva)
         - Feedback Completed (local actions)
         - Candidate counters (sourced/launched/complete_submissions/pass_submissions)
+        - JobDiva JobAgent "Criteria Not Assigned" flag (F7) — only written
+          when an explicit boolean is passed; left untouched when None so
+          ad-hoc callers (e.g. backfills) don't overwrite an existing flag
+          with stale data.
 
         The candidate counters used to be computed live on every dashboard
         load via `_aggregate_candidate_metrics`. That JOIN + JSONB extraction
@@ -804,33 +827,64 @@ class AutoAssignService:
                         )
                         return
                     resolved_job_id = row[0]
-                    cur.execute(
-                        "UPDATE monitored_jobs SET "
-                        "  pair_external_subs = %s, "
-                        "  feedback_completed = %s, "
-                        "  time_to_first_pass = %s, "
-                        "  candidates_sourced = %s, "
-                        "  candidates_launched = %s, "
-                        "  complete_submissions = %s, "
-                        "  pass_submissions = %s, "
-                        "  updated_at = NOW() "
-                        "WHERE job_id = %s",
-                        (
-                            ext_subs,
-                            feedback_count,
-                            time_to_pass,
-                            counters["candidates_sourced"],
-                            counters["candidates_launched"],
-                            counters["complete_submissions"],
-                            counters["pass_submissions"],
-                            resolved_job_id,
-                        ),
-                    )
+                    # F7: only overwrite `jobdiva_criteria_unconfigured` when
+                    # we have a fresh boolean from this run's summary. Callers
+                    # that don't run a search (manual backfills) pass None and
+                    # leave the flag at its last-known value.
+                    if jobdiva_criteria_unconfigured is None:
+                        cur.execute(
+                            "UPDATE monitored_jobs SET "
+                            "  pair_external_subs = %s, "
+                            "  feedback_completed = %s, "
+                            "  time_to_first_pass = %s, "
+                            "  candidates_sourced = %s, "
+                            "  candidates_launched = %s, "
+                            "  complete_submissions = %s, "
+                            "  pass_submissions = %s, "
+                            "  updated_at = NOW() "
+                            "WHERE job_id = %s",
+                            (
+                                ext_subs,
+                                feedback_count,
+                                time_to_pass,
+                                counters["candidates_sourced"],
+                                counters["candidates_launched"],
+                                counters["complete_submissions"],
+                                counters["pass_submissions"],
+                                resolved_job_id,
+                            ),
+                        )
+                    else:
+                        cur.execute(
+                            "UPDATE monitored_jobs SET "
+                            "  pair_external_subs = %s, "
+                            "  feedback_completed = %s, "
+                            "  time_to_first_pass = %s, "
+                            "  candidates_sourced = %s, "
+                            "  candidates_launched = %s, "
+                            "  complete_submissions = %s, "
+                            "  pass_submissions = %s, "
+                            "  jobdiva_criteria_unconfigured = %s, "
+                            "  updated_at = NOW() "
+                            "WHERE job_id = %s",
+                            (
+                                ext_subs,
+                                feedback_count,
+                                time_to_pass,
+                                counters["candidates_sourced"],
+                                counters["candidates_launched"],
+                                counters["complete_submissions"],
+                                counters["pass_submissions"],
+                                bool(jobdiva_criteria_unconfigured),
+                                resolved_job_id,
+                            ),
+                        )
                     conn.commit()
             logger.info(
                 f"📊 [AutoAssignService] Metrics refreshed for {target_job_id}: "
                 f"pass_time={time_to_pass}min ext_subs={ext_subs} feedback={feedback_count} "
-                f"sourced={counters['candidates_sourced']} pass={counters['pass_submissions']}"
+                f"sourced={counters['candidates_sourced']} pass={counters['pass_submissions']} "
+                f"jd_unconfigured={jobdiva_criteria_unconfigured}"
             )
         except Exception as e:
             logger.warning(f"[AutoAssignService] Metrics refresh failed for job {target_job_id}: {e}")
