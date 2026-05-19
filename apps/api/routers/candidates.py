@@ -15,6 +15,7 @@ from services.unipile import unipile_service
 from services.sourced_candidates_storage import sourced_candidates_storage
 from services.dnc_storage import load_dnc_phone_set
 from services.unified_candidate_search import SearchCriteria, unified_search_service
+from services import contact_enrichment
 from utils.phone import normalize_phone
 from models import (
     CandidateSearchRequest, CandidateMessageRequest, CandidatesSaveRequest,
@@ -1660,216 +1661,23 @@ def _name_from_linkedin_url(linkedin_url: str) -> str:
         return ""
 
 
-def _extract_new_zoominfo_contact_fields(payload: Dict[str, Any]) -> Dict[str, str]:
-    """Parse ZoomInfo new Data API contact enrich response into our canonical fields."""
-    data = payload.get("data") or []
-    first = data[0] if isinstance(data, list) and data else {}
-    attrs = first.get("attributes") if isinstance(first, dict) else {}
-    if not isinstance(attrs, dict):
-        attrs = {}
-
-    email_alt = attrs.get("emailAlt")
-    alt_email = ""
-    if isinstance(email_alt, list):
-        for item in email_alt:
-            if isinstance(item, dict):
-                candidate = str(item.get("value") or "").strip()
-                if candidate:
-                    alt_email = candidate
-                    break
-
-    return {
-        "mobilePhone": str(attrs.get("mobilePhone") or attrs.get("mobilePhoneAlt") or "").strip(),
-        "workPhone": str(attrs.get("phone") or attrs.get("directPhone") or attrs.get("directPhoneAlt") or "").strip(),
-        "workEmail": str(attrs.get("email") or "").strip(),
-        "personalEmail": alt_email,
-    }
+# ZoomInfo new-OAuth Data API parser. Moved to services/contact_enrichment.py
+# so the in-line sourcing enrichment path can reuse the same shape.
+_extract_new_zoominfo_contact_fields = contact_enrichment.extract_zoominfo_contact_fields
 
 
-APOLLO_ENRICH_URL = "https://api.apollo.io/api/v1/people/enrich"
-# Resolve at import: prefer APOLLO_API_KEY env var, fall back to the legacy
-# in-repo key so existing deployments keep working until the env var is set.
-_APOLLO_LEGACY_KEY = "cB7rogHZj4XRrhnTEqTlXQ"
-try:
-    from core.config import APOLLO_API_KEY as _APOLLO_ENV_KEY
-except Exception:
-    _APOLLO_ENV_KEY = ""
-APOLLO_API_KEY = (_APOLLO_ENV_KEY or _APOLLO_LEGACY_KEY).strip()
-APOLLO_KEY_SOURCE = "env" if (_APOLLO_ENV_KEY or "").strip() else "legacy_fallback"
-if APOLLO_KEY_SOURCE == "legacy_fallback":
-    logger.warning(
-        "Apollo enrichment using legacy in-repo key; set APOLLO_API_KEY env var to rotate"
-    )
+# Apollo configuration and helpers — owned by contact_enrichment so sourcing-
+# time and on-demand enrichment share one key-resolution + parser surface.
+APOLLO_ENRICH_URL = contact_enrichment.APOLLO_ENRICH_URL
+APOLLO_API_KEY = contact_enrichment.APOLLO_API_KEY
+APOLLO_KEY_SOURCE = contact_enrichment.APOLLO_KEY_SOURCE
 
 
-def _extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
-    person = payload.get("person") if isinstance(payload, dict) else {}
-    if not isinstance(person, dict):
-        person = {}
-
-    def _first_non_empty(*values: Any) -> str:
-        for value in values:
-            candidate = str(value or "").strip()
-            if candidate:
-                return candidate
-        return ""
-
-    def _extract_phone_value(item: Any) -> str:
-        if isinstance(item, str):
-            return str(item).strip()
-        if isinstance(item, dict):
-            return _first_non_empty(
-                item.get("sanitized_number"),
-                item.get("raw_number"),
-                item.get("number"),
-                item.get("value"),
-            )
-        return ""
-
-    phone_candidates: List[str] = []
-    seen_phone_candidates = set()
-
-    def _add_phone_candidate(raw_phone: Any):
-        candidate = _normalise_phone(str(raw_phone or "").strip())
-        if not candidate:
-            return
-        if sum(1 for ch in candidate if ch.isdigit()) < 7:
-            return
-        if candidate in seen_phone_candidates:
-            return
-        seen_phone_candidates.add(candidate)
-        phone_candidates.append(candidate)
-
-    work_email = _first_non_empty(person.get("email"), person.get("work_email"))
-
-    personal_email = ""
-    personal_emails = person.get("personal_emails")
-    if isinstance(personal_emails, list):
-        for item in personal_emails:
-            candidate = _first_non_empty(
-                item.get("email") if isinstance(item, dict) else None,
-                item,
-            )
-            if candidate:
-                personal_email = candidate
-                break
-
-    mobile_phone = _first_non_empty(
-        person.get("mobile_phone"),
-        person.get("mobile"),
-        person.get("cell_phone"),
-        person.get("cell"),
-    )
-    work_phone = _first_non_empty(
-        person.get("sanitized_phone"),
-        person.get("work_phone"),
-        person.get("organization_phone"),
-        person.get("direct_phone"),
-        person.get("office_phone"),
-        person.get("home_phone"),
-        person.get("phone"),
-        person.get("phone_number"),
-    )
-
-    _add_phone_candidate(mobile_phone)
-    _add_phone_candidate(work_phone)
-
-    phone_numbers = person.get("phone_numbers")
-    if isinstance(phone_numbers, list):
-        for item in phone_numbers:
-            number = _extract_phone_value(item)
-            if not number:
-                continue
-
-            ptype = str(item.get("type") or "").strip().lower() if isinstance(item, dict) else ""
-            if not mobile_phone and ptype in {"mobile", "cell", "cellphone"}:
-                mobile_phone = number
-            elif not work_phone and ptype in {"work", "office", "direct"}:
-                work_phone = number
-            elif not work_phone:
-                work_phone = number
-            _add_phone_candidate(number)
-
-    person_organization = person.get("organization")
-    if isinstance(person_organization, dict):
-        for key in ("phone", "phone_number", "sanitized_phone", "work_phone", "main_phone", "direct_phone"):
-            _add_phone_candidate(person_organization.get(key))
-
-    payload_organization = payload.get("organization") if isinstance(payload, dict) else None
-    if isinstance(payload_organization, dict):
-        for key in ("phone", "phone_number", "sanitized_phone", "work_phone", "main_phone", "direct_phone"):
-            _add_phone_candidate(payload_organization.get(key))
-
-    if not mobile_phone:
-        mobile_phone = _extract_phone_value(payload.get("mobile_phone"))
-    if not work_phone:
-        work_phone = _extract_phone_value(payload.get("phone"))
-
-    _add_phone_candidate(payload.get("mobile_phone") if isinstance(payload, dict) else "")
-    _add_phone_candidate(payload.get("phone") if isinstance(payload, dict) else "")
-    _add_phone_candidate(payload.get("phone_number") if isinstance(payload, dict) else "")
-
-    if not mobile_phone and phone_candidates:
-        mobile_phone = phone_candidates[0]
-    if not work_phone and len(phone_candidates) > 1:
-        work_phone = phone_candidates[1]
-    elif not work_phone and phone_candidates:
-        work_phone = phone_candidates[0]
-
-    return {
-        "mobilePhone": mobile_phone,
-        "workPhone": work_phone,
-        "workEmail": work_email,
-        "personalEmail": personal_email,
-        "phoneCandidates": phone_candidates,
-    }
-
-
-async def _apollo_enrich_by_linkedin(candidate_id: str, linkedin_url: str) -> Dict[str, Any]:
-    if not APOLLO_API_KEY or APOLLO_API_KEY == "PASTE_APOLLO_API_KEY_HERE":
-        logger.warning("Apollo fallback skipped for %s: API key not configured", candidate_id)
-        return {"ok": False, "message": "Apollo API key not configured"}
-
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "X-API-Key": APOLLO_API_KEY,
-    }
-    payload = {"linkedin_url": linkedin_url}
-
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            ares = await client.post(APOLLO_ENRICH_URL, headers=headers, json=payload)
-    except Exception as e:
-        logger.warning("Apollo fallback request failed for %s: %s", candidate_id, e)
-        return {"ok": False, "message": f"Apollo request failed: {str(e)}"}
-
-    if ares.status_code >= 400:
-        logger.warning(
-            "Apollo fallback non-2xx for %s: %s %s",
-            candidate_id,
-            ares.status_code,
-            ares.text[:300],
-        )
-        return {"ok": False, "message": f"Apollo API error ({ares.status_code})"}
-
-    try:
-        apollo_data = ares.json()
-    except Exception:
-        apollo_data = {"raw": ares.text}
-
-    person = apollo_data.get("person") if isinstance(apollo_data, dict) else None
-    if not isinstance(person, dict) or not person:
-        logger.info(
-            "Apollo 2xx but no person returned for %s (key_source=%s)",
-            candidate_id,
-            APOLLO_KEY_SOURCE,
-        )
-
-    extracted = _extract_apollo_contact_fields(apollo_data)
-    if not any(extracted.get(k) for k in ("mobilePhone", "workPhone", "workEmail", "personalEmail")):
-        logger.info("Apollo returned no usable contact fields for %s", candidate_id)
-    return {"ok": True, "fields": extracted}
+# Apollo response parser + LinkedIn-URL enrichment call. Moved to
+# services/contact_enrichment.py; aliased back under the old underscore names
+# so internal callers in this file remain unchanged.
+_extract_apollo_contact_fields = contact_enrichment.extract_apollo_contact_fields
+_apollo_enrich_by_linkedin = contact_enrichment.apollo_enrich_by_linkedin
 
 
 async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandidateContactRequest):
