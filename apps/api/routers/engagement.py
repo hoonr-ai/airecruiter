@@ -236,6 +236,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 headline = row.get("headline") or data_blob.get("headline", "")
 
                 resumes.append({
+                    "source_candidate_id": row.get("candidate_id") or cid,
                     "name": name,
                     "email": email,
                     "phone": phone,
@@ -248,6 +249,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
             else:
                 # Fallback for candidates not found in DB
                 resumes.append({
+                    "source_candidate_id": cid,
                     "name": "Unknown Candidate",
                     "email": "",
                     "phone": "",
@@ -344,6 +346,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 safe_name = candidate_name.lower().replace(" ", ".").replace(",", "")
                 candidate_email = f"{safe_name}@noemail.pair.ai"
             final_resumes.append({
+                "source_candidate_id": r.get("source_candidate_id"),
                 "name": candidate_name,
                 "email": candidate_email,
                 "phone": r.get("phone"),
@@ -866,25 +869,29 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             if not isinstance(data_list, list):
                 data_list = [response_data] if response_data else []
 
-            # Map pairbot response entries by email so partial / reordered /
-            # deduplicated responses don't get misattributed to the wrong
-            # candidate. Previously this used positional `data_list[idx]`,
-            # which silently wrote interview_id="" when pairbot returned fewer
-            # entries than candidates (timeout, dedup, etc.) — the root cause
-            # of "engage sometimes passes, sometimes fails".
+            # Map pairbot response entries by a stable per-candidate key first,
+            # then fall back to email for older responses.
+            interview_by_source_candidate_id: Dict[str, Dict[str, Any]] = {}
             interview_by_email: Dict[str, Dict[str, Any]] = {}
             for item in data_list:
                 if not isinstance(item, dict):
                     continue
+                item_source_id = str(item.get("source_candidate_id") or "").strip()
+                if item_source_id:
+                    interview_by_source_candidate_id[item_source_id] = item
                 item_email = str(item.get("candidate_email") or "").lower().strip()
                 if item_email:
                     interview_by_email[item_email] = item
 
             # Position N in real_candidate_ids corresponds to position N in
             # payload_obj.resumes (both built from the same selection in
-            # generate-payload), so we can recover the submitted email per
-            # candidate without another DB lookup.
+            # generate-payload), so we can recover the submitted identifiers
+            # per candidate without another DB lookup.
             payload_resumes = payload_obj.get("resumes") or []
+            submitted_source_id_by_idx: List[str] = [
+                str((r or {}).get("source_candidate_id") or "").strip()
+                for r in payload_resumes
+            ]
             submitted_email_by_idx: List[str] = [
                 str((r or {}).get("email") or "").lower().strip()
                 for r in payload_resumes
@@ -910,12 +917,23 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 asyncio.create_task(_run_provisioning())
 
             for idx, candidate_id in enumerate(request.real_candidate_ids):
+                submitted_source_id = (
+                    submitted_source_id_by_idx[idx]
+                    if idx < len(submitted_source_id_by_idx)
+                    else ""
+                )
                 submitted_email = (
                     submitted_email_by_idx[idx]
                     if idx < len(submitted_email_by_idx)
                     else ""
                 )
-                interview_info = interview_by_email.get(submitted_email) or {}
+                interview_info = (
+                    interview_by_source_candidate_id.get(submitted_source_id)
+                    if submitted_source_id
+                    else {}
+                )
+                if not interview_info:
+                    interview_info = interview_by_email.get(submitted_email) or {}
                 if not interview_info and idx < len(data_list) and isinstance(data_list[idx], dict):
                     # Legacy positional fallback: only used when the email
                     # match missed AND a positional entry actually exists.
