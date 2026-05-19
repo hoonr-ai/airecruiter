@@ -2406,6 +2406,18 @@ async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhon
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.patch("/candidates/phone")
+async def update_candidate_phone_body(request: UpdateCandidatePhoneRequest):
+    """
+    Body-based phone update endpoint to avoid URL/path encoding edge cases for
+    candidate IDs containing reserved/non-ASCII characters.
+    """
+    candidate_id = str(request.candidate_id or "").strip()
+    if not candidate_id:
+        raise HTTPException(status_code=400, detail="candidate_id is required")
+    return await update_candidate_phone(candidate_id, request)
+
+
 @router.patch("/candidates/{candidate_id:path}/email")
 async def update_candidate_email(candidate_id: str, request: UpdateCandidateEmailRequest):
     actual_candidate_id = request.candidate_id or candidate_id
@@ -2448,6 +2460,18 @@ async def update_candidate_email(candidate_id: str, request: UpdateCandidateEmai
     except Exception as e:
         logger.error(f"update_candidate_email failed for {candidate_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/candidates/email")
+async def update_candidate_email_body(request: UpdateCandidateEmailRequest):
+    """
+    Body-based email update endpoint to avoid URL/path encoding edge cases for
+    candidate IDs containing reserved/non-ASCII characters.
+    """
+    candidate_id = str(request.candidate_id or "").strip()
+    if not candidate_id:
+        raise HTTPException(status_code=400, detail="candidate_id is required")
+    return await update_candidate_email(candidate_id, request)
 
 
 @router.get("/candidates/list")
