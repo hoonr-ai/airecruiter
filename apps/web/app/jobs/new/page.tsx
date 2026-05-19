@@ -92,6 +92,22 @@ import { logger } from "@/lib/logger";
 
 const IS_QA_CURATE =
   typeof window !== "undefined" && window.location.hostname === "qacurate.hoonr.ai";
+const LAUNCH_EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+function isValidLaunchEmail(value: string | null | undefined): boolean {
+  const email = String(value || "").trim().toLowerCase();
+  if (!email || !LAUNCH_EMAIL_RE.test(email)) return false;
+  if (email.endsWith("@noemail.pair.ai")) return false;
+  return true;
+}
+
+function launchPhoneDigits(value: string | null | undefined): string {
+  return String(value || "").replace(/\D/g, "");
+}
+
+function isValidLaunchPhone(value: string | null | undefined): boolean {
+  return launchPhoneDigits(value).length >= 7;
+}
 
 // Utility function to clean location_type values and filter out employment terms
 function cleanLocationType(locationType: string | null | undefined): string {
@@ -648,10 +664,10 @@ function NewJobPageContent() {
   const [isEnrichingContacts, setIsEnrichingContacts] = useState(false);
   const [missingContactsOpen, setMissingContactsOpen] = useState(false);
   // Realtime progress for the batched Launch PAIR flow (enrichment + per-batch
-  // save/engage). Batches of 15 keep individual payloads small enough for the
+  // save/engage). Batches of 5 keep individual payloads small enough for the
   // backend; the modal surfaces per-batch status so the recruiter can see
   // what's happening on long runs.
-  const LAUNCH_BATCH_SIZE = 15;
+  const LAUNCH_BATCH_SIZE = 5;
   const [launchProgress, setLaunchProgress] = useState<LaunchPairProgress>(initialLaunchProgress);
   const [missingContactCandidates, setMissingContactCandidates] = useState<MissingContactCandidate[]>([]);
   const [missingContactsReviewMode, setMissingContactsReviewMode] = useState(false);
@@ -6336,6 +6352,37 @@ function NewJobPageContent() {
       const readyIds = new Set<string>();
       const needsInfo: MissingContactCandidate[] = [];
       const launchJobdivaId = jobdivaId || jobData?.jobdiva_id || numericJobId || undefined;
+      const emailToCandidateIds = new Map<string, string[]>();
+      const phoneToCandidateIds = new Map<string, string[]>();
+      for (const c of candidates) {
+        const id = String(c.candidate_id || c.id || "").trim();
+        if (!id || !selectedCandidates.has(id) || dncDropped.has(id)) continue;
+        const overrideEmail = contactOverrides[id]?.email;
+        const overridePhone = contactOverrides[id]?.phone;
+        const effectiveEmail = String(overrideEmail || c.email || "").trim().toLowerCase();
+        const effectivePhone = overridePhone || c.phone || "";
+        if (isValidLaunchEmail(effectiveEmail)) {
+          const ids = emailToCandidateIds.get(effectiveEmail) || [];
+          ids.push(id);
+          emailToCandidateIds.set(effectiveEmail, ids);
+        }
+        if (isValidLaunchPhone(effectivePhone)) {
+          const normalizedPhone = launchPhoneDigits(effectivePhone);
+          const ids = phoneToCandidateIds.get(normalizedPhone) || [];
+          ids.push(id);
+          phoneToCandidateIds.set(normalizedPhone, ids);
+        }
+      }
+      const duplicateEmailIds = new Set<string>();
+      const duplicatePhoneIds = new Set<string>();
+      for (const ids of emailToCandidateIds.values()) {
+        if (ids.length < 2) continue;
+        for (const id of ids) duplicateEmailIds.add(id);
+      }
+      for (const ids of phoneToCandidateIds.values()) {
+        if (ids.length < 2) continue;
+        for (const id of ids) duplicatePhoneIds.add(id);
+      }
       for (const c of candidates) {
         const id = String(c.candidate_id || c.id || "").trim();
         if (!id || !selectedCandidates.has(id) || dncDropped.has(id)) continue;
@@ -6343,8 +6390,8 @@ function NewJobPageContent() {
         const overrideEmail = contactOverrides[id]?.email;
         const effectivePhone = overridePhone || c.phone;
         const effectiveEmail = String(overrideEmail || c.email || "").trim().toLowerCase();
-        const phoneOK = String(effectivePhone || "").replace(/\D/g, "").length >= 7;
-        const emailOK = !!effectiveEmail && !effectiveEmail.endsWith("@noemail.pair.ai");
+        const phoneOK = isValidLaunchPhone(effectivePhone) && !duplicatePhoneIds.has(id);
+        const emailOK = isValidLaunchEmail(effectiveEmail) && !duplicateEmailIds.has(id);
         if (phoneOK && emailOK) {
           readyIds.add(id);
         } else {
@@ -6357,8 +6404,23 @@ function NewJobPageContent() {
             jobdiva_id: launchJobdivaId ? String(launchJobdivaId) : undefined,
             needsPhone: !phoneOK,
             needsEmail: !emailOK,
+            currentPhone: effectivePhone || "",
+            currentEmail: effectiveEmail || "",
           });
         }
+      }
+
+      if (duplicateEmailIds.size > 0) {
+        showToast(
+          `${duplicateEmailIds.size} selected candidate${duplicateEmailIds.size === 1 ? "" : "s"} share duplicate email addresses. PAIR needs a unique real email per candidate.`,
+          "info",
+        );
+      }
+      if (duplicatePhoneIds.size > 0) {
+        showToast(
+          `${duplicatePhoneIds.size} selected candidate${duplicatePhoneIds.size === 1 ? "" : "s"} share duplicate phone numbers. PAIR needs a unique real phone per candidate.`,
+          "info",
+        );
       }
 
       const hasReady = readyIds.size > 0;
