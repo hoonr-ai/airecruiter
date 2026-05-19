@@ -11,7 +11,7 @@ from pydantic import BaseModel
 from services.jobdiva import JobDivaService
 from services.unipile import unipile_service
 from services.vetted import vetted_service
-from services.exa_service import exa_service
+from services.exa_service import exa_service, _extract_city_from_highlights
 from services.location import normalize_location_string, within_radius
 from core.config import (
     SCORING_REQUIRED_WEIGHT,
@@ -34,6 +34,7 @@ from core.config import (
 )
 from services import skill_embeddings
 from services import role_taxonomy
+from services import contact_enrichment
 from services.role_family import detect_role_family
 
 
@@ -545,6 +546,66 @@ class UnifiedCandidateSearch:
                         cand["location"] = cand["enhanced_info"].get("current_location") or cand.get("location")
                         if cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills"):
                             cand["skills"] = cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills")
+
+                        # Exa deep analysis on filter survivors only. Replaces
+                        # the 4000-char highlights with the full profile text
+                        # plus a per-candidate match summary; preserves the
+                        # original highlights in resume_text since downstream
+                        # location extractors are tuned to that shape.
+                        if (
+                            source_type == "LinkedIn-Exa"
+                            and os.getenv("EXA_DEEP_ANALYSIS_ENABLED", "true").strip().lower() == "true"
+                        ):
+                            try:
+                                deep = await self.exa_service.deep_analyze_candidate(
+                                    str(cand.get("profile_url") or ""),
+                                    criteria.sourcing_skill_values(),
+                                    criteria.location or "",
+                                )
+                            except Exception as e:
+                                logger.warning("Exa deep_analyze raised for %s: %s", cand.get("id"), e)
+                                deep = {}
+                            if deep:
+                                cand["deep_text"] = deep.get("text", "")
+                                cand["exa_deep_summary"] = deep.get("summary", "")
+                                if (not cand.get("city") or not cand.get("state")) and deep.get("text"):
+                                    head = deep["text"][:600]
+                                    c2, s2 = _extract_city_from_highlights(head)
+                                    if c2 and not cand.get("city"):
+                                        cand["city"] = c2
+                                    if s2 and not cand.get("state"):
+                                        cand["state"] = s2
+
+                        # In-line ZoomInfo → Apollo enrichment for survivors of
+                        # the cheap filter gates that still have neither email
+                        # nor phone. Gated by CONTACT_ENRICHMENT_INLINE_ENABLED
+                        # inside the helper; capped per-job at
+                        # contact_enrichment.PER_JOB_CAP so cost is bounded.
+                        if not (str(cand.get("email") or "").strip() or str(cand.get("phone") or "").strip()):
+                            profile_url = str(cand.get("profile_url") or "").strip()
+                            if "linkedin.com/in/" in profile_url.lower():
+                                try:
+                                    enrich = await contact_enrichment.enrich_contact_for_sourcing(
+                                        profile_url, criteria.job_id
+                                    )
+                                except Exception as e:
+                                    logger.warning("contact_enrichment failed for %s: %s", cand.get("id"), e)
+                                    enrich = {}
+                                if enrich:
+                                    cand["email"] = (
+                                        cand.get("email")
+                                        or enrich.get("workEmail")
+                                        or enrich.get("personalEmail")
+                                        or ""
+                                    )
+                                    cand["phone"] = (
+                                        cand.get("phone")
+                                        or enrich.get("mobilePhone")
+                                        or enrich.get("workPhone")
+                                        or ""
+                                    )
+                                    if cand.get("email") or cand.get("phone"):
+                                        cand["enhanced_info"]["contact_enrichment_provider"] = enrich.get("provider_used")
                         return {"status": "success", "candidate": cand}
 
                 process_tasks = [asyncio.create_task(_process_external_single(c)) for c in ext_candidates]
@@ -3401,7 +3462,7 @@ class UnifiedCandidateSearch:
             candidates = await self.exa_service.search_dice_candidates(
                 skills=skills_values,
                 location=self._scope_location_to_us(criteria.location),
-                limit=min(criteria.page_size, 20),
+                limit=min(criteria.page_size, 50),
                 boolean_string=self._scope_boolean_to_us(boolean_string),
             )
             return {"candidates": candidates, "source_type": "Dice"}
@@ -3428,7 +3489,7 @@ class UnifiedCandidateSearch:
             candidates = await self.exa_service.search_candidates(
                 skills=skills_values,
                 location=self._scope_location_to_us(criteria.location),
-                limit=min(criteria.page_size, 20),
+                limit=min(criteria.page_size, 50),
                 boolean_string=self._scope_boolean_to_us(boolean_string),
             )
             return {"candidates": candidates, "source_type": "LinkedIn-Exa"}
