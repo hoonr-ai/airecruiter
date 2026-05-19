@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from typing import List, Dict, Any, Tuple
@@ -71,14 +72,42 @@ def _exa_query_from_boolean(boolean_string: str, skills: List[str], location: st
     well — AND/OR/NOT survive as word tokens and quoted phrases still bias
     matches. When no boolean is provided, fall back to the skills+location
     heuristic that Dice/LinkedIn-Exa used previously.
+
+    When a boolean is provided we still re-append top must-have skills + the
+    primary location if they're missing from the boolean — defends against
+    upstream boolean builders that drop skills or location, which manifested
+    in production as Exa results ignoring the user's stated requirements.
     """
     bs = (boolean_string or "").strip()
     if bs:
         # Drop ` within N mi` radius hints — Exa can't act on them and they
         # introduce noise. Location (if present) still appears as a quoted
         # phrase elsewhere in the boolean.
-        cleaned = re.sub(r'\s+within\s+\d+\s*mi\b', '', bs, flags=re.IGNORECASE)
-        return cleaned.strip()
+        cleaned = re.sub(r'\s+within\s+\d+\s*mi\b', '', bs, flags=re.IGNORECASE).strip()
+        lower_bs = cleaned.lower()
+        # Top-5 skills only — caps query length around Exa's quality knee
+        # (~512 chars). Skills already in the boolean are skipped to avoid
+        # duplication.
+        if skills:
+            for skill in skills[:5]:
+                if not skill:
+                    continue
+                token = skill.strip()
+                if not token:
+                    continue
+                if re.search(rf'\b{re.escape(token.lower())}\b', lower_bs):
+                    continue
+                cleaned = f'{cleaned} AND "{token}"'
+                lower_bs = cleaned.lower()
+        # Match the location only on its city portion (`split(",", 1)[0]`)
+        # so a boolean that already says "located in New York" won't get
+        # "New York, NY" appended on top of it.
+        loc = (location or "").strip()
+        if loc:
+            city_token = loc.split(",", 1)[0].strip().lower()
+            if city_token and city_token not in lower_bs:
+                cleaned = f'{cleaned} located in {loc}'
+        return cleaned
 
     skills_str = ", ".join(skills) if skills else ""
     prefix = role_hint or "candidate"
@@ -180,6 +209,69 @@ class ExaService:
         except Exception as e:
             logger.error(f"Exa search failed: {e}")
             return []
+
+    async def deep_analyze_candidate(
+        self,
+        url: str,
+        query_skills: List[str],
+        query_location: str,
+    ) -> Dict[str, str]:
+        """Fetch Exa contents + a targeted match-rationale summary for one URL.
+
+        Returns {'text': str (≤8000 chars), 'summary': str} on success or `{}`
+        on any failure (missing SDK, timeout, HTTP error, parse error).
+
+        Billing is per-URL on Exa's side, so callers should gate this to
+        post-filter survivors rather than calling for every search hit.
+        """
+        if not self.exa or not url:
+            return {}
+
+        skills_csv = ", ".join((query_skills or [])[:8]) or "(no skills)"
+        location_str = (query_location or "").strip() or "(no location filter)"
+        summary_query = (
+            f"Does this candidate match: {skills_csv} located in {location_str}? "
+            "Pull years of experience, current title, current location, and a "
+            "brief match rationale."
+        )
+
+        loop = asyncio.get_event_loop()
+
+        def do_contents() -> Any:
+            return self.exa.get_contents(
+                urls=[url],
+                text=True,
+                summary={"query": summary_query},
+                livecrawl="fallback",
+            )
+
+        try:
+            response = await asyncio.wait_for(
+                loop.run_in_executor(None, do_contents),
+                timeout=25.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Exa deep_analyze timeout for %s", url)
+            return {}
+        except Exception as e:
+            logger.warning("Exa deep_analyze failed for %s: %s", url, e)
+            return {}
+
+        try:
+            results = getattr(response, "results", None) or []
+            if not results:
+                return {}
+            r0 = results[0]
+            text = getattr(r0, "text", "") or ""
+            summary = getattr(r0, "summary", "") or ""
+        except Exception as e:
+            logger.warning("Exa deep_analyze parse failed for %s: %s", url, e)
+            return {}
+
+        return {
+            "text": (text or "")[:8000],
+            "summary": summary or "",
+        }
 
     async def search_dice_candidates(self, skills: List[str], location: str, limit: int = 10, boolean_string: str = "") -> List[Dict[str, Any]]:
         """
