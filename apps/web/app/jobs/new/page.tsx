@@ -970,6 +970,15 @@ function NewJobPageContent() {
           const prioA = sourcePriority(a);
           const prioB = sourcePriority(b);
           if (prioA !== prioB) return prioA - prioB;
+          // Prefer JobDiva's api_rank (lower = better) when both candidates
+          // carry it — preserves JobAgent's ranking end-to-end even when
+          // LLM scoring assigns different match_score values. Falls back to
+          // match_score for sources without an API rank (e.g. Exa, Dice).
+          const rankA = typeof a.api_rank === "number" ? a.api_rank : null;
+          const rankB = typeof b.api_rank === "number" ? b.api_rank : null;
+          if (rankA !== null && rankB !== null) {
+            return (rankB - rankA) * dirMul;
+          }
           const scoreA = typeof a.match_score === "number" ? a.match_score : 0;
           const scoreB = typeof b.match_score === "number" ? b.match_score : 0;
           return (scoreA - scoreB) * dirMul;
