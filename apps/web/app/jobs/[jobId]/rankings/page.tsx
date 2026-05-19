@@ -456,6 +456,7 @@ export default function CandidateRankingsPage() {
 
   const [job, setJob] = useState<JobDetails | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [launchedRowCount, setLaunchedRowCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [appliedFilters, setAppliedFilters] = useState<AppliedFilters | null>(null);
@@ -1280,6 +1281,7 @@ export default function CandidateRankingsPage() {
       const candRes = await fetch(`${apiBase}/jobs/${jobId}/candidates`);
       const candData = await candRes.json();
       if (candData.status === "success" && Array.isArray(candData.candidates)) {
+        setLaunchedRowCount(candData.candidates.length);
         // Initialize feedbacks state from persisted data
         const initialFeedbacks: Record<string, string> = {};
         candData.candidates.forEach((c: any) => {
@@ -1460,7 +1462,7 @@ export default function CandidateRankingsPage() {
               ) : (
                 <>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Candidates Launched: <strong className="text-slate-900 ml-1">{candidates.length}</strong>
+                    <div className="w-2 h-2 rounded-full bg-slate-300"></div> Candidates Launched: <strong className="text-slate-900 ml-1">{launchedRowCount}</strong>
                   </div>
                   <div className="flex items-center gap-2">
                     <div className="w-2 h-2 rounded-full bg-slate-300"></div> Openings: <strong className="text-slate-900 ml-1">{!job?.openings ? "—" : job.openings}</strong>
@@ -1722,6 +1724,7 @@ export default function CandidateRankingsPage() {
 
           <div className="ml-auto text-[13px] font-bold text-slate-500 px-2">
             Showing <span className="text-slate-900">{filteredCandidates.length}</span> of <span className="text-slate-900">{candidates.length}</span>
+            <span className="text-slate-400"> visible candidates</span>
           </div>
         </div>
 

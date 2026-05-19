@@ -55,6 +55,7 @@ function countDigits(s: string) {
 }
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const CONTACT_SAVE_BATCH_SIZE = 4;
 
 function isValidEmail(s: string) {
   const v = (s || "").trim().toLowerCase();
@@ -69,7 +70,7 @@ export function MissingContactsModal({
   onClose,
   onAllProvided,
   title = "Missing contact details",
-  description = "PAIR needs a phone number and a real email for each candidate. Add the missing details below and we'll launch for them too.",
+  description = "PAIR needs a unique real phone number and email for each candidate. Add or correct the details below and we'll launch for them too.",
   primaryLabel = "Launch PAIR for remaining",
 }: MissingContactsModalProps) {
   const [phones, setPhones] = useState<Record<string, string>>({});
@@ -100,9 +101,48 @@ export function MissingContactsModal({
     }
   }, [open, candidates]);
 
+  const duplicateEmailIds = (() => {
+    const seen = new Map<string, string[]>();
+    for (const c of candidates) {
+      const email = (emails[c.candidate_id] || "").trim().toLowerCase();
+      if (!isValidEmail(email)) continue;
+      const ids = seen.get(email) || [];
+      ids.push(c.candidate_id);
+      seen.set(email, ids);
+    }
+    const dupes = new Set<string>();
+    for (const ids of seen.values()) {
+      if (ids.length < 2) continue;
+      for (const id of ids) dupes.add(id);
+    }
+    return dupes;
+  })();
+
+  const duplicatePhoneIds = (() => {
+    const seen = new Map<string, string[]>();
+    for (const c of candidates) {
+      const phone = (phones[c.candidate_id] || "").trim();
+      if (countDigits(phone) < 7) continue;
+      const normalized = phone.replace(/\D/g, "");
+      const ids = seen.get(normalized) || [];
+      ids.push(c.candidate_id);
+      seen.set(normalized, ids);
+    }
+    const dupes = new Set<string>();
+    for (const ids of seen.values()) {
+      if (ids.length < 2) continue;
+      for (const id of ids) dupes.add(id);
+    }
+    return dupes;
+  })();
+
   const isRowValid = (c: MissingContactCandidate) => {
-    const phoneOk = !c.needsPhone || countDigits(phones[c.candidate_id] || "") >= 7;
-    const emailOk = !c.needsEmail || isValidEmail(emails[c.candidate_id] || "");
+    const phoneOk =
+      !c.needsPhone ||
+      (countDigits(phones[c.candidate_id] || "") >= 7 && !duplicatePhoneIds.has(c.candidate_id));
+    const emailOk =
+      !c.needsEmail ||
+      (isValidEmail(emails[c.candidate_id] || "") && !duplicateEmailIds.has(c.candidate_id));
     return phoneOk && emailOk;
   };
 
@@ -198,7 +238,12 @@ export function MissingContactsModal({
         tasks.push(saveEmail(c, (emails[c.candidate_id] || "").trim()));
       }
     }
-    const results = await Promise.all(tasks);
+    const results: boolean[] = [];
+    for (let i = 0; i < tasks.length; i += CONTACT_SAVE_BATCH_SIZE) {
+      const chunk = tasks.slice(i, i + CONTACT_SAVE_BATCH_SIZE);
+      const chunkResults = await Promise.all(chunk);
+      results.push(...chunkResults);
+    }
     if (results.every(Boolean)) {
       const out: Record<string, { phone?: string; email?: string }> = {};
       for (const c of candidates) {
@@ -276,6 +321,11 @@ export function MissingContactsModal({
                           )}
                         </div>
                         {phoneErr && <span className="text-[11px] text-rose-600">{phoneErr}</span>}
+                        {!phoneErr && duplicatePhoneIds.has(c.candidate_id) && (
+                          <span className="text-[11px] text-rose-600">
+                            Each candidate needs a unique phone number
+                          </span>
+                        )}
                       </div>
                     </div>
                   )}
@@ -304,6 +354,11 @@ export function MissingContactsModal({
                           )}
                         </div>
                         {emailErr && <span className="text-[11px] text-rose-600">{emailErr}</span>}
+                        {!emailErr && duplicateEmailIds.has(c.candidate_id) && (
+                          <span className="text-[11px] text-rose-600">
+                            Each candidate needs a unique email address
+                          </span>
+                        )}
                       </div>
                     </div>
                   )}
