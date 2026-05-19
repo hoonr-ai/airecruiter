@@ -229,30 +229,80 @@ export function MissingContactsModal({
   }
 
   async function handleSubmit() {
-    const tasks: Promise<boolean>[] = [];
+    setPhoneErrors({});
+    setEmailErrors({});
+    
+    const updates = [];
     for (const c of candidates) {
+      let needsUpdate = false;
+      const item: any = { candidate_id: c.candidate_id, jobdiva_id: c.jobdiva_id };
+      
       if (c.needsPhone) {
-        tasks.push(savePhone(c, (phones[c.candidate_id] || "").trim()));
+        const phone = (phones[c.candidate_id] || "").trim();
+        if (countDigits(phone) < 7) {
+          setPhoneErrors(prev => ({ ...prev, [c.candidate_id]: "At least 7 digits required" }));
+          return;
+        }
+        item.phone = phone;
+        needsUpdate = true;
       }
+      
       if (c.needsEmail) {
-        tasks.push(saveEmail(c, (emails[c.candidate_id] || "").trim()));
+        const email = (emails[c.candidate_id] || "").trim();
+        if (!isValidEmail(email)) {
+          setEmailErrors(prev => ({ ...prev, [c.candidate_id]: "Enter a valid email address" }));
+          return;
+        }
+        item.email = email;
+        needsUpdate = true;
+      }
+      
+      if (needsUpdate) {
+        updates.push(item);
       }
     }
-    const results: boolean[] = [];
-    for (let i = 0; i < tasks.length; i += CONTACT_SAVE_BATCH_SIZE) {
-      const chunk = tasks.slice(i, i + CONTACT_SAVE_BATCH_SIZE);
-      const chunkResults = await Promise.all(chunk);
-      results.push(...chunkResults);
+    
+    // Set all saving states to true
+    for (const c of candidates) {
+      if (c.needsPhone) setSavingPhone(prev => ({ ...prev, [c.candidate_id]: true }));
+      if (c.needsEmail) setSavingEmail(prev => ({ ...prev, [c.candidate_id]: true }));
     }
-    if (results.every(Boolean)) {
+    
+    try {
+      const res = await fetch(`${API_BASE}/candidates/bulk-contacts`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ updates })
+      });
+      
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        const msg = body?.detail || `Bulk save failed (${res.status})`;
+        if (candidates.length > 0) {
+           setPhoneErrors(prev => ({ ...prev, [candidates[0].candidate_id]: String(msg) }));
+        }
+        return;
+      }
+      
       const out: Record<string, { phone?: string; email?: string }> = {};
       for (const c of candidates) {
+        if (c.needsPhone) setPhoneSavedAt(prev => ({ ...prev, [c.candidate_id]: Date.now() }));
+        if (c.needsEmail) setEmailSavedAt(prev => ({ ...prev, [c.candidate_id]: Date.now() }));
+        
         const entry: { phone?: string; email?: string } = {};
         if (c.needsPhone) entry.phone = (phones[c.candidate_id] || "").trim();
         if (c.needsEmail) entry.email = (emails[c.candidate_id] || "").trim().toLowerCase();
         out[c.candidate_id] = entry;
       }
       onAllProvided(out);
+    } catch (e: any) {
+      logger.error("missing_contacts.bulk.save.error", { message: e?.message });
+      if (candidates.length > 0) {
+         setPhoneErrors(prev => ({ ...prev, [candidates[0].candidate_id]: "Failed to save contacts. Please try again." }));
+      }
+    } finally {
+      setSavingPhone({});
+      setSavingEmail({});
     }
   }
 
