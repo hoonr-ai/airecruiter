@@ -172,6 +172,14 @@ def _ensure_monitored_jobs_schema() -> None:
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS candidates_launched INTEGER DEFAULT 0",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS complete_submissions INTEGER DEFAULT 0",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS pass_submissions INTEGER DEFAULT 0",
+            # F7: surface JobDiva JobAgent "Criteria Not Assigned" state on the
+            # dashboard. Set by auto_assign_service when a Step-5 search returns
+            # summary.jobdiva_criteria_unconfigured=True, meaning JobDiva's
+            # AI matcher has no criteria configured for this job and we fell
+            # back to the broken-pool TalentSearch (silently degrades quality).
+            # The frontend can render a badge that links the recruiter to
+            # JobDiva's web UI to set the criteria.
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS jobdiva_criteria_unconfigured BOOLEAN DEFAULT FALSE",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS current_step INTEGER",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS user_session TEXT",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS ai_enhanced BOOLEAN DEFAULT FALSE",
@@ -1923,6 +1931,7 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
                 "mj.pair_external_subs, mj.feedback_completed, "
                 "mj.candidates_sourced, mj.candidates_launched, "
                 "mj.complete_submissions, mj.pass_submissions, "
+                "mj.jobdiva_criteria_unconfigured, "
                 "mj.pair_launched_at, mj.outreach_stopped_at, mj.time_to_first_pass, mj.created_at, mj.updated_at "
                 "FROM monitored_jobs mj"
             )

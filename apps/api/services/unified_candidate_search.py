@@ -402,10 +402,22 @@ class UnifiedCandidateSearch:
                 # search-service layer so every caller (auto-sync, manual
                 # source, UI preview) gets the bound regardless of what
                 # criteria.page_size the caller requested.
+                #
+                # F5: order by application recency before truncating so the
+                # freshest 100 applicants survive, not whatever order JobDiva
+                # returned them in. Applicants are thin records (no resume
+                # title/skill haystack pre-enrichment) so we can't pre-rank by
+                # skill match — recency is the next-best signal we have.
                 if applicants and len(applicants) > 100:
+                    def _applicant_recency_key(a: Dict[str, Any]) -> str:
+                        # JobApplicantsDetail.RECEIVED is an ISO-ish date string;
+                        # lexicographic sort on the ISO form is reverse-chronological
+                        # when reversed. Missing dates sort last.
+                        return str(a.get("received") or "")
+                    applicants.sort(key=_applicant_recency_key, reverse=True)
                     self._log_stage(
                         "Applicants",
-                        f"Capping {len(applicants)} applicants to 100 to prevent system lag.",
+                        f"Capping {len(applicants)} applicants to top-100 by recency.",
                     )
                     applicants = applicants[:100]
 
@@ -455,10 +467,15 @@ class UnifiedCandidateSearch:
                     summary["jobdiva_criteria_unconfigured"] = True
 
                 # HOTFIX: Hard cap at 100 — see Applicants stage above.
+                # F5 note: TalentSearch results are already skill-ranked by
+                # `_rank_candidates_by_skill` inside `_search_jobdiva_talent`
+                # (TalentSearch-fallback path) or sorted by must-skill hits
+                # (JobAgent path) before reaching here. The slice that follows
+                # is therefore a top-100-by-relevance cut, not FIFO.
                 if talent_pool and len(talent_pool) > 100:
                     self._log_stage(
                         "TalentSearch",
-                        f"Capping {len(talent_pool)} talent profiles to 100 to prevent system lag.",
+                        f"Capping {len(talent_pool)} talent profiles to top-100 by skill rank.",
                     )
                     talent_pool = talent_pool[:100]
 
@@ -490,12 +507,22 @@ class UnifiedCandidateSearch:
                 summary[f"{source_type.lower()}_count"] = len(ext_candidates)
 
                 # HOTFIX: Hard cap at 100 — see Applicants stage above.
+                # F5: pre-rank by cheap title/skill keyword match before
+                # slicing. External sources (Exa/Dice/Unipile) ship enough
+                # signal in `title` + highlight text to rank meaningfully,
+                # and an unranked FIFO slice can discard the best matches
+                # if Exa returns ordered by its own relevance and we ask
+                # for 50 results but the cap fires elsewhere.
                 if ext_candidates and len(ext_candidates) > 100:
+                    before_rank = len(ext_candidates)
+                    ext_candidates = self._rank_candidates_by_skill(
+                        ext_candidates, criteria, keep_top=100
+                    )
                     self._log_stage(
                         source_type,
-                        f"Capping {len(ext_candidates)} {source_type} profiles to 100 to prevent system lag.",
+                        f"Capping {before_rank} {source_type} profiles to "
+                        f"top-{len(ext_candidates)} by skill+title rank.",
                     )
-                    ext_candidates = ext_candidates[:100]
 
                 self._log_stage(source_type, f"Found {len(ext_candidates)} profiles; starting streaming enrichment...")
 
@@ -504,6 +531,17 @@ class UnifiedCandidateSearch:
                 async def _process_external_single(cand):
                     async with semaphore:
                         cand["source"] = source_type
+
+                        # F3: cheap role-anchor check on external candidates.
+                        # Exa has no real query filter — surfaced profiles can
+                        # be completely off-role (e.g. software engineers when
+                        # the job is "Program Manager"). Drop those before
+                        # they consume a 100-cap slot and a downstream LLM call.
+                        # Unipile is checked AFTER profile enrichment fills its
+                        # title field; Exa/Dice carry a title from the start.
+                        if source_type != "LinkedIn-Unipile" and not self._candidate_title_match(cand, criteria):
+                            return {"status": "failed_title_match"}
+
                         is_linkedin = source_type.startswith("LinkedIn")
                         if source_type == "LinkedIn-Unipile":
                             provider_id = cand.get("provider_id")
@@ -514,6 +552,9 @@ class UnifiedCandidateSearch:
                                         cand.update(self._extract_linkedin_profile_data(full_profile))
                                 except Exception as e:
                                     logger.warning(f"Failed to fetch full profile for LinkedIn candidate {provider_id}: {e}")
+                            # After enrichment, run the same role-anchor check.
+                            if not self._candidate_title_match(cand, criteria):
+                                return {"status": "failed_title_match"}
 
                         # PR-B: cheap pre-LLM YOE gate for external sources too.
                         # Drops candidates whose headline / abstract / resume
@@ -3455,6 +3496,84 @@ class UnifiedCandidateSearch:
         
         return extracted
 
+    @staticmethod
+    def _candidate_title_match(cand: Dict[str, Any], criteria: SearchCriteria) -> bool:
+        """Cheap title sanity check for external candidates (Exa, Dice, Unipile).
+
+        Drops candidates whose `title`/`headline` show no overlap with the
+        job's must-titles. Conservative — only fires when (a) the job has
+        must-title criteria and (b) the candidate has some non-empty title
+        signal to match against. Without this check, an Exa search for a
+        Program Manager job can surface "Senior Software Engineer" profiles
+        whose only connection to "program manager" is a stray word in their
+        about section. Local scoring catches this later, but at higher cost
+        and after it's already taken a 100-cap slot.
+
+        Returns True (pass) unless we have strong reason to believe the
+        title is mismatched. Multi-word must-titles count as a hit when
+        either (a) the full phrase appears, or (b) every significant token
+        (>=4 chars) of the phrase appears in the candidate's title field.
+        """
+        must_titles: List[str] = []
+        for item in criteria.title_criteria or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("match_type", "must") != "must":
+                continue
+            value = str(item.get("value", "")).strip().lower()
+            if value:
+                must_titles.append(value)
+        if not must_titles:
+            return True
+
+        title_text = str(cand.get("title") or "").lower()
+        headline_text = str(cand.get("headline") or "").lower()
+        if not (title_text or headline_text):
+            # No title signal yet (e.g. Unipile pre-enrichment). Defer to
+            # downstream filters rather than dropping blind.
+            return True
+
+        snippet = str(cand.get("resume_text") or "")[:500].lower()
+        hay = " ".join(p for p in (title_text, headline_text, snippet) if p)
+
+        for title in must_titles:
+            if title in hay:
+                return True
+            tokens = [t for t in title.split() if len(t) >= 4]
+            if not tokens:
+                # All tokens too short to gate on (e.g. "BA" / "QA") — pass.
+                return True
+            if all(t in title_text or t in headline_text for t in tokens):
+                return True
+        return False
+
+    @staticmethod
+    def _role_hint_from_criteria(criteria: SearchCriteria) -> str:
+        """Pick up to two `must` titles from the criteria and join with OR.
+
+        Used to anchor Exa/Dice queries when the boolean string is empty.
+        Falls back to "" so the caller can use its own default — Exa uses
+        "candidate", Dice uses "resume profile". Never hardcodes a role
+        family (the previous "software engineer OR developer" default
+        biased non-tech searches into engineering candidates).
+        """
+        titles: List[str] = []
+        for item in criteria.title_criteria or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("match_type", "must") == "exclude":
+                continue
+            value = str(item.get("value", "")).strip()
+            if value:
+                titles.append(value)
+            if len(titles) >= 2:
+                break
+        if not titles:
+            return ""
+        if len(titles) == 1:
+            return f'"{titles[0]}"'
+        return " OR ".join(f'"{t}"' for t in titles)
+
     async def _search_dice(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
             skills_values = criteria.sourcing_skill_values()
@@ -3464,6 +3583,7 @@ class UnifiedCandidateSearch:
                 location=self._scope_location_to_us(criteria.location),
                 limit=min(criteria.page_size, 50),
                 boolean_string=self._scope_boolean_to_us(boolean_string),
+                role_hint=self._role_hint_from_criteria(criteria),
             )
             return {"candidates": candidates, "source_type": "Dice"}
         except Exception as e:
@@ -3491,6 +3611,7 @@ class UnifiedCandidateSearch:
                 location=self._scope_location_to_us(criteria.location),
                 limit=min(criteria.page_size, 50),
                 boolean_string=self._scope_boolean_to_us(boolean_string),
+                role_hint=self._role_hint_from_criteria(criteria),
             )
             return {"candidates": candidates, "source_type": "LinkedIn-Exa"}
         except Exception as e:
