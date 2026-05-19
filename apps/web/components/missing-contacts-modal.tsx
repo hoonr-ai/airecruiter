@@ -162,11 +162,11 @@ export function MissingContactsModal({
     setSavingPhone(prev => ({ ...prev, [cand.candidate_id]: true }));
     try {
       const res = await fetch(
-        `${API_BASE}/candidates/${encodeURIComponent(cand.candidate_id)}/phone`,
+        `${API_BASE}/candidates/phone`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ phone, jobdiva_id: cand.jobdiva_id }),
+          body: JSON.stringify({ candidate_id: cand.candidate_id, phone, jobdiva_id: cand.jobdiva_id }),
         },
       );
       if (!res.ok) {
@@ -201,11 +201,11 @@ export function MissingContactsModal({
     setSavingEmail(prev => ({ ...prev, [cand.candidate_id]: true }));
     try {
       const res = await fetch(
-        `${API_BASE}/candidates/${encodeURIComponent(cand.candidate_id)}/email`,
+        `${API_BASE}/candidates/email`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, jobdiva_id: cand.jobdiva_id }),
+          body: JSON.stringify({ candidate_id: cand.candidate_id, email, jobdiva_id: cand.jobdiva_id }),
         },
       );
       if (!res.ok) {
