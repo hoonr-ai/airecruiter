@@ -51,6 +51,17 @@ def _ensure_rubric_schema_sync() -> None:
                   AND t1.jobdiva_id = t2.jobdiva_id
                   AND LOWER(t1.title) = LOWER(t2.title)
             """)
+            # Same one-time cleanup for job_education so the unique index
+            # below can be created without conflict. Mirrors the in-memory
+            # seen_edu dedup added to save_full_rubric.
+            cur.execute("""
+                DELETE FROM job_education e1
+                USING job_education e2
+                WHERE e1.ctid < e2.ctid
+                  AND e1.jobdiva_id = e2.jobdiva_id
+                  AND LOWER(COALESCE(e1.degree, '')) = LOWER(COALESCE(e2.degree, ''))
+                  AND LOWER(COALESCE(e1.field, ''))  = LOWER(COALESCE(e2.field, ''))
+            """)
             # Defense-in-depth against duplicate rubric items per job. LOWER()
             # matches the case-insensitive frontend dedup and the backend's
             # seen_skills.upper() check in save_full_rubric.
@@ -61,6 +72,10 @@ def _ensure_rubric_schema_sync() -> None:
             cur.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS job_titles_unique_per_job
                 ON job_titles (jobdiva_id, LOWER(title))
+            """)
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS job_education_unique_per_job
+                ON job_education (jobdiva_id, LOWER(COALESCE(degree, '')), LOWER(COALESCE(field, '')))
             """)
         conn.commit()
 
@@ -140,23 +155,32 @@ class JobRubricDB:
                     cur.execute("DELETE FROM job_other_requirements WHERE jobdiva_id = %s", (jobdiva_id,))
 
                     # 2. Save Skills (Hard and Soft)
+                    # `skills` is the canonical hard-skills field across the
+                    # GET endpoint, the frontend's rubricData, and the
+                    # JobRubric dataclass's legacy alias. We deliberately do
+                    # NOT concatenate with `hard_skills` here: when a user
+                    # edits a skill in Step 3, only rubricData.skills mutates;
+                    # the rubricData.hard_skills copy stays stale and the
+                    # value-keyed dedup below would let the stale row through
+                    # as a duplicate of the edited one. Read `skills` first,
+                    # fall back to `hard_skills` only if the caller didn't
+                    # populate `skills` (legacy direct-dataclass writers).
                     all_skills = []
-                    # We merge lists but FILTER OUT anything that was re-routed to education
-                    raw_skills = (rubric.get('skills', []) or []) + (rubric.get('hard_skills', []) or [])
+                    raw_skills = rubric.get('skills') or rubric.get('hard_skills') or []
                     seen_skills = set()
-                    
+
                     for s in raw_skills:
                         if s.get('category') == 'certification':
                             continue
-                        val = s.get('value', '').upper()
-                        if val in seen_skills: continue
+                        val = (s.get('value') or '').strip().upper()
+                        if not val or val in seen_skills: continue
                         seen_skills.add(val)
                         s['category'] = s.get('category', 'hard')
                         all_skills.append(s)
 
-                    for s in rubric.get('soft_skills', []):
-                        val = s.get('value', '').upper()
-                        if val in seen_skills: continue
+                    for s in rubric.get('soft_skills', []) or []:
+                        val = (s.get('value') or '').strip().upper()
+                        if not val or val in seen_skills: continue
                         seen_skills.add(val)
                         s['category'] = 'soft'
                         all_skills.append(s)
@@ -197,14 +221,28 @@ class JobRubricDB:
                         ))
 
                     # 4. Save Education & Certs
-                    for e in rubric.get('education', []):
+                    # Dedup by (degree|field) tuple — same key the extractor
+                    # uses at job_skills_extractor.py:524. Without this a user
+                    # who double-clicks "Add Education / Certificate" or any
+                    # path that re-feeds the rubric ends up with duplicate
+                    # rows (job_education has no DELETE-and-replace at the row
+                    # level inside this transaction, just a bulk DELETE above,
+                    # so duplicates in the payload all land in the table).
+                    seen_edu = set()
+                    for e in rubric.get('education', []) or []:
+                        degree = (e.get('degree') or '').strip()
+                        field = (e.get('field') or '').strip()
+                        key = f"{degree}|{field}".upper()
+                        if key == '|' or key in seen_edu:
+                            continue
+                        seen_edu.add(key)
                         cur.execute("""
                             INSERT INTO job_education (jobdiva_id, degree, field, is_required, source)
                             VALUES (%s, %s, %s, %s, %s)
                         """, (
                             jobdiva_id,
-                            e.get('degree', ''),
-                            e.get('field', ''),
+                            degree,
+                            field,
                             e.get('required', 'Required') == 'Required',
                             e.get('source') or 'Hoonr-Curate',
                         ))
