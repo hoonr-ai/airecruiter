@@ -953,6 +953,9 @@ function NewJobPageContent() {
     };
 
     const filtered = candidates.filter((c: any) => {
+      const candId = c.candidate_id || c.jobdiva_candidate_id || c.id;
+      const key = `${c.source ?? ''}:${candId}`;
+      if (launchedCandidateKeys.has(key)) return false;
       if (!matchesSourceFilter(c)) return false;
       if (minScore > 0) {
         const score = typeof c.match_score === "number" ? c.match_score : 0;
@@ -1244,7 +1247,7 @@ function NewJobPageContent() {
     if (dncPhones.size === 0) return new Set<string>();
     const keys = new Set<string>();
     for (const c of candidates) {
-      const id = c.candidate_id || c.id;
+      const id = c.candidate_id || c.jobdiva_candidate_id || c.id;
       if (!id) continue;
       const np = normalizePhone(c.phone);
       if (np && dncPhones.has(np)) {
@@ -5123,7 +5126,7 @@ function NewJobPageContent() {
                 }
               }
               setCandidates(prev => prev.map(c => (
-                String(c.candidate_id || c.id || "") === targetId
+                String(c.candidate_id || c.jobdiva_candidate_id || c.id || "") === targetId
                   ? { ...c, ...patch }
                   : c
               )));
@@ -5840,7 +5843,7 @@ function NewJobPageContent() {
 
     const effective = contactOverrides
       ? candidates.map(c => {
-        const id = c.candidate_id || c.id;
+        const id = c.candidate_id || c.jobdiva_candidate_id || c.id;
         const override = contactOverrides[id];
         return override
           ? {
@@ -5861,7 +5864,7 @@ function NewJobPageContent() {
     // the auto-deselect from handleLaunchPairClick. The backend repeats
     // this check at /candidates/save — defense in depth.
     const candidatesPayload = effective
-      .filter(c => launchIds.has(c.candidate_id || c.id))
+      .filter(c => launchIds.has(c.candidate_id || c.jobdiva_candidate_id || c.id))
       .filter(c => {
         if (dncPhones.size === 0) return true;
         const np = normalizePhone(c.phone);
@@ -5881,7 +5884,7 @@ function NewJobPageContent() {
           }
         }
         return {
-          candidate_id: String(c.candidate_id || c.id || "unknown"),
+          candidate_id: String(c.candidate_id || c.jobdiva_candidate_id || c.id || "unknown"),
           name: displayName || "Unnamed Candidate",
           email: c.email || null,
           phone: c.phone || null,
@@ -6166,7 +6169,7 @@ function NewJobPageContent() {
         const reviewList: MissingContactCandidate[] = [];
         const launchJobdivaId = jobdivaId || jobData?.jobdiva_id || numericJobId || undefined;
         for (const c of candidates) {
-          const id = String(c.candidate_id || c.id || "").trim();
+          const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
           if (!id || !selectedCandidates.has(id)) continue;
           reviewList.push({
             candidate_id: id,
@@ -6193,7 +6196,7 @@ function NewJobPageContent() {
       }
 
       const candidatesMissingPhone = candidates.filter(c => {
-        const id = c.candidate_id || c.id;
+        const id = c.candidate_id || c.jobdiva_candidate_id || c.id;
         if (!selectedCandidates.has(id)) return false;
         const digits = String(c.phone || "").replace(/\D/g, "");
         return digits.length < 7;
@@ -6220,7 +6223,7 @@ function NewJobPageContent() {
       let noContactFoundCount = 0;
 
       for (const c of candidatesMissingPhone) {
-        const id = String(c.candidate_id || c.id || "").trim();
+        const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
         if (!id) continue;
 
         const linkedinUrlCandidates = [
@@ -6307,7 +6310,7 @@ function NewJobPageContent() {
 
       if (enrichedCount > 0) {
         setCandidates(prev => prev.map(c => {
-          const cid = String(c.candidate_id || c.id || "").trim();
+          const cid = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
           const override = contactOverrides[cid];
           if (!override) return c;
           return {
@@ -6325,7 +6328,7 @@ function NewJobPageContent() {
       }
 
       const unresolvedMissing = candidatesMissingPhone.filter(c => {
-        const cid = String(c.candidate_id || c.id || "").trim();
+        const cid = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
         const overridePhone = contactOverrides[cid]?.phone || c.phone || "";
         const digits = String(overridePhone).replace(/\D/g, "");
         return digits.length < 7;
@@ -6351,7 +6354,7 @@ function NewJobPageContent() {
       const dncDropped = new Set<string>();
       if (dncPhones.size > 0) {
         for (const c of candidates) {
-          const id = String(c.candidate_id || c.id || "").trim();
+          const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
           if (!id || !selectedCandidates.has(id)) continue;
           const overridePhone = contactOverrides[id]?.phone;
           const phoneToCheck = overridePhone || c.phone;
@@ -6383,7 +6386,7 @@ function NewJobPageContent() {
       const emailToCandidateIds = new Map<string, string[]>();
       const phoneToCandidateIds = new Map<string, string[]>();
       for (const c of candidates) {
-        const id = String(c.candidate_id || c.id || "").trim();
+        const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
         if (!id || !selectedCandidates.has(id) || dncDropped.has(id)) continue;
         const overrideEmail = contactOverrides[id]?.email;
         const overridePhone = contactOverrides[id]?.phone;
@@ -6412,7 +6415,7 @@ function NewJobPageContent() {
         for (const id of ids) duplicatePhoneIds.add(id);
       }
       for (const c of candidates) {
-        const id = String(c.candidate_id || c.id || "").trim();
+        const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
         if (!id || !selectedCandidates.has(id) || dncDropped.has(id)) continue;
         const overridePhone = contactOverrides[id]?.phone;
         const overrideEmail = contactOverrides[id]?.email;
@@ -7567,18 +7570,18 @@ function NewJobPageContent() {
                         const n = Math.max(1, selectBestN);
                         const firstN = candidates
                           .filter(c => {
-                            const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
+                            const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
                             return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
                           })
                           .slice(0, n);
 
-                        const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.id));
+                        const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.jobdiva_candidate_id || c.id));
 
                         if (allFirstNSelected) {
                           setSelectedCandidates(prev => {
                             const next = new Set(prev);
                             firstN.forEach(c => {
-                              const id = c.candidate_id || c.id;
+                              const id = c.candidate_id || c.jobdiva_candidate_id || c.id;
                               next.delete(id);
                             });
                             return next;
@@ -7587,7 +7590,7 @@ function NewJobPageContent() {
                           setSelectedCandidates(prev => {
                             const next = new Set(prev);
                             firstN.forEach(c => {
-                              const id = c.candidate_id || c.id;
+                              const id = c.candidate_id || c.jobdiva_candidate_id || c.id;
                               next.add(id);
                             });
                             return next;
@@ -7600,11 +7603,11 @@ function NewJobPageContent() {
                         const n = Math.max(1, selectBestN);
                         const firstN = candidates
                           .filter(c => {
-                            const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
+                            const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
                             return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
                           })
                           .slice(0, n);
-                        const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.id));
+                        const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.jobdiva_candidate_id || c.id));
                         return allFirstNSelected ? 'Deselect Best' : 'Select Best';
                       })()
                       }
@@ -7638,10 +7641,10 @@ function NewJobPageContent() {
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white"
                       onClick={() => {
                         const eligible = candidates.filter(c => {
-                          const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
+                          const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
                           return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
                         });
-                        const allIds = eligible.map(c => c.candidate_id || c.id);
+                        const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
 
                         if (allSelected) {
@@ -7655,10 +7658,10 @@ function NewJobPageContent() {
                     >
                       {(() => {
                         const eligible = candidates.filter(c => {
-                          const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
+                          const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
                           return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
                         });
-                        const allIds = eligible.map(c => c.candidate_id || c.id);
+                        const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
                         return allSelected ? 'Deselect All' : 'Select All';
                       })()
@@ -7900,7 +7903,7 @@ function NewJobPageContent() {
                       onPhoneSaved={(id, normalised) => {
                         setCandidates((prev) =>
                           prev.map((c) =>
-                            (c.candidate_id || c.id) === id ? { ...c, phone: normalised } : c
+                            (c.candidate_id || c.jobdiva_candidate_id || c.id) === id ? { ...c, phone: normalised } : c
                           )
                         );
                       }}
