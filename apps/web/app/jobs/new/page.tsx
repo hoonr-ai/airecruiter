@@ -979,15 +979,6 @@ function NewJobPageContent() {
           .join(" ");
         if (!haystack.includes(trimmedQuery)) return false;
       }
-      
-      // NEW LOGIC: Fully exclude launched candidates from the visible list
-      // This key format automatically handles ALL candidate sources uniformly 
-      // (e.g. "JobDiva:1234", "LinkedIn:urn:li...", "Exa:5678")
-      const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
-      if (launchedCandidateKeys.has(key)) {
-        return false;
-      }
-
       return true;
     });
 
@@ -1037,7 +1028,7 @@ function NewJobPageContent() {
     };
 
     return [...filtered].sort(cmp);
-  }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, sortKey, sortDir, launchedCandidateKeys]);
+  }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, sortKey, sortDir]);
 
   const totalPages = Math.max(1, Math.ceil(sortedCandidates.length / candidatesPerPage));
   const paginatedCandidates = sortedCandidates.slice(
@@ -5961,7 +5952,6 @@ function NewJobPageContent() {
     let totalDncSkipped = 0;
     let totalFailedBatches = 0;
     let engageFailureMessage: string | null = null;
-    let skippedCandidateNames: string[] = [];
 
     for (let i = 0; i < batches.length; i++) {
       const batch = batches[i];
@@ -6038,17 +6028,6 @@ function NewJobPageContent() {
             batchAlreadySent = Array.isArray(engageRes.skipped_already_sent)
               ? engageRes.skipped_already_sent.length
               : 0;
-
-            if (Array.isArray(engageRes.skipped_already_sent) && engageRes.skipped_already_sent.length > 0) {
-              const skippedNames = engageRes.skipped_already_sent.map((id: string) => {
-                const c = candidates.find(cand => (cand.candidate_id || cand.id) === id);
-                if (c) {
-                  return c.name || [c.firstName, c.lastName].filter(Boolean).join(" ") || c.email || id;
-                }
-                return id;
-              }).filter(Boolean);
-              skippedCandidateNames.push(...skippedNames);
-            }
           } else {
             batchEngageError = engageRes.message || "PAIR rejected the batch";
           }
@@ -6084,13 +6063,6 @@ function NewJobPageContent() {
         totalEngaged,
         totalFailedBatches,
       }));
-    }
-
-    if (skippedCandidateNames.length > 0) {
-      showToast(
-        `Skipped ${skippedCandidateNames.join(", ")} (Already Launched)`,
-        "info"
-      );
     }
 
     if (totalDncSkipped > 0) {
