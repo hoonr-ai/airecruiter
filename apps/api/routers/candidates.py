@@ -1552,6 +1552,16 @@ class UpdateCandidateEmailRequest(BaseModel):
     candidate_id: Optional[str] = None
 
 
+class BulkContactUpdateItem(BaseModel):
+    candidate_id: str
+    jobdiva_id: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+
+class BulkContactUpdateRequest(BaseModel):
+    updates: List[BulkContactUpdateItem]
+
+
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -2406,6 +2416,18 @@ async def update_candidate_phone(candidate_id: str, request: UpdateCandidatePhon
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.patch("/candidates/phone")
+async def update_candidate_phone_body(request: UpdateCandidatePhoneRequest):
+    """
+    Body-based phone update endpoint to avoid URL/path encoding edge cases for
+    candidate IDs containing reserved/non-ASCII characters.
+    """
+    candidate_id = str(request.candidate_id or "").strip()
+    if not candidate_id:
+        raise HTTPException(status_code=400, detail="candidate_id is required")
+    return await update_candidate_phone(candidate_id, request)
+
+
 @router.patch("/candidates/{candidate_id:path}/email")
 async def update_candidate_email(candidate_id: str, request: UpdateCandidateEmailRequest):
     actual_candidate_id = request.candidate_id or candidate_id
@@ -2447,6 +2469,92 @@ async def update_candidate_email(candidate_id: str, request: UpdateCandidateEmai
         raise
     except Exception as e:
         logger.error(f"update_candidate_email failed for {candidate_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/candidates/email")
+async def update_candidate_email_body(request: UpdateCandidateEmailRequest):
+    """
+    Body-based email update endpoint to avoid URL/path encoding edge cases for
+    candidate IDs containing reserved/non-ASCII characters.
+    """
+    candidate_id = str(request.candidate_id or "").strip()
+    if not candidate_id:
+        raise HTTPException(status_code=400, detail="candidate_id is required")
+    return await update_candidate_email(candidate_id, request)
+
+
+@router.patch("/candidates/bulk-contacts")
+async def update_candidate_contacts_bulk(request: BulkContactUpdateRequest):
+    """
+    Bulk update candidate phone and email to avoid Nginx rate limits (503)
+    when updating multiple candidates at once.
+    """
+    try:
+        conn = get_db_connection()
+        updated_total = 0
+        try:
+            with conn.cursor() as cur:
+                for item in request.updates:
+                    actual_candidate_id = item.candidate_id
+                    import urllib.parse
+                    actual_candidate_id = urllib.parse.unquote(actual_candidate_id)
+                    
+                    phone_val = None
+                    if item.phone:
+                        phone_val = _normalise_phone(item.phone)
+                        if sum(1 for ch in phone_val if ch.isdigit()) < 7:
+                            raise HTTPException(status_code=400, detail=f"Phone number for {item.candidate_id} must contain at least 7 digits")
+                            
+                    email_val = None
+                    if item.email:
+                        email_val = _validate_email(item.email)
+                        
+                    if phone_val and email_val:
+                        query = """
+                            UPDATE sourced_candidates
+                            SET phone = %s, email = %s, updated_at = CURRENT_TIMESTAMP
+                            WHERE candidate_id = %s
+                        """
+                        params = [phone_val, email_val, actual_candidate_id]
+                        if item.jobdiva_id:
+                            query += " AND jobdiva_id = %s"
+                            params.append(item.jobdiva_id)
+                        cur.execute(query, tuple(params))
+                        updated_total += cur.rowcount
+                    elif phone_val:
+                        query = """
+                            UPDATE sourced_candidates
+                            SET phone = %s, updated_at = CURRENT_TIMESTAMP
+                            WHERE candidate_id = %s
+                        """
+                        params = [phone_val, actual_candidate_id]
+                        if item.jobdiva_id:
+                            query += " AND jobdiva_id = %s"
+                            params.append(item.jobdiva_id)
+                        cur.execute(query, tuple(params))
+                        updated_total += cur.rowcount
+                    elif email_val:
+                        query = """
+                            UPDATE sourced_candidates
+                            SET email = %s, updated_at = CURRENT_TIMESTAMP
+                            WHERE candidate_id = %s
+                        """
+                        params = [email_val, actual_candidate_id]
+                        if item.jobdiva_id:
+                            query += " AND jobdiva_id = %s"
+                            params.append(item.jobdiva_id)
+                        cur.execute(query, tuple(params))
+                        updated_total += cur.rowcount
+
+            conn.commit()
+        finally:
+            conn.close()
+        return {"status": "success", "updated_rows": updated_total}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"update_candidate_contacts_bulk failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

@@ -55,6 +55,7 @@ function countDigits(s: string) {
 }
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const CONTACT_SAVE_BATCH_SIZE = 4;
 
 function isValidEmail(s: string) {
   const v = (s || "").trim().toLowerCase();
@@ -69,7 +70,7 @@ export function MissingContactsModal({
   onClose,
   onAllProvided,
   title = "Missing contact details",
-  description = "PAIR needs a phone number and a real email for each candidate. Add the missing details below and we'll launch for them too.",
+  description = "PAIR needs a unique real phone number and email for each candidate. Add or correct the details below and we'll launch for them too.",
   primaryLabel = "Launch PAIR for remaining",
 }: MissingContactsModalProps) {
   const [phones, setPhones] = useState<Record<string, string>>({});
@@ -100,9 +101,48 @@ export function MissingContactsModal({
     }
   }, [open, candidates]);
 
+  const duplicateEmailIds = (() => {
+    const seen = new Map<string, string[]>();
+    for (const c of candidates) {
+      const email = (emails[c.candidate_id] || "").trim().toLowerCase();
+      if (!isValidEmail(email)) continue;
+      const ids = seen.get(email) || [];
+      ids.push(c.candidate_id);
+      seen.set(email, ids);
+    }
+    const dupes = new Set<string>();
+    for (const ids of seen.values()) {
+      if (ids.length < 2) continue;
+      for (const id of ids) dupes.add(id);
+    }
+    return dupes;
+  })();
+
+  const duplicatePhoneIds = (() => {
+    const seen = new Map<string, string[]>();
+    for (const c of candidates) {
+      const phone = (phones[c.candidate_id] || "").trim();
+      if (countDigits(phone) < 7) continue;
+      const normalized = phone.replace(/\D/g, "");
+      const ids = seen.get(normalized) || [];
+      ids.push(c.candidate_id);
+      seen.set(normalized, ids);
+    }
+    const dupes = new Set<string>();
+    for (const ids of seen.values()) {
+      if (ids.length < 2) continue;
+      for (const id of ids) dupes.add(id);
+    }
+    return dupes;
+  })();
+
   const isRowValid = (c: MissingContactCandidate) => {
-    const phoneOk = !c.needsPhone || countDigits(phones[c.candidate_id] || "") >= 7;
-    const emailOk = !c.needsEmail || isValidEmail(emails[c.candidate_id] || "");
+    const phoneOk =
+      !c.needsPhone ||
+      (countDigits(phones[c.candidate_id] || "") >= 7 && !duplicatePhoneIds.has(c.candidate_id));
+    const emailOk =
+      !c.needsEmail ||
+      (isValidEmail(emails[c.candidate_id] || "") && !duplicateEmailIds.has(c.candidate_id));
     return phoneOk && emailOk;
   };
 
@@ -122,11 +162,11 @@ export function MissingContactsModal({
     setSavingPhone(prev => ({ ...prev, [cand.candidate_id]: true }));
     try {
       const res = await fetch(
-        `${API_BASE}/candidates/${encodeURIComponent(cand.candidate_id)}/phone`,
+        `${API_BASE}/candidates/phone`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ phone, jobdiva_id: cand.jobdiva_id }),
+          body: JSON.stringify({ candidate_id: cand.candidate_id, phone, jobdiva_id: cand.jobdiva_id }),
         },
       );
       if (!res.ok) {
@@ -161,11 +201,11 @@ export function MissingContactsModal({
     setSavingEmail(prev => ({ ...prev, [cand.candidate_id]: true }));
     try {
       const res = await fetch(
-        `${API_BASE}/candidates/${encodeURIComponent(cand.candidate_id)}/email`,
+        `${API_BASE}/candidates/email`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, jobdiva_id: cand.jobdiva_id }),
+          body: JSON.stringify({ candidate_id: cand.candidate_id, email, jobdiva_id: cand.jobdiva_id }),
         },
       );
       if (!res.ok) {
@@ -189,25 +229,80 @@ export function MissingContactsModal({
   }
 
   async function handleSubmit() {
-    const tasks: Promise<boolean>[] = [];
+    setPhoneErrors({});
+    setEmailErrors({});
+    
+    const updates = [];
     for (const c of candidates) {
+      let needsUpdate = false;
+      const item: any = { candidate_id: c.candidate_id, jobdiva_id: c.jobdiva_id };
+      
       if (c.needsPhone) {
-        tasks.push(savePhone(c, (phones[c.candidate_id] || "").trim()));
+        const phone = (phones[c.candidate_id] || "").trim();
+        if (countDigits(phone) < 7) {
+          setPhoneErrors(prev => ({ ...prev, [c.candidate_id]: "At least 7 digits required" }));
+          return;
+        }
+        item.phone = phone;
+        needsUpdate = true;
       }
+      
       if (c.needsEmail) {
-        tasks.push(saveEmail(c, (emails[c.candidate_id] || "").trim()));
+        const email = (emails[c.candidate_id] || "").trim();
+        if (!isValidEmail(email)) {
+          setEmailErrors(prev => ({ ...prev, [c.candidate_id]: "Enter a valid email address" }));
+          return;
+        }
+        item.email = email;
+        needsUpdate = true;
+      }
+      
+      if (needsUpdate) {
+        updates.push(item);
       }
     }
-    const results = await Promise.all(tasks);
-    if (results.every(Boolean)) {
+    
+    // Set all saving states to true
+    for (const c of candidates) {
+      if (c.needsPhone) setSavingPhone(prev => ({ ...prev, [c.candidate_id]: true }));
+      if (c.needsEmail) setSavingEmail(prev => ({ ...prev, [c.candidate_id]: true }));
+    }
+    
+    try {
+      const res = await fetch(`${API_BASE}/candidates/bulk-contacts`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ updates })
+      });
+      
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        const msg = body?.detail || `Bulk save failed (${res.status})`;
+        if (candidates.length > 0) {
+           setPhoneErrors(prev => ({ ...prev, [candidates[0].candidate_id]: String(msg) }));
+        }
+        return;
+      }
+      
       const out: Record<string, { phone?: string; email?: string }> = {};
       for (const c of candidates) {
+        if (c.needsPhone) setPhoneSavedAt(prev => ({ ...prev, [c.candidate_id]: Date.now() }));
+        if (c.needsEmail) setEmailSavedAt(prev => ({ ...prev, [c.candidate_id]: Date.now() }));
+        
         const entry: { phone?: string; email?: string } = {};
         if (c.needsPhone) entry.phone = (phones[c.candidate_id] || "").trim();
         if (c.needsEmail) entry.email = (emails[c.candidate_id] || "").trim().toLowerCase();
         out[c.candidate_id] = entry;
       }
       onAllProvided(out);
+    } catch (e: any) {
+      logger.error("missing_contacts.bulk.save.error", { message: e?.message });
+      if (candidates.length > 0) {
+         setPhoneErrors(prev => ({ ...prev, [candidates[0].candidate_id]: "Failed to save contacts. Please try again." }));
+      }
+    } finally {
+      setSavingPhone({});
+      setSavingEmail({});
     }
   }
 
@@ -276,6 +371,11 @@ export function MissingContactsModal({
                           )}
                         </div>
                         {phoneErr && <span className="text-[11px] text-rose-600">{phoneErr}</span>}
+                        {!phoneErr && duplicatePhoneIds.has(c.candidate_id) && (
+                          <span className="text-[11px] text-rose-600">
+                            Each candidate needs a unique phone number
+                          </span>
+                        )}
                       </div>
                     </div>
                   )}
@@ -304,6 +404,11 @@ export function MissingContactsModal({
                           )}
                         </div>
                         {emailErr && <span className="text-[11px] text-rose-600">{emailErr}</span>}
+                        {!emailErr && duplicateEmailIds.has(c.candidate_id) && (
+                          <span className="text-[11px] text-rose-600">
+                            Each candidate needs a unique email address
+                          </span>
+                        )}
                       </div>
                     </div>
                   )}
