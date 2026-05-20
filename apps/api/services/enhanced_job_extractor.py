@@ -1,25 +1,25 @@
 import uuid
 from typing import List, Optional
-from openai import AsyncOpenAI
 from pydantic import BaseModel
 from core.config import OPENAI_API_KEY
+from core.llm_client import get_openai_client, model_for
 
 from core.models import (
-    JobDescription, 
-    JobMetadata, 
-    GatingRules, 
-    Requirement, 
-    Competency, 
+    JobDescription,
+    JobMetadata,
+    GatingRules,
+    Requirement,
+    Competency,
     SenioritySignals
 )
 from services.job_storage import JobStorageService
 
 class EnhancedJobExtractor:
     """Enhanced job extractor that produces full JobDescription models."""
-    
+
     def __init__(self):
         self.api_key = OPENAI_API_KEY
-        self.client = AsyncOpenAI(api_key=self.api_key) if self.api_key else None
+        self.client = get_openai_client()
         self.storage_service = JobStorageService()
     
     async def extract_and_store_job(self, raw_description: str, job_id: Optional[str] = None, source_job_id: Optional[str] = None) -> JobDescription:
@@ -62,7 +62,11 @@ class EnhancedJobExtractor:
             return self._create_mock_job_description(job_id)
         
         try:
-            model = "gpt-4o"
+            # Tier-3 #10: dropped from gpt-4o → gpt-4o-mini. The full
+            # extraction is a schema fill with no chain-of-reasoning
+            # advantage from the larger model. Override via
+            # LLM_MODEL_ENHANCED_EXTRACT=gpt-4o if quality regresses.
+            model = model_for("enhanced_extract", "gpt-4o-mini")
             
             system_prompt = """You are an expert HR system that extracts structured job data.
 

@@ -1288,12 +1288,11 @@ async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData)
             try:
                 from services.taxonomy_service import extract_grounded_rubric
                 from services.job_rubric_db import JobRubricDB
-                from core.config import OPENAI_API_KEY
-                from openai import AsyncOpenAI
-                
+                from core.llm_client import get_openai_client
+
                 logger.info(f"⚡ Step 2 Next Click: Triggering Grounded Extraction for {numeric_id} (Ref: {ref_id})")
-                
-                client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+                client = get_openai_client()
                 grounded = await extract_grounded_rubric(
                     job_text=draft_data.ai_description,
                     job_title=draft_data.enhanced_title or draft_data.title,

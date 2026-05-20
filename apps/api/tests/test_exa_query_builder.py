@@ -36,6 +36,19 @@ class _StubBaseModel:
 _stub_module("pydantic", BaseModel=_StubBaseModel, Field=lambda *a, **k: None)
 _stub_module("core", __path__=[])
 _stub_module("core.config", EXA_API_KEY="", OPENAI_API_KEY="", GEMINI_API_KEY="")
+_stub_module(
+    "core.llm_client",
+    get_openai_client=lambda: None,
+    model_for=lambda purpose, default: default,
+)
+_stub_module(
+    "core.llm_cache",
+    make_key=lambda *a, **kw: "stub",
+    get_json=lambda k: None,
+    set_json=lambda *a, **kw: None,
+    get_str=lambda k: None,
+    set_str=lambda *a, **kw: None,
+)
 
 from services.exa_service import _exa_query_from_boolean  # noqa: E402
 

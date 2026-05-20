@@ -48,6 +48,15 @@ _stub_module(
     OPENAI_API_KEY="",
     GEMINI_API_KEY="",
 )
+# Stub the LLM client singleton — services/location.py imports from it
+# transitively. We only exercise pure regex helpers here, so any object
+# that exposes the two used names is fine.
+_stub_module(
+    "core.llm_client",
+    get_openai_client=lambda: None,
+    model_for=lambda purpose, default: default,
+)
+_stub_module("core.llm_cache", make_key=lambda *a, **kw: "stub", get_json=lambda k: None, set_json=lambda *a, **kw: None, get_str=lambda k: None, set_str=lambda *a, **kw: None)
 
 from services.exa_service import _extract_city_from_highlights  # noqa: E402
 

@@ -14,18 +14,19 @@ from services.job_skills_extractor import JobSkillsExtractor, ExtractedSkill
 from services.job_skills_db import JobSkillsDB
 from services.job_rubric_db import JobRubricDB
 from services.screening_question_generator import generate_screening_questions
-from openai import AsyncOpenAI
 from core import (
     OPENAI_API_KEY,
     JOBDIVA_AI_JD_UDF_ID, JOBDIVA_JOB_NOTES_UDF_ID,
     OPENAI_MODEL
 )
+from core.llm_client import get_openai_client, model_for
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Initialize OpenAI client
-client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+# Singleton OpenAI client — module-level reference for legacy code paths.
+# New code should call get_openai_client() directly.
+client = get_openai_client()
 
 
 class JobDescriptionRequest(BaseModel):
@@ -391,9 +392,12 @@ async def generate_job_title(req: JobDescriptionRequest):
         return {"title": f"ERROR: No API Key"}
 
     try:
-        print(f"DEBUG TITLE: Attempting title enhancement with OpenAI: {OPENAI_MODEL}")
+        # Tier-3 #11: title polish is a sub-60-char text transform —
+        # nano is plenty. Override via LLM_MODEL_TITLE_POLISH.
+        _title_model = model_for("title_polish", "gpt-4.1-nano")
+        print(f"DEBUG TITLE: Attempting title enhancement with OpenAI: {_title_model}")
         completion = await client.chat.completions.create(
-            model=OPENAI_MODEL if OPENAI_MODEL else "gpt-4o",
+            model=_title_model,
             messages=[
                 {"role": "system", "content": "You are an expert recruitment copywriter."},
                 {"role": "user", "content": prompt}

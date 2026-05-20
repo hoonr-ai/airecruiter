@@ -698,18 +698,38 @@ async def generate_screening_questions(
     )
 
     role_specific: List[Dict[str, Any]] = []
+    # Cache the LLM JSON output keyed by (system, user) prompt content +
+    # screening_level. Recruiters frequently regenerate screening
+    # questions on an unchanged JD; this turns each repeat into a Redis
+    # round-trip. TTL: 30 days. The cache check lives inside the try so
+    # that a corrupt-cache edge case still falls through to the
+    # deterministic-template fallback below — same safety net as a real
+    # LLM failure.
+    from core import llm_cache as _llm_cache
+    _screening_cache_key = _llm_cache.make_key(
+        "screening", 1, system_message, prompt, screening_level
+    )
     try:
-        completion = await openai_client.chat.completions.create(
-            model=model or "gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.5,
-            response_format={"type": "json_object"},
-            timeout=45,
-        )
-        raw = json.loads(completion.choices[0].message.content or "{}")
+        _cached = await _llm_cache.get_json(_screening_cache_key)
+        if _cached is not None:
+            logger.info("screening questions: cache HIT")
+            raw = _cached
+        else:
+            completion = await openai_client.chat.completions.create(
+                model=model or "gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_message},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.5,
+                response_format={"type": "json_object"},
+                timeout=45,
+                prompt_cache_key="screening-v1",
+            )
+            raw = json.loads(completion.choices[0].message.content or "{}")
+            await _llm_cache.set_json(
+                _screening_cache_key, raw, ttl_seconds=30 * 24 * 60 * 60
+            )
         role_specific = _sanitize_questions(raw.get("questions", []), is_it_role=is_it_role)
     except Exception as exc:
         logger.error(f"❌ screening_question_generator LLM failed: {exc}")

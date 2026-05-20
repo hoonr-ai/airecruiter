@@ -4,8 +4,8 @@ import logging
 import re
 from typing import List, Dict, Any, Optional
 import httpx
-from openai import AsyncOpenAI
 from core.config import OPENAI_API_KEY
+from core.llm_client import get_openai_client, model_for
 from core.models import JobDescription, CandidateProfile, SkillProfileEntry
 from core import llm_cache
 # Azure-Agent grounding was retired from job_skills_extractor (see its
@@ -39,7 +39,7 @@ def _resume_hash(text: str) -> Optional[str]:
 class AIService:
     def __init__(self):
         self.api_key = OPENAI_API_KEY
-        self.client = AsyncOpenAI(api_key=self.api_key) if self.api_key else None
+        self.client = get_openai_client()
         
         # Initialize Ontology (Graph) if not loaded
         from core.graph import ontology
@@ -64,7 +64,9 @@ class AIService:
 
         system_prompt = "You are a Job Description Parser. Extract structured data."
         try:
-            model = "gpt-4o-mini"
+            # Tier-3 #11: mechanical JD schema fill — dropped from
+            # gpt-4o-mini to gpt-4.1-nano. Override via LLM_MODEL_JD_PARSE.
+            model = model_for("jd_parse", "gpt-4.1-nano")
             completion = await self.client.beta.chat.completions.parse(
                 model=model,
                 messages=[

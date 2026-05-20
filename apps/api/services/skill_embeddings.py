@@ -21,7 +21,7 @@ import asyncio
 import logging
 import math
 from collections import OrderedDict
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from openai import AsyncOpenAI
 
@@ -30,12 +30,13 @@ from core.config import (
     OPENAI_API_KEY,
     OPENAI_EMBEDDING_MODEL,
 )
+from core.llm_client import get_openai_client
+from core import llm_cache as _llm_cache
 
 logger = logging.getLogger(__name__)
 
 _CACHE: "OrderedDict[str, List[float]]" = OrderedDict()
 _CACHE_LOCK = asyncio.Lock()
-_CLIENT: Optional[AsyncOpenAI] = None
 _BATCH_SIZE = 256
 
 
@@ -44,10 +45,7 @@ def _normalize(term: str) -> str:
 
 
 def _client() -> Optional[AsyncOpenAI]:
-    global _CLIENT
-    if _CLIENT is None and OPENAI_API_KEY:
-        _CLIENT = AsyncOpenAI(api_key=OPENAI_API_KEY)
-    return _CLIENT
+    return get_openai_client()
 
 
 async def warm_terms(terms: List[str]) -> None:
@@ -81,15 +79,35 @@ async def warm_terms(terms: List[str]) -> None:
         if not still_needed:
             return
 
-        for i in range(0, len(still_needed), _BATCH_SIZE):
-            chunk = still_needed[i : i + _BATCH_SIZE]
+        # L2: check Redis before calling OpenAI. Embeddings are
+        # deterministic for a given (model, input) pair so we cache
+        # without a TTL. Net: a fresh worker boots warm against Redis
+        # instead of re-embedding every term that crossed any worker
+        # before its restart.
+        from_redis: Dict[str, List[float]] = {}
+        for term in still_needed:
+            vec = await _embed_get_from_redis(term)
+            if vec is not None:
+                _CACHE[term] = vec
+                from_redis[term] = vec
+
+        api_needed = [t for t in still_needed if t not in from_redis]
+        if from_redis:
+            logger.info(f"embedding warm: redis L2 served {len(from_redis)}/{len(still_needed)}")
+
+        for i in range(0, len(api_needed), _BATCH_SIZE):
+            chunk = api_needed[i : i + _BATCH_SIZE]
             try:
                 resp = await client.embeddings.create(
                     model=OPENAI_EMBEDDING_MODEL,
                     input=chunk,
                 )
                 for term, item in zip(chunk, resp.data):
-                    _CACHE[term] = list(item.embedding)
+                    vec = list(item.embedding)
+                    _CACHE[term] = vec
+                    # Write-through to Redis so the next worker / restart
+                    # benefits without paying the OpenAI cost again.
+                    await _embed_put_to_redis(term, vec)
             except Exception as exc:
                 logger.warning(
                     "embedding warm failed for batch of %d (model=%s): %s",
@@ -103,6 +121,37 @@ async def warm_terms(terms: List[str]) -> None:
 
             while len(_CACHE) > EMBEDDING_CACHE_MAX:
                 _CACHE.popitem(last=False)
+
+
+def _embed_redis_key(term: str) -> str:
+    # Include model in the namespace so swapping the embedding model
+    # naturally invalidates the cache (vectors from different models
+    # aren't comparable).
+    return _llm_cache.make_key("embed", 1, OPENAI_EMBEDDING_MODEL, term)
+
+
+async def _embed_get_from_redis(term: str) -> Optional[List[float]]:
+    raw = await _llm_cache.get_str(_embed_redis_key(term))
+    if not raw:
+        return None
+    try:
+        import json
+        vec = json.loads(raw)
+        return vec if isinstance(vec, list) else None
+    except Exception:
+        return None
+
+
+async def _embed_put_to_redis(term: str, vec: List[float]) -> None:
+    if not vec:
+        return
+    try:
+        import json
+        await _llm_cache.set_str(
+            _embed_redis_key(term), json.dumps(vec), ttl_seconds=None
+        )
+    except Exception as exc:
+        logger.debug(f"embed redis write failed for {term!r}: {exc}")
 
 
 def _cosine(a: List[float], b: List[float]) -> float:

@@ -1,11 +1,11 @@
 import json
 import logging
 from typing import Optional
-from openai import AsyncOpenAI
 from core.intelligence import TribunalVerdict
 from core.models import CandidateProfile, JobDescription
 from core.toon import encode
 from core.config import OPENAI_API_KEY
+from core.llm_client import get_openai_client
 from core import llm_cache
 
 logger = logging.getLogger(__name__)
@@ -37,7 +37,7 @@ def _distance_bucket(distance_miles: Optional[float]) -> Optional[str]:
 class TribunalService:
     def __init__(self):
         self.api_key = OPENAI_API_KEY
-        self.client = AsyncOpenAI(api_key=self.api_key) if self.api_key else None
+        self.client = get_openai_client()
 
     async def evaluate_narrative(
         self,
