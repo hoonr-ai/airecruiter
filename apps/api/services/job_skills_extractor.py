@@ -347,6 +347,7 @@ IMPORTANT:
                 ],
                 temperature=0.2,  # Slightly higher to encourage more comprehensive extraction
                 response_format={"type": "json_object"},
+                prompt_cache_key="job-skills-p2-v1",
             )
             phase2_result = json.loads(p2_resp.choices[0].message.content)
         except Exception as p2_err:

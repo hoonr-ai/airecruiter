@@ -261,11 +261,16 @@ class ChatService:
             messages.append({"role": "user", "content": message})
 
             # Round 1: let the model decide whether to call a tool.
+            # `prompt_cache_key` lets OpenAI's automatic prefix cache route
+            # repeat traffic for the (system + tools) preamble through the
+            # same cache shard, halving input-token cost on the cached
+            # prefix once a conversation grows past ~1024 tokens.
             first = await self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
                 tools=_TOOLS,
                 tool_choice="auto",
+                prompt_cache_key="tira-chat-v1",
             )
             choice = first.choices[0].message
             tool_calls = getattr(choice, "tool_calls", None) or []
@@ -308,6 +313,7 @@ class ChatService:
             second = await self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
+                prompt_cache_key="tira-chat-v1",
             )
             return second.choices[0].message.content or ""
         except Exception as e:

@@ -1,10 +1,13 @@
+import hashlib
 import json
 import logging
-from typing import List, Dict, Any
+import re
+from typing import List, Dict, Any, Optional
 import httpx
 from openai import AsyncOpenAI
 from core.config import OPENAI_API_KEY
 from core.models import JobDescription, CandidateProfile, SkillProfileEntry
+from core import llm_cache
 # Azure-Agent grounding was retired from job_skills_extractor (see its
 # module docstring) but the conditional usage below still references the
 # old symbols. Guard the import so a re-export removal can't crash app
@@ -16,6 +19,22 @@ except ImportError:
     AZURE_AGENT_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
+
+# 30 days. The on-disk resume-hash cache in sourced_candidates_storage
+# uses the same 30-day window, so this just mirrors the DB TTL.
+_CANDIDATE_PROFILE_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
+
+
+def _resume_hash(text: str) -> Optional[str]:
+    """sha256 over normalized resume text. Mirrors
+    sourced_candidates_storage._resume_text_hash so the same resume
+    parsed via either path produces the same cache key."""
+    if not text:
+        return None
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if len(normalized) < 50:
+        return None
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 class AIService:
     def __init__(self):
@@ -79,7 +98,32 @@ class AIService:
         import asyncio
         if not self.client:
              raise Exception("OpenAI Client not initialized")
-             
+
+        # Resume-hash cache check. Pre-tier-1 the LLM fired even when we
+        # had a fully-parsed profile for an identical resume from a prior
+        # ingest. We keep the same hashing rule as
+        # sourced_candidates_storage._resume_text_hash so JobDiva
+        # re-syncs and Tira's `tira_match_resume` flow share the cache.
+        rhash = _resume_hash(text)
+        cache_key = llm_cache.make_key("candidate", 1, rhash) if rhash else None
+        if cache_key:
+            cached = await llm_cache.get_json(cache_key)
+            if cached is not None:
+                try:
+                    profile = CandidateProfile.model_validate(cached)
+                    # cid is per-ingest — overwrite the cached id so the
+                    # caller's id is honored. resume_text is dropped from
+                    # the cached payload (see set below) to keep entries
+                    # small; restore from the live arg.
+                    profile.id = cid
+                    profile.resume_text = text
+                    logger.info(f"candidate parse: cache HIT for {cid}")
+                    return profile
+                except Exception as exc:
+                    logger.warning(
+                        f"candidate parse: cached profile failed validation for {cid}, re-parsing: {exc}"
+                    )
+
         system_prompt = (
             "You are a professional Resume Parser and Taxonomy Expert. "
             "Extract structured data from the resume text including Name, Location (City, State), "
@@ -97,7 +141,8 @@ class AIService:
                     {"role": "user", "content": text[:30000]}
                 ],
                 response_format=CandidateProfile,
-                temperature=0.0
+                temperature=0.0,
+                prompt_cache_key="candidate-parse-v1",
             )
             
             # 2. Grounded Skill Extraction (Azure Agent) - Parallel
@@ -119,13 +164,31 @@ class AIService:
             # 3. Merge Grounded Skills
             if agent_resp:
                 grounded_skills = _azure_agent.convert_to_profile_skills(agent_resp.get("job_skills", []) or agent_resp.get("skills", []))
-                
+
                 # Check for existing skills to avoid duplicates
                 existing_slugs = {s.skill_slug.lower().strip() for s in profile.skill_profile}
                 for gs in grounded_skills:
                     if gs["skill_slug"].lower().strip() not in existing_slugs:
                         profile.skill_profile.append(SkillProfileEntry(**gs))
-            
+
+            if cache_key:
+                try:
+                    # Drop resume_text from the cached payload — entries
+                    # would otherwise be 30kb+ each. Caller restores it
+                    # from the live `text` arg on cache hit. id is left
+                    # as a placeholder since the cache is keyed by resume
+                    # hash and each cache hit overwrites id with the
+                    # caller's per-ingest cid.
+                    payload = profile.model_dump()
+                    payload["resume_text"] = ""
+                    payload["id"] = "__cached__"
+                    await llm_cache.set_json(
+                        cache_key,
+                        payload,
+                        ttl_seconds=_CANDIDATE_PROFILE_CACHE_TTL_SECONDS,
+                    )
+                except Exception as cache_exc:
+                    logger.debug(f"candidate parse: cache set failed for {cid}: {cache_exc}")
             return profile
             
         except Exception as e:

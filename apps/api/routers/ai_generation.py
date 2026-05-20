@@ -318,7 +318,8 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
             # Lower temperature keeps recruiter-notes facts (exact years, tools,
             # certifications) from being paraphrased away.
             temperature=0.3,
-            timeout=45
+            timeout=45,
+            prompt_cache_key="jd-gen-v1",
         )
         description = completion.choices[0].message.content
         print("DEBUG: OpenAI JD generation successful.")
@@ -398,7 +399,8 @@ async def generate_job_title(req: JobDescriptionRequest):
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,
-            timeout=20
+            timeout=20,
+            prompt_cache_key="title-polish-v1",
         )
         new_title = completion.choices[0].message.content.strip()
         

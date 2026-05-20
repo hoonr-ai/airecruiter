@@ -107,6 +107,7 @@ Return structured JSON following the JobDescription schema."""
                     {"role": "user", "content": f"Extract structured data from this job description:\n\n{raw_description}"}
                 ],
                 response_format=JobDescription,
+                prompt_cache_key="enhanced-job-v1",
             )
             
             job_description = response.choices[0].message.parsed
