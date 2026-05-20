@@ -792,10 +792,15 @@ function NewJobPageContent() {
 
   const matchesSourceFilter = (cand: any) => {
     const src = String(cand.source || "").toLowerCase();
+    // "all" must literally mean every candidate, regardless of distance.
+    // Short-circuit before the in-radius gate below so beyond-radius and
+    // no-geocode soft-keeps (handled by isBeyondRadius) aren't silently
+    // dropped from the catch-all tab. The dedicated "Beyond {N}mi" pill
+    // still shows the out-of-range cohort on its own.
+    if (sourceFilter === "all") return true;
     if (sourceFilter === "beyond") return isBeyondRadius(cand);
     if (isBeyondRadius(cand)) return false;
     switch (sourceFilter) {
-      case "all": return true;
       case "jobdiva": return src.startsWith("jobdiva");
       case "linkedin-unipile": return src === "linkedin-unipile" || src === "linkedin";
       case "linkedin-exa": return src === "linkedin-exa";
@@ -7504,7 +7509,7 @@ function NewJobPageContent() {
                   {candidates.length > 0 && (
                     <div className="flex items-center gap-1.5 mt-3 flex-wrap">
                       {([
-                        { id: "all", label: "All", count: inRadiusCount },
+                        { id: "all", label: "All", count: candidates.length },
                         { id: "jobdiva", label: "JobDiva", count: sourceCounts["jobdiva"] || 0 },
                         { id: "linkedin-unipile", label: "LinkedIn-Unipile", count: sourceCounts["linkedin-unipile"] || 0 },
                         { id: "linkedin-exa", label: "LinkedIn-Exa", count: sourceCounts["linkedin-exa"] || 0 },
