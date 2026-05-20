@@ -16,6 +16,16 @@ async def get_job_criteria(job_id: str):
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
+                # Ensure table exists
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS job_criteria (
+                        job_id TEXT PRIMARY KEY,
+                        criteria JSONB,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                conn.commit()
+
                 cur.execute(
                     "SELECT criteria FROM job_criteria WHERE job_id = %s ORDER BY updated_at DESC LIMIT 1",
                     (job_id,)
