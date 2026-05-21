@@ -9,14 +9,11 @@ from routers._helpers import get_db_connection
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-
-@router.get("/api/jobs/{job_id}/criteria", response_model=JobCriteriaResponse)
-async def get_job_criteria(job_id: str):
-    """Fetch criteria for a job."""
+async def init_job_criteria_schema():
+    """Initialize the job_criteria table."""
     try:
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # Ensure table exists
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS job_criteria (
                         job_id TEXT PRIMARY KEY,
@@ -25,7 +22,16 @@ async def get_job_criteria(job_id: str):
                     );
                 """)
                 conn.commit()
+    except Exception as e:
+        logger.error(f"init_job_criteria_schema failed: {e}")
 
+
+@router.get("/api/jobs/{job_id}/criteria", response_model=JobCriteriaResponse)
+async def get_job_criteria(job_id: str):
+    """Fetch criteria for a job."""
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
                 cur.execute(
                     "SELECT criteria FROM job_criteria WHERE job_id = %s ORDER BY updated_at DESC LIMIT 1",
                     (job_id,)

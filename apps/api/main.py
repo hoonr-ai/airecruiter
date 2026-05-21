@@ -168,6 +168,14 @@ async def lifespan(app: FastAPI):
         except Exception as e:  # noqa: BLE001
             logger.error(f"monitored_jobs_schema_init_failed: {e}; continuing")
 
+    if job_criteria_router is not None and hasattr(job_criteria_router, "init_job_criteria_schema"):
+        try:
+            await asyncio.wait_for(job_criteria_router.init_job_criteria_schema(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error("job_criteria_schema_init_timeout (10s); continuing")
+        except Exception as e:
+            logger.error(f"job_criteria_schema_init_failed: {e}; continuing")
+
     # 4b. Keep the /jobs/monitored cache warm. Per-worker in-memory cache
     # has a 30s TTL, but the live query can spike to 20-30s during
     # poll-loop lock contention — long enough that the frontend's 8s
