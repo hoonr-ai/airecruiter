@@ -3864,22 +3864,10 @@ function NewJobPageContent() {
         criteria: `Must be open to ${arrangementLabel} work arrangement`,
       });
     }
-    let availabilityText = "";
-    if (!jobData.start_date || availabilityDate === 'ASAP') {
-      availabilityText = "What is your earliest availability to start a new role? Ideally, we're looking for someone who can start as soon as possible.";
-    } else {
-      const d = new Date(jobData.start_date + 'T00:00:00Z');
-      if (!isNaN(+d)) {
-        d.setUTCDate(d.getUTCDate() - 1);
-        const formatted = d.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric', timeZone: 'UTC' });
-        availabilityText = `What is your earliest availability to start a new role? Ideally, we are looking for a candidate who can start by ${formatted}.`;
-      } else {
-        availabilityText = "What is your earliest availability to start a new role? Ideally, we're looking for someone who can start as soon as possible.";
-      }
-    }
+    const availabilityText = "What is your earliest availability to start a new role?";
 
     defaultQs.push(
-      { text: availabilityText, criteria: `Must be available by ${availabilityDate}` },
+      { text: availabilityText, criteria: "" },
       { text: "What is your expected compensation for this role?", criteria: "" },
       { text: "Which types of working arrangements are you open to and eligible for? Select all that apply: W2 Employee, Subcontractor to Pyramid through your current employer, Independent Contractor", criteria: "" },
       { text: "Are you authorized to work indefinitely for any employer in the United States?", criteria: "" },
