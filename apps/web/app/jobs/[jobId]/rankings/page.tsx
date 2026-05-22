@@ -1242,7 +1242,7 @@ export default function CandidateRankingsPage() {
         setJob({
           job_id: jobId as string,
           jobdiva_id: data.jobdiva_id,
-          title: data.title || data.enhanced_title || `Job ${jobId}`,
+          title: data.enhanced_title || data.title || `Job ${jobId}`,
           customer_name: data.customer_name,
           openings: data.openings,
           max_allowed_submittals: data.max_allowed_submittals
