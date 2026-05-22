@@ -744,7 +744,7 @@ function NewJobPageContent() {
   // same N. The text input is the source of truth; the button reads it.
   const [selectBestN, setSelectBestN] = useState<number>(100);
   const [selectBestInput, setSelectBestInput] = useState<string>("100");
-  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "linkedin-unipile" | "linkedin-exa" | "dice" | "upload-resume" | "beyond">("all");
+  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "linkedin-unipile" | "linkedin-exa" | "dice" | "upload-resume">("all");
   const [locationFilter, setLocationFilter] = useState<Set<string>>(new Set());
   const [minScore, setMinScore] = useState<number>(0);
   const [candidateSearchQuery, setCandidateSearchQuery] = useState<string>("");
@@ -771,29 +771,8 @@ function NewJobPageContent() {
     return Math.min(100, Math.max(1, parsed));
   }, [sourceLocations]);
 
-  const isBeyondRadius = (cand: any): boolean => {
-    const reason = String(cand?.location_match_reason || "");
-    if (
-      reason === "candidate_location_missing_keep" ||
-      reason === "geocode_unavailable_keep" ||
-      reason === "outside_radius_soft_keep"
-    ) {
-      return true;
-    }
-    const d = cand?.distance_miles;
-    if (typeof d !== "number" || !Number.isFinite(d)) return false;
-    return d > currentWithinMiles;
-  };
-
-  const hasUnknownLocation = (cand: any): boolean => {
-    const reason = String(cand?.location_match_reason || "");
-    return reason === "candidate_location_missing_keep" || reason === "geocode_unavailable_keep";
-  };
-
   const matchesSourceFilter = (cand: any) => {
     const src = String(cand.source || "").toLowerCase();
-    if (sourceFilter === "beyond") return isBeyondRadius(cand);
-    if (isBeyondRadius(cand)) return false;
     switch (sourceFilter) {
       case "all": return true;
       case "jobdiva": return src.startsWith("jobdiva");
@@ -805,10 +784,6 @@ function NewJobPageContent() {
     }
   };
   const sourceCounts = candidates.reduce((acc: Record<string, number>, c) => {
-    if (isBeyondRadius(c)) {
-      acc["beyond"] = (acc["beyond"] || 0) + 1;
-      return acc;
-    }
     const s = String(c.source || "").toLowerCase();
     if (s.startsWith("jobdiva")) acc["jobdiva"] = (acc["jobdiva"] || 0) + 1;
     else if (s === "linkedin-unipile" || s === "linkedin") acc["linkedin-unipile"] = (acc["linkedin-unipile"] || 0) + 1;
@@ -818,7 +793,7 @@ function NewJobPageContent() {
     return acc;
   }, {});
 
-  const inRadiusCount = candidates.length - (sourceCounts["beyond"] || 0);
+  const totalCandidatesCount = candidates.length;
 
   const getJobdivaSkills = () => {
     const seen = new Set<string>();
@@ -934,9 +909,9 @@ function NewJobPageContent() {
     return "";
   };
 
-  const getCandidateReceivedDate = (c: any): Date | null => {
+  const getCandidateLastActiveDate = (c: any): Date | null => {
     const raw =
-      c.received || c.received_date || c.receivedDate || c.last_modified || c.lastModified;
+      c.available || c.DATEAVAILABLE || c.received || c.received_date || c.receivedDate || c.last_modified || c.lastModified;
     if (!raw) return null;
     const d = new Date(raw);
     return Number.isNaN(d.getTime()) ? null : d;
@@ -1008,8 +983,8 @@ function NewJobPageContent() {
           return nameA.localeCompare(nameB) * dirMul;
         }
         case "lastActive": {
-          const dA = getCandidateReceivedDate(a)?.getTime() ?? 0;
-          const dB = getCandidateReceivedDate(b)?.getTime() ?? 0;
+          const dA = getCandidateLastActiveDate(a)?.getTime() ?? 0;
+          const dB = getCandidateLastActiveDate(b)?.getTime() ?? 0;
           return (dA - dB) * dirMul;
         }
         case "location": {
@@ -7526,26 +7501,24 @@ function NewJobPageContent() {
                   {candidates.length > 0 && (
                     <div className="flex items-center gap-1.5 mt-3 flex-wrap">
                       {([
-                        { id: "all", label: "All", count: inRadiusCount },
+                        { id: "all", label: "All", count: totalCandidatesCount },
                         { id: "jobdiva", label: "JobDiva", count: sourceCounts["jobdiva"] || 0 },
                         { id: "linkedin-unipile", label: "LinkedIn-Unipile", count: sourceCounts["linkedin-unipile"] || 0 },
                         { id: "linkedin-exa", label: "LinkedIn-Exa", count: sourceCounts["linkedin-exa"] || 0 },
                         { id: "dice", label: "Dice", count: sourceCounts["dice"] || 0 },
-                        { id: "upload-resume", label: "Upload-Resume", count: sourceCounts["upload-resume"] || 0 },
-                        { id: "beyond", label: `Beyond ${currentWithinMiles}mi`, count: sourceCounts["beyond"] || 0 }
+                        { id: "upload-resume", label: "Upload-Resume", count: sourceCounts["upload-resume"] || 0 }
                       ] as const).map(pill => {
                         if (pill.id !== "all" && pill.count === 0) return null;
                         const active = sourceFilter === pill.id;
-                        const isBeyond = pill.id === "beyond";
                         return (
                           <button
                             key={pill.id}
                             onClick={() => { setSourceFilter(pill.id as any); setCurrentPage(1); }}
                             className={`px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider border transition-colors ${active
-                              ? (isBeyond ? 'bg-amber-500 text-white border-amber-500' : 'bg-[#6366f1] text-white border-[#6366f1]')
-                              : (isBeyond ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50')}`}
+                              ? 'bg-[#6366f1] text-white border-[#6366f1]'
+                              : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
                           >
-                            {pill.label} <span className={`ml-1 font-medium ${active ? 'text-white/80' : isBeyond ? 'text-amber-500' : 'text-slate-400'}`}>{pill.count}</span>
+                            {pill.label} <span className={`ml-1 font-medium ${active ? 'text-white/80' : 'text-slate-400'}`}>{pill.count}</span>
                           </button>
                         );
                       })}
