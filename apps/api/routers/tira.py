@@ -58,7 +58,7 @@ async def tira_match_resume(
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute(
-        "SELECT job_id, jobdiva_id, sourcing_filters, resume_match_filters, title "
+        "SELECT job_id, jobdiva_id, sourcing_filters, resume_match_filters, title, enhanced_title "
         "FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
         (job_id, job_id),
     )
@@ -141,7 +141,7 @@ async def tira_match_resume(
         "job": {
             "job_id": str(job_row.get("job_id")),
             "jobdiva_id": job_row.get("jobdiva_id"),
-            "title": job_row.get("title"),
+            "title": job_row.get("enhanced_title") or job_row.get("title"),
         },
         "candidate": {
             "name": candidate["name"],

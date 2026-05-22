@@ -314,7 +314,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 "job_id": job_row.get("job_id") or request.job_id,
                 "jobdiva_id": job_row.get("jobdiva_id") or "",
                 "context": {
-                    "title": job_row.get("title", ""),
+                    "title": job_row.get("enhanced_title") or job_row.get("title", ""),
                     "customer_name": job_row.get("customer_name") or "Unknown",
                     "city": job_row.get("city") or "TBD",
                     "state": job_row.get("state") or "",
@@ -1460,7 +1460,7 @@ async def _check_and_fire_candidate_passed_notification(
 
         # 4. Fetch Job & Candidate metadata for email
         cur.execute("""
-            SELECT job_id, title, city, state, pay_rate, recruiter_emails, jobdiva_id
+            SELECT job_id, title, enhanced_title, city, state, pay_rate, recruiter_emails, jobdiva_id
             FROM monitored_jobs
             WHERE job_id = %s OR jobdiva_id = %s
             ORDER BY (job_id ~ '^[0-9]+$') DESC, created_at DESC
@@ -1597,7 +1597,7 @@ async def _check_and_fire_candidate_passed_notification(
         # Create JobDiva Note: PAIR Pass Candidate Report
         # Note: We use the job title from job_row for the message
         base_url = resolve_app_base_url(request.app_base_url if 'request' in locals() else "")
-        pair_job_title = job_row.get("title") or "the"
+        pair_job_title = job_row.get("enhanced_title") or job_row.get("title") or "the"
         report_link = f"{base_url}/jobs/{app_job_id}/report?candidateId={candidate_id}"
         note_text = f"Candidate completed Phone Screen for {pair_job_title} position. <a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report."
         
@@ -1625,7 +1625,7 @@ async def _check_and_fire_candidate_passed_notification(
             summary=interview_block.get("summary") or "Passed screening criteria.",
             screening_summary=screening_summary,
             jobdiva_id=job_row["jobdiva_id"] or job_id,
-            job_title=job_row["title"],
+            job_title=job_row.get("enhanced_title") or job_row.get("title") or "",
             location=f"{job_row['city']}, {job_row['state']}" if job_row['city'] else "—",
             salary_range=job_row["pay_rate"] or "—",
             recruiter_emails=recruiter_emails,
