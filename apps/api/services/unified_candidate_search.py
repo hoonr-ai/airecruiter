@@ -820,8 +820,17 @@ class UnifiedCandidateSearch:
                     if not detail:
                         continue
                     patch: Dict[str, Any] = {}
-                    email = (get_field(detail, ["email", "EMAIL", "emailAddress", "EMAILADDRESS"]) or "")
-                    phone = (get_field(detail, ["phone", "PHONE", "phoneNumber", "PHONENUMBER", "mobilePhone", "MOBILEPHONE"]) or "")
+                    email = (get_field(detail, [
+                        "email", "EMAIL", "emailAddress", "EMAILADDRESS",
+                        "emails", "EMAILS", "emailId", "EMAILID",
+                        "email1", "EMAIL1", "email2", "EMAIL2",
+                        "alternateEmail", "ALTERNATEEMAIL",
+                    ]) or "")
+                    phone = (get_field(detail, [
+                        "phone", "PHONE", "phoneNumber", "PHONENUMBER",
+                        "mobilePhone", "MOBILEPHONE", "phone1", "PHONE1",
+                        "cellPhone", "CELLPHONE",
+                    ]) or "")
                     address1 = (get_field(detail, ["address1", "ADDRESS1", "address", "ADDRESS"]) or "")
                     linkedin = (get_field(detail, ["linkedinUrl", "LINKEDINURL", "linkedin", "LINKEDIN", "linkedIn", "LINKEDIN_URL"]) or "")
                     resume_id = (get_field(detail, ["resumeId", "RESUMEID", "resume_id"]) or "")
