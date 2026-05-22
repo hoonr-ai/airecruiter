@@ -109,6 +109,46 @@ function isValidLaunchPhone(value: string | null | undefined): boolean {
   return launchPhoneDigits(value).length >= 7;
 }
 
+function getCandidateLaunchEmail(candidate: any): string {
+  return String(
+    candidate?.email ||
+    candidate?.workEmail ||
+    candidate?.personalEmail ||
+    candidate?.enhanced_info?.email ||
+    candidate?.enhanced_info?.workEmail ||
+    candidate?.enhanced_info?.personalEmail ||
+    candidate?.data?.email ||
+    candidate?.data?.workEmail ||
+    candidate?.data?.personalEmail ||
+    candidate?.data?.enhanced_info?.email ||
+    candidate?.data?.enhanced_info?.workEmail ||
+    candidate?.data?.enhanced_info?.personalEmail ||
+    candidate?.data?.zoominfo_contact_enrichment?.workEmail ||
+    candidate?.data?.zoominfo_contact_enrichment?.personalEmail ||
+    ""
+  ).trim().toLowerCase();
+}
+
+function getCandidateLaunchPhone(candidate: any): string {
+  return String(
+    candidate?.phone ||
+    candidate?.workPhone ||
+    candidate?.mobilePhone ||
+    candidate?.enhanced_info?.phone ||
+    candidate?.enhanced_info?.workPhone ||
+    candidate?.enhanced_info?.mobilePhone ||
+    candidate?.data?.phone ||
+    candidate?.data?.workPhone ||
+    candidate?.data?.mobilePhone ||
+    candidate?.data?.enhanced_info?.phone ||
+    candidate?.data?.enhanced_info?.workPhone ||
+    candidate?.data?.enhanced_info?.mobilePhone ||
+    candidate?.data?.zoominfo_contact_enrichment?.mobilePhone ||
+    candidate?.data?.zoominfo_contact_enrichment?.workPhone ||
+    ""
+  ).trim();
+}
+
 // Utility function to clean location_type values and filter out employment terms
 function cleanLocationType(locationType: string | null | undefined): string {
   if (!locationType) return "";
@@ -6137,6 +6177,8 @@ function NewJobPageContent() {
         for (const c of candidates) {
           const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
           if (!id || !selectedCandidates.has(id)) continue;
+          const currentPhone = getCandidateLaunchPhone(c);
+          const currentEmail = getCandidateLaunchEmail(c);
           reviewList.push({
             candidate_id: id,
             name: getCandidateDisplayName(c) || c.name || "Unnamed",
@@ -6146,8 +6188,8 @@ function NewJobPageContent() {
             jobdiva_id: launchJobdivaId ? String(launchJobdivaId) : undefined,
             needsPhone: true,
             needsEmail: true,
-            currentPhone: c.phone || "",
-            currentEmail: c.email || "",
+            currentPhone,
+            currentEmail,
           });
         }
         if (reviewList.length === 0) {
@@ -6161,11 +6203,12 @@ function NewJobPageContent() {
         return;
       }
 
-      const candidatesMissingPhone = candidates.filter(c => {
+      const candidatesMissingContact = candidates.filter(c => {
         const id = c.candidate_id || c.jobdiva_candidate_id || c.id;
         if (!selectedCandidates.has(id)) return false;
-        const digits = String(c.phone || "").replace(/\D/g, "");
-        return digits.length < 7;
+        const phone = getCandidateLaunchPhone(c);
+        const email = getCandidateLaunchEmail(c);
+        return !isValidLaunchPhone(phone) || !isValidLaunchEmail(email);
       });
 
       // Open the progress modal upfront so the recruiter sees enrichment
@@ -6174,10 +6217,10 @@ function NewJobPageContent() {
       setLaunchProgress({
         ...initialLaunchProgress,
         open: true,
-        phase: candidatesMissingPhone.length > 0 ? "enriching" : "launching",
+        phase: candidatesMissingContact.length > 0 ? "enriching" : "launching",
         totalCandidates: selectedCandidates.size,
         batchSize: LAUNCH_BATCH_SIZE,
-        enrichTotal: candidatesMissingPhone.length,
+        enrichTotal: candidatesMissingContact.length,
       });
 
       const contactOverrides: Record<string, { phone?: string; email?: string }> = {};
@@ -6188,7 +6231,7 @@ function NewJobPageContent() {
       let enrichFailedCount = 0;
       let noContactFoundCount = 0;
 
-      for (const c of candidatesMissingPhone) {
+      for (const c of candidatesMissingContact) {
         const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
         if (!id) continue;
 
@@ -6293,15 +6336,15 @@ function NewJobPageContent() {
         showToast(`ZoomInfo enriched: ${parts.join(" · ")}.`, "success");
       }
 
-      const unresolvedMissing = candidatesMissingPhone.filter(c => {
+      const unresolvedMissing = candidatesMissingContact.filter(c => {
         const cid = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-        const overridePhone = contactOverrides[cid]?.phone || c.phone || "";
-        const digits = String(overridePhone).replace(/\D/g, "");
-        return digits.length < 7;
+        const overridePhone = contactOverrides[cid]?.phone || getCandidateLaunchPhone(c);
+        const overrideEmail = contactOverrides[cid]?.email || getCandidateLaunchEmail(c);
+        return !isValidLaunchPhone(overridePhone) || !isValidLaunchEmail(overrideEmail);
       }).length;
 
       if (unresolvedMissing > 0) {
-        showToast(`${unresolvedMissing} selected candidate${unresolvedMissing === 1 ? "" : "s"} still missing phone after enrichment.`, "info");
+        showToast(`${unresolvedMissing} selected candidate${unresolvedMissing === 1 ? "" : "s"} still missing phone or email after enrichment.`, "info");
       }
 
       if (missingLinkedInCount > 0 || enrichFailedCount > 0 || noContactFoundCount > 0) {
@@ -6356,8 +6399,8 @@ function NewJobPageContent() {
         if (!id || !selectedCandidates.has(id) || dncDropped.has(id)) continue;
         const overrideEmail = contactOverrides[id]?.email;
         const overridePhone = contactOverrides[id]?.phone;
-        const effectiveEmail = String(overrideEmail || c.email || "").trim().toLowerCase();
-        const effectivePhone = overridePhone || c.phone || "";
+        const effectiveEmail = String(overrideEmail || getCandidateLaunchEmail(c)).trim().toLowerCase();
+        const effectivePhone = overridePhone || getCandidateLaunchPhone(c);
         if (isValidLaunchEmail(effectiveEmail)) {
           const ids = emailToCandidateIds.get(effectiveEmail) || [];
           ids.push(id);
@@ -6385,8 +6428,8 @@ function NewJobPageContent() {
         if (!id || !selectedCandidates.has(id) || dncDropped.has(id)) continue;
         const overridePhone = contactOverrides[id]?.phone;
         const overrideEmail = contactOverrides[id]?.email;
-        const effectivePhone = overridePhone || c.phone;
-        const effectiveEmail = String(overrideEmail || c.email || "").trim().toLowerCase();
+        const effectivePhone = overridePhone || getCandidateLaunchPhone(c);
+        const effectiveEmail = String(overrideEmail || getCandidateLaunchEmail(c)).trim().toLowerCase();
         const phoneOK = isValidLaunchPhone(effectivePhone) && !duplicatePhoneIds.has(id);
         const emailOK = isValidLaunchEmail(effectiveEmail) && !duplicateEmailIds.has(id);
         if (phoneOK && emailOK) {

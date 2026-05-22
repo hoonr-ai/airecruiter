@@ -17,6 +17,36 @@ from core import (
 
 logger = logging.getLogger(__name__)
 
+_CANDIDATE_EMAIL_KEYS = [
+    "email",
+    "EMAIL",
+    "emailAddress",
+    "EMAILADDRESS",
+    "emails",
+    "EMAILS",
+    "emailId",
+    "EMAILID",
+    "email1",
+    "EMAIL1",
+    "email2",
+    "EMAIL2",
+    "alternateEmail",
+    "ALTERNATEEMAIL",
+]
+
+_CANDIDATE_PHONE_KEYS = [
+    "phone",
+    "PHONE",
+    "phoneNumber",
+    "PHONENUMBER",
+    "mobilePhone",
+    "MOBILEPHONE",
+    "phone1",
+    "PHONE1",
+    "cellPhone",
+    "CELLPHONE",
+]
+
 # LLM-only candidate enrichment is active for sourcing.
 
 # TEMPORARY DEBUG LOGGER
@@ -162,6 +192,16 @@ def _clean_location_field(value: Any) -> str:
         return ""
     
     return val_str
+
+
+def _get_candidate_email(data: Dict[str, Any]) -> str:
+    value = get_field(data, _CANDIDATE_EMAIL_KEYS) or ""
+    return str(value).strip()
+
+
+def _get_candidate_phone(data: Dict[str, Any]) -> str:
+    value = get_field(data, _CANDIDATE_PHONE_KEYS) or ""
+    return str(value).strip()
 
 
 def _is_job_agent_criteria_unconfigured(status_code: int, body: str) -> bool:
@@ -711,7 +751,7 @@ class JobDivaService:
                             "last_name": last_name,    # Use underscore format
                             "firstName": first_name,
                             "lastName": last_name,
-                            "email": get_field(c, ["EMAIL", "email", "emailAddress"]) or "",
+                            "email": _get_candidate_email(c),
                             "city": home_city,
                             "state": home_state,
                             "location": home_location_str,
@@ -728,7 +768,7 @@ class JobDivaService:
                             "received": get_field(c, ["RECEIVED", "received"]),
                             "available": get_field(c, ["AVAILABLE", "available"]),
                             "lastnote": get_field(c, ["LASTNOTE", "lastNote"]),
-                            "phone": get_field(c, ["PHONE", "phone", "phoneNumber", "mobilePhone"]) or ""
+                            "phone": _get_candidate_phone(c)
                         })
                     
                     if jd_results:
@@ -908,7 +948,7 @@ class JobDivaService:
                 "last_name": last_name,
                 "firstName": first_name,
                 "lastName": last_name,
-                "email": get_field(c, ["email", "EMAIL"]) or "",
+                "email": _get_candidate_email(c),
                 "city": city,
                 "state": state,
                 "zipcode": get_field(c, ["zipcode", "ZIPCODE", "zip", "ZIP"]) or "",
@@ -929,7 +969,7 @@ class JobDivaService:
                 "availability_status": get_field(c, ["available", "AVAILABLE"]) or "",
                 "abstract": abstract,
                 "lastnote": get_field(c, ["lastNote", "LASTNOTE"]),
-                "phone": get_field(c, ["phone", "PHONE", "phoneNumber"]) or "",
+                "phone": _get_candidate_phone(c),
             }
 
             if require_resume and not has_resume:
@@ -1375,13 +1415,13 @@ class JobDivaService:
             return str(value).strip() if value else ""
 
         if not candidate.get("email"):
-            v = take(["email", "EMAIL", "emailAddress", "EMAILADDRESS"])
+            v = _get_candidate_email(detail)
             if v:
                 candidate["email"] = v
                 counters["email"] = counters.get("email", 0) + 1
 
         if not candidate.get("phone"):
-            v = take(["phone", "PHONE", "phoneNumber", "PHONENUMBER", "mobilePhone", "MOBILEPHONE"])
+            v = _get_candidate_phone(detail)
             if v:
                 candidate["phone"] = v
                 counters["phone"] = counters.get("phone", 0) + 1
@@ -1927,8 +1967,8 @@ class JobDivaService:
             "name": full_name,
             "firstName": first_name,
             "lastName": last_name,
-            "email": get_field(candidate, ["email", "EMAIL", "emailAddress"]) or "Available upon request",
-            "phone": get_field(candidate, ["phone", "PHONE", "phoneNumber", "mobilePhone"]) or "Available upon request", 
+            "email": _get_candidate_email(candidate) or "Available upon request",
+            "phone": _get_candidate_phone(candidate) or "Available upon request",
             "title": get_field(candidate, ["title", "TITLE", "currentTitle", "jobTitle"]) or "",
             "location": get_field(candidate, ["location", "city", "CITY"]) or "",
             "work_city": get_field(candidate, ["work_city", "workCity", "WORKCITY"]) or "",
@@ -3855,4 +3895,3 @@ class JobDivaService:
 
 
 jobdiva_service = JobDivaService()
-
