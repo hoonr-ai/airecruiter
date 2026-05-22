@@ -620,7 +620,7 @@ export default function CandidateRankingsPage() {
     }
 
     if (raw.includes("complete") || raw === "passed" || raw === "pass") {
-      return { label: "Completed", color: "#059669" };
+      return { label: "Pass", color: "#059669" };
     }
 
     if (raw === "failed" || raw === "fail" || raw === "rejected") {
