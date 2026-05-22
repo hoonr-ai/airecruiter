@@ -1730,12 +1730,15 @@ export default function CandidateRankingsPage() {
 
         {/* HTML Exact Replica Table */}
         <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm overflow-hidden relative max-w-full">
-          <div className="overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent">
+          <div 
+            className="overflow-x-auto overflow-y-auto pb-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent"
+            style={{ maxHeight: 'calc(100vh - 320px)' }}
+          >
             <Table className="table-fixed min-w-[1200px] w-full border-collapse">
-              <TableHeader>
+              <TableHeader className="sticky top-0 z-30 shadow-sm bg-slate-50">
                 <TableRow className="bg-slate-50 border-b border-slate-200 hover:bg-slate-50 h-[50px] transition-colors">
                   <TableHead className="w-[50px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider border-r border-slate-200 px-2">#</TableHead>
-                  <TableHead className="w-[320px] sticky left-0 z-20 bg-slate-50 font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 text-center after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200">
+                  <TableHead className="w-[320px] sticky left-0 z-40 bg-slate-50 font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 text-center after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200">
                     <div className="flex items-center justify-center w-full h-full group/header relative">
                       <button
                         onClick={() => toggleSort("name")}
