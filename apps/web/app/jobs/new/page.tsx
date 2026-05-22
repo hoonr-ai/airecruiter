@@ -3880,7 +3880,7 @@ function NewJobPageContent() {
 
     defaultQs.push(
       { text: availabilityText, criteria: `Must be available by ${availabilityDate}` },
-      { text: "What is your current compensation and expected compensation?", criteria: "" },
+      { text: "What is your expected compensation for this role?", criteria: "" },
       { text: "Which types of working arrangements are you open to and eligible for? Select all that apply: W2 Employee, Subcontractor to Pyramid through your current employer, Independent Contractor", criteria: "" },
       { text: "Are you authorized to work indefinitely for any employer in the United States?", criteria: "" },
       { text: "Will you now or in the future require visa sponsorship to continue working in the United States?", criteria: "" },
