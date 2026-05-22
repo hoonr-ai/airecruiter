@@ -1729,16 +1729,16 @@ export default function CandidateRankingsPage() {
         </div>
 
         {/* HTML Exact Replica Table */}
-        <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm overflow-hidden relative max-w-full">
+        <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm relative max-w-full">
           <div 
-            className="overflow-x-auto overflow-y-auto pb-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent"
+            className="overflow-x-auto overflow-y-auto rounded-2xl pb-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent"
             style={{ maxHeight: 'calc(100vh - 320px)' }}
           >
-            <Table className="table-fixed min-w-[1200px] w-full border-collapse">
-              <TableHeader className="sticky top-0 z-30 shadow-sm bg-slate-50">
+            <table className="table-fixed min-w-[1200px] w-full border-separate border-spacing-0">
+              <TableHeader className="z-30 shadow-sm bg-slate-50">
                 <TableRow className="bg-slate-50 border-b border-slate-200 hover:bg-slate-50 h-[50px] transition-colors">
-                  <TableHead className="w-[50px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider border-r border-slate-200 px-2">#</TableHead>
-                  <TableHead className="w-[320px] sticky left-0 z-40 bg-slate-50 font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 text-center after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200">
+                  <TableHead className="w-[50px] sticky top-0 z-30 bg-slate-50 text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider border-r border-b border-slate-200 px-2">#</TableHead>
+                  <TableHead className="w-[320px] sticky top-0 left-0 z-40 bg-slate-50 font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 text-center border-b border-slate-200 after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200">
                     <div className="flex items-center justify-center w-full h-full group/header relative">
                       <button
                         onClick={() => toggleSort("name")}
@@ -1769,7 +1769,7 @@ export default function CandidateRankingsPage() {
                       )}
                     </div>
                   </TableHead>
-                  <TableHead className="w-[160px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-slate-200">
+                  <TableHead className="w-[160px] sticky top-0 z-30 bg-slate-50 text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-b border-slate-200">
                     <div className="flex items-center justify-center w-full h-full group/header relative">
                       <button
                         onClick={() => toggleSort("source")}
@@ -1801,7 +1801,7 @@ export default function CandidateRankingsPage() {
                     </div>
                   </TableHead>
 
-                  <TableHead className="w-[260px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-slate-200">
+                  <TableHead className="w-[260px] sticky top-0 z-30 bg-slate-50 text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-b border-slate-200">
                     <div className="flex items-center justify-center w-full h-full group/header relative">
                       <button
                         onClick={() => toggleSort("screening_score")}
@@ -1832,7 +1832,7 @@ export default function CandidateRankingsPage() {
                       )}
                     </div>
                   </TableHead>
-                  <TableHead className="w-[200px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-slate-200">
+                  <TableHead className="w-[200px] sticky top-0 z-30 bg-slate-50 text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-b border-slate-200">
                     <div className="flex items-center justify-center w-full h-full group/header relative">
                       <button
                         onClick={() => toggleSort("engage_status")}
@@ -1864,7 +1864,7 @@ export default function CandidateRankingsPage() {
                     </div>
                   </TableHead>
 
-                  <TableHead className="w-[200px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-slate-200">
+                  <TableHead className="w-[200px] sticky top-0 z-30 bg-slate-50 text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-b border-slate-200">
                     <div className="flex items-center justify-center w-full h-full group/header relative">
                       <button
                         onClick={() => toggleSort("engage_score")}
@@ -1897,7 +1897,7 @@ export default function CandidateRankingsPage() {
                     </div>
                   </TableHead>
 
-                  <TableHead className="w-[220px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-slate-200">
+                  <TableHead className="w-[220px] sticky top-0 z-30 bg-slate-50 text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider py-0 border-l border-b border-slate-200">
                     <div className="flex items-center justify-center w-full h-full group/header relative">
                       <button
                         onClick={() => toggleSort("total_score")}
@@ -1930,10 +1930,10 @@ export default function CandidateRankingsPage() {
                     </div>
                   </TableHead>
 
-                  <TableHead className="w-[260px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider border-l border-slate-200 py-0 px-2">
+                  <TableHead className="w-[260px] sticky top-0 z-30 bg-slate-50 text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider border-l border-b border-slate-200 py-0 px-2">
                     ACTIONS
                   </TableHead>
-                  <TableHead className="w-[220px] text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider border-l border-slate-200 py-0 px-2">
+                  <TableHead className="w-[220px] sticky top-0 z-30 bg-slate-50 text-center font-semibold text-slate-500 text-[12px] uppercase tracking-wider border-l border-b border-slate-200 py-0 px-2">
                     CANDIDATE FEEDBACK
                   </TableHead>
                 </TableRow>
@@ -1963,7 +1963,7 @@ export default function CandidateRankingsPage() {
 
                     return (
                       <TableRow key={`${candidateKey}-${idx}`} className="border-b border-slate-100 hover:bg-slate-50 transition-all duration-200 h-auto group leading-tight relative">
-                        <TableCell className="w-[50px] border-r border-slate-200 py-2 px-2 align-middle text-center font-medium text-slate-700 group-hover:bg-slate-50 transition-colors">
+                        <TableCell className="w-[50px] border-r border-slate-200 py-2 px-2 align-middle text-center font-medium text-slate-500 text-[12px] group-hover:bg-slate-50 transition-colors">
                           {idx + 1}
                         </TableCell>
                         <TableCell className="sticky left-0 z-10 bg-white w-[320px] py-2 px-3 align-middle text-center group-hover:bg-slate-50 transition-colors after:absolute after:inset-y-0 after:right-0 after:w-[1px] after:bg-slate-200">
@@ -2235,7 +2235,7 @@ export default function CandidateRankingsPage() {
                   })
                 )}
               </TableBody>
-            </Table>
+            </table>
           </div>
         </div>
       </div>
