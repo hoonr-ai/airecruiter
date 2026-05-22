@@ -916,7 +916,7 @@ class AutoAssignService:
                         """
                         SELECT
                             COUNT(DISTINCT candidate_id)                                 AS candidates_sourced,
-                            COUNT(DISTINCT candidate_id)                                 AS candidates_launched,
+                            COUNT(DISTINCT CASE WHEN data->>'engage_status' IS NOT NULL AND data->>'engage_status' != '' THEN candidate_id END) AS candidates_launched,
                             COUNT(DISTINCT CASE
                                 WHEN data->>'engage_status' IN
                                     ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
