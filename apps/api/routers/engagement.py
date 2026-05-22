@@ -1323,6 +1323,30 @@ async def get_assessment_data(interview_id: str):
     if transcription_data and "data" in transcription_data:
         transcription_data = transcription_data["data"]
 
+    # Prefer Curate's resolved pass/fail status when available so assessment
+    # surfaces the effective engagement result instead of Pair Bot's raw
+    # completion state.
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT status
+                    FROM engage_interview_audit
+                    WHERE interview_id = %s
+                    ORDER BY updated_at DESC NULLS LAST, id DESC
+                    LIMIT 1
+                    """,
+                    (interview_id,),
+                )
+                audit_row = cur.fetchone()
+                if audit_row and interview_data:
+                    effective_status = str(audit_row.get("status") or "").strip()
+                    if effective_status:
+                        interview_data["status"] = effective_status
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to overlay effective interview status for {interview_id}: {e}")
+
     return {
         "success": True,
         "interview_id": interview_id,
