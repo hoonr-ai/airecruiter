@@ -1281,7 +1281,8 @@ export default function CandidateRankingsPage() {
       const candRes = await fetch(`${apiBase}/jobs/${jobId}/candidates`);
       const candData = await candRes.json();
       if (candData.status === "success" && Array.isArray(candData.candidates)) {
-        setLaunchedRowCount(candData.candidates.length);
+        const actuallyLaunched = candData.candidates.filter((c: any) => c.data?.engage_status && c.data.engage_status !== "");
+        setLaunchedRowCount(actuallyLaunched.length);
         // Initialize feedbacks state from persisted data
         const initialFeedbacks: Record<string, string> = {};
         candData.candidates.forEach((c: any) => {
