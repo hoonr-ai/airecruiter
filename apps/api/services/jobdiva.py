@@ -89,12 +89,28 @@ def get_field(data: Dict[str, Any], keys: List[str], default: Any = None) -> Any
         norm_key = normalize(key)
         if norm_key in normalized_data:
             val = normalized_data[norm_key]
+            # Handle JobDiva returning lists for fields like email or phone when a candidate has multiple
+            if isinstance(val, list) and val:
+                # JobDiva lists might be strings or dicts
+                first_valid = None
+                for item in val:
+                    if isinstance(item, dict):
+                        for subkey in ["dateTime", "date", "value", "$"]:
+                            if subkey in item:
+                                item = item[subkey]
+                                break
+                    if isinstance(item, str) and item.strip():
+                        first_valid = item.strip()
+                        break
+                val = first_valid if first_valid is not None else str(val[0])
+                
             # Handle JobDiva's nested date/time objects
             if isinstance(val, dict):
                 for subkey in ["dateTime", "date", "value", "$"]:
                     if subkey in val:
                         val = val[subkey]
                         break
+            
             
             # Filter out employment-related values from location fields
             if isinstance(val, str) and _is_location_key(key):

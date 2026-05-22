@@ -86,6 +86,7 @@ def _ensure_sourced_candidates_schema() -> None:
                     image_url TEXT,
                     data JSONB,
                     status TEXT DEFAULT 'sourced',
+                    resume_match_percentage INT DEFAULT 0,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(jobdiva_id, candidate_id, source)
