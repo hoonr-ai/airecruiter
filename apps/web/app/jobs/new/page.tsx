@@ -4313,38 +4313,6 @@ function NewJobPageContent() {
     });
   }, [rubricData, workAuthorization, jobData?.work_authorization]);
 
-  // Inject Step 1 employment-type selections (e.g. "W2", "C2C") as individual
-  // Required rows in Step 3's "Other Requirements". Parallel to the workAuth
-  // injector above: uses its own signature ref so flipping selections on
-  // Step 1 re-injects (added types appear), but deleting a row on Step 3
-  // does NOT re-add it while the signature is unchanged.
-  const injectedEmpTypesRef = useRef<string>("");
-  useEffect(() => {
-    if (!rubricData) return;
-    if (!selectedEmpTypes || selectedEmpTypes.length === 0) return;
-    const signature = selectedEmpTypes.slice().sort().join("|");
-    if (injectedEmpTypesRef.current === signature) return;
-
-    setRubricData((prev: any) => {
-      if (!prev) return prev;
-      const existing: any[] = Array.isArray(prev.other_requirements) ? prev.other_requirements : [];
-      const existingLower = new Set(
-        existing
-          .map((item: any) => (typeof item?.value === "string" ? item.value.trim().toLowerCase() : ""))
-          .filter(Boolean)
-      );
-      const toAdd = selectedEmpTypes
-        .filter(t => !existingLower.has(String(t).trim().toLowerCase()))
-        .map(t => ({ value: String(t), required: "Required", source: "Step1" }));
-      injectedEmpTypesRef.current = signature;
-      if (toAdd.length === 0) return prev;
-      return {
-        ...prev,
-        other_requirements: [...toAdd, ...existing],
-      };
-    });
-  }, [rubricData, selectedEmpTypes]);
-
   useEffect(() => {
     if (currentStep !== 4) return;
 
