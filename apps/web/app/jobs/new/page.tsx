@@ -957,6 +957,11 @@ function NewJobPageContent() {
     return Number.isNaN(d.getTime()) ? null : d;
   };
 
+  const getCandidateMatchScore = (c: any): number => {
+    const score = Number(c?.match_score);
+    return Number.isFinite(score) ? score : 0;
+  };
+
   const sortedCandidates = useMemo(() => {
     const trimmedQuery = candidateSearchQuery.trim().toLowerCase();
     const sourcePriority = (c: any) => {
@@ -973,7 +978,7 @@ function NewJobPageContent() {
       if (launchedCandidateKeys.has(key)) return false;
       if (!matchesSourceFilter(c)) return false;
       if (minScore > 0) {
-        const score = typeof c.match_score === "number" ? c.match_score : 0;
+        const score = getCandidateMatchScore(c);
         if (score < minScore) return false;
       }
       if (locationFilter.size > 0) {
@@ -1001,21 +1006,22 @@ function NewJobPageContent() {
     const cmp = (a: any, b: any) => {
       switch (sortKey) {
         case "match": {
+          const scoreA = getCandidateMatchScore(a);
+          const scoreB = getCandidateMatchScore(b);
+          if (scoreA !== scoreB) return (scoreA - scoreB) * dirMul;
+
+          // For equal match scores, preserve the better upstream JobDiva rank
+          // when both candidates have one, then fall back to source priority.
+          const rankA = typeof a.api_rank === "number" ? a.api_rank : null;
+          const rankB = typeof b.api_rank === "number" ? b.api_rank : null;
+          if (rankA !== null && rankB !== null && rankA !== rankB) {
+            return rankA - rankB;
+          }
+
           const prioA = sourcePriority(a);
           const prioB = sourcePriority(b);
           if (prioA !== prioB) return prioA - prioB;
-          // Prefer JobDiva's api_rank (lower = better) when both candidates
-          // carry it — preserves JobAgent's ranking end-to-end even when
-          // LLM scoring assigns different match_score values. Falls back to
-          // match_score for sources without an API rank (e.g. Exa, Dice).
-          const rankA = typeof a.api_rank === "number" ? a.api_rank : null;
-          const rankB = typeof b.api_rank === "number" ? b.api_rank : null;
-          if (rankA !== null && rankB !== null) {
-            return (rankB - rankA) * dirMul;
-          }
-          const scoreA = typeof a.match_score === "number" ? a.match_score : 0;
-          const scoreB = typeof b.match_score === "number" ? b.match_score : 0;
-          return (scoreA - scoreB) * dirMul;
+          return 0;
         }
         case "name": {
           const nameA = String(a.name || `${a.firstName || ""} ${a.lastName || ""}`).trim().toLowerCase();
