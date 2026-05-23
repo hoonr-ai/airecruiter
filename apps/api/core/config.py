@@ -44,6 +44,16 @@ LLM_CONCURRENCY = int(get_env_with_default("LLM_CONCURRENCY", "5"))
 # Set to "false" to always run LLM extraction.
 SKIP_LLM_IF_STRUCTURED = get_env_with_default("SKIP_LLM_IF_STRUCTURED", "false").lower() == "true"
 
+# ---- LLM response cache (Redis) ----
+# Backs the per-call response caches added in tier 1 (Tribunal verdicts,
+# parsed candidate profiles) and tier 2 (rubric / screening / boolean /
+# location). When REDIS_URL is empty the cache is a no-op — every call
+# falls through to the LLM as before. LLM_CACHE_ENABLED is a kill switch
+# that bypasses Redis without unsetting REDIS_URL (useful for evicting a
+# bad entry without redeploying).
+REDIS_URL = get_env_with_default("REDIS_URL", "")
+LLM_CACHE_ENABLED = get_env_bool("LLM_CACHE_ENABLED", True)
+
 # Debugging
 DEBUG_LOG_PATH = os.getenv("DEBUG_LOG_PATH")
 OPENAI_API_KEY = get_env_or_fail("OPENAI_API_KEY")

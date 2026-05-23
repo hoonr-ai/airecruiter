@@ -17,12 +17,18 @@ import json
 import logging
 from dataclasses import dataclass
 from core.graph import ontology
+from core import llm_cache
 from services.role_family import detect_role_family
 from services.taxonomy_service import extract_grounded_rubric
 from services import role_taxonomy
 import openai
 
 logger = logging.getLogger(__name__)
+
+# 30 days. Rubric phase-2 output is a function of the JD text + title +
+# customer; recruiters who regenerate the rubric on an unchanged JD pay
+# nothing after the first call.
+_RUBRIC_PHASE2_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
 
 # Below this many hard skills, a non-IT JD gets a second-pass through
 # the family-aware grounding prompt. IT JDs typically yield 6-8 hard
@@ -71,7 +77,11 @@ class JobSkillsAnalysis:
 
 class JobSkillsExtractor:
     def __init__(self, openai_api_key: str):
-        self.openai_client = openai.AsyncOpenAI(api_key=openai_api_key)
+        # `openai_api_key` is kept in the signature for backwards compat with
+        # existing call sites that pass it explicitly; the singleton already
+        # reads OPENAI_API_KEY from config so the arg is now unused.
+        from core.llm_client import get_openai_client
+        self.openai_client = get_openai_client()
 
     def _combine_job_texts(self, jobdiva: str, ai: str, notes: str) -> str:
         sections = []
@@ -338,20 +348,31 @@ IMPORTANT:
 - job_roles MUST contain 3 to 5 entries (not just one), with the most
   resume-common token first.
 """
-        try:
-            p2_resp = await self.openai_client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[
-                    {"role": "system", "content": "You are an expert recruiter and skills analyst. Extract up to 8 HARD skills from the JD itself, plus any truly important SOFT skills. HARD SKILLS ARE THE PRIORITY. Soft skills must never crowd out hard skills or reduce the hard-skill count. The skills array may contain more than 8 total items if needed, but no more than 8 should be hard skills.\n\nTHE SINGLE MOST IMPORTANT RULE: every hard skill name must be a token that would appear verbatim on a real candidate's resume. Skills are matched downstream by literal substring search; abstract competency phrases (e.g. 'Critical Care Knowledge', 'Patient Assessment', 'Documentation Skills', 'Brand Voice Adaptation', 'Quality Assurance', 'Care Management') silently reject every candidate. Prefer concrete proper nouns: certifications (BLS, ACLS, CCRN, RRT, PMP, ISO 9001, AS9100, CQA), tool/product/framework names (Epic, Cerner, Primavera P6, AutoCAD, Bluebeam, Procore, Jira, AWS), equipment/procedure names (Ventilator, Intubation, CPAP, BiPAP, ABG, EKG), software titles, named regulations. If a skill name ends in 'Knowledge', 'Skills', 'Compliance', 'Methodology', 'Best Practices', 'Adaptation', or 'Development', replace it with the underlying concrete noun.\n\nPRIORITY ORDER FOR HARD SKILLS: 1) Explicit skills listed in requirements/qualifications/tools/procedures (HIGHEST), 2) Direct skill mentions in duties or responsibilities (HIGH), 3) Strongly inferred hard skills from the JD only if fewer than 8 direct hard skills are available (MEDIUM). Patient Care, Communication, Teamwork, Flexibility, Attention to Detail, Empathy, Collaboration, and Customer Service are soft skills. Mark each skill with evidence_type = direct or inferred."},
-                    {"role": "user", "content": phase2_prompt}
-                ],
-                temperature=0.2,  # Slightly higher to encourage more comprehensive extraction
-                response_format={"type": "json_object"},
-            )
-            phase2_result = json.loads(p2_resp.choices[0].message.content)
-        except Exception as p2_err:
-            logger.error(f"❌ Phase 2 failed: {p2_err}")
-            phase2_result = {}
+        # Cache phase-2 by the user prompt content (the only thing that
+        # varies per call — system prompt is byte-identical).
+        phase2_cache_key = llm_cache.make_key("rubric_p2", 1, phase2_prompt)
+        phase2_result = await llm_cache.get_json(phase2_cache_key)
+        if phase2_result is not None:
+            logger.info("rubric phase 2: cache HIT")
+        else:
+            try:
+                p2_resp = await self.openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "You are an expert recruiter and skills analyst. Extract up to 8 HARD skills from the JD itself, plus any truly important SOFT skills. HARD SKILLS ARE THE PRIORITY. Soft skills must never crowd out hard skills or reduce the hard-skill count. The skills array may contain more than 8 total items if needed, but no more than 8 should be hard skills.\n\nTHE SINGLE MOST IMPORTANT RULE: every hard skill name must be a token that would appear verbatim on a real candidate's resume. Skills are matched downstream by literal substring search; abstract competency phrases (e.g. 'Critical Care Knowledge', 'Patient Assessment', 'Documentation Skills', 'Brand Voice Adaptation', 'Quality Assurance', 'Care Management') silently reject every candidate. Prefer concrete proper nouns: certifications (BLS, ACLS, CCRN, RRT, PMP, ISO 9001, AS9100, CQA), tool/product/framework names (Epic, Cerner, Primavera P6, AutoCAD, Bluebeam, Procore, Jira, AWS), equipment/procedure names (Ventilator, Intubation, CPAP, BiPAP, ABG, EKG), software titles, named regulations. If a skill name ends in 'Knowledge', 'Skills', 'Compliance', 'Methodology', 'Best Practices', 'Adaptation', or 'Development', replace it with the underlying concrete noun.\n\nPRIORITY ORDER FOR HARD SKILLS: 1) Explicit skills listed in requirements/qualifications/tools/procedures (HIGHEST), 2) Direct skill mentions in duties or responsibilities (HIGH), 3) Strongly inferred hard skills from the JD only if fewer than 8 direct hard skills are available (MEDIUM). Patient Care, Communication, Teamwork, Flexibility, Attention to Detail, Empathy, Collaboration, and Customer Service are soft skills. Mark each skill with evidence_type = direct or inferred."},
+                        {"role": "user", "content": phase2_prompt}
+                    ],
+                    temperature=0.2,  # Slightly higher to encourage more comprehensive extraction
+                    response_format={"type": "json_object"},
+                    prompt_cache_key="job-skills-p2-v1",
+                )
+                phase2_result = json.loads(p2_resp.choices[0].message.content)
+                await llm_cache.set_json(
+                    phase2_cache_key, phase2_result, ttl_seconds=_RUBRIC_PHASE2_CACHE_TTL_SECONDS
+                )
+            except Exception as p2_err:
+                logger.error(f"❌ Phase 2 failed: {p2_err}")
+                phase2_result = {}
 
         # Merge results - Extract ALL skills from LLM and categorize
         grounded_hard_skills = []

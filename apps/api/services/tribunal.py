@@ -1,15 +1,43 @@
 import json
+import logging
 from typing import Optional
-from openai import AsyncOpenAI
 from core.intelligence import TribunalVerdict
 from core.models import CandidateProfile, JobDescription
 from core.toon import encode
 from core.config import OPENAI_API_KEY
+from core.llm_client import get_openai_client
+from core import llm_cache
+
+logger = logging.getLogger(__name__)
+
+# 7 days. Tribunal inputs (parsed resume + JD rubric) only change when a
+# candidate is re-parsed or a rubric is re-extracted, both of which
+# already invalidate this key via the rubric_hash component.
+_TRIBUNAL_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
+
+
+def _distance_bucket(distance_miles: Optional[float]) -> Optional[str]:
+    """Bucket continuous distances so a 12.3 mi vs 12.7 mi delta doesn't
+    fork the cache. Buckets are wide enough to be cosmetically
+    indistinguishable to the Tribunal's location_fit scoring."""
+    if distance_miles is None:
+        return None
+    d = float(distance_miles)
+    if d <= 10:
+        return "<=10"
+    if d <= 25:
+        return "<=25"
+    if d <= 50:
+        return "<=50"
+    if d <= 100:
+        return "<=100"
+    return ">100"
+
 
 class TribunalService:
     def __init__(self):
         self.api_key = OPENAI_API_KEY
-        self.client = AsyncOpenAI(api_key=self.api_key) if self.api_key else None
+        self.client = get_openai_client()
 
     async def evaluate_narrative(
         self,
@@ -28,7 +56,7 @@ class TribunalService:
 
         # 1. Prepare Context with TOON
         try:
-            # We strip heavy text fields before encoding to save even more space, 
+            # We strip heavy text fields before encoding to save even more space,
             # as the full resume text is provided separately in the prompt.
             # But here we want the structured data (timeline, skills)
             candidate_toon = encode(candidate)
@@ -37,6 +65,27 @@ class TribunalService:
             print(f"⚠️ TOON Encoding Failed: {encode_error}. Falling back to default.")
             candidate_toon = str(candidate.dict())
             jd_toon = str(jd.dict())
+
+        # Cache key: the four things that actually go to the LLM. TOON output
+        # is canonical for a given pydantic model, so hashing it is stable
+        # across calls without explicit resume_hash / rubric_hash plumbing.
+        cache_key = llm_cache.make_key(
+            "tribunal", 1,
+            resume_text[:30000],
+            candidate_toon,
+            jd_toon,
+            _distance_bucket(distance_miles),
+            radius_miles,
+        )
+        cached = await llm_cache.get_json(cache_key)
+        if cached is not None:
+            try:
+                verdict = TribunalVerdict.model_validate(cached)
+                logger.info("tribunal: cache HIT")
+                return verdict
+            except Exception as exc:
+                # Schema drift — drop the entry and re-evaluate. Don't fail open.
+                logger.warning(f"tribunal: cached verdict failed validation, re-running: {exc}")
         
         system_prompt = """
         You are "Talience Tribunal", an AI panel that evaluates candidate career narratives.
@@ -109,11 +158,21 @@ class TribunalService:
                     {"role": "user",   "content": user_prompt}
                 ],
                 response_format=TribunalVerdict,
-                temperature=0.2 # low temp for consistent tagging
+                temperature=0.2, # low temp for consistent tagging
+                prompt_cache_key="tribunal-v1",
             )
-            
-            return completion.choices[0].message.parsed
-            
+
+            verdict = completion.choices[0].message.parsed
+            try:
+                await llm_cache.set_json(
+                    cache_key,
+                    verdict.model_dump(),
+                    ttl_seconds=_TRIBUNAL_CACHE_TTL_SECONDS,
+                )
+            except Exception as cache_exc:
+                logger.debug(f"tribunal: cache set failed: {cache_exc}")
+            return verdict
+
         except Exception as e:
             print(f"❌ Tribunal Error: {e}")
             return self._fail_open(f"LLM Error: {str(e)}")

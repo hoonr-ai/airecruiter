@@ -4,9 +4,10 @@ import re
 from typing import Optional, Tuple, Dict
 
 import httpx
-from openai import AsyncOpenAI
 from pydantic import BaseModel
 from core.config import OPENAI_API_KEY
+from core.llm_client import get_openai_client, model_for
+from core import llm_cache
 
 
 _GEOCODE_CACHE: Dict[str, Optional[Tuple[float, float]]] = {}
@@ -238,7 +239,7 @@ class LocationVerdict(BaseModel):
 class LocationService:
     def __init__(self):
         self.api_key = OPENAI_API_KEY
-        self.client = AsyncOpenAI(api_key=self.api_key) if self.api_key else None
+        self.client = get_openai_client()
         
     async def check_proximity(self, candidate_loc: str, job_loc: str, work_mode: str) -> LocationVerdict:
         """
@@ -251,12 +252,25 @@ class LocationService:
         if work_mode.lower() == "remote":
             return LocationVerdict(is_within_range=True, distance_estimate="N/A", reason="Role is Remote.")
 
+        # Cache on the normalized location pair. Geography doesn't change,
+        # so TTL is long (90 days). Pre-tier-2 this only had an
+        # in-process dict that died on every worker restart.
+        cand_key = (candidate_loc or "").strip().lower()
+        job_key = (job_loc or "").strip().lower()
+        cache_key = llm_cache.make_key("location", 1, cand_key, job_key)
+        cached = await llm_cache.get_json(cache_key)
+        if cached is not None:
+            try:
+                return LocationVerdict.model_validate(cached)
+            except Exception:
+                pass  # fall through to LLM on schema drift
+
         prompt = f"""
         Determine if the Candidate Location is within commuting distance (approx 50 miles / 80 km) of the Job Location.
-        
+
         Candidate Location: {candidate_loc}
         Job Location: {job_loc}
-        
+
         Output JSON:
         {{
             "is_within_range": boolean,
@@ -266,7 +280,10 @@ class LocationService:
         """
 
         try:
-            model = "gpt-4o-mini"
+            # Tier-3 #11: yes/no commuting check is mechanical; nano
+            # holds quality at ~3× lower cost. Override via
+            # LLM_MODEL_LOCATION if regressions appear.
+            model = model_for("location", "gpt-4.1-nano")
             completion = await self.client.beta.chat.completions.parse(
                 model=model, # Cheap model is fine for geography
                 messages=[
@@ -274,10 +291,18 @@ class LocationService:
                     {"role": "user", "content": prompt}
                 ],
                 response_format=LocationVerdict,
-                temperature=0.0
+                temperature=0.0,
+                prompt_cache_key="location-v1",
             )
 
-            return completion.choices[0].message.parsed
+            verdict = completion.choices[0].message.parsed
+            try:
+                await llm_cache.set_json(
+                    cache_key, verdict.model_dump(), ttl_seconds=90 * 24 * 60 * 60
+                )
+            except Exception:
+                pass
+            return verdict
         except Exception as e:
             print(f"⚠️ Location Check Error: {e}")
             return LocationVerdict(is_within_range=True, distance_estimate="Error", reason="Location check failed.")

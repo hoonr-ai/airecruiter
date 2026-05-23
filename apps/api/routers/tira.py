@@ -221,22 +221,36 @@ async def tira_boolean_from_jd(
     MAX_CHARS = 12_000
     jd = text[:MAX_CHARS]
 
-    try:
-        response = await chat_service.client.chat.completions.create(
-            model="gpt-4o-mini",
-            response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": _BOOLEAN_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Job description:\n\n{jd}"},
-            ],
-        )
-        raw = response.choices[0].message.content or "{}"
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=502, detail="Model returned non-JSON output.")
-    except Exception as e:
-        logger.error(f"Tira boolean: model call failed: {e}")
-        raise HTTPException(status_code=502, detail=f"Model call failed: {e}")
+    # 1-day TTL — recruiters often regenerate the boolean string on the
+    # same JD while iterating; longer than that they've usually moved on
+    # to a different posting.
+    from core import llm_cache as _llm_cache
+    from core.llm_client import model_for as _model_for
+    _boolean_cache_key = _llm_cache.make_key("boolean", 1, jd)
+    parsed = await _llm_cache.get_json(_boolean_cache_key)
+    if parsed is not None:
+        logger.info("tira boolean: cache HIT")
+    else:
+        try:
+            # Tier-3 #11: nano handles must-have / nice-to-have /
+            # exclusions JSON output reliably.
+            response = await chat_service.client.chat.completions.create(
+                model=_model_for("boolean", "gpt-4.1-nano"),
+                response_format={"type": "json_object"},
+                messages=[
+                    {"role": "system", "content": _BOOLEAN_SYSTEM_PROMPT},
+                    {"role": "user", "content": f"Job description:\n\n{jd}"},
+                ],
+                prompt_cache_key="boolean-v1",
+            )
+            raw = response.choices[0].message.content or "{}"
+            parsed = json.loads(raw)
+            await _llm_cache.set_json(_boolean_cache_key, parsed, ttl_seconds=24 * 60 * 60)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=502, detail="Model returned non-JSON output.")
+        except Exception as e:
+            logger.error(f"Tira boolean: model call failed: {e}")
+            raise HTTPException(status_code=502, detail=f"Model call failed: {e}")
 
     # Light validation — keep shapes predictable for the frontend.
     def _as_str_list(v: Any) -> List[str]:

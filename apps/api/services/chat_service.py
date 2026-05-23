@@ -15,6 +15,7 @@ from openai import AsyncOpenAI
 
 from core.config import DATABASE_URL, OPENAI_API_KEY
 from core.db import get_dict_cursor_connection
+from core.llm_client import get_openai_client
 
 logger = logging.getLogger(__name__)
 
@@ -244,7 +245,7 @@ class ChatService:
     (sufficient for the single-lookup questions Tira handles today)."""
 
     def __init__(self):
-        self.client: Optional[AsyncOpenAI] = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+        self.client: Optional[AsyncOpenAI] = get_openai_client()
 
     async def get_response(self, message: str, history: List[Any]) -> str:
         if not self.client:
@@ -261,11 +262,16 @@ class ChatService:
             messages.append({"role": "user", "content": message})
 
             # Round 1: let the model decide whether to call a tool.
+            # `prompt_cache_key` lets OpenAI's automatic prefix cache route
+            # repeat traffic for the (system + tools) preamble through the
+            # same cache shard, halving input-token cost on the cached
+            # prefix once a conversation grows past ~1024 tokens.
             first = await self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
                 tools=_TOOLS,
                 tool_choice="auto",
+                prompt_cache_key="tira-chat-v1",
             )
             choice = first.choices[0].message
             tool_calls = getattr(choice, "tool_calls", None) or []
@@ -308,6 +314,7 @@ class ChatService:
             second = await self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
+                prompt_cache_key="tira-chat-v1",
             )
             return second.choices[0].message.content or ""
         except Exception as e:
