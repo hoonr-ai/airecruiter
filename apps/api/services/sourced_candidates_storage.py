@@ -163,6 +163,15 @@ def _ensure_sourced_candidates_schema() -> None:
                 "ON sourced_candidates (jobdiva_id, LOWER(email))",
                 "CREATE INDEX IF NOT EXISTS idx_sc_jobdiva_data_email_lc "
                 "ON sourced_candidates (jobdiva_id, (LOWER(data->>'email')))",
+                # Functional index on the engage_status JSONB key. Used by every
+                # candidate-counter aggregate (auto_assign_service.refresh_job_
+                # performance_metrics, routers/jobs._aggregate_candidate_metrics,
+                # routers/engagement bulk-status filters). Without it those
+                # `data->>'engage_status' IN (...)` predicates fall back to a
+                # seq scan of the jobdiva_id slice; with it Postgres can
+                # short-circuit to just the rows matching the status set.
+                "CREATE INDEX IF NOT EXISTS idx_sc_jobdiva_engage_status "
+                "ON sourced_candidates (jobdiva_id, ((data->>'engage_status')))",
             ):
                 try:
                     conn.execute(text(stmt))
@@ -459,7 +468,7 @@ class SourcedCandidatesStorage:
         """Retrieve all sourced candidates for a specific job."""
         if not self.db_url:
             return []
-            
+
         try:
             import psycopg2.extras
             import json
@@ -468,18 +477,43 @@ class SourcedCandidatesStorage:
             conn.autocommit = True
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-            # Robust query that handles the mapping logic in SQL
-            # Same logic as get_all_candidates but filtered by job_id
+            # Pre-resolve both possible storage keys (alphanumeric ref +
+            # numeric PK) via a bounded indexed lookup. Pre-fix the main query
+            # carried `LEFT JOIN monitored_jobs ... ON (sc.jobdiva_id = mj.job_id
+            # OR sc.jobdiva_id = mj.jobdiva_id) WHERE mj.job_id = %s OR
+            # mj.jobdiva_id = %s OR sc.jobdiva_id = %s`. The triple-OR with
+            # joined columns made the predicate non-sargable and forced a
+            # seq scan of sourced_candidates. Resolving the keys up front lets
+            # the candidate query use `WHERE sc.jobdiva_id = ANY(%s)` against
+            # idx_sourced_candidates_jobdiva_id.
+            cur.execute(
+                """
+                SELECT jobdiva_id, job_id::text
+                FROM monitored_jobs
+                WHERE jobdiva_id = %s OR job_id::text = %s
+                LIMIT 1
+                """,
+                (jobdiva_id, jobdiva_id),
+            )
+            row = cur.fetchone()
+            lookup_keys = {jobdiva_id}
+            if row:
+                ref_key = row.get("jobdiva_id") if isinstance(row, dict) else row[0]
+                num_key = row.get("job_id") if isinstance(row, dict) else row[1]
+                if ref_key:
+                    lookup_keys.add(str(ref_key))
+                if num_key:
+                    lookup_keys.add(str(num_key))
+
             query = """
-                SELECT DISTINCT ON (sc.candidate_id) sc.*, 
+                SELECT DISTINCT ON (sc.candidate_id) sc.*,
                        sc.resume_match_percentage AS match_score
                 FROM sourced_candidates sc
-                LEFT JOIN monitored_jobs mj ON (sc.jobdiva_id = mj.job_id OR sc.jobdiva_id = mj.jobdiva_id)
-                WHERE mj.job_id = %s OR mj.jobdiva_id = %s OR sc.jobdiva_id = %s
+                WHERE sc.jobdiva_id = ANY(%s)
                 ORDER BY sc.candidate_id, sc.created_at DESC
             """
-            
-            cur.execute(query, (jobdiva_id, jobdiva_id, jobdiva_id))
+
+            cur.execute(query, (list(lookup_keys),))
             
             candidates = []
             for row in cur.fetchall():
@@ -624,8 +658,25 @@ class SourcedCandidatesStorage:
             }
 
             # CTE dedupes by candidate_id (keep most-recent row), then outer
-            # SELECT filters, counts, orders, paginates.
-            query = f"""
+            # SELECT filters, orders, paginates.
+            #
+            # v31: when `job_id` is set, push the predicate INTO the
+            # sourced_candidates scan inside the deduped CTE. Pre-v31 the
+            # CTE deduped across the entire table and the outer query
+            # filtered after — meaning every `/jobs/{id}` modal load
+            # paid the full-table dedup cost. With pushdown, the scan
+            # uses idx_sourced_candidates_jobdiva_id (per-job slice ≈ 1/100th
+            # of the table) and dedup happens on that slice only.
+            #
+            # `source` and `location` filters are NOT pushed down because
+            # the dedup keeps only the LATEST row per candidate; pushing
+            # those filters in would silently change semantics ("candidate's
+            # latest source is X" vs "candidate has any row with source X").
+            inner_filter = "TRUE"
+            if job_id:
+                inner_filter = "sc.jobdiva_id = %(job_id)s"
+
+            cte_sql = f"""
                 WITH monitored_jobs_lookup AS (
                     SELECT DISTINCT ON (lookup_id) lookup_id, title
                     FROM (
@@ -651,12 +702,13 @@ class SourcedCandidatesStorage:
                     FROM sourced_candidates sc
                     LEFT JOIN monitored_jobs_lookup mjl
                       ON sc.jobdiva_id = mjl.lookup_id
+                    WHERE {inner_filter}
                     ORDER BY sc.candidate_id, sc.created_at DESC
                 )
-                SELECT d.*, COUNT(*) OVER() AS total_count
-                FROM deduped d
-                WHERE (%(job_id)s IS NULL   OR d.jobdiva_id = %(job_id)s)
-                  AND (%(source)s IS NULL   OR d.source = %(source)s)
+            """
+
+            outer_where = """
+                WHERE (%(source)s IS NULL   OR d.source = %(source)s)
                   AND (%(location)s IS NULL OR d.location = %(location)s)
                   AND (
                       %(band_unscored)s = FALSE
@@ -672,18 +724,38 @@ class SourcedCandidatesStorage:
                       OR COALESCE(d.location,'')   ILIKE %(search_like)s
                       OR COALESCE(d.jobdiva_id,'') ILIKE %(search_like)s
                   )
+            """
+
+            # v31: split COUNT(*) OVER() into a dedicated count query.
+            # Pre-v31 the window aggregate forced Postgres to scan and
+            # project every wide row in the filtered set before LIMIT
+            # could apply. The narrow count query reuses the same CTE
+            # and only materializes COUNT(*), letting the page query
+            # focus on serializing 50 rows.
+            page_query = f"""
+                {cte_sql}
+                SELECT d.*
+                FROM deduped d
+                {outer_where}
                 ORDER BY {order_by}
                 LIMIT %(limit)s OFFSET %(offset)s
             """
-            cur.execute(query, params)
+            cur.execute(page_query, params)
             rows = cur.fetchall()
 
-            total = int(rows[0]["total_count"]) if rows else 0
+            count_query = f"""
+                {cte_sql}
+                SELECT COUNT(*) AS total_count
+                FROM deduped d
+                {outer_where}
+            """
+            cur.execute(count_query, params)
+            count_row = cur.fetchone()
+            total = int(count_row["total_count"]) if count_row else 0
 
             candidates: List[Dict[str, Any]] = []
             for row in rows:
                 c_dict = dict(row)
-                c_dict.pop("total_count", None)
                 # JSON uplift: column-level `match_score` already COALESCEd at
                 # SQL layer. engage_score / engage_status still live only in
                 # the `data` jsonb, so uplift them here for the FE.
@@ -732,6 +804,13 @@ class SourcedCandidatesStorage:
 
         Pulled from the full `sourced_candidates` table (DB-wide, not the
         current page) so filtering still operates on all rows post-pagination.
+
+        v31: collapsed from 3 separate `SELECT DISTINCT` round-trips
+        (one each for jobs/sources/locations) into a single CTE pass.
+        Pre-v31 every `/candidates/filter-options` load triggered three
+        independent scans of `sourced_candidates`. Now one scan emits all
+        three distinct sets via array_agg in a CTE, and we LEFT JOIN
+        monitored_jobs once to enrich job ids with titles.
         """
         if not self.db_url:
             return {"jobs": [], "sources": [], "locations": []}
@@ -743,40 +822,70 @@ class SourcedCandidatesStorage:
             conn.autocommit = True
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
-            # Jobs: jobdiva_id + best-effort title via monitored_jobs.
+            # Single-pass distinct extraction. `array_agg(DISTINCT ...) FILTER`
+            # uses one hash aggregation across sourced_candidates rather than
+            # three. Job titles are looked up afterward via a small set-
+            # cardinality join, not a table-scan join.
             cur.execute("""
-                WITH distinct_jobs AS (
-                    SELECT DISTINCT sc.jobdiva_id AS id
-                    FROM sourced_candidates sc
-                    WHERE sc.jobdiva_id IS NOT NULL AND sc.jobdiva_id <> ''
+                WITH facets AS (
+                    SELECT
+                        array_agg(DISTINCT jobdiva_id) FILTER (
+                            WHERE jobdiva_id IS NOT NULL AND jobdiva_id <> ''
+                        ) AS job_ids,
+                        array_agg(DISTINCT source) FILTER (
+                            WHERE source IS NOT NULL AND source <> ''
+                        ) AS sources,
+                        array_agg(DISTINCT location) FILTER (
+                            WHERE location IS NOT NULL AND location <> ''
+                        ) AS locations
+                    FROM sourced_candidates
                 )
-                SELECT dj.id,
-                       COALESCE(mj_div.title, mj_num.title) AS title
-                FROM distinct_jobs dj
-                LEFT JOIN monitored_jobs mj_div
-                  ON mj_div.jobdiva_id = dj.id
-                LEFT JOIN monitored_jobs mj_num
-                  ON mj_num.job_id::text = dj.id
-                ORDER BY title NULLS LAST, dj.id
+                SELECT
+                    COALESCE(job_ids, ARRAY[]::text[])  AS job_ids,
+                    COALESCE(sources, ARRAY[]::text[])  AS sources,
+                    COALESCE(locations, ARRAY[]::text[]) AS locations
+                FROM facets
             """)
+            row = cur.fetchone() or {}
+            job_ids = list(row.get("job_ids") or [])
+            sources = sorted([s for s in (row.get("sources") or []) if s])
+            locations = sorted([l for l in (row.get("locations") or []) if l])
+
+            # Titles for the discovered job ids. Indexed lookups (jobdiva_id
+            # + job_id::text). One round-trip instead of N.
+            titles_by_id: Dict[str, str] = {}
+            if job_ids:
+                cur.execute("""
+                    SELECT lookup_id, title FROM (
+                        SELECT mj.jobdiva_id::text AS lookup_id, mj.title
+                        FROM monitored_jobs mj
+                        WHERE mj.jobdiva_id = ANY(%s)
+                        UNION ALL
+                        SELECT mj.job_id::text AS lookup_id, mj.title
+                        FROM monitored_jobs mj
+                        WHERE mj.job_id::text = ANY(%s)
+                    ) t
+                    WHERE title IS NOT NULL AND title <> ''
+                """, (job_ids, job_ids))
+                for r in cur.fetchall():
+                    lid = r["lookup_id"]
+                    if lid and lid not in titles_by_id:
+                        titles_by_id[lid] = r["title"]
+
             jobs = [
-                {"id": r["id"], "label": f"{r['title']} — #{r['id']}" if r["title"] else f"#{r['id']}"}
-                for r in cur.fetchall()
+                {
+                    "id": jid,
+                    "label": (
+                        f"{titles_by_id[jid]} — #{jid}"
+                        if titles_by_id.get(jid)
+                        else f"#{jid}"
+                    ),
+                }
+                for jid in sorted(
+                    job_ids,
+                    key=lambda j: (titles_by_id.get(j) is None, titles_by_id.get(j) or "", j),
+                )
             ]
-
-            cur.execute("""
-                SELECT DISTINCT source FROM sourced_candidates
-                WHERE source IS NOT NULL AND source <> ''
-                ORDER BY source
-            """)
-            sources = [r["source"] for r in cur.fetchall()]
-
-            cur.execute("""
-                SELECT DISTINCT location FROM sourced_candidates
-                WHERE location IS NOT NULL AND location <> ''
-                ORDER BY location
-            """)
-            locations = [r["location"] for r in cur.fetchall()]
 
             cur.close()
             conn.close()
