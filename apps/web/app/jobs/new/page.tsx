@@ -1006,17 +1006,20 @@ function NewJobPageContent() {
     const cmp = (a: any, b: any) => {
       switch (sortKey) {
         case "match": {
-          const scoreA = getCandidateMatchScore(a);
-          const scoreB = getCandidateMatchScore(b);
-          if (scoreA !== scoreB) return (scoreA - scoreB) * dirMul;
-
-          // For equal match scores, preserve the better upstream JobDiva rank
-          // when both candidates have one, then fall back to source priority.
+          // JobDiva rows carry api_rank (recency for Applicants, JobAgent
+          // rank for Talent Search). When both sides have it, JobDiva's
+          // own ranking wins — match_score is a lenient/rough signal for
+          // those rows, not the sort key. Falls through to score sort for
+          // non-JobDiva pairs (no api_rank) and ties.
           const rankA = typeof a.api_rank === "number" ? a.api_rank : null;
           const rankB = typeof b.api_rank === "number" ? b.api_rank : null;
           if (rankA !== null && rankB !== null && rankA !== rankB) {
             return rankA - rankB;
           }
+
+          const scoreA = getCandidateMatchScore(a);
+          const scoreB = getCandidateMatchScore(b);
+          if (scoreA !== scoreB) return (scoreA - scoreB) * dirMul;
 
           const prioA = sourcePriority(a);
           const prioB = sourcePriority(b);
