@@ -97,11 +97,13 @@ export function AssessModal({
 
   const getStatusConfig = (status: string | undefined) => {
     switch (status?.toLowerCase()) {
+      case "passed":
+      case "pass":
       case "completed":
         return {
           icon: <CheckCircle2 className="w-4 h-4" />,
           color: "bg-emerald-100 text-emerald-700 border-emerald-200",
-          label: "Completed",
+          label: "Pass",
         };
       case "in_progress":
       case "in-progress":
@@ -111,11 +113,13 @@ export function AssessModal({
           color: "bg-blue-100 text-blue-700 border-blue-200",
           label: "In Progress",
         };
+      case "fail":
       case "failed":
+      case "rejected":
         return {
           icon: <XCircle className="w-4 h-4" />,
           color: "bg-rose-100 text-rose-700 border-rose-200",
-          label: "Failed",
+          label: "Fail",
         };
       default:
         return {

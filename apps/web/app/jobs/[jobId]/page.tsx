@@ -146,7 +146,8 @@ export default function JobDetailPage() {
       if (job) {
         const jobDetail = {
           id: String(job.jobdiva_id || job.job_id || jobId),
-          ...job
+          ...job,
+          title: job.enhanced_title || job.title || "",
         };
         setJobData(jobDetail);
         setFormData({

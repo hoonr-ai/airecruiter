@@ -84,8 +84,10 @@ function getDisplayName(c: any): string {
   );
 }
 
-function getReceivedDate(c: any): Date | null {
+function getLastActiveDate(c: any): Date | null {
   const raw =
+    c.available ||
+    c.DATEAVAILABLE ||
     c.received ||
     c.received_date ||
     c.receivedDate ||
@@ -96,9 +98,9 @@ function getReceivedDate(c: any): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-function formatReceivedShort(d: Date | null): string {
+function formatLastActiveShort(d: Date | null): string {
   if (!d) return "";
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "2-digit" });
+  return d.toLocaleDateString(undefined, { month: "2-digit", day: "2-digit", year: "numeric" });
 }
 
 function getMatchTone(score: number | null) {
@@ -320,8 +322,8 @@ export function CandidateMatchTable({
                 typeof candidate.match_score === "number" ? candidate.match_score : null;
               const tone = getMatchTone(matchScore);
               const { home: homeLocation, work: workLocation } = getCandidateLocations(candidate);
-              const receivedDate = getReceivedDate(candidate);
-              const receivedShort = formatReceivedShort(receivedDate);
+              const lastActiveDate = getLastActiveDate(candidate);
+              const lastActiveShort = formatLastActiveShort(lastActiveDate);
               const sourceBadge = getSourceBadge(candidate.source);
               const checked = selectedIds.has(id);
               const launchedKey = `${candidate.source ?? ''}:${id}`;
@@ -463,10 +465,10 @@ export function CandidateMatchTable({
                     )}
                   </TableCell>
                   <TableCell>
-                    {receivedShort ? (
+                    {lastActiveShort ? (
                       <span className="inline-flex items-center gap-1 text-slate-600">
                         <Calendar className="w-3 h-3 text-slate-400" />
-                        {receivedShort}
+                        {lastActiveShort}
                       </span>
                     ) : (
                       <span className="text-slate-300">—</span>

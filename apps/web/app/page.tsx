@@ -381,10 +381,10 @@ export default function DashboardPage() {
       <div className="bg-white rounded-2xl shadow-[0_2px_10px_-4px_rgba(0,0,0,0.1)] border border-slate-200 overflow-hidden mt-2">
         <div className="overflow-x-auto overflow-y-auto" style={{ maxHeight: 'calc(100vh - 240px)' }}>
           <table className="min-w-full divide-y divide-slate-100">
-            <thead className="bg-[#fcfdfd]">
+            <thead className="bg-[#fcfdfd] sticky top-0 z-20 shadow-sm">
               <tr>
                 <SortableHeader field="id">JOBDIVA ID</SortableHeader>
-                <SortableHeader field="title" className="sticky left-0 bg-[#fcfdfd] z-10 shadow-[5px_0_15px_-5px_rgba(0,0,0,0.03)] border-r border-slate-100/50">JOB TITLE</SortableHeader>
+                <SortableHeader field="title" className="sticky left-0 bg-[#fcfdfd] z-30 shadow-[5px_0_15px_-5px_rgba(0,0,0,0.03)] border-r border-slate-100/50">JOB TITLE</SortableHeader>
                 <SortableHeader field="customer_name">CUSTOMER NAME</SortableHeader>
                 <SortableHeader field="location">LOCATION / ZIP</SortableHeader>
                 <SortableHeader field="priority">PRIORITY</SortableHeader>
@@ -398,7 +398,7 @@ export default function DashboardPage() {
                 <SortableHeader field="pairExternalSubs">HOONR-CURATE EXTERNAL SUBS</SortableHeader>
                 <SortableHeader field="feedbackCompleted">FEEDBACK COMPLETED</SortableHeader>
                 <SortableHeader field="timeToFirstPass">TIME TO FIRST PASS</SortableHeader>
-                <th className="px-6 py-4 text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide border-b border-l border-slate-100/50 sticky right-0 bg-[#fcfdfd] z-10 shadow-[-10px_0_15px_-5px_rgba(0,0,0,0.03)] whitespace-nowrap">
+                <th className="px-6 py-4 text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide border-b border-l border-slate-100/50 sticky right-0 bg-[#fcfdfd] z-30 shadow-[-10px_0_15px_-5px_rgba(0,0,0,0.03)] whitespace-nowrap">
                   ACTIONS
                 </th>
               </tr>

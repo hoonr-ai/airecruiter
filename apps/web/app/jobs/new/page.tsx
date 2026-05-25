@@ -109,6 +109,46 @@ function isValidLaunchPhone(value: string | null | undefined): boolean {
   return launchPhoneDigits(value).length >= 7;
 }
 
+function getCandidateLaunchEmail(candidate: any): string {
+  return String(
+    candidate?.email ||
+    candidate?.workEmail ||
+    candidate?.personalEmail ||
+    candidate?.enhanced_info?.email ||
+    candidate?.enhanced_info?.workEmail ||
+    candidate?.enhanced_info?.personalEmail ||
+    candidate?.data?.email ||
+    candidate?.data?.workEmail ||
+    candidate?.data?.personalEmail ||
+    candidate?.data?.enhanced_info?.email ||
+    candidate?.data?.enhanced_info?.workEmail ||
+    candidate?.data?.enhanced_info?.personalEmail ||
+    candidate?.data?.zoominfo_contact_enrichment?.workEmail ||
+    candidate?.data?.zoominfo_contact_enrichment?.personalEmail ||
+    ""
+  ).trim().toLowerCase();
+}
+
+function getCandidateLaunchPhone(candidate: any): string {
+  return String(
+    candidate?.phone ||
+    candidate?.workPhone ||
+    candidate?.mobilePhone ||
+    candidate?.enhanced_info?.phone ||
+    candidate?.enhanced_info?.workPhone ||
+    candidate?.enhanced_info?.mobilePhone ||
+    candidate?.data?.phone ||
+    candidate?.data?.workPhone ||
+    candidate?.data?.mobilePhone ||
+    candidate?.data?.enhanced_info?.phone ||
+    candidate?.data?.enhanced_info?.workPhone ||
+    candidate?.data?.enhanced_info?.mobilePhone ||
+    candidate?.data?.zoominfo_contact_enrichment?.mobilePhone ||
+    candidate?.data?.zoominfo_contact_enrichment?.workPhone ||
+    ""
+  ).trim();
+}
+
 // Utility function to clean location_type values and filter out employment terms
 function cleanLocationType(locationType: string | null | undefined): string {
   if (!locationType) return "";
@@ -744,7 +784,7 @@ function NewJobPageContent() {
   // same N. The text input is the source of truth; the button reads it.
   const [selectBestN, setSelectBestN] = useState<number>(100);
   const [selectBestInput, setSelectBestInput] = useState<string>("100");
-  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "linkedin-unipile" | "linkedin-exa" | "dice" | "upload-resume" | "beyond">("all");
+  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "linkedin-unipile" | "linkedin-exa" | "dice" | "upload-resume">("all");
   const [locationFilter, setLocationFilter] = useState<Set<string>>(new Set());
   const [minScore, setMinScore] = useState<number>(0);
   const [candidateSearchQuery, setCandidateSearchQuery] = useState<string>("");
@@ -771,29 +811,8 @@ function NewJobPageContent() {
     return Math.min(100, Math.max(1, parsed));
   }, [sourceLocations]);
 
-  const isBeyondRadius = (cand: any): boolean => {
-    const reason = String(cand?.location_match_reason || "");
-    if (
-      reason === "candidate_location_missing_keep" ||
-      reason === "geocode_unavailable_keep" ||
-      reason === "outside_radius_soft_keep"
-    ) {
-      return true;
-    }
-    const d = cand?.distance_miles;
-    if (typeof d !== "number" || !Number.isFinite(d)) return false;
-    return d > currentWithinMiles;
-  };
-
-  const hasUnknownLocation = (cand: any): boolean => {
-    const reason = String(cand?.location_match_reason || "");
-    return reason === "candidate_location_missing_keep" || reason === "geocode_unavailable_keep";
-  };
-
   const matchesSourceFilter = (cand: any) => {
     const src = String(cand.source || "").toLowerCase();
-    if (sourceFilter === "beyond") return isBeyondRadius(cand);
-    if (isBeyondRadius(cand)) return false;
     switch (sourceFilter) {
       case "all": return true;
       case "jobdiva": return src.startsWith("jobdiva");
@@ -805,10 +824,6 @@ function NewJobPageContent() {
     }
   };
   const sourceCounts = candidates.reduce((acc: Record<string, number>, c) => {
-    if (isBeyondRadius(c)) {
-      acc["beyond"] = (acc["beyond"] || 0) + 1;
-      return acc;
-    }
     const s = String(c.source || "").toLowerCase();
     if (s.startsWith("jobdiva")) acc["jobdiva"] = (acc["jobdiva"] || 0) + 1;
     else if (s === "linkedin-unipile" || s === "linkedin") acc["linkedin-unipile"] = (acc["linkedin-unipile"] || 0) + 1;
@@ -818,7 +833,7 @@ function NewJobPageContent() {
     return acc;
   }, {});
 
-  const inRadiusCount = candidates.length - (sourceCounts["beyond"] || 0);
+  const totalCandidatesCount = candidates.length;
 
   const getJobdivaSkills = () => {
     const seen = new Set<string>();
@@ -934,12 +949,17 @@ function NewJobPageContent() {
     return "";
   };
 
-  const getCandidateReceivedDate = (c: any): Date | null => {
+  const getCandidateLastActiveDate = (c: any): Date | null => {
     const raw =
-      c.received || c.received_date || c.receivedDate || c.last_modified || c.lastModified;
+      c.available || c.DATEAVAILABLE || c.received || c.received_date || c.receivedDate || c.last_modified || c.lastModified;
     if (!raw) return null;
     const d = new Date(raw);
     return Number.isNaN(d.getTime()) ? null : d;
+  };
+
+  const getCandidateMatchScore = (c: any): number => {
+    const score = Number(c?.match_score);
+    return Number.isFinite(score) ? score : 0;
   };
 
   const sortedCandidates = useMemo(() => {
@@ -953,9 +973,12 @@ function NewJobPageContent() {
     };
 
     const filtered = candidates.filter((c: any) => {
+      const candId = c.candidate_id || c.jobdiva_candidate_id || c.id;
+      const key = `${c.source ?? ''}:${candId}`;
+      if (launchedCandidateKeys.has(key)) return false;
       if (!matchesSourceFilter(c)) return false;
       if (minScore > 0) {
-        const score = typeof c.match_score === "number" ? c.match_score : 0;
+        const score = getCandidateMatchScore(c);
         if (score < minScore) return false;
       }
       if (locationFilter.size > 0) {
@@ -983,21 +1006,25 @@ function NewJobPageContent() {
     const cmp = (a: any, b: any) => {
       switch (sortKey) {
         case "match": {
+          // JobDiva rows carry api_rank (recency for Applicants, JobAgent
+          // rank for Talent Search). When both sides have it, JobDiva's
+          // own ranking wins — match_score is a lenient/rough signal for
+          // those rows, not the sort key. Falls through to score sort for
+          // non-JobDiva pairs (no api_rank) and ties.
+          const rankA = typeof a.api_rank === "number" ? a.api_rank : null;
+          const rankB = typeof b.api_rank === "number" ? b.api_rank : null;
+          if (rankA !== null && rankB !== null && rankA !== rankB) {
+            return rankA - rankB;
+          }
+
+          const scoreA = getCandidateMatchScore(a);
+          const scoreB = getCandidateMatchScore(b);
+          if (scoreA !== scoreB) return (scoreA - scoreB) * dirMul;
+
           const prioA = sourcePriority(a);
           const prioB = sourcePriority(b);
           if (prioA !== prioB) return prioA - prioB;
-          // Prefer JobDiva's api_rank (lower = better) when both candidates
-          // carry it — preserves JobAgent's ranking end-to-end even when
-          // LLM scoring assigns different match_score values. Falls back to
-          // match_score for sources without an API rank (e.g. Exa, Dice).
-          const rankA = typeof a.api_rank === "number" ? a.api_rank : null;
-          const rankB = typeof b.api_rank === "number" ? b.api_rank : null;
-          if (rankA !== null && rankB !== null) {
-            return (rankB - rankA) * dirMul;
-          }
-          const scoreA = typeof a.match_score === "number" ? a.match_score : 0;
-          const scoreB = typeof b.match_score === "number" ? b.match_score : 0;
-          return (scoreA - scoreB) * dirMul;
+          return 0;
         }
         case "name": {
           const nameA = String(a.name || `${a.firstName || ""} ${a.lastName || ""}`).trim().toLowerCase();
@@ -1005,8 +1032,8 @@ function NewJobPageContent() {
           return nameA.localeCompare(nameB) * dirMul;
         }
         case "lastActive": {
-          const dA = getCandidateReceivedDate(a)?.getTime() ?? 0;
-          const dB = getCandidateReceivedDate(b)?.getTime() ?? 0;
+          const dA = getCandidateLastActiveDate(a)?.getTime() ?? 0;
+          const dB = getCandidateLastActiveDate(b)?.getTime() ?? 0;
           return (dA - dB) * dirMul;
         }
         case "location": {
@@ -1025,7 +1052,7 @@ function NewJobPageContent() {
     };
 
     return [...filtered].sort(cmp);
-  }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, sortKey, sortDir]);
+  }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, sortKey, sortDir, launchedCandidateKeys]);
 
   const totalPages = Math.max(1, Math.ceil(sortedCandidates.length / candidatesPerPage));
   const paginatedCandidates = sortedCandidates.slice(
@@ -1235,7 +1262,7 @@ function NewJobPageContent() {
     if (dncPhones.size === 0) return new Set<string>();
     const keys = new Set<string>();
     for (const c of candidates) {
-      const id = c.candidate_id || c.id;
+      const id = c.candidate_id || c.jobdiva_candidate_id || c.id;
       if (!id) continue;
       const np = normalizePhone(c.phone);
       if (np && dncPhones.has(np)) {
@@ -3846,23 +3873,11 @@ function NewJobPageContent() {
         criteria: `Must be open to ${arrangementLabel} work arrangement`,
       });
     }
-    let availabilityText = "";
-    if (!jobData.start_date || availabilityDate === 'ASAP') {
-      availabilityText = "What is your earliest availability to start a new role? Ideally, we're looking for someone who can start as soon as possible.";
-    } else {
-      const d = new Date(jobData.start_date + 'T00:00:00Z');
-      if (!isNaN(+d)) {
-        d.setUTCDate(d.getUTCDate() - 1);
-        const formatted = d.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric', timeZone: 'UTC' });
-        availabilityText = `What is your earliest availability to start a new role? Ideally, we are looking for a candidate who can start by ${formatted}.`;
-      } else {
-        availabilityText = "What is your earliest availability to start a new role? Ideally, we're looking for someone who can start as soon as possible.";
-      }
-    }
+    const availabilityText = "What is your earliest availability to start a new role?";
 
     defaultQs.push(
-      { text: availabilityText, criteria: `Must be available by ${availabilityDate}` },
-      { text: "What is your current compensation and expected compensation?", criteria: "" },
+      { text: availabilityText, criteria: "" },
+      { text: "What is your expected compensation for this role?", criteria: "" },
       { text: "Which types of working arrangements are you open to and eligible for? Select all that apply: W2 Employee, Subcontractor to Pyramid through your current employer, Independent Contractor", criteria: "" },
       { text: "Are you authorized to work indefinitely for any employer in the United States?", criteria: "" },
       { text: "Will you now or in the future require visa sponsorship to continue working in the United States?", criteria: "" },
@@ -4306,38 +4321,6 @@ function NewJobPageContent() {
       };
     });
   }, [rubricData, workAuthorization, jobData?.work_authorization]);
-
-  // Inject Step 1 employment-type selections (e.g. "W2", "C2C") as individual
-  // Required rows in Step 3's "Other Requirements". Parallel to the workAuth
-  // injector above: uses its own signature ref so flipping selections on
-  // Step 1 re-injects (added types appear), but deleting a row on Step 3
-  // does NOT re-add it while the signature is unchanged.
-  const injectedEmpTypesRef = useRef<string>("");
-  useEffect(() => {
-    if (!rubricData) return;
-    if (!selectedEmpTypes || selectedEmpTypes.length === 0) return;
-    const signature = selectedEmpTypes.slice().sort().join("|");
-    if (injectedEmpTypesRef.current === signature) return;
-
-    setRubricData((prev: any) => {
-      if (!prev) return prev;
-      const existing: any[] = Array.isArray(prev.other_requirements) ? prev.other_requirements : [];
-      const existingLower = new Set(
-        existing
-          .map((item: any) => (typeof item?.value === "string" ? item.value.trim().toLowerCase() : ""))
-          .filter(Boolean)
-      );
-      const toAdd = selectedEmpTypes
-        .filter(t => !existingLower.has(String(t).trim().toLowerCase()))
-        .map(t => ({ value: String(t), required: "Required", source: "Step1" }));
-      injectedEmpTypesRef.current = signature;
-      if (toAdd.length === 0) return prev;
-      return {
-        ...prev,
-        other_requirements: [...toAdd, ...existing],
-      };
-    });
-  }, [rubricData, selectedEmpTypes]);
 
   useEffect(() => {
     if (currentStep !== 4) return;
@@ -5114,7 +5097,7 @@ function NewJobPageContent() {
                 }
               }
               setCandidates(prev => prev.map(c => (
-                String(c.candidate_id || c.id || "") === targetId
+                String(c.candidate_id || c.jobdiva_candidate_id || c.id || "") === targetId
                   ? { ...c, ...patch }
                   : c
               )));
@@ -5831,7 +5814,7 @@ function NewJobPageContent() {
 
     const effective = contactOverrides
       ? candidates.map(c => {
-        const id = c.candidate_id || c.id;
+        const id = c.candidate_id || c.jobdiva_candidate_id || c.id;
         const override = contactOverrides[id];
         return override
           ? {
@@ -5852,7 +5835,7 @@ function NewJobPageContent() {
     // the auto-deselect from handleLaunchPairClick. The backend repeats
     // this check at /candidates/save — defense in depth.
     const candidatesPayload = effective
-      .filter(c => launchIds.has(c.candidate_id || c.id))
+      .filter(c => launchIds.has(c.candidate_id || c.jobdiva_candidate_id || c.id))
       .filter(c => {
         if (dncPhones.size === 0) return true;
         const np = normalizePhone(c.phone);
@@ -5872,7 +5855,7 @@ function NewJobPageContent() {
           }
         }
         return {
-          candidate_id: String(c.candidate_id || c.id || "unknown"),
+          candidate_id: String(c.candidate_id || c.jobdiva_candidate_id || c.id || "unknown"),
           name: displayName || "Unnamed Candidate",
           email: c.email || null,
           phone: c.phone || null,
@@ -5949,6 +5932,7 @@ function NewJobPageContent() {
     let totalDncSkipped = 0;
     let totalFailedBatches = 0;
     let engageFailureMessage: string | null = null;
+    let skippedCandidateNames: string[] = [];
 
     for (let i = 0; i < batches.length; i++) {
       const batch = batches[i];
@@ -6025,6 +6009,17 @@ function NewJobPageContent() {
             batchAlreadySent = Array.isArray(engageRes.skipped_already_sent)
               ? engageRes.skipped_already_sent.length
               : 0;
+
+            if (Array.isArray(engageRes.skipped_already_sent) && engageRes.skipped_already_sent.length > 0) {
+              const skippedNames = engageRes.skipped_already_sent.map((id: string) => {
+                const c = candidates.find(cand => (cand.candidate_id || cand.id) === id);
+                if (c) {
+                  return c.name || [c.firstName, c.lastName].filter(Boolean).join(" ") || c.email || id;
+                }
+                return id;
+              }).filter(Boolean);
+              skippedCandidateNames.push(...skippedNames);
+            }
           } else {
             batchEngageError = engageRes.message || "PAIR rejected the batch";
           }
@@ -6060,6 +6055,13 @@ function NewJobPageContent() {
         totalEngaged,
         totalFailedBatches,
       }));
+    }
+
+    if (skippedCandidateNames.length > 0) {
+      showToast(
+        `Skipped ${skippedCandidateNames.join(", ")} (Already Launched)`,
+        "info"
+      );
     }
 
     if (totalDncSkipped > 0) {
@@ -6138,8 +6140,10 @@ function NewJobPageContent() {
         const reviewList: MissingContactCandidate[] = [];
         const launchJobdivaId = jobdivaId || jobData?.jobdiva_id || numericJobId || undefined;
         for (const c of candidates) {
-          const id = String(c.candidate_id || c.id || "").trim();
+          const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
           if (!id || !selectedCandidates.has(id)) continue;
+          const currentPhone = getCandidateLaunchPhone(c);
+          const currentEmail = getCandidateLaunchEmail(c);
           reviewList.push({
             candidate_id: id,
             name: getCandidateDisplayName(c) || c.name || "Unnamed",
@@ -6149,8 +6153,8 @@ function NewJobPageContent() {
             jobdiva_id: launchJobdivaId ? String(launchJobdivaId) : undefined,
             needsPhone: true,
             needsEmail: true,
-            currentPhone: c.phone || "",
-            currentEmail: c.email || "",
+            currentPhone,
+            currentEmail,
           });
         }
         if (reviewList.length === 0) {
@@ -6164,11 +6168,12 @@ function NewJobPageContent() {
         return;
       }
 
-      const candidatesMissingPhone = candidates.filter(c => {
-        const id = c.candidate_id || c.id;
+      const candidatesMissingContact = candidates.filter(c => {
+        const id = c.candidate_id || c.jobdiva_candidate_id || c.id;
         if (!selectedCandidates.has(id)) return false;
-        const digits = String(c.phone || "").replace(/\D/g, "");
-        return digits.length < 7;
+        const phone = getCandidateLaunchPhone(c);
+        const email = getCandidateLaunchEmail(c);
+        return !isValidLaunchPhone(phone) || !isValidLaunchEmail(email);
       });
 
       // Open the progress modal upfront so the recruiter sees enrichment
@@ -6177,10 +6182,10 @@ function NewJobPageContent() {
       setLaunchProgress({
         ...initialLaunchProgress,
         open: true,
-        phase: candidatesMissingPhone.length > 0 ? "enriching" : "launching",
+        phase: candidatesMissingContact.length > 0 ? "enriching" : "launching",
         totalCandidates: selectedCandidates.size,
         batchSize: LAUNCH_BATCH_SIZE,
-        enrichTotal: candidatesMissingPhone.length,
+        enrichTotal: candidatesMissingContact.length,
       });
 
       const contactOverrides: Record<string, { phone?: string; email?: string }> = {};
@@ -6191,8 +6196,8 @@ function NewJobPageContent() {
       let enrichFailedCount = 0;
       let noContactFoundCount = 0;
 
-      for (const c of candidatesMissingPhone) {
-        const id = String(c.candidate_id || c.id || "").trim();
+      for (const c of candidatesMissingContact) {
+        const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
         if (!id) continue;
 
         const linkedinUrlCandidates = [
@@ -6279,7 +6284,7 @@ function NewJobPageContent() {
 
       if (enrichedCount > 0) {
         setCandidates(prev => prev.map(c => {
-          const cid = String(c.candidate_id || c.id || "").trim();
+          const cid = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
           const override = contactOverrides[cid];
           if (!override) return c;
           return {
@@ -6296,15 +6301,15 @@ function NewJobPageContent() {
         showToast(`ZoomInfo enriched: ${parts.join(" · ")}.`, "success");
       }
 
-      const unresolvedMissing = candidatesMissingPhone.filter(c => {
-        const cid = String(c.candidate_id || c.id || "").trim();
-        const overridePhone = contactOverrides[cid]?.phone || c.phone || "";
-        const digits = String(overridePhone).replace(/\D/g, "");
-        return digits.length < 7;
+      const unresolvedMissing = candidatesMissingContact.filter(c => {
+        const cid = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
+        const overridePhone = contactOverrides[cid]?.phone || getCandidateLaunchPhone(c);
+        const overrideEmail = contactOverrides[cid]?.email || getCandidateLaunchEmail(c);
+        return !isValidLaunchPhone(overridePhone) || !isValidLaunchEmail(overrideEmail);
       }).length;
 
       if (unresolvedMissing > 0) {
-        showToast(`${unresolvedMissing} selected candidate${unresolvedMissing === 1 ? "" : "s"} still missing phone after enrichment.`, "info");
+        showToast(`${unresolvedMissing} selected candidate${unresolvedMissing === 1 ? "" : "s"} still missing phone or email after enrichment.`, "info");
       }
 
       if (missingLinkedInCount > 0 || enrichFailedCount > 0 || noContactFoundCount > 0) {
@@ -6323,7 +6328,7 @@ function NewJobPageContent() {
       const dncDropped = new Set<string>();
       if (dncPhones.size > 0) {
         for (const c of candidates) {
-          const id = String(c.candidate_id || c.id || "").trim();
+          const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
           if (!id || !selectedCandidates.has(id)) continue;
           const overridePhone = contactOverrides[id]?.phone;
           const phoneToCheck = overridePhone || c.phone;
@@ -6355,12 +6360,12 @@ function NewJobPageContent() {
       const emailToCandidateIds = new Map<string, string[]>();
       const phoneToCandidateIds = new Map<string, string[]>();
       for (const c of candidates) {
-        const id = String(c.candidate_id || c.id || "").trim();
+        const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
         if (!id || !selectedCandidates.has(id) || dncDropped.has(id)) continue;
         const overrideEmail = contactOverrides[id]?.email;
         const overridePhone = contactOverrides[id]?.phone;
-        const effectiveEmail = String(overrideEmail || c.email || "").trim().toLowerCase();
-        const effectivePhone = overridePhone || c.phone || "";
+        const effectiveEmail = String(overrideEmail || getCandidateLaunchEmail(c)).trim().toLowerCase();
+        const effectivePhone = overridePhone || getCandidateLaunchPhone(c);
         if (isValidLaunchEmail(effectiveEmail)) {
           const ids = emailToCandidateIds.get(effectiveEmail) || [];
           ids.push(id);
@@ -6384,12 +6389,12 @@ function NewJobPageContent() {
         for (const id of ids) duplicatePhoneIds.add(id);
       }
       for (const c of candidates) {
-        const id = String(c.candidate_id || c.id || "").trim();
+        const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
         if (!id || !selectedCandidates.has(id) || dncDropped.has(id)) continue;
         const overridePhone = contactOverrides[id]?.phone;
         const overrideEmail = contactOverrides[id]?.email;
-        const effectivePhone = overridePhone || c.phone;
-        const effectiveEmail = String(overrideEmail || c.email || "").trim().toLowerCase();
+        const effectivePhone = overridePhone || getCandidateLaunchPhone(c);
+        const effectiveEmail = String(overrideEmail || getCandidateLaunchEmail(c)).trim().toLowerCase();
         const phoneOK = isValidLaunchPhone(effectivePhone) && !duplicatePhoneIds.has(id);
         const emailOK = isValidLaunchEmail(effectiveEmail) && !duplicateEmailIds.has(id);
         if (phoneOK && emailOK) {
@@ -7504,26 +7509,24 @@ function NewJobPageContent() {
                   {candidates.length > 0 && (
                     <div className="flex items-center gap-1.5 mt-3 flex-wrap">
                       {([
-                        { id: "all", label: "All", count: inRadiusCount },
+                        { id: "all", label: "All", count: totalCandidatesCount },
                         { id: "jobdiva", label: "JobDiva", count: sourceCounts["jobdiva"] || 0 },
                         { id: "linkedin-unipile", label: "LinkedIn-Unipile", count: sourceCounts["linkedin-unipile"] || 0 },
                         { id: "linkedin-exa", label: "LinkedIn-Exa", count: sourceCounts["linkedin-exa"] || 0 },
                         { id: "dice", label: "Dice", count: sourceCounts["dice"] || 0 },
-                        { id: "upload-resume", label: "Upload-Resume", count: sourceCounts["upload-resume"] || 0 },
-                        { id: "beyond", label: `Beyond ${currentWithinMiles}mi`, count: sourceCounts["beyond"] || 0 }
+                        { id: "upload-resume", label: "Upload-Resume", count: sourceCounts["upload-resume"] || 0 }
                       ] as const).map(pill => {
                         if (pill.id !== "all" && pill.count === 0) return null;
                         const active = sourceFilter === pill.id;
-                        const isBeyond = pill.id === "beyond";
                         return (
                           <button
                             key={pill.id}
                             onClick={() => { setSourceFilter(pill.id as any); setCurrentPage(1); }}
                             className={`px-2.5 py-1 rounded-full text-[11px] font-bold uppercase tracking-wider border transition-colors ${active
-                              ? (isBeyond ? 'bg-amber-500 text-white border-amber-500' : 'bg-[#6366f1] text-white border-[#6366f1]')
-                              : (isBeyond ? 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50')}`}
+                              ? 'bg-[#6366f1] text-white border-[#6366f1]'
+                              : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}`}
                           >
-                            {pill.label} <span className={`ml-1 font-medium ${active ? 'text-white/80' : isBeyond ? 'text-amber-500' : 'text-slate-400'}`}>{pill.count}</span>
+                            {pill.label} <span className={`ml-1 font-medium ${active ? 'text-white/80' : 'text-slate-400'}`}>{pill.count}</span>
                           </button>
                         );
                       })}
@@ -7539,18 +7542,18 @@ function NewJobPageContent() {
                         const n = Math.max(1, selectBestN);
                         const firstN = candidates
                           .filter(c => {
-                            const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
+                            const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
                             return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
                           })
                           .slice(0, n);
 
-                        const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.id));
+                        const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.jobdiva_candidate_id || c.id));
 
                         if (allFirstNSelected) {
                           setSelectedCandidates(prev => {
                             const next = new Set(prev);
                             firstN.forEach(c => {
-                              const id = c.candidate_id || c.id;
+                              const id = c.candidate_id || c.jobdiva_candidate_id || c.id;
                               next.delete(id);
                             });
                             return next;
@@ -7559,7 +7562,7 @@ function NewJobPageContent() {
                           setSelectedCandidates(prev => {
                             const next = new Set(prev);
                             firstN.forEach(c => {
-                              const id = c.candidate_id || c.id;
+                              const id = c.candidate_id || c.jobdiva_candidate_id || c.id;
                               next.add(id);
                             });
                             return next;
@@ -7572,11 +7575,11 @@ function NewJobPageContent() {
                         const n = Math.max(1, selectBestN);
                         const firstN = candidates
                           .filter(c => {
-                            const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
+                            const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
                             return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
                           })
                           .slice(0, n);
-                        const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.id));
+                        const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.jobdiva_candidate_id || c.id));
                         return allFirstNSelected ? 'Deselect Best' : 'Select Best';
                       })()
                       }
@@ -7610,10 +7613,10 @@ function NewJobPageContent() {
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white"
                       onClick={() => {
                         const eligible = candidates.filter(c => {
-                          const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
+                          const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
                           return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
                         });
-                        const allIds = eligible.map(c => c.candidate_id || c.id);
+                        const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
 
                         if (allSelected) {
@@ -7627,10 +7630,10 @@ function NewJobPageContent() {
                     >
                       {(() => {
                         const eligible = candidates.filter(c => {
-                          const key = `${c.source ?? ''}:${c.candidate_id || c.id}`;
+                          const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
                           return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
                         });
-                        const allIds = eligible.map(c => c.candidate_id || c.id);
+                        const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
                         return allSelected ? 'Deselect All' : 'Select All';
                       })()
@@ -7872,7 +7875,7 @@ function NewJobPageContent() {
                       onPhoneSaved={(id, normalised) => {
                         setCandidates((prev) =>
                           prev.map((c) =>
-                            (c.candidate_id || c.id) === id ? { ...c, phone: normalised } : c
+                            (c.candidate_id || c.jobdiva_candidate_id || c.id) === id ? { ...c, phone: normalised } : c
                           )
                         );
                       }}

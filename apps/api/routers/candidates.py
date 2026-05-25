@@ -2999,7 +2999,7 @@ async def get_candidate_evaluation_report(
             job_details = {
                 "job_id":            job_row.get("job_id"),
                 "jobdiva_id":        job_row.get("jobdiva_id"),
-                "title":             job_row.get("title") or job_row.get("enhanced_title"),
+                "title":             job_row.get("enhanced_title") or job_row.get("title"),
                 "customer_name":     job_row.get("customer_name"),
                 "city":              job_row.get("city"),
                 "state":             job_row.get("state"),

@@ -159,8 +159,38 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 else:
                     logger.warning(f"Webhook: No audit log found for interview {payload.interview_id}")
 
-                # 1. Update engage_interview_audit (matching interview_id)
+                # --- 70% threshold + hard filter check (Curate owns this logic) ---
+                # Pair Bot sends 'completed' when all questions are answered.
+                # Curate decides the final pass/fail from that completed result.
+                # For in_progress: no evaluation yet — just track the status.
+                effective_status = payload.status
+                if payload.status == 'completed':
+                    hf_raw = (payload.hard_filter_status or '').lower().strip()
+                    # No hard filter (None / empty / 'not_hard_filter') = automatically passed
+                    hf_passed = hf_raw in ('passed', 'pass', '', 'not_hard_filter') or payload.hard_filter_status is None
 
+                    # Score threshold: candidate_score is on 0–100 scale from Pair Bot.
+                    # If None → no scored questions in this interview → skip threshold.
+                    if payload.candidate_score is not None:
+                        score_passed = payload.candidate_score >= 70.0
+                    else:
+                        score_passed = True  # No scored Q10+ questions → threshold doesn't apply
+
+                    if hf_passed and score_passed:
+                        effective_status = 'passed'
+                        logger.info(
+                            f"Webhook: interview {payload.interview_id} → PASSED "
+                            f"(hf={hf_raw or 'none'}, score={payload.candidate_score})"
+                        )
+                    else:
+                        effective_status = 'failed'
+                        logger.info(
+                            f"Webhook: interview {payload.interview_id} → FAILED "
+                            f"(hf={hf_raw or 'none'}, hf_passed={hf_passed}, "
+                            f"score={payload.candidate_score}, score_passed={score_passed})"
+                        )
+
+                # 1. Update engage_interview_audit (matching interview_id)
                 cur.execute(
                     """
                     UPDATE engage_interview_audit
@@ -169,26 +199,30 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                         updated_at = CURRENT_TIMESTAMP
                     WHERE interview_id = %s
                     """,
-                    (payload.status, json.dumps(payload.dict()), str(payload.interview_id))
+                    (effective_status, json.dumps(payload.dict()), str(payload.interview_id))
                 )
-                
+
                 # 2. Update sourced_candidates.data
                 now_iso = datetime.now(timezone.utc).isoformat()
                 candidate_blob: Dict[str, Any] = {
-                    "engage_status": payload.status,
+                    "engage_status": effective_status,
                     "engage_updated_at": now_iso,
                     "engage_interview_id": str(payload.interview_id),
                     "engage_last_response": detail_payload,
                 }
-                if payload.total_score is not None:
-                    candidate_blob["engage_total_score"] = payload.total_score
-                if payload.candidate_score is not None:
-                    candidate_blob["engage_score"] = payload.candidate_score
-                    candidate_blob["engage_candidate_score"] = payload.candidate_score
-                if payload.completed_at:
-                    candidate_blob["engage_completed_at"] = payload.completed_at
-                if payload.hard_filter_status:
-                    candidate_blob["engage_hard_filter_status"] = payload.hard_filter_status
+                # Only write scores + outcome fields for completed interviews.
+                # For in_progress, we just track the status — scores arrive with
+                # the final completed webhook once all questions are answered.
+                if payload.status == 'completed':
+                    if payload.total_score is not None:
+                        candidate_blob["engage_total_score"] = payload.total_score
+                    if payload.candidate_score is not None:
+                        candidate_blob["engage_score"] = payload.candidate_score
+                        candidate_blob["engage_candidate_score"] = payload.candidate_score
+                    if payload.completed_at:
+                        candidate_blob["engage_completed_at"] = payload.completed_at
+                    if payload.hard_filter_status:
+                        candidate_blob["engage_hard_filter_status"] = payload.hard_filter_status
 
                 cur.execute(
                     """
@@ -216,9 +250,9 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 
             conn.commit()
 
-        # Check for pass condition and fire email if needed
-        # Prioritize hard_filter_status if provided, otherwise fallback to status
-        check_status = (payload.hard_filter_status or payload.status).lower()
+        # Check for pass condition and fire email if needed.
+        # Use the effective_status already resolved above (passed/failed/in_progress).
+        check_status = effective_status.lower()
         
         # Safe import of ENGAGE_PASSED_STATUSES
         try:

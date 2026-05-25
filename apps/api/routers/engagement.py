@@ -314,7 +314,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 "job_id": job_row.get("job_id") or request.job_id,
                 "jobdiva_id": job_row.get("jobdiva_id") or "",
                 "context": {
-                    "title": job_row.get("title", ""),
+                    "title": job_row.get("enhanced_title") or job_row.get("title", ""),
                     "customer_name": job_row.get("customer_name") or "Unknown",
                     "city": job_row.get("city") or "TBD",
                     "state": job_row.get("state") or "",
@@ -1323,6 +1323,30 @@ async def get_assessment_data(interview_id: str):
     if transcription_data and "data" in transcription_data:
         transcription_data = transcription_data["data"]
 
+    # Prefer Curate's resolved pass/fail status when available so assessment
+    # surfaces the effective engagement result instead of Pair Bot's raw
+    # completion state.
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    SELECT status
+                    FROM engage_interview_audit
+                    WHERE interview_id = %s
+                    ORDER BY updated_at DESC NULLS LAST, id DESC
+                    LIMIT 1
+                    """,
+                    (interview_id,),
+                )
+                audit_row = cur.fetchone()
+                if audit_row and interview_data:
+                    effective_status = str(audit_row.get("status") or "").strip()
+                    if effective_status:
+                        interview_data["status"] = effective_status
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to overlay effective interview status for {interview_id}: {e}")
+
     return {
         "success": True,
         "interview_id": interview_id,
@@ -1460,7 +1484,7 @@ async def _check_and_fire_candidate_passed_notification(
 
         # 4. Fetch Job & Candidate metadata for email
         cur.execute("""
-            SELECT job_id, title, city, state, pay_rate, recruiter_emails, jobdiva_id
+            SELECT job_id, title, enhanced_title, city, state, pay_rate, recruiter_emails, jobdiva_id
             FROM monitored_jobs
             WHERE job_id = %s OR jobdiva_id = %s
             ORDER BY (job_id ~ '^[0-9]+$') DESC, created_at DESC
@@ -1597,7 +1621,7 @@ async def _check_and_fire_candidate_passed_notification(
         # Create JobDiva Note: PAIR Pass Candidate Report
         # Note: We use the job title from job_row for the message
         base_url = resolve_app_base_url(request.app_base_url if 'request' in locals() else "")
-        pair_job_title = job_row.get("title") or "the"
+        pair_job_title = job_row.get("enhanced_title") or job_row.get("title") or "the"
         report_link = f"{base_url}/jobs/{app_job_id}/report?candidateId={candidate_id}"
         note_text = f"Candidate completed Phone Screen for {pair_job_title} position. <a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report."
         
@@ -1625,7 +1649,7 @@ async def _check_and_fire_candidate_passed_notification(
             summary=interview_block.get("summary") or "Passed screening criteria.",
             screening_summary=screening_summary,
             jobdiva_id=job_row["jobdiva_id"] or job_id,
-            job_title=job_row["title"],
+            job_title=job_row.get("enhanced_title") or job_row.get("title") or "",
             location=f"{job_row['city']}, {job_row['state']}" if job_row['city'] else "—",
             salary_range=job_row["pay_rate"] or "—",
             recruiter_emails=recruiter_emails,
