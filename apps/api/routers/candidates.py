@@ -938,16 +938,23 @@ async def get_job_candidates(job_id_or_ref: str):
             elif raw_score is not None:
                 cand["engage_score"] = raw_score
 
+            hf_display = str(cand.get("engage_hard_filter_status") or "").lower()
+            score_display = cand.get("engage_score")
+
             # Format engage_status
             cur_status = cand.get("engage_status") or "pending"
             status_display = "Pending"
             s = cur_status.lower()
-            if s in ["passed", "completed", "hired", "pass"]:
+            if s in ["passed", "hired", "pass"]:
                 status_display = "Pass"
             elif s in ["failed", "rejected", "fail"]:
                 status_display = "Fail"
             elif s in ["in_progress", "in progress"]:
                 status_display = "In Progress"
+            elif s == "completed":
+                hf_passed = hf_display in ["", "pass", "passed", "not_hard_filter"]
+                score_passed = score_display is None or float(score_display) >= 70.0
+                status_display = "Pass" if (hf_passed and score_passed) else "Fail"
             
             cand["engage_status"] = status_display
 
@@ -3164,12 +3171,17 @@ async def get_candidate_evaluation_report(
         status_display = "Pending"
         if engage_status:
             s = engage_status.lower()
-            if s in ["passed", "completed", "hired", "pass"]:
+            if s in ["passed", "hired", "pass"]:
                 status_display = "Pass"
             elif s in ["failed", "rejected", "fail"]:
                 status_display = "Fail"
             elif s in ["in_progress", "in progress"]:
                 status_display = "In Progress"
+            elif s == "completed":
+                hf_display = (hard_filter_status or "").lower()
+                hf_passed = hf_display in ["", "pass", "passed", "not_hard_filter"]
+                score_passed = display_engage_score is None or float(display_engage_score) >= 70.0
+                status_display = "Pass" if (hf_passed and score_passed) else "Fail"
 
         scores = {
             "resume_match_score":    resume_match_score,
