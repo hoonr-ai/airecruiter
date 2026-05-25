@@ -1460,19 +1460,24 @@ class JobDivaService:
                 candidate["title"] = specialty
 
         # City/state can be more accurate in detail (TalentSearch sometimes
-        # returns work-location vs candidate-location).
-        if not candidate.get("city"):
-            v = take(["city", "CITY", "locationCity", "LOCATIONCITY"])
-            if v:
-                candidate["city"] = v
-        if not candidate.get("state"):
-            v = take(["state", "STATE", "locationState", "LOCATIONSTATE"])
-            if v:
-                candidate["state"] = v
-        if (candidate.get("city") or candidate.get("state")) and not candidate.get("location"):
-            candidate["location"] = ", ".join(
-                [p for p in [candidate.get("city", ""), candidate.get("state", "")] if p]
-            ).strip()
+        # returns work-location vs candidate-location). When the detail
+        # endpoint has a value, it wins — TalentSearch's value is the one
+        # that diverges from what JobDiva shows on the candidate profile.
+        detail_city = take(["city", "CITY", "locationCity", "LOCATIONCITY"])
+        detail_state = take(["state", "STATE", "locationState", "LOCATIONSTATE"])
+        city_changed = False
+        state_changed = False
+        if detail_city and detail_city != candidate.get("city"):
+            candidate["city"] = detail_city
+            city_changed = True
+        if detail_state and detail_state != candidate.get("state"):
+            candidate["state"] = detail_state
+            state_changed = True
+        if city_changed or state_changed or not candidate.get("location"):
+            parts = [candidate.get("city", ""), candidate.get("state", "")]
+            candidate["location"] = ", ".join([p for p in parts if p]).strip()
+        if city_changed or state_changed:
+            counters["location"] = counters.get("location", 0) + 1
 
     def _build_talent_boolean(self, skills: List[Any], location: str) -> str:
         terms = []

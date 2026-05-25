@@ -425,6 +425,13 @@ class UnifiedCandidateSearch:
                     self._log_stage("Applicants", "No applicants found.")
                     return
 
+                # Stamp api_rank by final list position so the Step-5 UI sorts
+                # by JobDiva's native order (recency, when sorted above; or
+                # whatever order JobDiva returned, otherwise). The frontend
+                # comparator prefers api_rank over match_score when present.
+                for _idx, _a in enumerate(applicants):
+                    _a["api_rank"] = _idx + 1
+
                 self._log_stage(
                     "Applicants",
                     f"Found {len(applicants)} applicants; starting resume screen...",
@@ -437,9 +444,16 @@ class UnifiedCandidateSearch:
                     return
 
                 self._attach_cached_enhanced_info(applicants)
+                from core import sourcing_config as _sc_applicants
                 async for cand in self._enrich_filtered_jobdiva_candidates(applicants, criteria):
                     assessment = self._filter_assessment(cand, criteria, enforce_years=True)
-                    if not assessment["passes"]:
+                    if _sc_applicants.JOBDIVA_BYPASS_PASS_GATE:
+                        # Match-score and matched/missing are still computed and
+                        # ride along in screening_summary as a soft signal, but
+                        # the gate stops rejecting — JobDiva native order +
+                        # recruiter judgement is the source of truth.
+                        assessment["passes"] = True
+                    elif not assessment["passes"]:
                         self._log_stage(
                             "Applicants",
                             f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
@@ -481,9 +495,12 @@ class UnifiedCandidateSearch:
                     self._log_stage("TalentSearch", "No talent-pool candidates returned.")
                     return
                 self._attach_cached_enhanced_info(talent_pool)
+                from core import sourcing_config as _sc_talent
                 async for cand in self._enrich_filtered_jobdiva_candidates(talent_pool, criteria):
                     assessment = self._filter_assessment(cand, criteria, enforce_years=True)
-                    if not assessment["passes"]:
+                    if _sc_talent.JOBDIVA_BYPASS_PASS_GATE:
+                        assessment["passes"] = True
+                    elif not assessment["passes"]:
                         self._log_stage(
                             "TalentSearch",
                             f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",

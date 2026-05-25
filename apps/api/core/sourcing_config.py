@@ -67,6 +67,22 @@ REQUIRED_MATCH_RATIO = 0.3
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# JobDiva — bypass the Stage-5 pass gate entirely
+# ─────────────────────────────────────────────────────────────────────────
+# When True, JobDiva-sourced candidates (Applicants + Talent Search) are
+# always emitted with `assessment.passes = True`, regardless of what
+# `_filter_assessment(enforce_years=True)` returned. `matched`/`missing`
+# are still computed and travel on the wire as `screening_summary`, so
+# the UI can render a leniency badge — but no candidate is rejected.
+#
+# Rationale: JobDiva's own ranking (recency for Applicants, JobAgent rank
+# for Talent Search) is the source of truth for ordering; our match
+# scorer is a rough estimation, not a filter. Other sources (LinkedIn,
+# Dice, Exa) still honor REQUIRED_MATCH_RATIO.
+JOBDIVA_BYPASS_PASS_GATE = True
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # Fast-path TalentSearch (skip blocking CandidatesDetail, hydrate async)
 # ─────────────────────────────────────────────────────────────────────────
 # When True, `_search_talent_pool` and the JobAgent sibling path skip the
