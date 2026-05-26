@@ -5382,29 +5382,7 @@ function NewJobPageContent() {
     userHasEditedQuestionsRef.current = true;
     setScreenQuestions(prev => prev.map(q => {
       if (q.id === id) {
-        let next = { ...q, [field]: value };
-        // F2: if pass_criteria changed on an availability question, sync the target into question_text
-        if (field === 'pass_criteria' && isAvailabilityQuestion(q)) {
-          const parsed = parseAvailabilityCriteria(value);
-          if (parsed.mode === 'asap') {
-            const base = q.question_text.split('. ')[0];
-            next.question_text = `${base}. Ideally, we're looking for someone who can start as soon as possible.`;
-          } else {
-            const dateObj = new Date(parsed.iso + 'T00:00:00Z');
-            // Subtract one day for the bot's question to "focus on a day before" as requested
-            dateObj.setUTCDate(dateObj.getUTCDate() - 1);
-            
-            const targetStr = dateObj.toLocaleDateString('en-US', {
-              month: 'short',
-              day: '2-digit',
-              year: 'numeric',
-              timeZone: 'UTC'
-            });
-            const base = q.question_text.split('. ')[0].split('?')[0];
-            next.question_text = `${base}? Ideally, we are looking for a candidate who can start by ${targetStr}.`;
-          }
-        }
-        return next;
+        return { ...q, [field]: value };
       }
       return q;
     }));
@@ -5707,60 +5685,13 @@ function NewJobPageContent() {
               </div>
 
               <div className="flex-1 min-w-0 border-l border-slate-100 pl-3">
-                {isAvailabilityQuestion(q) ? (() => {
-                  // F2: availability question renders a date picker + ASAP
-                  // toggle so recruiters don't have to free-type a date and
-                  // can't end up with a stale baked-in value.
-                  const parsed = parseAvailabilityCriteria(q.pass_criteria);
-                  const isASAP = parsed.mode === "asap";
-                  return (
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <input
-                        type="date"
-                        value={parsed.iso ?? ""}
-                        disabled={isASAP}
-                        onChange={(e) => {
-                          const iso = e.target.value;
-                          updateScreenQuestion(
-                            q.id,
-                            "pass_criteria",
-                            formatAvailabilityCriteria(iso ? { mode: "date", iso } : { mode: "asap" })
-                          );
-                        }}
-                        className={`text-[13px] bg-white border border-slate-200 rounded-md px-2 py-1 font-medium focus:outline-none focus:ring-2 focus:ring-[#6366f1]/30 focus:border-[#6366f1] ${isASAP ? "text-slate-400" : "text-[#4f46e5]"}`}
-                      />
-                      <label className="inline-flex items-center gap-1.5 text-[12px] text-slate-600 cursor-pointer select-none">
-                        <input
-                          type="checkbox"
-                          checked={isASAP}
-                          onChange={(e) => {
-                            if (e.target.checked) {
-                              updateScreenQuestion(q.id, "pass_criteria", formatAvailabilityCriteria({ mode: "asap" }));
-                            } else {
-                              // Uncheck → default to today so the picker has a sensible value.
-                              const today = new Date().toISOString().slice(0, 10);
-                              updateScreenQuestion(
-                                q.id,
-                                "pass_criteria",
-                                formatAvailabilityCriteria({ mode: "date", iso: today })
-                              );
-                            }
-                          }}
-                          className="w-3.5 h-3.5 rounded border-slate-300 text-[#6366f1] focus:ring-[#6366f1]/30"
-                        />
-                        ASAP
-                      </label>
-                    </div>
-                  );
-                })() : (
-                  <textarea
-                    value={q.pass_criteria}
-                    onChange={(e) => updateScreenQuestion(q.id, 'pass_criteria', e.target.value)}
-                    rows={2}
-                    className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${q.pass_criteria ? 'text-[#4f46e5]' : 'text-slate-300 italic'}`}
-                    placeholder="No hard filter"
-                  />
-                )}
+                <textarea
+                  value={q.pass_criteria}
+                  onChange={(e) => updateScreenQuestion(q.id, 'pass_criteria', e.target.value)}
+                  rows={2}
+                  className={`w-full text-[13px] bg-transparent border-none outline-none font-medium resize-none whitespace-pre-wrap break-words ${q.pass_criteria ? 'text-[#4f46e5]' : 'text-slate-300 italic'}`}
+                  placeholder="No hard filter"
+                />
               </div>
 
               <div className="w-10 flex-shrink-0 flex flex-col items-end gap-2 pr-1">
