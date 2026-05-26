@@ -554,6 +554,13 @@ class SourcedCandidatesStorage:
                         print(f"Error parsing candidate data: {e}")
                 if c_dict.get('created_at'):
                     c_dict['created_at'] = str(c_dict['created_at'])
+                
+                # Sanitize phone numbers
+                if c_dict.get('phone'):
+                    from core.utils import is_valid_phone
+                    if not is_valid_phone(c_dict['phone']):
+                        c_dict['phone'] = None
+                        
                 candidates.append(c_dict)
                 
             cur.close()
@@ -791,6 +798,13 @@ class SourcedCandidatesStorage:
                         logger.debug(f"Error parsing candidate.data json: {e}")
                 if c_dict.get("created_at"):
                     c_dict["created_at"] = str(c_dict["created_at"])
+                
+                # Sanitize phone numbers
+                if c_dict.get("phone"):
+                    from core.utils import is_valid_phone
+                    if not is_valid_phone(c_dict["phone"]):
+                        c_dict["phone"] = None
+                        
                 # Numeric -> float for JSON serialization
                 if c_dict.get("match_score") is not None:
                     try:

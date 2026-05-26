@@ -248,6 +248,10 @@ class UnifiedCandidateSearch:
 
         def finalize_candidate(cand):
             """Apply match scoring to a candidate."""
+            from core.utils import is_valid_phone
+            if not is_valid_phone(cand.get("phone")):
+                cand["phone"] = None
+                
             # Ensure name is title-cased if it exists
             if cand.get("name"):
                 cand["name"] = str(cand["name"]).title()

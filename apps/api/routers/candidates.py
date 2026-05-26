@@ -3123,11 +3123,16 @@ async def get_candidate_evaluation_report(
         # ----------------------------------------------------------------
         # Compose final report
         # ----------------------------------------------------------------
+        phone = cand_row.get("phone")
+        from core.utils import is_valid_phone
+        if phone and not is_valid_phone(phone):
+            phone = None
+
         candidate_info = {
             "candidate_id":    candidate_id,
             "name":            cand_row.get("name"),
             "email":           cand_row.get("email"),
-            "phone":           cand_row.get("phone"),
+            "phone":           phone,
             "headline":        cand_row.get("headline"),
             "location":        cand_row.get("location"),
             "source":          cand_row.get("source"),
