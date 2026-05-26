@@ -305,12 +305,11 @@ function ResumeScreeningHoverCard({
       : explainability[0]?.text || "";
 
   return (
-    <div 
-      className={`absolute left-1/2 top-full z-40 mt-3 w-[420px] -translate-x-1/2 rounded-2xl border border-slate-200 bg-white/95 p-5 text-left shadow-2xl backdrop-blur-md transition-all duration-300 origin-top ${
-        open 
-          ? "opacity-100 translate-y-0 scale-100 visible pointer-events-auto" 
+    <div
+      className={`absolute left-1/2 top-full z-40 mt-3 w-[420px] -translate-x-1/2 rounded-2xl border border-slate-200 bg-white/95 p-5 text-left shadow-2xl backdrop-blur-md transition-all duration-300 origin-top ${open
+          ? "opacity-100 translate-y-0 scale-100 visible pointer-events-auto"
           : "opacity-0 -translate-y-2 scale-95 invisible pointer-events-none"
-      }`}
+        }`}
     >
       {titleAtCompany && (
         <div className="mb-1.5 text-[12.5px] font-semibold text-slate-800 break-words whitespace-normal leading-relaxed" title={titleAtCompany}>
@@ -387,12 +386,11 @@ function HardFilterHoverCard({
   if (!details || details.length === 0) return null;
 
   return (
-    <div 
-      className={`absolute left-1/2 top-full z-40 mt-3 w-[420px] -translate-x-1/2 rounded-2xl border border-slate-200 bg-white/95 p-4 text-left shadow-2xl backdrop-blur-md transition-all duration-300 origin-top ${
-        open 
-          ? "opacity-100 translate-y-0 scale-100 visible pointer-events-auto" 
+    <div
+      className={`absolute left-1/2 top-full z-40 mt-3 w-[420px] -translate-x-1/2 rounded-2xl border border-slate-200 bg-white/95 p-4 text-left shadow-2xl backdrop-blur-md transition-all duration-300 origin-top ${open
+          ? "opacity-100 translate-y-0 scale-100 visible pointer-events-auto"
           : "opacity-0 -translate-y-2 scale-95 invisible pointer-events-none"
-      }`}
+        }`}
     >
       <div className="mb-3 flex items-center justify-between border-b border-slate-100 pb-2.5">
         <span className="text-[12px] font-bold uppercase tracking-widest text-slate-800 flex items-center gap-2">
@@ -405,8 +403,8 @@ function HardFilterHoverCard({
       </div>
       <div className="space-y-2.5 max-h-[380px] overflow-y-auto pr-2 scrollbar-thin scrollbar-thumb-slate-200">
         {details.map((item, index) => (
-          <div 
-            key={`${item.question}-${index}`} 
+          <div
+            key={`${item.question}-${index}`}
             className="group/item rounded-xl border border-slate-200 bg-slate-50/50 p-3 hover:border-indigo-200 hover:bg-white transition-all duration-200"
           >
             <div className="mb-2 flex items-start justify-between gap-3">
@@ -414,13 +412,12 @@ function HardFilterHoverCard({
                 {item.question}
               </div>
               <span
-                className={`shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide shadow-sm ${
-                  item.status === "Pass"
+                className={`shrink-0 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide shadow-sm ${item.status === "Pass"
                     ? "border-emerald-200 bg-emerald-50 text-emerald-700"
                     : item.status === "Fail"
                       ? "border-rose-200 bg-rose-50 text-rose-700"
                       : "border-amber-200 bg-amber-50 text-amber-700"
-                }`}
+                  }`}
               >
                 {item.status}
               </span>
@@ -1321,8 +1318,8 @@ export default function CandidateRankingsPage() {
           const source = String(c.source || "").toLowerCase();
           const sourcePriority =
             source.includes("linkedin") ? 0 :
-            source.includes("talentsearch") || source.includes("talent_search") ? 1 :
-            source.includes("applicants") ? 2 : 3;
+              source.includes("talentsearch") || source.includes("talent_search") ? 1 :
+                source.includes("applicants") ? 2 : 3;
           const matchScore = Number(c.match_score || c.resume_match_percentage || c.data?.match_score || 0);
           return {
             hasJobDivaCandidateId,
@@ -1731,7 +1728,7 @@ export default function CandidateRankingsPage() {
 
         {/* HTML Exact Replica Table */}
         <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm relative max-w-full">
-          <div 
+          <div
             className="overflow-x-auto overflow-y-auto rounded-2xl pb-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent"
             style={{ maxHeight: 'calc(100vh - 320px)' }}
           >
@@ -2134,7 +2131,7 @@ export default function CandidateRankingsPage() {
 
 
 
-                        <TableCell 
+                        <TableCell
                           className="text-center align-middle py-3 px-2 font-medium text-slate-700 text-[13px] transition-colors border-l border-slate-200"
                           onMouseEnter={() => {
                             if (showEngageScore) setHoveredEngageScoreKey(candidateKey);
@@ -2152,8 +2149,8 @@ export default function CandidateRankingsPage() {
                                   <span className="font-bold text-slate-900 text-[14px] underline decoration-indigo-200 underline-offset-4">
                                     {eScore}/{eTotal}
                                   </span>
-                                  <HardFilterHoverCard 
-                                    details={hardFilterDetails} 
+                                  <HardFilterHoverCard
+                                    details={hardFilterDetails}
                                     open={hoveredEngageScoreKey === candidateKey}
                                   />
                                 </div>
