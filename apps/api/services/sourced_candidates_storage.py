@@ -253,12 +253,18 @@ def _extract_resume_contact_details(resume_text: str) -> Dict[str, Any]:
     if email_match:
         extracted["email"] = email_match.group(1).strip()
 
-    phone_match = re.search(
-        r"(\+?\d[\d\-\(\)\s]{7,}\d)",
+    phone_matches = re.finditer(
+        r"(\+?\d[\d\-\(\) \t]{7,}\d)",
         cleaned,
     )
-    if phone_match:
-        extracted["phone"] = re.sub(r"\s+", " ", phone_match.group(1)).strip()
+    for match in phone_matches:
+        candidate_phone = re.sub(r"\s+", " ", match.group(1)).strip()
+        # Validate: a real phone number has at least 10 digit characters and isn't abnormally long.
+        # Year ranges like "2017 - 2021" only contain 8 digits and must be rejected.
+        digit_count = sum(1 for c in candidate_phone if c.isdigit())
+        if digit_count >= 10 and len(candidate_phone) <= 25:
+            extracted["phone"] = candidate_phone
+            break
 
     urls: Dict[str, str] = {}
     for raw_url in re.findall(r"(https?://[^\s\]\)<>]+|www\.[^\s\]\)<>]+|linkedin\.com/[^\s\]\)<>]+|github\.com/[^\s\]\)<>]+)", cleaned, re.IGNORECASE):
