@@ -566,7 +566,8 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
             "resumes": final_resumes,
             "jd": jd,
             "company_intro": (job_row.get("bot_introduction") or "") if job_row else "",
-            "interview_duration": "20-25"
+            "interview_duration": "20-25",
+            "source": "Curate"
         }
 
         payload_str = json.dumps(payload, indent=2)
