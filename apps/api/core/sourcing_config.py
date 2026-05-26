@@ -48,7 +48,7 @@ STRIP_YEARS_FROM_BOOLEAN = True
 # field is often a constant default (4) populated from the job title alone,
 # which causes real candidates to be dropped before their resume is parsed.
 # Real YOE check still runs at Stage 5 against the LLM-extracted value.
-SKIP_JOBDIVA_YOE_PRECHECK = False
+SKIP_JOBDIVA_YOE_PRECHECK = True
 
 
 # ─────────────────────────────────────────────────────────────────────────

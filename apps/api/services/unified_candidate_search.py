@@ -470,45 +470,40 @@ class UnifiedCandidateSearch:
 
         async def produce_jobdiva_talent():
             """
-            Run the boolean-string Talent Search against the JobDiva talent pool.
-            Independent of Applicants — runs whenever "JobDiva" is in sources.
+            Run JobAgentSearch. Thin records are emitted immediately so the UI
+            shows candidates as fast as possible. LLM scoring + resume enrichment
+            runs asynchronously in the background and pushes candidate_detail
+            patches for each candidate as they complete.
             """
             try:
                 if not talent_selected:
                     return
                 await queue.put({"type": "stage", "data": "Searching JobDiva Talent Search..."})
-                self._log_stage("TalentSearch", "Running JobDiva Talent boolean search...")
+                self._log_stage("JobAgent", "Running JobDiva JobAgentSearch (j9b)...")
                 talent_res = await self._search_jobdiva_talent(criteria)
                 talent_pool = talent_res.get("candidates", [])
                 summary["talent_search_count"] = len(talent_pool)
                 if talent_res.get("jobdiva_criteria_unconfigured"):
                     summary["jobdiva_criteria_unconfigured"] = True
 
-                # HOTFIX: Hard cap at 100 — see Applicants stage above.
-                # JobAgent results arrive in JobDiva's API rank order
-                # (preserved end-to-end via `api_rank`); this slice keeps the
-                # top-100 by JobDiva's own ranking.
                 if talent_pool and len(talent_pool) > 100:
                     self._log_stage(
-                        "TalentSearch",
+                        "JobAgent",
                         f"Capping {len(talent_pool)} talent profiles to top-100 by JobAgent rank.",
                     )
                     talent_pool = talent_pool[:100]
 
                 if not talent_pool:
-                    self._log_stage("TalentSearch", "No talent-pool candidates returned.")
+                    self._log_stage("JobAgent", "No candidates returned from JobAgentSearch.")
                     return
-                self._attach_cached_enhanced_info(talent_pool)
-                from core import sourcing_config as _sc_talent
-                async for cand in self._enrich_filtered_jobdiva_candidates(talent_pool, criteria):
-                    assessment = self._filter_assessment(cand, criteria, enforce_years=True)
-                    if _sc_talent.JOBDIVA_BYPASS_PASS_GATE:
-                        assessment["passes"] = True
-                    elif not assessment["passes"]:
-                        self._log_stage(
-                            "TalentSearch",
-                            f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
-                        )
+
+                self._log_stage(
+                    "JobAgent",
+                    f"Streaming {len(talent_pool)} candidates immediately; LLM scoring runs in background.",
+                )
+                # Emit all thin records to the UI right away — no LLM blocking here.
+                for cand in talent_pool:
+                    assessment = {"passes": True, "matched": [], "missing": [], "excluded": []}
                     await emit_candidate(cand, assessment, "qualified_talent")
             except Exception as e:
                 logger.error(f"JobDiva Talent stage failed: {e}", exc_info=True)
@@ -713,32 +708,27 @@ class UnifiedCandidateSearch:
                 if event.get("type") == "candidate":
                     cand_payload = event.get("data") or {}
                     src = str(cand_payload.get("source") or "")
-                    if src.startswith("JobDiva"):
+                    # Only enrich JobAgent/TalentSearch candidates in background;
+                    # Applicants are already enriched via the blocking path.
+                    if src in ("JobDiva-JobAgent", "JobDiva-TalentSearch"):
                         hydration_targets.append(cand_payload)
                 yield event
 
-            # Phase 4 of fast-path: now that the foreground list is streamed,
-            # hydrate the top of the JobDiva pool with CandidatesDetail. Each
-            # page emits per-candidate "candidate_detail" events into the same
-            # SSE stream so the UI can merge in place. Order targets by
-            # api_rank ASC so top JobAgent results hydrate first — matches
-            # the UI display order. Records without api_rank (other sources)
-            # sort last.
-            from core import sourcing_config as _sc
-            if hydration_targets and _sc.FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH:
+            # Background enrichment: resume fetch + LLM scoring + CandidatesDetail.
+            # JobAgent candidates were emitted thin; now enrich them in background
+            # and push candidate_detail patches as each completes.
+            if hydration_targets:
                 def _hydration_key(c: Dict[str, Any]) -> int:
                     rank = c.get("api_rank")
                     return rank if isinstance(rank, int) else 10**9
                 hydration_targets.sort(key=_hydration_key)
-                hydration_targets = hydration_targets[
-                    : _sc.FAST_PATH_DETAIL_BACKGROUND_MAX_CANDIDATES
-                ]
+                hydration_targets = hydration_targets[:100]
                 hydration_task = asyncio.create_task(
-                    self._hydrate_jobdiva_in_background(
-                        hydration_targets, queue, SENTINEL
+                    self._enrich_jobdiva_in_background(
+                        hydration_targets, criteria, queue, SENTINEL
                     )
                 )
-                # Drain hydration events. Hydration emits SENTINEL when done.
+                # Drain enrichment patch events. Task emits SENTINEL when done.
                 while True:
                     event = await queue.get()
                     if event is SENTINEL:
@@ -901,6 +891,146 @@ class UnifiedCandidateSearch:
             raise
         except Exception as exc:
             logger.exception("Hydration task failed: %s", exc)
+        finally:
+            try:
+                await queue.put(sentinel)
+            except Exception:
+                pass
+
+
+    async def _enrich_jobdiva_in_background(
+        self,
+        candidates: List[Dict[str, Any]],
+        criteria: "SearchCriteria",
+        queue: asyncio.Queue,
+        sentinel: Any,
+    ) -> None:
+        """Background enrichment for JobAgent candidates.
+
+        For each candidate: fetch resume (if missing), run LLM extraction,
+        compute match score, and emit a candidate_detail patch so the UI can
+        merge enriched data into already-rendered rows.
+
+        Runs after thin records have been streamed to the frontend. Concurrency
+        is capped at 10; overall deadline is 5 minutes.
+        """
+        from services.sourced_candidates_storage import process_jobdiva_candidate
+
+        semaphore = asyncio.Semaphore(10)
+
+        async def _enrich_single(cand: Dict[str, Any]) -> None:
+            cid = str(cand.get("candidate_id") or cand.get("id") or "")
+            if not cid:
+                return
+            async with semaphore:
+                try:
+                    # Step 1: fetch resume text if not already present.
+                    resume_text = cand.get("resume_text") or ""
+                    if not resume_text or "Resume content unavailable" in resume_text:
+                        try:
+                            resume_data = await self.jobdiva_service.get_candidate_resume(
+                                cid, resume_id=cand.get("resume_id")
+                            )
+                            resume_text = (resume_data or {}).get("resume_text", "")
+                            if resume_text and "Resume content unavailable" not in resume_text:
+                                cand["resume_text"] = resume_text
+                                for _k in ("resume_id", "email", "phone", "title", "location"):
+                                    _v = (resume_data or {}).get(_k)
+                                    if _v and not cand.get(_k):
+                                        cand[_k] = _v
+                        except Exception as _re:
+                            logger.debug("Background resume fetch failed for %s: %s", cid, _re)
+
+                    if not cand.get("resume_text"):
+                        await queue.put({
+                            "type": "candidate_detail",
+                            "candidate_id": cid,
+                            "patch": {"resume_missing": True, "enrichment_status": "no_resume"},
+                        })
+                        return
+
+                    # Step 2: LLM extraction.
+                    enhanced = await process_jobdiva_candidate(cand)
+                    if isinstance(enhanced, dict) and enhanced is not cand:
+                        cand["enhanced_info"] = enhanced.get("raw", enhanced)
+                    else:
+                        cand["enhanced_info"] = {}
+                    cand["enhanced_info_status"] = "completed"
+
+                    ei = cand.get("enhanced_info") or {}
+                    patch: Dict[str, Any] = {"enrichment_status": "completed", "enhanced_info": ei}
+
+                    for _src, _dst in [
+                        ("candidate_name", "name"),
+                        ("email", "email"),
+                        ("phone", "phone"),
+                        ("job_title", "title"),
+                        ("current_location", "location"),
+                        ("years_of_experience", "experience_years"),
+                    ]:
+                        _val = ei.get(_src)
+                        if _val:
+                            patch[_dst] = _val
+                            cand[_dst] = _val
+
+                    for _sk in ("structured_skills", "skills"):
+                        _val = ei.get(_sk)
+                        if _val:
+                            patch["skills"] = _val
+                            cand["skills"] = _val
+                            break
+
+                    for _ek in ("candidate_education", "education"):
+                        _val = ei.get(_ek)
+                        if _val:
+                            patch["education"] = _val
+                            break
+
+                    # Step 3: compute match score from enriched data.
+                    score_result = self._score_candidate(cand, criteria)
+                    patch["match_score"] = score_result.get("score", 0)
+                    patch["match_score_details"] = score_result.get("score_details", {})
+
+                    assessment = self._filter_assessment(cand, criteria, enforce_years=True)
+                    assessment["passes"] = True  # JOBDIVA_BYPASS_PASS_GATE
+                    patch["screening_summary"] = {
+                        "matched": assessment["matched"][:10],
+                        "missing": assessment["missing"][:10],
+                        "excluded": assessment["excluded"][:10],
+                        "passes_strict": assessment["passes"],
+                    }
+
+                    await queue.put({
+                        "type": "candidate_detail",
+                        "candidate_id": cid,
+                        "patch": patch,
+                    })
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("Background enrichment failed for candidate_id=%s: %s", cid, exc)
+
+        try:
+            tasks = [asyncio.ensure_future(_enrich_single(c)) for c in candidates]
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=300.0,
+                )
+            except asyncio.TimeoutError:
+                incomplete = sum(1 for t in tasks if not t.done())
+                logger.warning(
+                    "Background LLM enrichment hit 300s deadline; %d/%d candidates incomplete",
+                    incomplete, len(tasks),
+                )
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Background enrichment task failed: %s", exc)
         finally:
             try:
                 await queue.put(sentinel)
@@ -3106,8 +3236,9 @@ class UnifiedCandidateSearch:
                             self._log_stage("ResumeScreen", f"successfully fetched resume for candidate_id={candidate_id} ({len(resume_text)} chars)")
 
                     if not candidate.get("resume_text"):
-                        self._log_stage("ResumeScreen", f"skipped candidate_id={candidate_id}; no resume text available")
-                        return {"status": "no_resume", "candidate": None}
+                        self._log_stage("ResumeScreen", f"no resume for candidate_id={candidate_id}; returning as profile-only")
+                        candidate["resume_missing"] = True
+                        return {"status": "success", "candidate": candidate}
 
                     # PR-B: cheap pre-LLM YOE gate. Drops candidates whose
                     # resume text confidently shows fewer years than the
