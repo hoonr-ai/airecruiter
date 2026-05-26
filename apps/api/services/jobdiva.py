@@ -886,7 +886,7 @@ class JobDivaService:
         criteria_unconfigured = False
 
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=300.0) as client:
                 response = await client.get(url, params=params, headers=headers)
             if response.status_code != 200:
                 body = response.text or ""
