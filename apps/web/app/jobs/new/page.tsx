@@ -5642,7 +5642,7 @@ function NewJobPageContent() {
                 <Users className="w-3 h-3 text-white" />
               </div>
               <span className="text-[12px] font-bold text-slate-800">Bot Introduction</span>
-              <span className="text-[11px] text-slate-400 font-normal">— what Nova says at the start of each call. Variables in {"{{brackets}}"} are filled at runtime.</span>
+              <span className="text-[11px] text-slate-400 font-normal">— what Alex says at the start of each call. Variables in {"{{brackets}}"} are filled at runtime.</span>
             </div>
             <textarea
               value={botIntroduction}
