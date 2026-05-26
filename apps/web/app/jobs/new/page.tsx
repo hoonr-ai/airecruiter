@@ -3546,7 +3546,7 @@ function NewJobPageContent() {
             <div className="flex items-center gap-2 mb-4">
               <Lightbulb className="w-4 h-4 text-slate-900" />
               <h3 className="text-[14px] font-bold text-slate-800">Other Requirements</h3>
-              <span className="text-[12px] text-slate-500 font-normal">Location constraints, shift requirements, work authorization, etc.</span>
+              <span className="text-[12px] text-slate-500 font-normal">Location constraints, shift requirements, etc.</span>
             </div>
 
             <div className="space-y-0">
