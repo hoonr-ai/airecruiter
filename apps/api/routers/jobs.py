@@ -247,10 +247,10 @@ def _backfill_monitored_jobs_counters_sync() -> None:
                                 THEN candidate_id
                             END) AS cm,
                             COUNT(DISTINCT CASE
-                                WHEN (data->>'engage_status' IN ('passed', 'pass', 'completed'))
-                                  OR (LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
-                                      AND (NULLIF(data->>'engage_score', '')::float >= 70))
-                                THEN candidate_id
+                WHEN (data->>'engage_status' IN ('passed', 'pass'))
+                  OR (LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
+                      AND (NULLIF(data->>'engage_score', '')::float >= 70))
+                THEN candidate_id
                             END) AS ps
                         FROM sourced_candidates
                         GROUP BY jobdiva_id
@@ -1833,7 +1833,7 @@ def _aggregate_candidate_metrics(cursor, jobdiva_keys: List[str]) -> Dict[str, D
                 THEN candidate_id
             END)                                                                       AS complete_submissions,
             COUNT(DISTINCT CASE
-                WHEN (data->>'engage_status' IN ('passed', 'pass', 'completed'))
+                WHEN (data->>'engage_status' IN ('passed', 'pass'))
                   OR (LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
                       AND (NULLIF(data->>'engage_score', '')::float >= 70))
                 THEN candidate_id

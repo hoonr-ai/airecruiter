@@ -258,7 +258,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
         try:
             from routers.engagement import ENGAGE_PASSED_STATUSES
         except ImportError:
-            ENGAGE_PASSED_STATUSES = ["passed", "completed", "hired"]
+            ENGAGE_PASSED_STATUSES = ["passed", "hired"]
             
         if check_status in [s.lower() for s in ENGAGE_PASSED_STATUSES] and payload.total_score is not None:
             if target_job_id and target_candidate_id:

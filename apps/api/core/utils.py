@@ -24,3 +24,24 @@ def normalize_skill(skill_name: str) -> str:
     s = re.sub(r'[^a-z0-9_+#]', '', s)
     
     return s.strip('_')
+
+def is_valid_phone(phone_str: str) -> bool:
+    """
+    Validates a phone number string to ensure it's not a dummy/masked number.
+    Rejects strings containing sequences like 000000, 999999, etc.
+    """
+    if not phone_str:
+        return False
+        
+    # Strip all non-digit characters to check the underlying number
+    digits = re.sub(r'\D', '', str(phone_str))
+    
+    # Phone number must have at least 10 digits
+    if len(digits) < 10:
+        return False
+        
+    # Reject known dummy patterns often used by Job Boards (e.g. 94657-000000, 999-999-9999)
+    if "000000" in digits or "999999" in digits or "111111" in digits:
+        return False
+        
+    return True
