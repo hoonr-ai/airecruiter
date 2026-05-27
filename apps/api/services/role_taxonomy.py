@@ -125,6 +125,45 @@ def _fuzzy_leaf(title: str, *, min_score: int = 85) -> str | None:
     return match[0] if match else None
 
 
+def _tokenise(text: str) -> set[str]:
+    return {t for t in _norm(text).replace(",", " ").replace("-", " ").split() if t}
+
+
+@lru_cache(maxsize=4096)
+def _canonical_substring_leaf(title: str) -> str | None:
+    """Shortest K17000 leaf whose token set is a superset of the input's tokens.
+
+    Prevents fuzzy from picking a niche leaf when the input is a generic title:
+    "Data Scientist" used to resolve to "Data Science Writer" via WRatio, and
+    its K10000/K5000 family then inherited the writer-flavoured siblings. The
+    canonical branch instead requires every input token to appear as a token
+    in the leaf, and picks the leaf with the fewest extra tokens.
+    """
+    if not _LEAF_NAMES or not title:
+        return None
+    input_tokens = _tokenise(title)
+    if not input_tokens:
+        return None
+    # Require at least one significant token in the input; otherwise we'd match
+    # any leaf containing a single generic word like "manager" alone.
+    if not any(t not in _GENERIC_TOKENS and len(t) >= 4 for t in input_tokens):
+        return None
+
+    best_leaf: str | None = None
+    best_count = 10**9
+    for leaf in _LEAF_NAMES:
+        leaf_tokens = _tokenise(leaf)
+        if not input_tokens.issubset(leaf_tokens):
+            continue
+        count = len(leaf_tokens)
+        if count < best_count:
+            best_count = count
+            best_leaf = leaf
+            if count == len(input_tokens):
+                return leaf
+    return best_leaf
+
+
 def _exact_at_level(value: str) -> dict | None:
     """If `value` appears as an exact value at K10000 or K5000, return a representative record.
 
@@ -192,6 +231,27 @@ def _accept(rec: dict | None, input_title: str) -> dict | None:
     return None
 
 
+def _is_relevant_sibling(input_title: str, sibling_leaf: str) -> bool:
+    """A sibling is kept only if it shares a real concept with the input.
+
+    Two K10000/K5000 family members can share zero meaningful overlap with the
+    input (e.g. "Last Mile Coordinator" sits in the IT Project Manager K5000
+    family alongside legitimate PMs). The resolver-side `_share_significant_token`
+    gate only checks input vs resolved leaf, not input vs each expanded sibling
+    — which is why those families leaked through.
+
+    Accept if either:
+      - a non-generic ≥4-char token (or prefix-equal pair) is shared, or
+      - rapidfuzz token_set_ratio ≥ 60 (handles spelling variants like
+        "frontend"/"front end" where significant tokens differ on the surface).
+    """
+    if not sibling_leaf:
+        return False
+    if _share_significant_token(input_title, sibling_leaf):
+        return True
+    return fuzz.token_set_ratio(input_title, sibling_leaf) >= 60
+
+
 def _resolve(title: str) -> dict | None:
     """Resolve a free-text title to its taxonomy record.
 
@@ -199,7 +259,10 @@ def _resolve(title: str) -> dict | None:
       1. Exact K17000 leaf match (raw and stripped) — always accepted.
       2. Exact match at K10000/K5000 family level — accepted only if the
          representative leaf shares a significant token with the input.
-      3. Fuzzy K17000 leaf match (WRatio, cutoff 85) — same significant-token
+      3. Canonical-substring K17000 leaf — shortest leaf whose tokens are a
+         superset of the input's. Prefers a generic-looking leaf over a fuzzy
+         pick into a niche variant ("Data Scientist" → "Data Science Writer").
+      4. Fuzzy K17000 leaf match (WRatio, cutoff 85) — same significant-token
          gate. Tried on raw then on the qualifier-stripped form.
 
     The significant-token gate is what prevents accidental cross-domain
@@ -214,6 +277,11 @@ def _resolve(title: str) -> dict | None:
         if key and (rec := _BY_LEAF.get(key)):
             return rec
         if key and (rec := _accept(_exact_at_level(key), title)):
+            return rec
+
+    for candidate in (title, _strip_qualifiers(title)):
+        leaf = _canonical_substring_leaf(candidate)
+        if leaf and (rec := _accept(_BY_LEAF.get(_norm(leaf)), title)):
             return rec
 
     for candidate in (raw, stripped):
@@ -234,41 +302,98 @@ def _collect(rec: dict, level: str, exclude: set[str]) -> list[str]:
     return [leaf for leaf in leaves if _norm(leaf) not in exclude]
 
 
-def expand_title(base_title: str, *, max_results: int = 30) -> list[dict]:
+def _direct_family_leaves(title: str) -> list[tuple[str, str]]:
+    """Leaves whose K10000 or K5000 EQUALS the input (raw or qualifier-stripped).
+
+    For generic titles like "Software Engineer" / "Business Analyst" there is
+    no K17000 leaf to resolve to, but the input IS the family name — those
+    families collectively have 41 / 68 members respectively. Going through
+    `_resolve` would either fail (NO MATCH) or pick a niche leaf via fuzzy
+    whose K10000/K5000 belongs to a different family entirely.
+
+    K10000 members come before K5000; duplicates across levels are skipped.
+    """
+    if not title:
+        return []
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for key_form in (_norm(title), _norm(_strip_qualifiers(title))):
+        if not key_form:
+            continue
+        for level in ("ROLE_K10000", "ROLE_K5000"):
+            for leaf in _INDEX.get(level, {}).get(key_form, []):
+                k = _norm(leaf)
+                if k not in seen:
+                    seen.add(k)
+                    out.append((leaf, level))
+    return out
+
+
+def expand_title(base_title: str, *, max_results: int = 10) -> list[dict]:
     """
     Expand a free-text title into similar/related titles using the taxonomy hierarchy.
 
     Returns a list of dicts ordered by relevance:
-        [{"title": "Strategic Project Manager", "relevance": "similar", "level": "ROLE_K1500"}, ...]
+        [{"title": "Strategic Project Manager", "relevance": "similar", "level": "ROLE_K10000"}, ...]
 
-    If the title can't be resolved (no exact, no fuzzy match above threshold), returns [].
+    Two paths feed the candidate pool:
+      a. If the input itself is a K10000/K5000 family name, take the whole family
+         directly (generic-title path).
+      b. Otherwise resolve the input to a K17000 leaf via `_resolve` and collect
+         its K10000 then K5000 siblings.
+
+    A per-sibling relevance filter then drops members that don't share a real
+    concept with the input — this is what prevents K5000 noise like
+    "Last Mile Coordinator" leaking into a "Project Manager" expansion.
+
+    Returns [] if neither path produces candidates.
     """
-    rec = _resolve(base_title)
-    if not rec:
+    if not base_title:
         return []
 
-    seed_leaf = rec.get("ROLE_K17000")
-    excluded = {_norm(seed_leaf)} if seed_leaf else set()
+    # Seed exclusion with the input itself (raw + qualifier-stripped) so we
+    # never recommend the user's own title back at them.
+    excluded: set[str] = {_norm(base_title)}
+    stripped_input = _norm(_strip_qualifiers(base_title))
+    if stripped_input:
+        excluded.add(stripped_input)
+    candidates: list[tuple[str, str]] = []  # (leaf, level)
+
+    # Path A — input itself is a K10000/K5000 family name (covers generic
+    # titles like "Software Engineer" that aren't K17000 leaves but ARE
+    # canonical family names).
+    for leaf, level in _direct_family_leaves(base_title):
+        k = _norm(leaf)
+        if k not in excluded:
+            candidates.append((leaf, level))
+            excluded.add(k)
+
+    # Path B — resolve the input to a K17000 leaf and take its K10000 then
+    # K5000 family. Run regardless of Path A: for titles like "Project Manager"
+    # that ARE K17000 leaves, the leaf-family path produces a bigger and
+    # better-curated set than the input-as-family-name path alone (which only
+    # finds K5000 members where the input is the exact family name).
+    rec = _resolve(base_title)
+    if rec:
+        seed_leaf = rec.get("ROLE_K17000")
+        if seed_leaf:
+            excluded.add(_norm(seed_leaf))
+        # K10000 (near-identical tier) before K5000 (broader, noisier).
+        for level in ("ROLE_K10000", "ROLE_K5000"):
+            for leaf in _collect(rec, level, excluded):
+                candidates.append((leaf, level))
+                excluded.add(_norm(leaf))
+
+    if not candidates:
+        return []
+
     out: list[dict] = []
-
-    # Only the tighter hierarchy levels feed similar-title expansion.
-    # K1500 / K1000 / K500 mix in cross-domain roles (e.g. K1500 for
-    # "Program Director" is "Community Program Coordinator" — pulls in
-    # community-services roles that aren't real PM peers). Restricting to
-    # K10000 + K5000 keeps siblings inside the same tight role family.
-    tier_for_level = {
-        "ROLE_K10000": "similar",
-        "ROLE_K5000": "similar",
-    }
-
-    for level, tier in tier_for_level.items():
+    for leaf, level in candidates:
         if len(out) >= max_results:
             break
-        for leaf in _collect(rec, level, excluded):
-            if len(out) >= max_results:
-                break
-            out.append({"title": leaf, "relevance": tier, "level": level})
-            excluded.add(_norm(leaf))
+        if not _is_relevant_sibling(base_title, leaf):
+            continue
+        out.append({"title": leaf, "relevance": "similar", "level": level})
 
     return out
 

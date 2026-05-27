@@ -494,10 +494,10 @@ IMPORTANT:
         # Augment each title with similar_titles from the role taxonomy.
         # Source: apps/api/data/job_role_taxonomy.json (17k roles, 9-level hierarchy).
         # Adds K17000 siblings in the same K5000/K1500 family, giving Step 5
-        # a useful expansion (~10-30 chips per title) without an LLM call.
+        # a tight set of the closest 10 chips per title without an LLM call.
         for t in final_titles:
             try:
-                expansions = role_taxonomy.expand_title(t.get("value", ""), max_results=30)
+                expansions = role_taxonomy.expand_title(t.get("value", ""), max_results=10)
             except Exception as e:
                 logger.warning("role_taxonomy.expand_title failed for %r: %s", t.get("value"), e)
                 expansions = []
@@ -506,7 +506,7 @@ IMPORTANT:
                 title = entry.get("title") if isinstance(entry, dict) else None
                 if title and title != t.get("value") and title not in existing:
                     existing.append(title)
-            t["similar_titles"] = existing[:30]
+            t["similar_titles"] = existing[:10]
 
         # Normalise additional education items
         education_raw = phase2_result.get("education", [])

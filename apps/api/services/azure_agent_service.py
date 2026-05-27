@@ -291,7 +291,7 @@ class AzureAgentService:
             existing_similar = list(data.get("similar_titles", []) or [])
             siblings: List[str] = []
             try:
-                expansions = role_taxonomy.expand_title(canonical, max_results=30)
+                expansions = role_taxonomy.expand_title(canonical, max_results=10)
             except Exception as e:
                 logger.warning("role_taxonomy.expand_title failed for %r: %s", canonical, e)
                 expansions = []
@@ -307,7 +307,7 @@ class AzureAgentService:
                 "matchType":      "Similar",
                 "required":       "Required",
                 "source":         "PAIR",
-                "similar_titles": merged[:30]
+                "similar_titles": merged[:10]
             })
 
         return result
