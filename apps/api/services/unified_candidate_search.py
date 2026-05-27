@@ -4094,7 +4094,7 @@ class UnifiedCandidateSearch:
     def _dedup_keys(self, candidate: Dict[str, Any]) -> List[str]:
         """Cross-source dedup keys for one candidate.
 
-        Each key is namespaced (`email:`, `linkedin:`, `name_loc:`) so two
+        Each key is namespaced (`email:`, `phone:`, `linkedin:`, `name_loc:`) so two
         candidates only collide when *one* of them genuinely overlaps —
         sharing a normalised LinkedIn URL is sufficient even if names
         differ slightly, and an email-with-`@` gates the email key
@@ -4105,6 +4105,12 @@ class UnifiedCandidateSearch:
         email = str(candidate.get("email") or "").strip().lower()
         if email and "@" in email:
             keys.append(f"email:{email}")
+
+        phone_raw = str(candidate.get("phone") or "")
+        phone_digits = "".join(filter(str.isdigit, phone_raw))
+        if len(phone_digits) >= 7:
+            # Use last 10 digits to normalize away country code prefixes
+            keys.append(f"phone:{phone_digits[-10:]}")
 
         profile_url = str(candidate.get("profile_url") or "").strip().lower()
         if profile_url and "linkedin.com" in profile_url:
@@ -4130,14 +4136,22 @@ class UnifiedCandidateSearch:
         unique_results = []
         
         for cand in candidates:
-            # Use email or combined name+city as key
             email = cand.get("email", "").lower().strip()
+            phone_raw = cand.get("phone", "")
+            phone_digits = "".join(filter(str.isdigit, phone_raw))
+            phone_key = phone_digits[-10:] if len(phone_digits) >= 7 else ""
+            
             name = f"{cand.get('firstName', '')} {cand.get('lastName', '')}".lower().strip()
             city = cand.get("city", "").lower().strip()
             
-            key = email if email else f"{name}|{city}"
+            if email:
+                key = f"email:{email}"
+            elif phone_key:
+                key = f"phone:{phone_key}"
+            else:
+                key = f"name_loc:{name}|{city}"
             
-            if not key or key == "|":
+            if not key or key == "name_loc:|":
                 unique_results.append(cand)
                 continue
                 
@@ -4145,10 +4159,20 @@ class UnifiedCandidateSearch:
                 seen[key] = cand
                 unique_results.append(cand)
             else:
-                # If we have a duplicate, prioritize JobDiva-Applicants over others
                 existing = seen[key]
-                if cand.get("source") == "JobDiva-Applicants" and existing.get("source") != "JobDiva-Applicants":
-                    # Replace existing with current
+                has_both_curr = bool(cand.get("email", "").strip()) and bool(cand.get("phone", "").strip())
+                has_both_exist = bool(existing.get("email", "").strip()) and bool(existing.get("phone", "").strip())
+                
+                # Prioritize: 1. Both email+phone, 2. JobDiva-Applicants
+                should_replace = False
+                if has_both_curr and not has_both_exist:
+                    should_replace = True
+                elif not has_both_curr and has_both_exist:
+                    should_replace = False
+                elif cand.get("source") == "JobDiva-Applicants" and existing.get("source") != "JobDiva-Applicants":
+                    should_replace = True
+
+                if should_replace:
                     for i, r in enumerate(unique_results):
                         if r == existing:
                             unique_results[i] = cand
