@@ -1957,7 +1957,7 @@ export default function CandidateRankingsPage() {
                     const screeningScore = candidate.match_score || 0;
                     const showEngageScore = hasFinalEngageOutcome(candidate);
                     const engageScore = showEngageScore ? (candidate.engage_score || 0) : 0;
-                    const totalScore = showEngageScore ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : screeningScore;
+                    const totalScore = showEngageScore ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : null;
 
                     return (
                       <TableRow key={`${candidateKey}-${idx}`} className="border-b border-slate-100 hover:bg-slate-50 transition-all duration-200 h-auto group leading-tight relative">
@@ -2163,10 +2163,10 @@ export default function CandidateRankingsPage() {
 
 
                         <TableCell className="text-center font-bold text-slate-900 text-[14px] align-middle py-3 px-2 transition-colors border-l border-slate-200">
-                          {totalScore ? (
+                          {totalScore !== null ? (
                             <span>{totalScore}/100</span>
                           ) : (
-                            <span className="font-normal opacity-30 italic">—</span>
+                            <span className="font-normal opacity-40 italic text-[13px]">Waiting</span>
                           )}
                         </TableCell>
 
