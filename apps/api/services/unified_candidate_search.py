@@ -171,6 +171,10 @@ class UnifiedCandidateSearch:
         # flag and the per-family override. None means "no active
         # family override" (use the global flag).
         self._current_family: Optional[str] = None
+        # Bounded concurrency for Exa Research API (1/5 account QPS). Lazy
+        # init in `search_candidates` so the env value is honoured at request
+        # time, not import time.
+        self._exa_agent_semaphore: Optional[asyncio.Semaphore] = None
 
     def _resolve_search_family(self, criteria: "SearchCriteria") -> Optional[str]:
         """Detect role family from the criteria's title + skill hints.
@@ -350,6 +354,21 @@ class UnifiedCandidateSearch:
         queue: asyncio.Queue = asyncio.Queue()
         SENTINEL = object()
 
+        # Exa Agent (Research API) Pass B coordination — Pass B waits for
+        # Pass A's external producer to finish, then snapshots the URLs it
+        # yielded to use as seeds for the research run. `_exa_yielded_candidates`
+        # holds the *live* candidate dicts so the deep-search patches can be
+        # merged onto the existing rows when URLs overlap.
+        from core import sourcing_config as _sc
+        exa_pass_a_done: asyncio.Event = asyncio.Event()
+        exa_yielded_candidates: List[Dict[str, Any]] = []
+        exa_pass_b_should_run = (
+            _sc.EXA_AGENT_ENABLED
+            and ("Exa" in criteria.sources)
+        )
+        if exa_pass_b_should_run and self._exa_agent_semaphore is None:
+            self._exa_agent_semaphore = asyncio.Semaphore(max(1, _sc.EXA_AGENT_CONCURRENCY))
+
         def build_screening(assessment):
             return {
                 "matched": assessment["matched"][:10],
@@ -406,6 +425,11 @@ class UnifiedCandidateSearch:
             if qualified_counter_key and assessment["passes"]:
                 summary[qualified_counter_key] += 1
             summary["total_candidates"] += 1
+            # Track Pass A's LinkedIn-Exa candidates so Pass B (Exa Research
+            # API) can seed its instructions with their URLs and merge
+            # enrichment patches back onto these exact dicts on overlap.
+            if exa_pass_b_should_run and str(cand.get("source") or "") == "LinkedIn-Exa":
+                exa_yielded_candidates.append(cand)
             await queue.put({"type": "candidate", "data": cand})
 
         async def emit_jobdiva_agent_result(cand, source_label):
@@ -802,8 +826,13 @@ class UnifiedCandidateSearch:
                         # plus a per-candidate match summary; preserves the
                         # original highlights in resume_text since downstream
                         # location extractors are tuned to that shape.
+                        # When EXA_AGENT_ENABLED, Pass B (Research API) is the
+                        # canonical enrichment path and supersedes this per-URL
+                        # get_contents() summary — keep this block as the
+                        # fallback when the agent path is disabled.
                         if (
                             source_type == "LinkedIn-Exa"
+                            and not exa_pass_b_should_run
                             and os.getenv("EXA_DEEP_ANALYSIS_ENABLED", "true").strip().lower() == "true"
                         ):
                             try:
@@ -868,6 +897,133 @@ class UnifiedCandidateSearch:
             except Exception as e:
                 logger.error(f"{name} search stage failed: {e}", exc_info=True)
             finally:
+                # Signal Pass A completion so the Exa Research producer can
+                # seed its run with the URLs we just yielded.
+                if name == "Exa" and exa_pass_b_should_run:
+                    exa_pass_a_done.set()
+                await queue.put(SENTINEL)
+
+        async def produce_exa_agent():
+            """Pass B: Exa Research API (`exa.research`) deep-search.
+
+            Waits for Pass A (LinkedIn-Exa producer) to finish, snapshots the
+            URLs it yielded, runs one research call that BOTH enriches those
+            URLs with structured fields (last_activity, follower_count,
+            recent_companies, fit_rationale) AND discovers additional
+            candidates. URL-overlapping results become `candidate_detail`
+            patches with stage `exa_deep_search`; new ones become fresh
+            `candidate` events tagged `LinkedIn-DeepSearch`.
+            """
+            try:
+                await queue.put({"type": "stage", "data": "Exa deep-research warming up..."})
+                # Bounded wait so a hung Pass A can't stall Pass B forever.
+                try:
+                    await asyncio.wait_for(exa_pass_a_done.wait(), timeout=120.0)
+                except asyncio.TimeoutError:
+                    logger.warning("Exa Pass A did not signal within 120s — running deep-research with no seeds")
+
+                seed_urls: List[str] = []
+                for c in exa_yielded_candidates:
+                    u = str(c.get("profile_url") or "").strip()
+                    if u:
+                        seed_urls.append(u)
+
+                await queue.put({"type": "stage", "data": "Exa deep-research running..."})
+
+                async with self._exa_agent_semaphore:
+                    try:
+                        results = await self.exa_service.deep_research_candidates(
+                            jd_title=self._role_hint_from_criteria(criteria) or (criteria.role_hint or ""),
+                            jd_role=self._role_hint_from_criteria(criteria) or (criteria.role_hint or ""),
+                            skills=criteria.sourcing_skill_values(),
+                            location=self._scope_location_to_us(criteria.location),
+                            seed_urls=seed_urls,
+                        )
+                    except Exception as e:
+                        logger.warning("deep_research_candidates raised: %s", e)
+                        results = []
+
+                if not results:
+                    return
+
+                def _norm_url(u: Any) -> str:
+                    s = str(u or "").strip().lower()
+                    if not s:
+                        return ""
+                    return s.split("?", 1)[0].rstrip("/")
+
+                pass_a_by_url: Dict[str, Dict[str, Any]] = {
+                    _norm_url(c.get("profile_url")): c
+                    for c in exa_yielded_candidates
+                    if c.get("profile_url")
+                }
+
+                for idx, entry in enumerate(results):
+                    if not isinstance(entry, dict):
+                        continue
+                    url = entry.get("linkedin_url") or ""
+                    nurl = _norm_url(url)
+                    patch_fields: Dict[str, Any] = {
+                        "exa_last_activity": entry.get("last_activity"),
+                        "exa_follower_count": entry.get("follower_count"),
+                        "exa_recent_companies": entry.get("recent_companies") or [],
+                        "exa_fit_rationale": entry.get("fit_rationale") or "",
+                    }
+
+                    if nurl and nurl in pass_a_by_url:
+                        existing = pass_a_by_url[nurl]
+                        cid = str(existing.get("candidate_id") or existing.get("id") or "")
+                        if not cid:
+                            continue
+                        prior_sources = existing.get("sources") or [existing.get("source") or "LinkedIn-Exa"]
+                        if not isinstance(prior_sources, list):
+                            prior_sources = [str(prior_sources)]
+                        merged = list(dict.fromkeys([*prior_sources, "LinkedIn-DeepSearch"]))
+                        patch_fields["sources"] = merged
+                        patch_fields["_stage"] = "exa_deep_search"
+                        existing["sources"] = merged
+                        existing.update({k: v for k, v in patch_fields.items() if v is not None})
+                        await queue.put({
+                            "type": "candidate_detail",
+                            "candidate_id": cid,
+                            "stage": "exa_deep_search",
+                            "patch": patch_fields,
+                        })
+                    else:
+                        new_id = f"exadeep_{idx}_{nurl[-32:] or 'unknown'}"
+                        new_cand: Dict[str, Any] = {
+                            "id": new_id,
+                            "candidate_id": new_id,
+                            "provider_id": new_id,
+                            "name": entry.get("name") or "",
+                            "firstName": (str(entry.get("name") or "").split(" ", 1) + [""])[0],
+                            "lastName": (str(entry.get("name") or "").split(" ", 1) + [""])[1],
+                            "title": entry.get("current_title") or "",
+                            "headline": entry.get("current_title") or "",
+                            "location": entry.get("location") or "",
+                            "profile_url": url,
+                            "source": "LinkedIn-DeepSearch",
+                            "sources": ["LinkedIn-DeepSearch"],
+                            "skills": [],
+                            "match_score": 0,
+                            "_stage": "exa_deep_search",
+                            **{k: v for k, v in patch_fields.items() if v is not None},
+                        }
+                        # Cross-source dedup so a deep-search hit doesn't
+                        # duplicate a row that some other producer (Unipile,
+                        # JobDiva) already emitted under a different id.
+                        keys = self._dedup_keys(new_cand)
+                        if any(k in seen_dedup_keys for k in keys):
+                            continue
+                        for k in keys:
+                            seen_dedup_keys.add(k)
+                        if new_id:
+                            seen_ids.add(new_id)
+                        summary["total_candidates"] += 1
+                        await queue.put({"type": "candidate", "data": new_cand})
+            except Exception as e:
+                logger.error(f"Exa Agent producer failed: {e}", exc_info=True)
+            finally:
                 await queue.put(SENTINEL)
 
         # Build producer tasks for all selected sources — run in parallel.
@@ -887,6 +1043,11 @@ class UnifiedCandidateSearch:
         for ext_name, ext_method in external_order:
             if ext_name in criteria.sources:
                 producers.append(asyncio.create_task(produce_external(ext_name, ext_method)))
+
+        # Exa Research API Pass B — depends on Pass A (`produce_external("Exa")`),
+        # so only schedule when both the agent is enabled AND Exa is selected.
+        if exa_pass_b_should_run:
+            producers.append(asyncio.create_task(produce_exa_agent()))
 
         # Drain the queue until every producer emits its SENTINEL.
         # Accumulate JobDiva-sourced candidates so we can hydrate them in
