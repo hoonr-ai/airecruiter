@@ -390,6 +390,95 @@ const getCandidateDisplayName = (candidate: {
   return candidate.source === "LinkedIn" ? "LinkedIn profile" : "Unnamed candidate";
 };
 
+// Extracted UI dedupe logic using email OR phone
+const deduplicateCandidatesUI = (candidatesList: any[]) => {
+  const normalizeEmail = (e?: string) => String(e || "").trim().toLowerCase();
+  const normalizePhoneValue = (p?: string) => {
+    const digits = String(p || "").replace(/\D/g, "");
+    return digits.length >= 7 ? digits.slice(-10) : "";
+  };
+
+  const getEmail = (c: any) => normalizeEmail(c.email || c.data?.email || c.enhanced_info?.email);
+  const getPhone = (c: any) => normalizePhoneValue(c.phone || c.data?.phone || c.enhanced_info?.phone);
+  const getNameLoc = (c: any) => {
+    const name = String(c.firstName || c.name || "").toLowerCase().trim() + "|" + String(c.lastName || "").toLowerCase().trim();
+    const city = String(c.city || c.location || "").toLowerCase().trim();
+    if (name === "|" && !city) return null;
+    return `${name}|${city}`;
+  };
+
+  let uniqueResults: any[] = [];
+
+  for (const cand of candidatesList) {
+    const cEmail = getEmail(cand);
+    const cPhone = getPhone(cand);
+    const cNameLoc = getNameLoc(cand);
+
+    if (!cEmail && !cPhone && !cNameLoc) {
+      uniqueResults.push(cand);
+      continue;
+    }
+
+    // Find ALL existing candidates that match
+    const matchIndices: number[] = [];
+    for (let i = 0; i < uniqueResults.length; i++) {
+      const existing = uniqueResults[i];
+      const eEmail = getEmail(existing);
+      const ePhone = getPhone(existing);
+      
+      let matches = false;
+      if (cEmail && eEmail && cEmail === eEmail) matches = true;
+      else if (cPhone && ePhone && cPhone === ePhone) matches = true;
+      else if (!cEmail && !cPhone && !eEmail && !ePhone && cNameLoc && cNameLoc === getNameLoc(existing)) matches = true;
+
+      if (matches) {
+        matchIndices.push(i);
+      }
+    }
+
+    if (matchIndices.length === 0) {
+      uniqueResults.push(cand);
+    } else {
+      // It matched one or more existing items.
+      // E.g. Cand has both email & phone. It matched existing[0] by email, existing[1] by phone.
+      // We must merge them into one winner.
+      const competitors = [cand, ...matchIndices.map(i => uniqueResults[i])];
+      
+      let winner = competitors[0];
+      for (let i = 1; i < competitors.length; i++) {
+        const comp = competitors[i];
+        const wHasBoth = Boolean(getEmail(winner)) && Boolean(getPhone(winner));
+        const cHasBoth = Boolean(getEmail(comp)) && Boolean(getPhone(comp));
+
+        if (cHasBoth && !wHasBoth) {
+          winner = comp;
+        } else if (cHasBoth === wHasBoth) {
+          const getPrio = (s?: string) => {
+            const l = String(s || "").toLowerCase();
+            if (l.includes("applicant")) return 1;
+            if (l.includes("talentsearch")) return 2;
+            return 3;
+          };
+          const wPrio = getPrio(winner.source);
+          const cPrio = getPrio(comp.source);
+          if (cPrio < wPrio) {
+             winner = comp;
+          } else if (cPrio === wPrio) {
+             if (Number(comp.match_score || 0) > Number(winner.match_score || 0)) {
+                winner = comp;
+             }
+          }
+        }
+      }
+
+      // Remove all matched indices from uniqueResults, append winner
+      uniqueResults = uniqueResults.filter((_, idx) => !matchIndices.includes(idx));
+      uniqueResults.push(winner);
+    }
+  }
+  return uniqueResults;
+};
+
 const extractLinkedInFromText = (text?: string | null): string => {
   const raw = String(text || "");
   if (!raw) return "";
@@ -5084,7 +5173,7 @@ function NewJobPageContent() {
               if (id && seenIds.has(id)) continue;
               if (id) seenIds.add(id);
               runList.push(event.data);
-              setCandidates(prev => [...prev, event.data]);
+              setCandidates(prev => deduplicateCandidatesUI([...prev, event.data]));
 
               const foundCount = runList.length;
               if (foundCount === 1) {
@@ -5134,11 +5223,11 @@ function NewJobPageContent() {
                   break;
                 }
               }
-              setCandidates(prev => prev.map(c => (
+              setCandidates(prev => deduplicateCandidatesUI(prev.map(c => (
                 String(c.candidate_id || c.jobdiva_candidate_id || c.id || "") === targetId
                   ? { ...c, ...patch }
                   : c
-              )));
+              ))));
             } else if (event.type === "stage") {
               const rawStage = String(event.data || "");
               const mapped = mapStageToStatus(rawStage);
@@ -5224,11 +5313,12 @@ function NewJobPageContent() {
       const parsed = JSON.parse(raw);
       const cached = Array.isArray(parsed?.candidates) ? parsed.candidates : [];
       if (cached.length === 0) return;
-      setCandidates(cached);
+      const dedupedCached = deduplicateCandidatesUI(cached);
+      setCandidates(dedupedCached);
       setHasSearched(true);
       setRestoredFromCache(true);
       const seen = seenCandidateIdsRef.current;
-      for (const c of cached) {
+      for (const c of dedupedCached) {
         const id = String(c?.candidate_id || c?.id || "");
         if (id) seen.add(id);
       }
