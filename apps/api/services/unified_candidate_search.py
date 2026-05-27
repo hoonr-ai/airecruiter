@@ -4240,10 +4240,17 @@ class UnifiedCandidateSearch:
         try:
             skills_values = criteria.sourcing_skill_values()
             boolean_string = criteria.boolean_string or self._build_boolean_string(criteria)
+            # Floor at 30 so the Exa Research Pass B has a meaningful seed-URL
+            # sample even when the recruiter's page_size is small, and cap at
+            # 50 (Exa's per-call sweet spot for people search before relevance
+            # falls off). Without the floor, page_size=10 → only 10 LinkedIn
+            # candidates surface and the deep-search pass discovers little.
+            requested = criteria.page_size or 30
+            exa_limit = min(50, max(30, requested))
             candidates = await self.exa_service.search_candidates(
                 skills=skills_values,
                 location=self._scope_location_to_us(criteria.location),
-                limit=min(criteria.page_size, 50),
+                limit=exa_limit,
                 boolean_string=self._scope_boolean_to_us(boolean_string),
                 role_hint=self._role_hint_from_criteria(criteria),
             )
