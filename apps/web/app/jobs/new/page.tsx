@@ -4066,7 +4066,14 @@ function NewJobPageContent() {
     if (!rubricData) return;
 
     const getRubricDrivenMatchType = (item: any, existingMatchType?: 'must' | 'can' | 'exclude') => {
-      if (existingMatchType === 'exclude') return 'exclude';
+      // Preserve ANY user-edited matchType. Previously only 'exclude' was
+      // honored, so a recruiter who toggled a Preferred-rubric skill from
+      // "OR" → "AND" (must) on Step 5 would silently see it flip back to
+      // "OR" the next time syncStepFiveData ran (e.g. after a page reload
+      // restored sf.titles/sf.skills and re-ran initializeSourceFromRubric).
+      // Explicit re-seeding from rubric still happens via the Step 4 → 5
+      // Next button when the rubric fingerprint changes (line ~8217).
+      if (existingMatchType) return existingMatchType;
       return isRubricItemRequired(item) ? "must" : "can";
     };
 
