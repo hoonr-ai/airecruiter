@@ -397,7 +397,7 @@ class ExaService:
             "recent_companies (last 2 positions, each with company, title, start as "
             "YYYY-MM, end as YYYY-MM or 'Present'), fit_rationale (one sentence ≤300 "
             f"chars on why this candidate's titles fit the role \"{jd_role}\"). "
-            "Return at least 10 candidates with linkedin_url populated."
+            "Return at least 30 candidates with linkedin_url populated."
         )[:4096]
 
         output_schema = {
