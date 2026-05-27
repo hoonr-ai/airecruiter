@@ -56,9 +56,17 @@ interface Props {
   dncKeys?: Set<string>;
 }
 
-const POPOVER_WIDTH = 420;
-const POPOVER_ESTIMATED_HEIGHT = 280;
+const POPOVER_WIDTH = 440;
+const POPOVER_ESTIMATED_HEIGHT = 360;
 const POPOVER_GAP = 8;
+
+function formatFollowerCount(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(Number(n))) return "";
+  const v = Number(n);
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1).replace(/\.0$/, "")}M followers`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1).replace(/\.0$/, "")}k followers`;
+  return `${v} followers`;
+}
 
 function getCandidateId(c: any): string {
   return String(c.candidate_id || c.id || "");
@@ -139,23 +147,39 @@ function awaitingScore(c: any): boolean {
   return stage === "agent_result" || stage === "details_loaded";
 }
 
-function getSourceBadge(source: string | undefined) {
+function getSourceBadge(source: string | undefined, sources?: string[]) {
   const src = String(source || "");
-  const isLinkedIn = src.startsWith("LinkedIn");
+  // A candidate may have been surfaced by both the keyword-driven Exa pass
+  // and the Exa Research deep-search pass; the backend merges them into a
+  // single `sources` array. Pick the most informative single label here.
+  const srcList = Array.isArray(sources) ? sources.filter(Boolean) : [];
+  const hasExa = srcList.includes("LinkedIn-Exa") || src === "LinkedIn-Exa";
+  const hasDeep = srcList.includes("LinkedIn-DeepSearch") || src === "LinkedIn-DeepSearch";
+  const isBothExa = hasExa && hasDeep;
+  const isDeepOnly = !hasExa && hasDeep;
+  const isLinkedIn = src.startsWith("LinkedIn") || hasExa || hasDeep;
   const isJobDivaTalent = src === "JobDiva-TalentSearch";
   const isJobDiva = src.toLowerCase().startsWith("jobdiva");
-  const colors = isLinkedIn
-    ? "bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]"
-    : isJobDivaTalent
-      ? "bg-[#fff7ed] text-[#c2410c] border-[#fed7aa]"
-      : isJobDiva
-        ? "bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]"
-        : "bg-slate-50 text-slate-700 border-slate-200";
-  const label = isLinkedIn
-    ? "LinkedIn"
-    : isJobDivaTalent
-      ? "JobDiva"
-      : src || "JobDiva";
+  const colors = isBothExa
+    ? "bg-[#eef2ff] text-[#4338ca] border-[#c7d2fe]"
+    : isDeepOnly
+      ? "bg-[#f5f3ff] text-[#7c3aed] border-[#ddd6fe]"
+      : isLinkedIn
+        ? "bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]"
+        : isJobDivaTalent
+          ? "bg-[#fff7ed] text-[#c2410c] border-[#fed7aa]"
+          : isJobDiva
+            ? "bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]"
+            : "bg-slate-50 text-slate-700 border-slate-200";
+  const label = isBothExa
+    ? "LinkedIn + Deep"
+    : isDeepOnly
+      ? "LinkedIn Deep"
+      : isLinkedIn
+        ? "LinkedIn"
+        : isJobDivaTalent
+          ? "JobDiva"
+          : src || "JobDiva";
   const Icon = isLinkedIn ? Linkedin : isJobDivaTalent ? Zap : ShieldCheck;
   return { colors, label, Icon, isLinkedIn };
 }
@@ -339,7 +363,7 @@ export function CandidateMatchTable({
               const { home: homeLocation, work: workLocation } = getCandidateLocations(candidate);
               const lastActiveDate = getLastActiveDate(candidate);
               const lastActiveShort = formatLastActiveShort(lastActiveDate);
-              const sourceBadge = getSourceBadge(candidate.source);
+              const sourceBadge = getSourceBadge(candidate.source, candidate.sources);
               const checked = selectedIds.has(id);
               const launchedKey = `${candidate.source ?? ''}:${id}`;
               const isAlreadyLaunched = !!disabledLaunchedKeys?.has(launchedKey);
@@ -593,6 +617,21 @@ function HoverDetailsCard({
   const explain = Array.isArray(candidate.explainability) ? candidate.explainability : [];
   const firstExplain = typeof explain[0] === "string" ? explain[0] : explain[0]?.text || "";
 
+  // Exa Research API enrichment (Pass B). All four fields may be absent
+  // when (a) the candidate isn't Exa-sourced, (b) the research run hasn't
+  // finished yet, or (c) the research run failed — every block below
+  // gates on truthiness so the card still renders cleanly without them.
+  const exaFitRationale = String(candidate.exa_fit_rationale || "").trim();
+  const exaLastActivity = String(candidate.exa_last_activity || "").trim();
+  const exaFollowerStr = formatFollowerCount(candidate.exa_follower_count);
+  const exaCompaniesRaw = Array.isArray(candidate.exa_recent_companies)
+    ? candidate.exa_recent_companies
+    : [];
+  const exaCompanies = exaCompaniesRaw
+    .filter((c: any) => c && (c.company || c.title))
+    .slice(0, 2);
+  const sourceBadge = getSourceBadge(candidate.source, candidate.sources);
+
   const recentAvailabilityRaw = String(
     candidate.recent_availability ||
       candidate.recentAvailability ||
@@ -616,11 +655,22 @@ function HoverDetailsCard({
       className="pointer-events-none fixed z-[60] rounded-xl border border-slate-200 bg-white shadow-xl p-4"
       style={{ top, left, width: POPOVER_WIDTH }}
     >
-      {titleAtCompany && (
-        <div className="text-[12.5px] font-semibold text-slate-800 mb-1.5 truncate" title={titleAtCompany}>
-          {titleAtCompany}
-        </div>
-      )}
+      <div className="flex items-center justify-between gap-2 mb-2">
+        {titleAtCompany ? (
+          <div className="text-[12.5px] font-semibold text-slate-800 truncate flex-1" title={titleAtCompany}>
+            {titleAtCompany}
+          </div>
+        ) : <div className="flex-1" />}
+        <span
+          className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center gap-1 border shrink-0 ${sourceBadge.colors}`}
+          title={Array.isArray(candidate.sources) && candidate.sources.length > 1
+            ? `Found via: ${candidate.sources.join(" + ")}`
+            : sourceBadge.label}
+        >
+          <sourceBadge.Icon className="w-2.5 h-2.5" />
+          {sourceBadge.label}
+        </span>
+      </div>
       <div className="flex flex-wrap items-center gap-2 mb-3 text-[11.5px] text-slate-600">
         {yearsStr && (
           <span className="inline-flex items-center gap-1">
@@ -637,6 +687,23 @@ function HoverDetailsCard({
         {recentAvailabilityRaw && (
           <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${availabilityChip}`}>
             {recentAvailabilityRaw}
+          </span>
+        )}
+        {exaLastActivity && (
+          <span
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border bg-violet-50 text-violet-700 border-violet-200"
+            title="LinkedIn last activity (Exa Research)"
+          >
+            <Clock className="w-3 h-3" />
+            {exaLastActivity}
+          </span>
+        )}
+        {exaFollowerStr && (
+          <span
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border bg-indigo-50 text-indigo-700 border-indigo-200"
+            title="LinkedIn follower count (Exa Research)"
+          >
+            {exaFollowerStr}
           </span>
         )}
       </div>
@@ -677,9 +744,42 @@ function HoverDetailsCard({
         </div>
       )}
 
-      {firstExplain && (
+      {exaCompanies.length > 0 && (
+        <div className="mb-3">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
+            Recent roles
+          </div>
+          <div className="flex flex-col gap-0.5">
+            {exaCompanies.map((c: any, i: number) => {
+              const title = String(c?.title || "").trim();
+              const company = String(c?.company || "").trim();
+              const start = String(c?.start || "").trim();
+              const end = String(c?.end || "").trim();
+              const lhs = [title, company].filter(Boolean).join(" @ ");
+              const rhs = [start, end].filter(Boolean).join(" – ");
+              return (
+                <div key={`${lhs}-${i}`} className="text-[11.5px] text-slate-700 truncate" title={`${lhs}${rhs ? ` · ${rhs}` : ""}`}>
+                  <span className="font-medium">{lhs || "(role)"}</span>
+                  {rhs && <span className="text-slate-400"> · {rhs}</span>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {(exaFitRationale || firstExplain) && (
         <div className="text-[11.5px] text-slate-600 leading-snug border-t border-slate-100 pt-2">
-          {firstExplain}
+          {exaFitRationale ? (
+            <>
+              <div className="text-[10px] font-bold uppercase tracking-wider text-violet-600 mb-1">
+                Fit rationale
+              </div>
+              {exaFitRationale}
+            </>
+          ) : (
+            firstExplain
+          )}
         </div>
       )}
     </div>

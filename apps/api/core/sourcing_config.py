@@ -113,3 +113,44 @@ FAST_PATH_DETAIL_BACKGROUND_MAX_CANDIDATES = 100
 
 # Sleep (seconds) between hydration pages to spread JobDiva load.
 FAST_PATH_DETAIL_BACKGROUND_PAGE_DELAY_S = 1.0
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Exa Research API — agentic deep-search pass for LinkedIn-Exa source
+# ─────────────────────────────────────────────────────────────────────────
+# When True, every Step-5 search that includes the "Exa" source also fires
+# an Exa Research run (`exa.research.create`) in parallel. The run discovers
+# additional LinkedIn profiles missed by the keyword-driven Pass A search
+# AND enriches Pass A's hits with structured fields: last_activity,
+# follower_count, last 2 companies, fit_rationale. Results land as a second
+# wave of `candidate` / `candidate_detail` events tagged with source
+# "LinkedIn-DeepSearch". Disable to skip the cost entirely.
+import os as _os
+EXA_AGENT_ENABLED = _os.getenv("EXA_AGENT_ENABLED", "true").strip().lower() == "true"
+
+# Exa research model. Cost/quality gradient: exa-research-fast < exa-research < exa-research-pro.
+# Also read by exa_service.deep_research_candidates().
+EXA_AGENT_MODEL = _os.getenv("EXA_AGENT_MODEL", "exa-research-fast").strip() or "exa-research-fast"
+
+# Cap on seed-URL count embedded in the research instructions string. The
+# instructions field is bounded to 4096 chars by Exa, and longer prompts
+# don't measurably improve enrichment quality. Read directly by exa_service.
+try:
+    EXA_AGENT_MAX_INPUT = int(_os.getenv("EXA_AGENT_MAX_INPUT", "25").strip() or "25")
+except ValueError:
+    EXA_AGENT_MAX_INPUT = 25
+
+# Hard timeout for poll_until_finished, in seconds. exa-research-fast usually
+# finishes <60s; -pro can take 5min+. Read directly by exa_service.
+try:
+    EXA_AGENT_TIMEOUT = int(_os.getenv("EXA_AGENT_TIMEOUT", "180").strip() or "180")
+except ValueError:
+    EXA_AGENT_TIMEOUT = 180
+
+# Concurrency cap (semaphore) for in-flight research runs. Exa enforces a
+# concurrency limit of 1/5 of account QPS — default account is ~10 QPS, so
+# ≥3 simultaneous runs will start 429ing. Default 1 (serialize per process).
+try:
+    EXA_AGENT_CONCURRENCY = int(_os.getenv("EXA_AGENT_CONCURRENCY", "1").strip() or "1")
+except ValueError:
+    EXA_AGENT_CONCURRENCY = 1

@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import re
 from typing import List, Dict, Any, Tuple
 from core.config import EXA_API_KEY
@@ -346,6 +347,170 @@ class ExaService:
             "text": (text or "")[:8000],
             "summary": summary or "",
         }
+
+    async def deep_research_candidates(
+        self,
+        jd_title: str,
+        jd_role: str,
+        skills: List[str],
+        location: str,
+        seed_urls: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Exa Research API pass — agentic enrichment + discovery.
+
+        Builds JD-focused instructions plus inline seed URLs from prior Exa hits,
+        polls the research run to completion, and returns the structured
+        candidates list (already schema-validated by Exa). Empty list on any
+        failure — caller treats it as "no extra candidates" and renders Pass A
+        as-is.
+
+        Cost is bounded by `EXA_AGENT_MODEL` (default `exa-research-fast`) and
+        `EXA_AGENT_TIMEOUT` (default 180s).
+        """
+        if not self.exa:
+            logger.warning("Exa API key is not set. Skipping deep research.")
+            return []
+
+        model = os.getenv("EXA_AGENT_MODEL", "exa-research-fast").strip() or "exa-research-fast"
+        try:
+            timeout_s = int(os.getenv("EXA_AGENT_TIMEOUT", "180").strip() or "180")
+        except ValueError:
+            timeout_s = 180
+        try:
+            max_input = int(os.getenv("EXA_AGENT_MAX_INPUT", "25").strip() or "25")
+        except ValueError:
+            max_input = 25
+
+        top_skills = ", ".join((skills or [])[:5]) or "(any)"
+        seeds = [u for u in (seed_urls or []) if u][:max_input]
+        seed_block = ""
+        if seeds:
+            seed_lines = "\n".join(f"- {u}" for u in seeds)
+            seed_block = f"\nAlso enrich these existing profiles:\n{seed_lines}\n"
+
+        # Cap total instruction length at SDK limit (4096 chars).
+        instructions = (
+            f"Find LinkedIn profiles matching: title=\"{jd_title}\" | role=\"{jd_role}\" "
+            f"| skills=\"{top_skills}\" | location=\"{location}\".{seed_block}"
+            "For each profile, extract: last_activity (most recent visible post/comment "
+            "with relative date, or null), follower_count (integer or null), "
+            "recent_companies (last 2 positions, each with company, title, start as "
+            "YYYY-MM, end as YYYY-MM or 'Present'), fit_rationale (one sentence ≤300 "
+            f"chars on why this candidate's titles fit the role \"{jd_role}\"). "
+            "Return at least 10 candidates with linkedin_url populated."
+        )[:4096]
+
+        output_schema = {
+            "type": "object",
+            "required": ["candidates"],
+            "properties": {
+                "candidates": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["linkedin_url", "fit_rationale"],
+                        "properties": {
+                            "linkedin_url": {"type": "string"},
+                            "name": {"type": "string"},
+                            "current_title": {"type": "string"},
+                            "location": {"type": "string"},
+                            "last_activity": {"type": ["string", "null"]},
+                            "follower_count": {"type": ["integer", "null"]},
+                            "recent_companies": {
+                                "type": "array",
+                                "maxItems": 2,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "company": {"type": "string"},
+                                        "title": {"type": "string"},
+                                        "start": {"type": "string"},
+                                        "end": {"type": "string"},
+                                    },
+                                },
+                            },
+                            "fit_rationale": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        }
+
+        loop = asyncio.get_event_loop()
+
+        def do_create():
+            return self.exa.research.create(
+                instructions=instructions,
+                model=model,
+                output_schema=output_schema,
+            )
+
+        def do_poll(rid: str):
+            return self.exa.research.poll_until_finished(
+                rid,
+                poll_interval=2000,
+                timeout_ms=timeout_s * 1000,
+            )
+
+        try:
+            logger.info(
+                "Exa research create: model=%s seeds=%d title=%r role=%r",
+                model, len(seeds), jd_title, jd_role,
+            )
+            created = await asyncio.wait_for(
+                loop.run_in_executor(None, do_create),
+                timeout=30.0,
+            )
+            research_id = getattr(created, "research_id", None) or getattr(created, "researchId", None)
+            if not research_id:
+                # SDK returns ResearchDto which may wrap the field — try .root.
+                root = getattr(created, "root", None)
+                research_id = getattr(root, "research_id", None) if root is not None else None
+            if not research_id:
+                logger.warning("Exa research create returned no research_id")
+                return []
+        except asyncio.TimeoutError:
+            logger.warning("Exa research create timed out")
+            return []
+        except Exception as e:
+            logger.warning("Exa research create failed: %s", e)
+            return []
+
+        try:
+            completed = await asyncio.wait_for(
+                loop.run_in_executor(None, do_poll, research_id),
+                timeout=timeout_s + 10,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Exa research poll timeout for %s", research_id)
+            return []
+        except Exception as e:
+            logger.warning("Exa research poll failed for %s: %s", research_id, e)
+            return []
+
+        # ResearchDto is a discriminated union; unwrap .root if present.
+        completed_root = getattr(completed, "root", completed)
+        status = getattr(completed_root, "status", "")
+        if status != "completed":
+            logger.warning("Exa research finished with status=%s", status)
+            return []
+
+        # Log cost for tuning.
+        cost = getattr(completed_root, "cost_dollars", None) or getattr(completed_root, "costDollars", None)
+        if cost is not None:
+            logger.info("Exa research cost=%s research_id=%s", cost, research_id)
+
+        output = getattr(completed_root, "output", None)
+        if output is None:
+            return []
+        parsed = getattr(output, "parsed", None)
+        if not isinstance(parsed, dict):
+            return []
+        candidates = parsed.get("candidates") or []
+        if not isinstance(candidates, list):
+            return []
+        logger.info("Exa research returned %d candidates", len(candidates))
+        return candidates
 
     async def search_dice_candidates(self, skills: List[str], location: str, limit: int = 10, boolean_string: str = "", role_hint: str = "") -> List[Dict[str, Any]]:
         """
