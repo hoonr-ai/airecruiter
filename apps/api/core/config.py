@@ -108,6 +108,28 @@ AZURE_AI_AGENT_NAME       = os.getenv("AZURE_AI_AGENT_NAME", "skill-role-extract
 # ---- Exa API ----
 EXA_API_KEY = get_env_with_default("EXA_API_KEY", "")
 
+# ---- Oxylabs Web Scraper API ----
+# HTTP Basic credentials for https://realtime.oxylabs.io/v1/queries.
+OXYLABS_USERNAME = get_env_with_default("OXYLABS_USERNAME", "")
+OXYLABS_PASSWORD = get_env_with_default("OXYLABS_PASSWORD", "")
+
+# ---- Monster recruiter portal (Power Resume Search) ----
+# Used to authenticate Oxylabs-rendered sessions into Monster's resume DB.
+# When unset, the Monster provider short-circuits with an empty result list.
+MONSTER_USERNAME = get_env_with_default("MONSTER_USERNAME", "")
+MONSTER_PASSWORD = get_env_with_default("MONSTER_PASSWORD", "")
+# Override only if Monster moves the recruiter portal. The defaults match the
+# current hiring.monster.com surface as of 2026-05.
+MONSTER_LOGIN_URL = get_env_with_default(
+    "MONSTER_LOGIN_URL", "https://hiring.monster.com/recruiter/login"
+)
+MONSTER_SEARCH_URL = get_env_with_default(
+    "MONSTER_SEARCH_URL", "https://hiring.monster.com/talent-search/results"
+)
+# Per-search pagination cap. Each page is one Oxylabs billable request, so this
+# directly bounds cost per /candidates/search call against the Monster source.
+MONSTER_MAX_PAGES = int(get_env_with_default("MONSTER_MAX_PAGES", "2"))
+
 # ---- ZoomInfo Contact Enrichment ----
 ZOOMINFO_ENRICH_URL = get_env_with_default("ZOOMINFO_ENRICH_URL", "https://api.zoominfo.com/enrich/contact")
 ZOOMINFO_BEARER_TOKEN = get_env_with_default("ZOOMINFO_BEARER_TOKEN", "")
@@ -195,6 +217,17 @@ SOURCE_TIER_BONUS = {
     "JobDiva-Applicants": int(
         get_env_with_default("SOURCE_TIER_BONUS_JOBDIVA_APPLICANTS", "10")
     ),
+    # Refactor `b5a6aaa` switched JobDiva talent-pool sourcing to
+    # JobAgent-only and renamed the source label from JobDiva-TalentSearch
+    # → JobDiva-JobAgent. The old key is kept for any in-flight records that
+    # still carry the legacy label; the new key picks up the same default
+    # bonus (raised from +5 to +10 because JobAgent is now the *only* way
+    # JobDiva candidates reach the funnel, and they're already pre-ranked
+    # for relevance by JobDiva's own matcher — see api_rank floor in
+    # finalize_candidate).
+    "JobDiva-JobAgent": int(
+        get_env_with_default("SOURCE_TIER_BONUS_JOBDIVA_JOBAGENT", "10")
+    ),
     "JobDiva-TalentSearch": int(
         get_env_with_default("SOURCE_TIER_BONUS_JOBDIVA_TALENT", "5")
     ),
@@ -203,6 +236,27 @@ SOURCE_TIER_BONUS = {
     ),
     "VettedDB": int(get_env_with_default("SOURCE_TIER_BONUS_VETTED", "2")),
 }
+
+# JobAgent rank → match_score floor. JobDiva's JobAgent returns candidates
+# ranked by their own relevance matcher; api_rank is 0-based, with 0 = top
+# pick. Recruiters trust JobDiva's ranking — our rubric-literal-match
+# scorer was overriding that trust with low scores when the resume happened
+# to use synonyms (rubric "MS Office Suite" vs resume "Microsoft Office").
+# This floor ensures JobDiva's top picks never score below what their rank
+# implies. The rubric score still applies on top of the floor — a top-5
+# candidate who is *also* a strong rubric match scores higher, not lower.
+#
+# Tuning notes:
+#  - Floors below 50 are deliberately omitted so deep-tail candidates
+#    (api_rank > 29) fall back entirely on the rubric score.
+#  - The source-tier bonus runs AFTER the floor, so a JobDiva top-5 lands
+#    at min 85 + 10 (JobAgent bonus) = 95.
+JOBAGENT_RANK_SCORE_FLOOR = (
+    (5, 85),   # api_rank 0..4   (top 5)
+    (10, 75),  # api_rank 5..9   (next 5)
+    (20, 65),  # api_rank 10..19
+    (30, 55),  # api_rank 20..29
+)
 
 # Embedding-based skill matching (PR-C). Off by default — when enabled,
 # `_fuzzy_term_score` augments its keyword-overlap signal with the cosine

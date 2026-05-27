@@ -977,11 +977,17 @@ function NewJobPageContent() {
       const key = `${c.source ?? ''}:${candId}`;
       if (launchedCandidateKeys.has(key)) return false;
       if (!matchesSourceFilter(c)) return false;
-      if (minScore > 0) {
+      // Progressive rows (agent_result / details_loaded) bypass score &
+      // location filters so they stay visible while shimmering. Once the
+      // scored patch lands they fall back into the normal filter pipeline.
+      const stage = String(c?._stage || "");
+      const awaitingScore = stage === "agent_result" || stage === "details_loaded";
+      const awaitingDetails = stage === "agent_result";
+      if (minScore > 0 && !awaitingScore) {
         const score = getCandidateMatchScore(c);
         if (score < minScore) return false;
       }
-      if (locationFilter.size > 0) {
+      if (locationFilter.size > 0 && !awaitingDetails) {
         const loc = getCandidateLocationStr(c);
         if (!loc || !locationFilter.has(loc)) return false;
       }
@@ -5080,15 +5086,40 @@ function NewJobPageContent() {
                 setSearchStatus(`Found ${foundCount} profiles from ${activePortal}. Matching resumes against the rubric...`);
               }
             } else if (event.type === "candidate_detail") {
-              // Fast-path hydration: a thin row that was streamed earlier
-              // now has its email/phone/linkedin_url/resume_text/etc filled
-              // in by the background CandidatesDetail pager. Merge the patch
-              // into the matching row by candidate_id.
+              // Two flavors share this event:
+              //   1. Background CandidatesDetail hydration patches that fill
+              //      email/phone/linkedin_url/resume_text into a thin row
+              //      streamed earlier.
+              //   2. Progressive Step-5 enrichment stages: `stage` is one of
+              //      "jobdiva_details" | "scored" | "dropped". The row was
+              //      emitted at the agent_result stage with shimmer cells; the
+              //      patches replace those cells as data lands. `dropped`
+              //      removes the row outright (filter failure, no resume,
+              //      cross-source dup, etc.).
               const targetId = String(event.candidate_id || "");
+              const stage = String(event.stage || "");
+              if (!targetId) continue;
+
+              if (stage === "dropped") {
+                // Remove the matching row by id, and forget it from the seen
+                // set so a re-run can re-add it. Drop reason is in patch
+                // (_drop_reason) — surfaced via console for debugging.
+                const drop_reason = (event.patch && (event.patch as any)._drop_reason) || "unknown";
+                if (process.env.NODE_ENV !== "production") {
+                  console.debug(`[Step-5] dropped candidate ${targetId} reason=${drop_reason}`);
+                }
+                runList = runList.filter(r => String(r.candidate_id || r.id || "") !== targetId);
+                seenIds.delete(targetId);
+                setCandidates(prev => prev.filter(c => (
+                  String(c.candidate_id || c.jobdiva_candidate_id || c.id || "") !== targetId
+                )));
+                continue;
+              }
+
               const patch = (event.patch && typeof event.patch === "object")
                 ? event.patch
                 : {};
-              if (!targetId || Object.keys(patch).length === 0) continue;
+              if (Object.keys(patch).length === 0) continue;
               // Update local runList copy used elsewhere in this run.
               for (const r of runList) {
                 if (String(r.candidate_id || r.id || "") === targetId) {

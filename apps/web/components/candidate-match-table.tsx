@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/table";
 import { Checkbox } from "@/components/ui/checkbox";
 import { PhoneIndicator } from "@/components/phone-indicator";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
   Linkedin,
   ShieldCheck,
@@ -122,6 +123,20 @@ function getMissingSkills(c: any): string[] {
   return raw
     .map((s: any) => (typeof s === "string" ? s : s?.name))
     .filter((s: any) => typeof s === "string" && s.trim().length > 0);
+}
+
+// Progressive sourcing stages. Backend emits "agent_result" first (name +
+// source only), then patches in "details_loaded" (resume / profile fields)
+// and finally "scored" (match_score + matched_skills). External / cached
+// sources still emit the full row in one shot — those candidates have no
+// `_stage` field and are treated as fully loaded.
+function awaitingDetails(c: any): boolean {
+  return String(c?._stage || "") === "agent_result";
+}
+
+function awaitingScore(c: any): boolean {
+  const stage = String(c?._stage || "");
+  return stage === "agent_result" || stage === "details_loaded";
 }
 
 function getSourceBadge(source: string | undefined) {
@@ -368,20 +383,34 @@ export function CandidateMatchTable({
                     >
                       {displayName}
                     </button>
-                    {(candidate.title || candidate.headline) && (
+                    {candidate.title || candidate.headline ? (
                       <div className="text-[11.5px] text-slate-500 truncate" title={candidate.title || candidate.headline}>
                         {candidate.title || candidate.headline}
                       </div>
-                    )}
+                    ) : awaitingDetails(candidate) ? (
+                      <Skeleton className="h-3 w-32 mt-1" data-testid="shimmer-title" />
+                    ) : null}
                   </TableCell>
                   <TableCell>
-                    <PhoneIndicator
-                      candidateId={id}
-                      jobdivaId={jobdivaId}
-                      phone={candidate.phone}
-                      persist={false}
-                      onSaved={(normalised) => onPhoneSaved(id, normalised)}
-                    />
+                    {candidate.phone ? (
+                      <PhoneIndicator
+                        candidateId={id}
+                        jobdivaId={jobdivaId}
+                        phone={candidate.phone}
+                        persist={false}
+                        onSaved={(normalised) => onPhoneSaved(id, normalised)}
+                      />
+                    ) : awaitingDetails(candidate) ? (
+                      <Skeleton className="h-4 w-24" data-testid="shimmer-phone" />
+                    ) : (
+                      <PhoneIndicator
+                        candidateId={id}
+                        jobdivaId={jobdivaId}
+                        phone={candidate.phone}
+                        persist={false}
+                        onSaved={(normalised) => onPhoneSaved(id, normalised)}
+                      />
+                    )}
                   </TableCell>
                   <TableCell
                     className="text-center"
@@ -409,16 +438,19 @@ export function CandidateMatchTable({
                       >
                         {matchScore}%
                       </button>
+                    ) : awaitingScore(candidate) ? (
+                      <Skeleton
+                        className="inline-block w-12 h-12 rounded-full"
+                        data-testid="shimmer-score"
+                      />
                     ) : (
                       <span className="text-slate-300">—</span>
                     )}
                   </TableCell>
                   <TableCell>
-                    <div className="flex flex-wrap gap-1 max-w-[260px]">
-                      {topMatched.length === 0 ? (
-                        <span className="text-slate-300">—</span>
-                      ) : (
-                        topMatched.map((skill, i) => (
+                    {topMatched.length > 0 ? (
+                      <div className="flex flex-wrap gap-1 max-w-[260px]">
+                        {topMatched.map((skill, i) => (
                           <span
                             key={`${skill}-${i}`}
                             className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 text-[11px] font-semibold border border-slate-200 truncate max-w-[110px]"
@@ -426,14 +458,22 @@ export function CandidateMatchTable({
                           >
                             {skill}
                           </span>
-                        ))
-                      )}
-                      {moreMatchedCount > 0 && (
-                        <span className="px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700 text-[11px] font-semibold border border-indigo-100">
-                          +{moreMatchedCount}
-                        </span>
-                      )}
-                    </div>
+                        ))}
+                        {moreMatchedCount > 0 && (
+                          <span className="px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700 text-[11px] font-semibold border border-indigo-100">
+                            +{moreMatchedCount}
+                          </span>
+                        )}
+                      </div>
+                    ) : awaitingScore(candidate) ? (
+                      <div className="flex flex-wrap gap-1 max-w-[260px]" data-testid="shimmer-skills">
+                        <Skeleton className="h-5 w-16 rounded-md" />
+                        <Skeleton className="h-5 w-20 rounded-md" />
+                        <Skeleton className="h-5 w-14 rounded-md" />
+                      </div>
+                    ) : (
+                      <span className="text-slate-300">—</span>
+                    )}
                   </TableCell>
                   <TableCell>
                     {homeLocation || workLocation ? (
@@ -460,6 +500,8 @@ export function CandidateMatchTable({
                           </span>
                         )}
                       </div>
+                    ) : awaitingDetails(candidate) ? (
+                      <Skeleton className="h-4 w-28" data-testid="shimmer-location" />
                     ) : (
                       <span className="text-slate-300">—</span>
                     )}
@@ -470,6 +512,8 @@ export function CandidateMatchTable({
                         <Calendar className="w-3 h-3 text-slate-400" />
                         {lastActiveShort}
                       </span>
+                    ) : awaitingDetails(candidate) ? (
+                      <Skeleton className="h-4 w-20" data-testid="shimmer-last-active" />
                     ) : (
                       <span className="text-slate-300">—</span>
                     )}
