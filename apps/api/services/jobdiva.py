@@ -597,15 +597,20 @@ class JobDivaService:
             "password": self.password
         }
 
-        try:
-            async with httpx.AsyncClient() as client:
-                debug_log(f"Authenticating to JobDiva: {self.username} at {auth_url}")
-                response = await client.get(auth_url, params=params)
-                
+        _auth_delays = [2, 4]
+        for _attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    debug_log(f"Authenticating to JobDiva: {self.username} at {auth_url} (attempt {_attempt+1}/3)")
+                    response = await client.get(auth_url, params=params)
+
                 if response.status_code != 200:
                     debug_log(f"JobDiva Auth Failed: {response.status_code} - {response.text}")
+                    if _attempt < 2:
+                        await asyncio.sleep(_auth_delays[_attempt])
+                        continue
                     return None
-                
+
                 token = response.text.replace("\"", "").strip()
                 if len(token) < 10:
                     logger.error(f"JobDiva Auth returned invalid token: {token}")
@@ -616,9 +621,12 @@ class JobDivaService:
                 debug_log("JobDiva Auth Successful")
                 return token
 
-        except Exception as e:
-            logger.error(f"JobDiva Auth Exception: {repr(e)}")
-            return None
+            except Exception as e:
+                logger.error(f"JobDiva Auth Exception (attempt {_attempt+1}/3): {repr(e)}")
+                if _attempt < 2:
+                    await asyncio.sleep(_auth_delays[_attempt])
+                    continue
+        return None
 
     async def search_candidates(
         self,
@@ -885,22 +893,76 @@ class JobDivaService:
         dropped_no_resume = 0
         criteria_unconfigured = False
 
+        # Retry schedule: first attempt 5 min, then two more at 10 min each.
+        _ja_timeouts = [300.0, 600.0, 600.0]
+        _ja_delays = [5, 15]
+        response = None
+        _last_response = None  # saved even on 5xx, for criteria-unconfigured check
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.get(url, params=params, headers=headers)
-            if response.status_code != 200:
-                body = response.text or ""
-                if _is_job_agent_criteria_unconfigured(response.status_code, body):
+            for _attempt, _timeout_val in enumerate(_ja_timeouts):
+                try:
+                    async with httpx.AsyncClient(timeout=_timeout_val) as client:
+                        logger.info(
+                            "JobAgentSearch jobId=%s attempt %d/%d timeout=%.0fs",
+                            job_id, _attempt + 1, len(_ja_timeouts), _timeout_val,
+                        )
+                        response = await client.get(url, params=params, headers=headers)
+                    _last_response = response
+                    if response.status_code < 500:
+                        break
+                    body = response.text or ""
+                    logger.warning(
+                        "JobAgentSearch attempt %d/%d: HTTP %d — %s",
+                        _attempt + 1, len(_ja_timeouts), response.status_code, body[:200],
+                    )
+                    response = None
+                except (httpx.TimeoutException, httpx.ConnectError) as _e:
+                    logger.warning(
+                        "JobAgentSearch attempt %d/%d failed: %s",
+                        _attempt + 1, len(_ja_timeouts), _e,
+                    )
+                    response = None
+
+                if _attempt < len(_ja_timeouts) - 1:
+                    _delay = _ja_delays[_attempt]
+                    logger.info("JobAgentSearch retrying in %ds...", _delay)
+                    await asyncio.sleep(_delay)
+                else:
+                    logger.error(
+                        "JobAgentSearch all %d attempts exhausted for jobId=%s",
+                        len(_ja_timeouts), job_id,
+                    )
+        except Exception as e:
+            logger.error(f"JobAgentSearch error: {e}")
+            return [], criteria_unconfigured
+
+        if response is None:
+            # All retries exhausted — check last response for criteria-unconfigured signal.
+            if _last_response is not None:
+                _body = _last_response.text or ""
+                if _is_job_agent_criteria_unconfigured(_last_response.status_code, _body):
                     criteria_unconfigured = True
                     logger.info(
-                        f"JobAgentSearch jobId={job_id}: criteria not configured "
-                        f"in JobDiva ({response.status_code}); will fall back."
+                        "JobAgentSearch jobId=%s: criteria not configured in JobDiva; surfacing to UI.",
+                        job_id,
                     )
-                else:
-                    logger.warning(
-                        f"JobAgentSearch failed: {response.status_code} - {body[:200]}"
-                    )
-                return [], criteria_unconfigured
+            return [], criteria_unconfigured
+
+        if response.status_code != 200:
+            body = response.text or ""
+            if _is_job_agent_criteria_unconfigured(response.status_code, body):
+                criteria_unconfigured = True
+                logger.info(
+                    f"JobAgentSearch jobId={job_id}: criteria not configured "
+                    f"in JobDiva ({response.status_code}); will fall back."
+                )
+            else:
+                logger.warning(
+                    f"JobAgentSearch failed: {response.status_code} - {body[:200]}"
+                )
+            return [], criteria_unconfigured
+
+        try:
             data = response.json()
             candidates = data.get("data") if isinstance(data, dict) else data
             candidates = candidates or []

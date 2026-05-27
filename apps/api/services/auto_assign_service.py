@@ -368,7 +368,7 @@ class AutoAssignService:
                         ) AS first_pass_ts
                         FROM sourced_candidates
                         WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                          AND (data->>'engage_status') IN ('pass', 'passed', 'Passed', 'PASS', 'completed', 'Completed', 'COMPLETED')
+                          AND (data->>'engage_status') IN ('pass', 'passed', 'Passed', 'PASS')
                         """,
                         (ref_id, num_id)
                     )
@@ -923,7 +923,7 @@ class AutoAssignService:
                                 THEN candidate_id
                             END)                                                          AS complete_submissions,
                             COUNT(DISTINCT CASE
-                                WHEN (data->>'engage_status' IN ('passed', 'pass', 'completed'))
+                                WHEN (data->>'engage_status' IN ('passed', 'pass'))
                                   OR (LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
                                       AND (NULLIF(data->>'engage_score', '')::float >= 70))
                                 THEN candidate_id
