@@ -39,11 +39,10 @@ for var in (
 ):
     os.environ.setdefault(var, "smoke-test-stub")
 
-# Use the production default (`medium`) unless the operator explicitly
-# overrides. `effort=low` consistently fails our 4-field schema with
-# `stop_reason=error` because the budget cap is too tight to crawl
-# LinkedIn for follower_count / last_activity.
-os.environ["EXA_AGENT_EFFORT"] = os.environ.get("EXA_AGENT_EFFORT", "medium")
+# Match the production default (`high`). Lower efforts under-populate the
+# follower_count / last_activity fields — see EXA_AGENT_EFFORT comments in
+# sourcing_config.py for the cost vs hit-rate trade-off.
+os.environ["EXA_AGENT_EFFORT"] = os.environ.get("EXA_AGENT_EFFORT", "high")
 
 logging.basicConfig(
     level=logging.INFO,

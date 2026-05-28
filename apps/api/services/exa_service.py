@@ -401,17 +401,38 @@ class ExaService:
         seeds = [u for u in (seed_urls or []) if u][:max_input]
 
         # Natural-language task. URLs go into `input.data`, not the query.
+        #
+        # Tone shift vs first version: every "or null" hint was making the
+        # agent give up on follower_count / last_activity the moment they
+        # weren't on the first page of search results. Now we explicitly
+        # mark them REQUIRED-TO-ATTEMPT and tell the agent how to find them
+        # (visit the linkedin profile page, search "<name> linkedin
+        # followers", etc.). Schema still allows null so the agent doesn't
+        # fail validation when a profile genuinely doesn't expose the data,
+        # but the prose strongly biases toward "go look".
         query = (
             f"Find LinkedIn profiles matching: title=\"{jd_title}\" | role=\"{jd_role}\" "
             f"| skills=\"{top_skills}\" | location=\"{location}\". "
             "Also enrich every profile passed in `input.data`. "
-            "For each profile, extract: last_activity (most recent visible "
-            "post/comment with relative date, or null), follower_count "
-            "(integer or null), recent_companies (last 2 positions, each with "
-            "company, title, start as YYYY-MM, end as YYYY-MM or 'Present'), "
-            f"fit_rationale (one sentence ≤300 chars on why this candidate's "
-            f"titles fit the role \"{jd_role}\"). "
-            "Return at least 30 candidates with linkedin_url populated."
+            "For each candidate, you MUST attempt to extract ALL of the following — "
+            "treat null as a last resort, not a default:\n"
+            "  1. follower_count: visit the candidate's LinkedIn profile page and "
+            "read the visible follower count (e.g. '226 followers', '11,978,553 "
+            "followers'). If the page redirects to a sign-in wall, search the web "
+            "for '\"<candidate name>\" linkedin followers' and parse the number "
+            "from any cached snippet or third-party profile aggregator.\n"
+            "  2. last_activity: scan the activity tab or recent posts section "
+            "of the LinkedIn profile. Report the most recent post/comment/repost "
+            "with a relative date (e.g. '3 days ago', '2 weeks ago', or an ISO "
+            "date). Only return null if the profile shows zero activity in the "
+            "last 12 months.\n"
+            "  3. recent_companies: last 2 positions, each with company, title, "
+            "start (YYYY-MM), end (YYYY-MM or 'Present').\n"
+            f"  4. fit_rationale: one sentence (≤300 chars) on why this candidate's "
+            f"titles fit the role \"{jd_role}\".\n"
+            "Return at least 30 candidates with linkedin_url populated. Do not "
+            "drop candidates just because one field is hard to find — partial "
+            "enrichment is better than skipping them."
         )
 
         # Pass A URLs as first-class input records — the Agent API processes
