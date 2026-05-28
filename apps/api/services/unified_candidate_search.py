@@ -916,6 +916,57 @@ class UnifiedCandidateSearch:
         """
         from services.sourced_candidates_storage import process_jobdiva_candidate
 
+        # Step 0 (batched, before per-candidate LLM): fetch JobDiva CandidatesDetail
+        # for the whole hydration set. JobAgentSearch doesn't return email/phone,
+        # and with FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH=True the inline merge in
+        # services.jobdiva is also skipped — so without this step the UI only
+        # sees whatever contact info the LLM can scrape from the resume text,
+        # which silently drops candidates whose contact info lives in JobDiva
+        # metadata rather than in the resume body.
+        try:
+            detail_token = await self.jobdiva_service.authenticate()
+        except Exception as _auth_exc:
+            logger.warning("Background enrichment: JobDiva auth failed: %s", _auth_exc)
+            detail_token = None
+        if detail_token:
+            detail_ids = [
+                str(c.get("candidate_id") or c.get("id") or "")
+                for c in candidates
+                if c.get("candidate_id") or c.get("id")
+            ]
+            if detail_ids:
+                try:
+                    detail_map = await self.jobdiva_service._fetch_candidate_details_batch(
+                        detail_token, detail_ids
+                    )
+                except Exception as _det_exc:
+                    logger.warning("Background CandidatesDetail batch failed: %s", _det_exc)
+                    detail_map = {}
+                counters = {"email": 0, "phone": 0, "address1": 0, "linkedin": 0, "resume": 0}
+                for cand in candidates:
+                    cid = str(cand.get("candidate_id") or cand.get("id") or "")
+                    detail = (detail_map or {}).get(cid)
+                    if not detail:
+                        continue
+                    self.jobdiva_service._merge_detail_into_candidate(cand, detail, counters)
+                    # Emit a candidate_detail patch immediately so the UI sees
+                    # email/phone before LLM enrichment finishes (which can be slow).
+                    patch: Dict[str, Any] = {}
+                    for _k in ("email", "phone", "address1", "linkedin_url", "resume_id"):
+                        _v = cand.get(_k)
+                        if _v:
+                            patch[_k] = _v
+                    if patch:
+                        await queue.put({
+                            "type": "candidate_detail",
+                            "candidate_id": cid,
+                            "patch": patch,
+                        })
+                logger.info(
+                    "Background CandidatesDetail hydration: %d/%d detailed; fields=%s",
+                    len(detail_map or {}), len(detail_ids), counters,
+                )
+
         semaphore = asyncio.Semaphore(10)
 
         async def _enrich_single(cand: Dict[str, Any]) -> None:
@@ -968,7 +1019,9 @@ class UnifiedCandidateSearch:
                         ("current_location", "location"),
                         ("years_of_experience", "experience_years"),
                     ]:
-                        _val = ei.get(_src)
+                        # Prefer LLM extraction; otherwise carry forward the
+                        # JobDiva CandidatesDetail value that Step 0 populated.
+                        _val = ei.get(_src) or cand.get(_dst)
                         if _val:
                             patch[_dst] = _val
                             cand[_dst] = _val
