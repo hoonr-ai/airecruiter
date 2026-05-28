@@ -128,7 +128,12 @@ FAST_PATH_DETAIL_BACKGROUND_PAGE_DELAY_S = 1.0
 #
 # Requires `exa_py>=2.13.0` and an Exa account with the agent beta enabled.
 import os as _os
-EXA_AGENT_ENABLED = _os.getenv("EXA_AGENT_ENABLED", "true").strip().lower() == "true"
+# Accept the common truthy variants. Strict "true" was tripping operators
+# who set `EXA_AGENT_ENABLED=1` or `=yes` and then wondered why Pass B
+# was silently skipped on every search.
+EXA_AGENT_ENABLED = _os.getenv("EXA_AGENT_ENABLED", "true").strip().lower() in {
+    "1", "true", "yes", "on", "y", "t"
+}
 
 # Agent effort level → cost cap per 1k searches:
 #   low    → $25/1k

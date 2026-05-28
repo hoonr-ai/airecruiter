@@ -5106,6 +5106,14 @@ function NewJobPageContent() {
 
     const mapStageToStatus = (stage: string) => {
       const raw = String(stage || "").toLowerCase();
+      // Exa deep-search messages have their own informative shape
+      // ("warming up", "running (N seeds)", "done — X enriched, Y new",
+      // "skipped: <reason>") — pass them through unchanged so the
+      // recruiter can see Pass B progress in the status bar instead of
+      // collapsing it into a generic "Searching at Exa portal..." line.
+      if (raw.includes("exa deep-search")) {
+        return stage;
+      }
       if (raw.includes("jobdiva applicants")) {
         return "Searching at JobDiva portal (Applicants)...";
       }
