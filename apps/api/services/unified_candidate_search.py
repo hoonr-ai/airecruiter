@@ -366,6 +366,17 @@ class UnifiedCandidateSearch:
             _sc.EXA_AGENT_ENABLED
             and ("Exa" in criteria.sources)
         )
+        # Visible diagnostic so support can grep one line and confirm Pass B
+        # is gated correctly for this request — without this the only signal
+        # that Pass B was skipped was the absence of "Exa Agent create" logs,
+        # which is easy to misread as a silent failure.
+        self._log_stage(
+            "ExaAgent",
+            f"pass_b_should_run={exa_pass_b_should_run} "
+            f"(EXA_AGENT_ENABLED={_sc.EXA_AGENT_ENABLED}, "
+            f"'Exa' in sources={'Exa' in criteria.sources}, "
+            f"sources={list(criteria.sources)})",
+        )
         if exa_pass_b_should_run and self._exa_agent_semaphore is None:
             self._exa_agent_semaphore = asyncio.Semaphore(max(1, _sc.EXA_AGENT_CONCURRENCY))
 
@@ -904,18 +915,26 @@ class UnifiedCandidateSearch:
                 await queue.put(SENTINEL)
 
         async def produce_exa_agent():
-            """Pass B: Exa Research API (`exa.research`) deep-search.
+            """Pass B: Exa Agent API (Websets 2.0) deep-search.
 
             Waits for Pass A (LinkedIn-Exa producer) to finish, snapshots the
-            URLs it yielded, runs one research call that BOTH enriches those
+            URLs it yielded, runs one Agent call that BOTH enriches those
             URLs with structured fields (last_activity, follower_count,
             recent_companies, fit_rationale) AND discovers additional
             candidates. URL-overlapping results become `candidate_detail`
             patches with stage `exa_deep_search`; new ones become fresh
             `candidate` events tagged `LinkedIn-DeepSearch`.
+
+            Emits stage events at start / completion / error so the Step-5 UI
+            can show "Exa deep-search ran (N enriched, M new)" or "Exa
+            deep-search failed — falling back to keyword results" in the
+            status bar without the recruiter having to inspect API logs.
             """
+            enriched = 0
+            new_found = 0
+            failure_reason = ""
             try:
-                await queue.put({"type": "stage", "data": "Exa deep-research warming up..."})
+                await queue.put({"type": "stage", "data": "Exa deep-search warming up..."})
                 # Bounded wait so a hung Pass A can't stall Pass B forever.
                 try:
                     await asyncio.wait_for(exa_pass_a_done.wait(), timeout=120.0)
@@ -928,7 +947,10 @@ class UnifiedCandidateSearch:
                     if u:
                         seed_urls.append(u)
 
-                await queue.put({"type": "stage", "data": "Exa deep-research running..."})
+                await queue.put({
+                    "type": "stage",
+                    "data": f"Exa deep-search running ({len(seed_urls)} seeds)...",
+                })
 
                 async with self._exa_agent_semaphore:
                     try:
@@ -941,9 +963,12 @@ class UnifiedCandidateSearch:
                         )
                     except Exception as e:
                         logger.warning("deep_research_candidates raised: %s", e)
+                        failure_reason = f"agent call raised: {type(e).__name__}"
                         results = []
 
                 if not results:
+                    if not failure_reason:
+                        failure_reason = "agent returned no candidates"
                     return
 
                 def _norm_url(u: Any) -> str:
@@ -989,6 +1014,7 @@ class UnifiedCandidateSearch:
                             "stage": "exa_deep_search",
                             "patch": patch_fields,
                         })
+                        enriched += 1
                     else:
                         new_id = f"exadeep_{idx}_{nurl[-32:] or 'unknown'}"
                         new_cand: Dict[str, Any] = {
@@ -1021,9 +1047,28 @@ class UnifiedCandidateSearch:
                             seen_ids.add(new_id)
                         summary["total_candidates"] += 1
                         await queue.put({"type": "candidate", "data": new_cand})
+                        new_found += 1
             except Exception as e:
                 logger.error(f"Exa Agent producer failed: {e}", exc_info=True)
+                failure_reason = failure_reason or f"producer crashed: {type(e).__name__}"
             finally:
+                # Final status emit so the UI status bar reflects what
+                # happened, even when no candidate_detail patches landed.
+                if failure_reason and (enriched + new_found) == 0:
+                    await queue.put({
+                        "type": "stage",
+                        "data": f"Exa deep-search skipped: {failure_reason}",
+                    })
+                else:
+                    await queue.put({
+                        "type": "stage",
+                        "data": f"Exa deep-search done — {enriched} enriched, {new_found} new",
+                    })
+                self._log_stage(
+                    "ExaAgent",
+                    f"pass_b finished enriched={enriched} new_found={new_found} "
+                    f"failure_reason={failure_reason or '(none)'}",
+                )
                 await queue.put(SENTINEL)
 
         # Build producer tasks for all selected sources — run in parallel.
