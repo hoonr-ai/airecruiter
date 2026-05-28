@@ -116,38 +116,46 @@ FAST_PATH_DETAIL_BACKGROUND_PAGE_DELAY_S = 1.0
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Exa Research API — agentic deep-search pass for LinkedIn-Exa source
+# Exa Agent API (Websets 2.0) — agentic deep-search pass for LinkedIn-Exa
 # ─────────────────────────────────────────────────────────────────────────
 # When True, every Step-5 search that includes the "Exa" source also fires
-# an Exa Research run (`exa.research.create`) in parallel. The run discovers
-# additional LinkedIn profiles missed by the keyword-driven Pass A search
-# AND enriches Pass A's hits with structured fields: last_activity,
-# follower_count, last 2 companies, fit_rationale. Results land as a second
-# wave of `candidate` / `candidate_detail` events tagged with source
-# "LinkedIn-DeepSearch". Disable to skip the cost entirely.
+# an Exa Agent run (`exa.beta.agent.runs.create`) in parallel. The Agent
+# discovers additional LinkedIn profiles missed by Pass A's keyword search
+# AND enriches Pass A's hits (passed via `input.data`) with structured
+# fields: last_activity, follower_count, last 2 companies, fit_rationale.
+# Results land as a second wave of `candidate` / `candidate_detail` events
+# tagged with source "LinkedIn-DeepSearch". Disable to skip the cost.
+#
+# Requires `exa_py>=2.13.0` and an Exa account with the agent beta enabled.
 import os as _os
 EXA_AGENT_ENABLED = _os.getenv("EXA_AGENT_ENABLED", "true").strip().lower() == "true"
 
-# Exa research model. Cost/quality gradient: exa-research-fast < exa-research < exa-research-pro.
-# Also read by exa_service.deep_research_candidates().
-EXA_AGENT_MODEL = _os.getenv("EXA_AGENT_MODEL", "exa-research-fast").strip() or "exa-research-fast"
+# Agent effort level → cost cap per 1k searches:
+#   low    → $25/1k
+#   medium → $100/1k
+#   high   → $500/1k
+#   xhigh  → $2000/1k
+#   auto   → Exa picks (no fixed cap; defaults to ~medium-ish)
+# Also read directly by exa_service.deep_research_candidates() so a deploy
+# can be tuned without a process restart.
+EXA_AGENT_EFFORT = _os.getenv("EXA_AGENT_EFFORT", "medium").strip().lower() or "medium"
 
-# Cap on seed-URL count embedded in the research instructions string. The
-# instructions field is bounded to 4096 chars by Exa, and longer prompts
-# don't measurably improve enrichment quality. Read directly by exa_service.
+# Cap on URL count placed into the Agent's `input.data` array. Larger
+# batches let the Agent share search context across profiles but increase
+# the cost cap proportionally. Read directly by exa_service.
 try:
     EXA_AGENT_MAX_INPUT = int(_os.getenv("EXA_AGENT_MAX_INPUT", "25").strip() or "25")
 except ValueError:
     EXA_AGENT_MAX_INPUT = 25
 
-# Hard timeout for poll_until_finished, in seconds. exa-research-fast usually
-# finishes <60s; -pro can take 5min+. Read directly by exa_service.
+# Hard timeout for poll_until_finished, in seconds. `effort=low` usually
+# finishes in 30–60s; `effort=xhigh` can hit 5min+. Read directly by exa_service.
 try:
     EXA_AGENT_TIMEOUT = int(_os.getenv("EXA_AGENT_TIMEOUT", "180").strip() or "180")
 except ValueError:
     EXA_AGENT_TIMEOUT = 180
 
-# Concurrency cap (semaphore) for in-flight research runs. Exa enforces a
+# Concurrency cap (semaphore) for in-flight Agent runs. Exa enforces a
 # concurrency limit of 1/5 of account QPS — default account is ~10 QPS, so
 # ≥3 simultaneous runs will start 429ing. Default 1 (serialize per process).
 try:
