@@ -64,11 +64,14 @@ const POPOVER_ESTIMATED_HEIGHT = 480;
 const POPOVER_GAP = 8;
 
 function formatFollowerCount(n: number | null | undefined): string {
+  // Always append the unit so a chip rendered as "👤 226" can't be misread
+  // as "in 226 other pipelines" or "226 connections". Users icon + bare
+  // number was too ambiguous in the wild.
   if (n == null || !Number.isFinite(Number(n))) return "";
   const v = Number(n);
-  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
-  if (v >= 1_000) return `${(v / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
-  return String(v);
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1).replace(/\.0$/, "")}M followers`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1).replace(/\.0$/, "")}k followers`;
+  return `${v} followers`;
 }
 
 function getInitials(name: string): string {
