@@ -390,6 +390,95 @@ const getCandidateDisplayName = (candidate: {
   return candidate.source === "LinkedIn" ? "LinkedIn profile" : "Unnamed candidate";
 };
 
+// Extracted UI dedupe logic using email OR phone
+const deduplicateCandidatesUI = (candidatesList: any[]) => {
+  const normalizeEmail = (e?: string) => String(e || "").trim().toLowerCase();
+  const normalizePhoneValue = (p?: string) => {
+    const digits = String(p || "").replace(/\D/g, "");
+    return digits.length >= 7 ? digits.slice(-10) : "";
+  };
+
+  const getEmail = (c: any) => normalizeEmail(c.email || c.data?.email || c.enhanced_info?.email);
+  const getPhone = (c: any) => normalizePhoneValue(c.phone || c.data?.phone || c.enhanced_info?.phone);
+  const getNameLoc = (c: any) => {
+    const name = String(c.firstName || c.name || "").toLowerCase().trim() + "|" + String(c.lastName || "").toLowerCase().trim();
+    const city = String(c.city || c.location || "").toLowerCase().trim();
+    if (name === "|" && !city) return null;
+    return `${name}|${city}`;
+  };
+
+  let uniqueResults: any[] = [];
+
+  for (const cand of candidatesList) {
+    const cEmail = getEmail(cand);
+    const cPhone = getPhone(cand);
+    const cNameLoc = getNameLoc(cand);
+
+    if (!cEmail && !cPhone && !cNameLoc) {
+      uniqueResults.push(cand);
+      continue;
+    }
+
+    // Find ALL existing candidates that match
+    const matchIndices: number[] = [];
+    for (let i = 0; i < uniqueResults.length; i++) {
+      const existing = uniqueResults[i];
+      const eEmail = getEmail(existing);
+      const ePhone = getPhone(existing);
+      
+      let matches = false;
+      if (cEmail && eEmail && cEmail === eEmail) matches = true;
+      else if (cPhone && ePhone && cPhone === ePhone) matches = true;
+      else if (!cEmail && !cPhone && !eEmail && !ePhone && cNameLoc && cNameLoc === getNameLoc(existing)) matches = true;
+
+      if (matches) {
+        matchIndices.push(i);
+      }
+    }
+
+    if (matchIndices.length === 0) {
+      uniqueResults.push(cand);
+    } else {
+      // It matched one or more existing items.
+      // E.g. Cand has both email & phone. It matched existing[0] by email, existing[1] by phone.
+      // We must merge them into one winner.
+      const competitors = [cand, ...matchIndices.map(i => uniqueResults[i])];
+      
+      let winner = competitors[0];
+      for (let i = 1; i < competitors.length; i++) {
+        const comp = competitors[i];
+        const wHasBoth = Boolean(getEmail(winner)) && Boolean(getPhone(winner));
+        const cHasBoth = Boolean(getEmail(comp)) && Boolean(getPhone(comp));
+
+        if (cHasBoth && !wHasBoth) {
+          winner = comp;
+        } else if (cHasBoth === wHasBoth) {
+          const getPrio = (s?: string) => {
+            const l = String(s || "").toLowerCase();
+            if (l.includes("applicant")) return 1;
+            if (l.includes("talentsearch")) return 2;
+            return 3;
+          };
+          const wPrio = getPrio(winner.source);
+          const cPrio = getPrio(comp.source);
+          if (cPrio < wPrio) {
+             winner = comp;
+          } else if (cPrio === wPrio) {
+             if (Number(comp.match_score || 0) > Number(winner.match_score || 0)) {
+                winner = comp;
+             }
+          }
+        }
+      }
+
+      // Remove all matched indices from uniqueResults, append winner
+      uniqueResults = uniqueResults.filter((_, idx) => !matchIndices.includes(idx));
+      uniqueResults.push(winner);
+    }
+  }
+  return uniqueResults;
+};
+
 const extractLinkedInFromText = (text?: string | null): string => {
   const raw = String(text || "");
   if (!raw) return "";
@@ -977,11 +1066,17 @@ function NewJobPageContent() {
       const key = `${c.source ?? ''}:${candId}`;
       if (launchedCandidateKeys.has(key)) return false;
       if (!matchesSourceFilter(c)) return false;
-      if (minScore > 0) {
+      // Progressive rows (agent_result / details_loaded) bypass score &
+      // location filters so they stay visible while shimmering. Once the
+      // scored patch lands they fall back into the normal filter pipeline.
+      const stage = String(c?._stage || "");
+      const awaitingScore = stage === "agent_result" || stage === "details_loaded";
+      const awaitingDetails = stage === "agent_result";
+      if (minScore > 0 && !awaitingScore) {
         const score = getCandidateMatchScore(c);
         if (score < minScore) return false;
       }
-      if (locationFilter.size > 0) {
+      if (locationFilter.size > 0 && !awaitingDetails) {
         const loc = getCandidateLocationStr(c);
         if (!loc || !locationFilter.has(loc)) return false;
       }
@@ -4066,7 +4161,14 @@ function NewJobPageContent() {
     if (!rubricData) return;
 
     const getRubricDrivenMatchType = (item: any, existingMatchType?: 'must' | 'can' | 'exclude') => {
-      if (existingMatchType === 'exclude') return 'exclude';
+      // Preserve ANY user-edited matchType. Previously only 'exclude' was
+      // honored, so a recruiter who toggled a Preferred-rubric skill from
+      // "OR" → "AND" (must) on Step 5 would silently see it flip back to
+      // "OR" the next time syncStepFiveData ran (e.g. after a page reload
+      // restored sf.titles/sf.skills and re-ran initializeSourceFromRubric).
+      // Explicit re-seeding from rubric still happens via the Step 4 → 5
+      // Next button when the rubric fingerprint changes (line ~8217).
+      if (existingMatchType) return existingMatchType;
       return isRubricItemRequired(item) ? "must" : "can";
     };
 
@@ -5004,6 +5106,14 @@ function NewJobPageContent() {
 
     const mapStageToStatus = (stage: string) => {
       const raw = String(stage || "").toLowerCase();
+      // Exa deep-search messages have their own informative shape
+      // ("warming up", "running (N seeds)", "done — X enriched, Y new",
+      // "skipped: <reason>") — pass them through unchanged so the
+      // recruiter can see Pass B progress in the status bar instead of
+      // collapsing it into a generic "Searching at Exa portal..." line.
+      if (raw.includes("exa deep-search")) {
+        return stage;
+      }
       if (raw.includes("jobdiva applicants")) {
         return "Searching at JobDiva portal (Applicants)...";
       }
@@ -5071,7 +5181,7 @@ function NewJobPageContent() {
               if (id && seenIds.has(id)) continue;
               if (id) seenIds.add(id);
               runList.push(event.data);
-              setCandidates(prev => [...prev, event.data]);
+              setCandidates(prev => deduplicateCandidatesUI([...prev, event.data]));
 
               const foundCount = runList.length;
               if (foundCount === 1) {
@@ -5080,15 +5190,40 @@ function NewJobPageContent() {
                 setSearchStatus(`Found ${foundCount} profiles from ${activePortal}. Matching resumes against the rubric...`);
               }
             } else if (event.type === "candidate_detail") {
-              // Fast-path hydration: a thin row that was streamed earlier
-              // now has its email/phone/linkedin_url/resume_text/etc filled
-              // in by the background CandidatesDetail pager. Merge the patch
-              // into the matching row by candidate_id.
+              // Two flavors share this event:
+              //   1. Background CandidatesDetail hydration patches that fill
+              //      email/phone/linkedin_url/resume_text into a thin row
+              //      streamed earlier.
+              //   2. Progressive Step-5 enrichment stages: `stage` is one of
+              //      "jobdiva_details" | "scored" | "dropped". The row was
+              //      emitted at the agent_result stage with shimmer cells; the
+              //      patches replace those cells as data lands. `dropped`
+              //      removes the row outright (filter failure, no resume,
+              //      cross-source dup, etc.).
               const targetId = String(event.candidate_id || "");
+              const stage = String(event.stage || "");
+              if (!targetId) continue;
+
+              if (stage === "dropped") {
+                // Remove the matching row by id, and forget it from the seen
+                // set so a re-run can re-add it. Drop reason is in patch
+                // (_drop_reason) — surfaced via console for debugging.
+                const drop_reason = (event.patch && (event.patch as any)._drop_reason) || "unknown";
+                if (process.env.NODE_ENV !== "production") {
+                  console.debug(`[Step-5] dropped candidate ${targetId} reason=${drop_reason}`);
+                }
+                runList = runList.filter(r => String(r.candidate_id || r.id || "") !== targetId);
+                seenIds.delete(targetId);
+                setCandidates(prev => prev.filter(c => (
+                  String(c.candidate_id || c.jobdiva_candidate_id || c.id || "") !== targetId
+                )));
+                continue;
+              }
+
               const patch = (event.patch && typeof event.patch === "object")
                 ? event.patch
                 : {};
-              if (!targetId || Object.keys(patch).length === 0) continue;
+              if (Object.keys(patch).length === 0) continue;
               // Update local runList copy used elsewhere in this run.
               for (const r of runList) {
                 if (String(r.candidate_id || r.id || "") === targetId) {
@@ -5096,11 +5231,11 @@ function NewJobPageContent() {
                   break;
                 }
               }
-              setCandidates(prev => prev.map(c => (
+              setCandidates(prev => deduplicateCandidatesUI(prev.map(c => (
                 String(c.candidate_id || c.jobdiva_candidate_id || c.id || "") === targetId
                   ? { ...c, ...patch }
                   : c
-              )));
+              ))));
             } else if (event.type === "stage") {
               const rawStage = String(event.data || "");
               const mapped = mapStageToStatus(rawStage);
@@ -5186,11 +5321,12 @@ function NewJobPageContent() {
       const parsed = JSON.parse(raw);
       const cached = Array.isArray(parsed?.candidates) ? parsed.candidates : [];
       if (cached.length === 0) return;
-      setCandidates(cached);
+      const dedupedCached = deduplicateCandidatesUI(cached);
+      setCandidates(dedupedCached);
       setHasSearched(true);
       setRestoredFromCache(true);
       const seen = seenCandidateIdsRef.current;
-      for (const c of cached) {
+      for (const c of dedupedCached) {
         const id = String(c?.candidate_id || c?.id || "");
         if (id) seen.add(id);
       }

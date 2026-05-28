@@ -1,7 +1,8 @@
 import asyncio
 import logging
+import os
 import re
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 from core.config import EXA_API_KEY
 from exa_py import Exa
 from services.location import extract_us_location_from_text
@@ -346,6 +347,213 @@ class ExaService:
             "text": (text or "")[:8000],
             "summary": summary or "",
         }
+
+    async def deep_research_candidates(
+        self,
+        jd_title: str,
+        jd_role: str,
+        skills: List[str],
+        location: str,
+        seed_urls: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Exa Agent API (Websets 2.0) pass — agentic enrichment + discovery.
+
+        Calls `exa.beta.agent.runs.create(...)` with:
+          - `query`: JD-focused natural-language task description.
+          - `input.data`: seed URLs from Pass A as first-class input records
+            (no 4096-char instructions limit, no string mangling).
+          - `output_schema`: JSON Schema for the 4 structured fields.
+          - `effort`: cost cap (`low`/`medium`/`high`/`xhigh`/`auto`).
+          - `betas=["agent-2026-05-07"]`: required to access the beta surface.
+
+        Polls the run to completion via `poll_until_finished`. Returns
+        `output.structured["candidates"]` on success, `[]` on any failure
+        (timeout, beta-not-available, schema mismatch, etc.).
+        """
+        if not self.exa:
+            logger.warning("Exa API key is not set. Skipping Agent deep search.")
+            return []
+
+        # Read knobs from env at call time so per-deploy tuning doesn't
+        # require a process restart.
+        effort = (os.getenv("EXA_AGENT_EFFORT", "medium").strip().lower() or "medium")
+        if effort not in {"low", "medium", "high", "xhigh", "auto"}:
+            logger.warning("EXA_AGENT_EFFORT=%r is invalid; falling back to 'medium'", effort)
+            effort = "medium"
+        try:
+            timeout_s = int(os.getenv("EXA_AGENT_TIMEOUT", "180").strip() or "180")
+        except ValueError:
+            timeout_s = 180
+        try:
+            max_input = int(os.getenv("EXA_AGENT_MAX_INPUT", "25").strip() or "25")
+        except ValueError:
+            max_input = 25
+
+        # Soft-warn if a stale EXA_AGENT_MODEL is set from the prior Research
+        # API implementation. It's ignored now — kept here so operators don't
+        # think the agent is still on the old path.
+        if os.getenv("EXA_AGENT_MODEL"):
+            logger.info(
+                "EXA_AGENT_MODEL is set but ignored — Agent API uses EXA_AGENT_EFFORT instead."
+            )
+
+        top_skills = ", ".join((skills or [])[:5]) or "(any)"
+        seeds = [u for u in (seed_urls or []) if u][:max_input]
+
+        # Natural-language task. URLs go into `input.data`, not the query.
+        #
+        # Tone shift vs first version: every "or null" hint was making the
+        # agent give up on follower_count / last_activity the moment they
+        # weren't on the first page of search results. Now we explicitly
+        # mark them REQUIRED-TO-ATTEMPT and tell the agent how to find them
+        # (visit the linkedin profile page, search "<name> linkedin
+        # followers", etc.). Schema still allows null so the agent doesn't
+        # fail validation when a profile genuinely doesn't expose the data,
+        # but the prose strongly biases toward "go look".
+        query = (
+            f"Find LinkedIn profiles matching: title=\"{jd_title}\" | role=\"{jd_role}\" "
+            f"| skills=\"{top_skills}\" | location=\"{location}\". "
+            "Also enrich every profile passed in `input.data`. "
+            "For each candidate, you MUST attempt to extract ALL of the following — "
+            "treat null as a last resort, not a default:\n"
+            "  1. follower_count: visit the candidate's LinkedIn profile page and "
+            "read the visible follower count (e.g. '226 followers', '11,978,553 "
+            "followers'). If the page redirects to a sign-in wall, search the web "
+            "for '\"<candidate name>\" linkedin followers' and parse the number "
+            "from any cached snippet or third-party profile aggregator.\n"
+            "  2. last_activity: scan the activity tab or recent posts section "
+            "of the LinkedIn profile. Report the most recent post/comment/repost "
+            "with a relative date (e.g. '3 days ago', '2 weeks ago', or an ISO "
+            "date). Only return null if the profile shows zero activity in the "
+            "last 12 months.\n"
+            "  3. recent_companies: last 2 positions, each with company, title, "
+            "start (YYYY-MM), end (YYYY-MM or 'Present').\n"
+            f"  4. fit_rationale: one sentence (≤300 chars) on why this candidate's "
+            f"titles fit the role \"{jd_role}\".\n"
+            "Return at least 30 candidates with linkedin_url populated. Do not "
+            "drop candidates just because one field is hard to find — partial "
+            "enrichment is better than skipping them."
+        )
+
+        # Pass A URLs as first-class input records — the Agent API processes
+        # them in addition to its own search-driven discovery.
+        agent_input: Optional[Dict[str, Any]] = None
+        if seeds:
+            agent_input = {"data": [{"linkedin_url": u} for u in seeds]}
+
+        output_schema = {
+            "type": "object",
+            "required": ["candidates"],
+            "properties": {
+                "candidates": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["linkedin_url", "fit_rationale"],
+                        "properties": {
+                            "linkedin_url": {"type": "string"},
+                            "name": {"type": "string"},
+                            "current_title": {"type": "string"},
+                            "location": {"type": "string"},
+                            "last_activity": {"type": ["string", "null"]},
+                            "follower_count": {"type": ["integer", "null"]},
+                            "recent_companies": {
+                                "type": "array",
+                                "maxItems": 2,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "company": {"type": "string"},
+                                        "title": {"type": "string"},
+                                        "start": {"type": "string"},
+                                        "end": {"type": "string"},
+                                    },
+                                },
+                            },
+                            "fit_rationale": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        }
+
+        loop = asyncio.get_event_loop()
+        betas = ["agent-2026-05-07"]
+
+        def do_create():
+            return self.exa.beta.agent.runs.create(
+                betas=betas,
+                query=query,
+                input=agent_input,
+                output_schema=output_schema,
+                effort=effort,
+            )
+
+        def do_poll(rid: str):
+            return self.exa.beta.agent.runs.poll_until_finished(
+                rid,
+                betas=betas,
+                poll_interval=2000,
+                timeout_ms=timeout_s * 1000,
+            )
+
+        try:
+            logger.info(
+                "Exa Agent create: effort=%s seeds=%d title=%r role=%r",
+                effort, len(seeds), jd_title, jd_role,
+            )
+            created = await asyncio.wait_for(
+                loop.run_in_executor(None, do_create),
+                timeout=30.0,
+            )
+            run_id = getattr(created, "id", None)
+            if not run_id:
+                logger.warning("Exa Agent create returned no run id; response=%r", created)
+                return []
+        except asyncio.TimeoutError:
+            logger.warning("Exa Agent create timed out")
+            return []
+        except Exception as e:
+            logger.warning("Exa Agent create failed: %s", e)
+            return []
+
+        try:
+            completed = await asyncio.wait_for(
+                loop.run_in_executor(None, do_poll, run_id),
+                timeout=timeout_s + 10,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Exa Agent poll timeout for run_id=%s", run_id)
+            return []
+        except Exception as e:
+            logger.warning("Exa Agent poll failed for run_id=%s: %s", run_id, e)
+            return []
+
+        status = getattr(completed, "status", "")
+        stop_reason = getattr(completed, "stop_reason", None) or getattr(completed, "stopReason", None)
+        if status != "completed":
+            err = getattr(completed, "error", None)
+            logger.warning(
+                "Exa Agent finished with status=%s stop_reason=%s error=%r",
+                status, stop_reason, err,
+            )
+            return []
+
+        cost = getattr(completed, "cost_dollars", None) or getattr(completed, "costDollars", None)
+        if cost is not None:
+            logger.info("Exa Agent run_id=%s cost=%s stop_reason=%s", run_id, cost, stop_reason)
+
+        output = getattr(completed, "output", None)
+        if output is None:
+            return []
+        structured = getattr(output, "structured", None)
+        if not isinstance(structured, dict):
+            return []
+        candidates = structured.get("candidates") or []
+        if not isinstance(candidates, list):
+            return []
+        logger.info("Exa Agent run_id=%s returned %d candidates", run_id, len(candidates))
+        return candidates
 
     async def search_dice_candidates(self, skills: List[str], location: str, limit: int = 10, boolean_string: str = "", role_hint: str = "") -> List[Dict[str, Any]]:
         """

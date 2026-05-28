@@ -282,7 +282,7 @@ export default function CandidateEvaluationReportPage() {
   const showEngageScore = hasFinalEngageOutcome(scores.hard_filter_status, scores.engage_status);
   const displayedTotalFitScore = showEngageScore
     ? (scores.total_fit_score || 0)
-    : (scores.resume_match_score || 0);
+    : null;
 
   const formatAvailability = (availability: string, interviewDate?: string) => {
     if (!availability || availability.toLowerCase().includes("no data available")) return "No data available";
@@ -468,7 +468,7 @@ export default function CandidateEvaluationReportPage() {
             <div className="flex-1 p-6 space-y-3">
               <div className="text-[12px] font-bold text-[#94a3b8] uppercase tracking-widest">Total Fit Score</div>
               <div className="flex items-center gap-4">
-                <div className="text-[14px] text-[#475569]">Score: <strong className="text-[#0f172a] ml-1 font-bold">{displayedTotalFitScore}/100</strong></div>
+                <div className="text-[14px] text-[#475569]">Score: <strong className="text-[#0f172a] ml-1 font-bold">{displayedTotalFitScore !== null ? `${displayedTotalFitScore}/100` : <span className="font-normal opacity-40 italic text-[13px] text-slate-500">Waiting</span>}</strong></div>
               </div>
             </div>
           </div>
