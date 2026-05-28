@@ -25,6 +25,9 @@ import {
   MapPin,
   Briefcase,
   Calendar,
+  Users,
+  GraduationCap,
+  Sparkles,
 } from "lucide-react";
 import { getCandidateLocations } from "@/lib/candidate-location";
 
@@ -56,16 +59,23 @@ interface Props {
   dncKeys?: Set<string>;
 }
 
-const POPOVER_WIDTH = 440;
-const POPOVER_ESTIMATED_HEIGHT = 360;
+const POPOVER_WIDTH = 540;
+const POPOVER_ESTIMATED_HEIGHT = 480;
 const POPOVER_GAP = 8;
 
 function formatFollowerCount(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(Number(n))) return "";
   const v = Number(n);
-  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1).replace(/\.0$/, "")}M followers`;
-  if (v >= 1_000) return `${(v / 1_000).toFixed(1).replace(/\.0$/, "")}k followers`;
-  return `${v} followers`;
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
+  return String(v);
+}
+
+function getInitials(name: string): string {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
 function getCandidateId(c: any): string {
@@ -546,11 +556,29 @@ export function CandidateMatchTable({
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span
                         className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center gap-1 border ${sourceBadge.colors}`}
-                        title={candidate.source || ""}
+                        title={
+                          Array.isArray(candidate.sources) && candidate.sources.length > 1
+                            ? `Found via: ${candidate.sources.join(" + ")}`
+                            : candidate.source || ""
+                        }
                       >
                         <sourceBadge.Icon className="w-2.5 h-2.5" />
                         {sourceBadge.label}
                       </span>
+                      {/* Standalone Deep chip — fires when Pass B contributed
+                          to this row (overlapping with Pass A or as a
+                          deep-only find). Visible signal that the recruiter
+                          is looking at enriched data, not just a Pass A hit. */}
+                      {(Array.isArray(candidate.sources)
+                        ? candidate.sources.includes("LinkedIn-DeepSearch")
+                        : candidate.source === "LinkedIn-DeepSearch") && (
+                        <span
+                          className="px-1.5 py-0.5 rounded-md text-[9.5px] font-extrabold uppercase tracking-wider inline-flex items-center gap-0.5 border bg-violet-50 text-violet-700 border-violet-200"
+                          title="Enriched via Exa Agent deep-search"
+                        >
+                          ✦ Deep
+                        </span>
+                      )}
                       {isDnc && (
                         <span
                           className="px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center border bg-rose-100 text-rose-700 border-rose-300"
@@ -596,42 +624,67 @@ function HoverDetailsCard({
   top: number;
   left: number;
 }) {
-  const titleStr = String(candidate.title || candidate.current_title || candidate.headline || "").trim();
+  // Header data
+  const displayName = getDisplayName(candidate);
+  const titleStr = String(
+    candidate.title || candidate.current_title || candidate.headline || ""
+  ).trim();
   const enhanced = (candidate.enhanced_info || {}) as Record<string, any>;
-  const companyExp =
-    (Array.isArray(candidate.company_experience) && candidate.company_experience.length > 0
-      ? candidate.company_experience
-      : Array.isArray(enhanced.company_experience)
-        ? enhanced.company_experience
-        : []) as Array<{ company?: string; title?: string }>;
-  const companyStr = String(companyExp[0]?.company || "").trim();
-  const titleAtCompany = titleStr && companyStr ? `${titleStr} @ ${companyStr}` : titleStr || companyStr;
+  const initials = getInitials(displayName);
 
+  // Location + years
+  const { home: homeLoc, work: workLoc } = getCandidateLocations(candidate);
+  const locationStr = homeLoc || workLoc || String(candidate.location || "").trim();
   const yearsRaw =
     candidate.experience_years ?? candidate.years_experience ?? enhanced.years_of_experience;
   const yearsNum = typeof yearsRaw === "number" ? yearsRaw : Number(yearsRaw);
-  const yearsStr = Number.isFinite(yearsNum) && yearsNum > 0 ? `${yearsNum}+ yrs experience` : "";
+  const yearsStr = Number.isFinite(yearsNum) && yearsNum > 0 ? `${yearsNum} yrs` : "";
 
-  const matched = getMatchedSkills(candidate);
-  const missing = getMissingSkills(candidate).slice(0, 5);
-  const explain = Array.isArray(candidate.explainability) ? candidate.explainability : [];
-  const firstExplain = typeof explain[0] === "string" ? explain[0] : explain[0]?.text || "";
-
-  // Exa Research API enrichment (Pass B). All four fields may be absent
-  // when (a) the candidate isn't Exa-sourced, (b) the research run hasn't
-  // finished yet, or (c) the research run failed — every block below
-  // gates on truthiness so the card still renders cleanly without them.
-  const exaFitRationale = String(candidate.exa_fit_rationale || "").trim();
-  const exaLastActivity = String(candidate.exa_last_activity || "").trim();
-  const exaFollowerStr = formatFollowerCount(candidate.exa_follower_count);
+  // Experience: prefer Exa's structured `exa_recent_companies` (Pass B has
+  // dates + titles), fall back to enhanced_info.company_experience from
+  // resume parsing. Both arrays may be present at the same time after Pass B
+  // lands — prefer Exa because its dates are cleaner.
   const exaCompaniesRaw = Array.isArray(candidate.exa_recent_companies)
     ? candidate.exa_recent_companies
     : [];
-  const exaCompanies = exaCompaniesRaw
-    .filter((c: any) => c && (c.company || c.title))
-    .slice(0, 2);
-  const sourceBadge = getSourceBadge(candidate.source, candidate.sources);
+  const exaCompanies = exaCompaniesRaw.filter((c: any) => c && (c.company || c.title));
+  const enhancedExp = Array.isArray(enhanced.company_experience)
+    ? enhanced.company_experience
+    : Array.isArray(candidate.company_experience)
+      ? candidate.company_experience
+      : [];
+  const useExaExp = exaCompanies.length > 0;
+  const experienceRows = (useExaExp ? exaCompanies : enhancedExp).slice(0, 3);
 
+  // Skills
+  const matched = getMatchedSkills(candidate);
+  const missing = getMissingSkills(candidate).slice(0, 4);
+
+  // Education (best-effort — schemas vary across sources)
+  const educationRaw =
+    candidate.education || enhanced.education || enhanced.education_summary || "";
+  const educationStr = Array.isArray(educationRaw)
+    ? educationRaw
+        .slice(0, 1)
+        .map((e: any) =>
+          typeof e === "string"
+            ? e
+            : [e?.degree, e?.school || e?.institution].filter(Boolean).join(", ") +
+              (e?.year || e?.graduation_year ? ` · ${e.year || e.graduation_year}` : "")
+        )
+        .filter(Boolean)[0] || ""
+    : String(educationRaw || "").trim();
+
+  // Exa Research API enrichment
+  const exaFitRationale = String(candidate.exa_fit_rationale || "").trim();
+  const exaLastActivity = String(candidate.exa_last_activity || "").trim();
+  const exaFollowerStr = formatFollowerCount(candidate.exa_follower_count);
+
+  // Explain fallback when Exa rationale isn't there yet
+  const explain = Array.isArray(candidate.explainability) ? candidate.explainability : [];
+  const firstExplain = typeof explain[0] === "string" ? explain[0] : explain[0]?.text || "";
+
+  // Status chips
   const recentAvailabilityRaw = String(
     candidate.recent_availability ||
       candidate.recentAvailability ||
@@ -640,148 +693,233 @@ function HoverDetailsCard({
       ""
   ).trim();
   const availabilityLower = recentAvailabilityRaw.toLowerCase();
-  const availabilityChip = recentAvailabilityRaw
-    ? availabilityLower.includes("available") || availabilityLower.includes("open")
-      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
-      : availabilityLower.includes("placed") ||
-          availabilityLower.includes("assignment") ||
-          availabilityLower.includes("employed")
-        ? "bg-slate-100 text-slate-600 border-slate-200"
-        : "bg-amber-50 text-amber-700 border-amber-200"
-    : "";
+  const isOpenToWork =
+    !!candidate.open_to_work ||
+    !!candidate.open_to_relocation ||
+    availabilityLower.includes("open") ||
+    availabilityLower.includes("available");
+
+  const matchScore =
+    typeof candidate.match_score === "number" ? candidate.match_score : null;
+  const matchTone = getMatchTone(matchScore);
+
+  const sourceBadge = getSourceBadge(candidate.source, candidate.sources);
+  const hasDeepEnrichment =
+    Array.isArray(candidate.sources) && candidate.sources.includes("LinkedIn-DeepSearch");
 
   return (
     <div
-      className="pointer-events-none fixed z-[60] rounded-xl border border-slate-200 bg-white shadow-xl p-4"
+      className="pointer-events-none fixed z-[60] rounded-xl border border-slate-200 bg-white shadow-xl"
       style={{ top, left, width: POPOVER_WIDTH }}
     >
-      <div className="flex items-center justify-between gap-2 mb-2">
-        {titleAtCompany ? (
-          <div className="text-[12.5px] font-semibold text-slate-800 truncate flex-1" title={titleAtCompany}>
-            {titleAtCompany}
+      {/* HEADER — avatar + name + source on the same row, title + location below */}
+      <div className="p-4 pb-3 border-b border-slate-100">
+        <div className="flex items-start gap-3">
+          <div className="w-11 h-11 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center font-bold text-[13px] shrink-0">
+            {initials}
           </div>
-        ) : <div className="flex-1" />}
-        <span
-          className={`px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center gap-1 border shrink-0 ${sourceBadge.colors}`}
-          title={Array.isArray(candidate.sources) && candidate.sources.length > 1
-            ? `Found via: ${candidate.sources.join(" + ")}`
-            : sourceBadge.label}
-        >
-          <sourceBadge.Icon className="w-2.5 h-2.5" />
-          {sourceBadge.label}
-        </span>
-      </div>
-      <div className="flex flex-wrap items-center gap-2 mb-3 text-[11.5px] text-slate-600">
-        {yearsStr && (
-          <span className="inline-flex items-center gap-1">
-            <Clock className="w-3 h-3 text-slate-400" />
-            {yearsStr}
-          </span>
-        )}
-        {candidate.email && (
-          <span className="inline-flex items-center gap-1 truncate max-w-[200px]" title={candidate.email}>
-            <Mail className="w-3 h-3 text-slate-400 shrink-0" />
-            <span className="truncate">{candidate.email}</span>
-          </span>
-        )}
-        {recentAvailabilityRaw && (
-          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${availabilityChip}`}>
-            {recentAvailabilityRaw}
-          </span>
-        )}
-        {exaLastActivity && (
-          <span
-            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border bg-violet-50 text-violet-700 border-violet-200"
-            title="LinkedIn last activity (Exa Research)"
-          >
-            <Clock className="w-3 h-3" />
-            {exaLastActivity}
-          </span>
-        )}
-        {exaFollowerStr && (
-          <span
-            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border bg-indigo-50 text-indigo-700 border-indigo-200"
-            title="LinkedIn follower count (Exa Research)"
-          >
-            {exaFollowerStr}
-          </span>
-        )}
-      </div>
-
-      {matched.length > 0 && (
-        <div className="mb-3">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
-            Matched skills
-          </div>
-          <div className="flex flex-wrap gap-1">
-            {matched.map((skill, i) => (
-              <span
-                key={`${skill}-${i}`}
-                className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 text-[11px] font-semibold border border-emerald-100"
-              >
-                {skill}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[14px] font-bold text-slate-900 truncate max-w-[300px]" title={displayName}>
+                {displayName}
               </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {missing.length > 0 && (
-        <div className="mb-3">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
-            Top missing skills
-          </div>
-          <div className="flex flex-wrap gap-1">
-            {missing.map((skill, i) => (
+              {hasDeepEnrichment && (
+                <span
+                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-md text-[9.5px] font-extrabold uppercase tracking-wider border bg-violet-50 text-violet-700 border-violet-200"
+                  title="Enriched via Exa Agent deep-search"
+                >
+                  <Sparkles className="w-2.5 h-2.5" />
+                  Deep
+                </span>
+              )}
               <span
-                key={`${skill}-${i}`}
-                className="px-2 py-0.5 rounded-md bg-rose-50 text-rose-700 text-[11px] font-semibold border border-rose-100"
+                className={`ml-auto px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center gap-1 border shrink-0 ${sourceBadge.colors}`}
+                title={Array.isArray(candidate.sources) && candidate.sources.length > 1
+                  ? `Found via: ${candidate.sources.join(" + ")}`
+                  : sourceBadge.label}
               >
-                {skill}
+                <sourceBadge.Icon className="w-2.5 h-2.5" />
+                {sourceBadge.label}
               </span>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {exaCompanies.length > 0 && (
-        <div className="mb-3">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
-            Recent roles
-          </div>
-          <div className="flex flex-col gap-0.5">
-            {exaCompanies.map((c: any, i: number) => {
-              const title = String(c?.title || "").trim();
-              const company = String(c?.company || "").trim();
-              const start = String(c?.start || "").trim();
-              const end = String(c?.end || "").trim();
-              const lhs = [title, company].filter(Boolean).join(" @ ");
-              const rhs = [start, end].filter(Boolean).join(" – ");
-              return (
-                <div key={`${lhs}-${i}`} className="text-[11.5px] text-slate-700 truncate" title={`${lhs}${rhs ? ` · ${rhs}` : ""}`}>
-                  <span className="font-medium">{lhs || "(role)"}</span>
-                  {rhs && <span className="text-slate-400"> · {rhs}</span>}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {(exaFitRationale || firstExplain) && (
-        <div className="text-[11.5px] text-slate-600 leading-snug border-t border-slate-100 pt-2">
-          {exaFitRationale ? (
-            <>
-              <div className="text-[10px] font-bold uppercase tracking-wider text-violet-600 mb-1">
-                Fit rationale
+            </div>
+            {titleStr && (
+              <div className="text-[12.5px] text-slate-700 truncate mt-0.5" title={titleStr}>
+                {titleStr}
               </div>
-              {exaFitRationale}
-            </>
-          ) : (
-            firstExplain
-          )}
+            )}
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11.5px] text-slate-500 mt-1">
+              {locationStr && (
+                <span className="inline-flex items-center gap-1">
+                  <MapPin className="w-3 h-3" />
+                  {locationStr}
+                </span>
+              )}
+              {yearsStr && (
+                <>
+                  {locationStr && <span className="text-slate-300">·</span>}
+                  <span className="inline-flex items-center gap-1">
+                    <Clock className="w-3 h-3" />
+                    {yearsStr}
+                  </span>
+                </>
+              )}
+              {matchScore != null && matchTone && (
+                <>
+                  <span className="text-slate-300">·</span>
+                  <span
+                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold"
+                    style={{ backgroundColor: matchTone.bg, color: matchTone.text }}
+                  >
+                    {matchScore}% match
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
         </div>
-      )}
+
+        {/* Status chip row — Open to work / Email / Follower count / Last activity */}
+        {(isOpenToWork || candidate.email || exaFollowerStr || exaLastActivity || recentAvailabilityRaw) && (
+          <div className="flex flex-wrap items-center gap-1.5 mt-3">
+            {isOpenToWork && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border bg-emerald-50 text-emerald-700 border-emerald-200">
+                ✓ Open to work
+              </span>
+            )}
+            {recentAvailabilityRaw && !isOpenToWork && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border bg-amber-50 text-amber-700 border-amber-200">
+                {recentAvailabilityRaw}
+              </span>
+            )}
+            {candidate.email && (
+              <span
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border bg-slate-50 text-slate-700 border-slate-200 max-w-[200px]"
+                title={candidate.email}
+              >
+                <Mail className="w-3 h-3" />
+                <span className="truncate">{candidate.email}</span>
+              </span>
+            )}
+            {exaFollowerStr && (
+              <span
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border bg-indigo-50 text-indigo-700 border-indigo-200"
+                title="LinkedIn follower count (Exa Agent)"
+              >
+                <Users className="w-3 h-3" />
+                {exaFollowerStr}
+              </span>
+            )}
+            {exaLastActivity && (
+              <span
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border bg-violet-50 text-violet-700 border-violet-200"
+                title="LinkedIn last activity (Exa Agent)"
+              >
+                <Clock className="w-3 h-3" />
+                {exaLastActivity}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* BODY */}
+      <div className="p-4 pt-3 space-y-3">
+        {/* EXPERIENCE timeline */}
+        {experienceRows.length > 0 && (
+          <div>
+            <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5 flex items-center gap-1">
+              <Briefcase className="w-3 h-3" />
+              Experience
+            </div>
+            <div className="flex flex-col gap-1">
+              {experienceRows.map((c: any, i: number) => {
+                const title = String(c?.title || c?.job_title || "").trim();
+                const company = String(c?.company || c?.company_name || "").trim();
+                const start = String(c?.start || c?.start_date || "").trim();
+                const end = String(c?.end || c?.end_date || "").trim();
+                const lhs = title && company
+                  ? <><span>{title}</span> <span className="text-slate-400">at</span> <span className="font-semibold">{company}</span></>
+                  : <span className="font-semibold">{title || company || "(role)"}</span>;
+                const rhs = [start, end].filter(Boolean).join(" – ");
+                return (
+                  <div
+                    key={`${title}-${company}-${i}`}
+                    className="text-[12px] text-slate-700 truncate"
+                    title={`${title} at ${company}${rhs ? ` · ${rhs}` : ""}`}
+                  >
+                    {lhs}
+                    {rhs && <span className="text-slate-400"> · {rhs}</span>}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* SKILLS — matched (emerald) + missing (rose) */}
+        {(matched.length > 0 || missing.length > 0) && (
+          <div className="grid grid-cols-2 gap-3">
+            {matched.length > 0 && (
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
+                  Skills matched ({matched.length})
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {matched.slice(0, 6).map((skill, i) => (
+                    <span
+                      key={`${skill}-${i}`}
+                      className="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 text-[11px] font-semibold border border-emerald-100"
+                    >
+                      {skill}
+                    </span>
+                  ))}
+                  {matched.length > 6 && (
+                    <span className="px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-700 text-[11px] font-semibold">
+                      +{matched.length - 6}
+                    </span>
+                  )}
+                </div>
+              </div>
+            )}
+            {missing.length > 0 && (
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
+                  Missing
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {missing.map((skill, i) => (
+                    <span
+                      key={`${skill}-${i}`}
+                      className="px-2 py-0.5 rounded-md bg-rose-50 text-rose-700 text-[11px] font-semibold border border-rose-100"
+                    >
+                      {skill}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* EDUCATION */}
+        {educationStr && (
+          <div className="text-[11.5px] text-slate-700 inline-flex items-start gap-1">
+            <GraduationCap className="w-3.5 h-3.5 text-slate-400 mt-0.5 shrink-0" />
+            <span>{educationStr}</span>
+          </div>
+        )}
+
+        {/* FIT RATIONALE — Exa preferred, fall back to legacy explainability */}
+        {(exaFitRationale || firstExplain) && (
+          <div className="text-[12px] text-slate-600 leading-snug border-t border-slate-100 pt-2.5">
+            <div className="text-[10px] font-bold uppercase tracking-wider text-violet-600 mb-1 inline-flex items-center gap-1">
+              <Sparkles className="w-3 h-3" />
+              {exaFitRationale ? "Fit rationale (Exa Agent)" : "Why this matches"}
+            </div>
+            {exaFitRationale || firstExplain}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

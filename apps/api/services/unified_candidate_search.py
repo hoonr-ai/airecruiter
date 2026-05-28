@@ -1017,6 +1017,19 @@ class UnifiedCandidateSearch:
                         enriched += 1
                     else:
                         new_id = f"exadeep_{idx}_{nurl[-32:] or 'unknown'}"
+                        # Pull skills out of recent_companies / fit_rationale
+                        # so the scorer has something to compare against the
+                        # JD's required skills. Without this, every deep-only
+                        # candidate scored 0 and sank to the bottom of the
+                        # sorted list — invisible to the recruiter.
+                        rationale_blob = " ".join([
+                            str(entry.get("fit_rationale") or ""),
+                            *[
+                                f"{rc.get('title', '')} {rc.get('company', '')}"
+                                for rc in (entry.get("recent_companies") or [])
+                                if isinstance(rc, dict)
+                            ],
+                        ])
                         new_cand: Dict[str, Any] = {
                             "id": new_id,
                             "candidate_id": new_id,
@@ -1031,7 +1044,7 @@ class UnifiedCandidateSearch:
                             "source": "LinkedIn-DeepSearch",
                             "sources": ["LinkedIn-DeepSearch"],
                             "skills": [],
-                            "match_score": 0,
+                            "resume_text": rationale_blob,  # feeds the scorer
                             "_stage": "exa_deep_search",
                             **{k: v for k, v in patch_fields.items() if v is not None},
                         }
@@ -1041,12 +1054,23 @@ class UnifiedCandidateSearch:
                         keys = self._dedup_keys(new_cand)
                         if any(k in seen_dedup_keys for k in keys):
                             continue
-                        for k in keys:
-                            seen_dedup_keys.add(k)
-                        if new_id:
-                            seen_ids.add(new_id)
-                        summary["total_candidates"] += 1
-                        await queue.put({"type": "candidate", "data": new_cand})
+                        # Route through emit_candidate so the deep-only
+                        # candidate gets the same scoring + finalize_candidate
+                        # treatment as Pass A — without this its match_score
+                        # stayed at 0 and it sorted to the bottom of the list.
+                        # The closure already handles seen_ids / seen_dedup_keys
+                        # bookkeeping internally; we don't pre-add here.
+                        try:
+                            assessment = self._filter_assessment(
+                                new_cand, criteria, enforce_years=False
+                            )
+                        except Exception as e:
+                            logger.warning("filter_assessment failed for deep candidate %s: %s", new_id, e)
+                            assessment = {
+                                "passes": True, "matched": [], "missing": [],
+                                "excluded": [], "score": 0,
+                            }
+                        await emit_candidate(new_cand, assessment)
                         new_found += 1
             except Exception as e:
                 logger.error(f"Exa Agent producer failed: {e}", exc_info=True)
