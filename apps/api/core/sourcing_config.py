@@ -136,14 +136,16 @@ EXA_AGENT_ENABLED = _os.getenv("EXA_AGENT_ENABLED", "true").strip().lower() in {
 }
 
 # Agent effort level → cost cap per 1k searches:
-#   low    → $25/1k
-#   medium → $100/1k
-#   high   → $500/1k
-#   xhigh  → $2000/1k
-#   auto   → Exa picks (no fixed cap; defaults to ~medium-ish)
+#   low    → $25/1k    — fails our 4-field schema (budget too tight to scrape)
+#   medium → $100/1k   — fit_rationale lands, but follower_count + last_activity
+#                        are null on ~70% of candidates (budget_reached before
+#                        the agent reaches the LinkedIn followers section)
+#   high   → $500/1k   — DEFAULT. Reliably populates all four fields.
+#   xhigh  → $2000/1k  — overkill for our schema; reserved for one-off deep dives
+#   auto   → Exa picks (no fixed cap)
 # Also read directly by exa_service.deep_research_candidates() so a deploy
 # can be tuned without a process restart.
-EXA_AGENT_EFFORT = _os.getenv("EXA_AGENT_EFFORT", "medium").strip().lower() or "medium"
+EXA_AGENT_EFFORT = _os.getenv("EXA_AGENT_EFFORT", "high").strip().lower() or "high"
 
 # Cap on URL count placed into the Agent's `input.data` array. Larger
 # batches let the Agent share search context across profiles but increase
