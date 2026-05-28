@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import re
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Optional, Tuple
 from core.config import EXA_API_KEY
 from exa_py import Exa
 from services.location import extract_us_location_from_text
@@ -356,22 +356,30 @@ class ExaService:
         location: str,
         seed_urls: List[str],
     ) -> List[Dict[str, Any]]:
-        """Exa Research API pass — agentic enrichment + discovery.
+        """Exa Agent API (Websets 2.0) pass — agentic enrichment + discovery.
 
-        Builds JD-focused instructions plus inline seed URLs from prior Exa hits,
-        polls the research run to completion, and returns the structured
-        candidates list (already schema-validated by Exa). Empty list on any
-        failure — caller treats it as "no extra candidates" and renders Pass A
-        as-is.
+        Calls `exa.beta.agent.runs.create(...)` with:
+          - `query`: JD-focused natural-language task description.
+          - `input.data`: seed URLs from Pass A as first-class input records
+            (no 4096-char instructions limit, no string mangling).
+          - `output_schema`: JSON Schema for the 4 structured fields.
+          - `effort`: cost cap (`low`/`medium`/`high`/`xhigh`/`auto`).
+          - `betas=["agent-2026-05-07"]`: required to access the beta surface.
 
-        Cost is bounded by `EXA_AGENT_MODEL` (default `exa-research-fast`) and
-        `EXA_AGENT_TIMEOUT` (default 180s).
+        Polls the run to completion via `poll_until_finished`. Returns
+        `output.structured["candidates"]` on success, `[]` on any failure
+        (timeout, beta-not-available, schema mismatch, etc.).
         """
         if not self.exa:
-            logger.warning("Exa API key is not set. Skipping deep research.")
+            logger.warning("Exa API key is not set. Skipping Agent deep search.")
             return []
 
-        model = os.getenv("EXA_AGENT_MODEL", "exa-research-fast").strip() or "exa-research-fast"
+        # Read knobs from env at call time so per-deploy tuning doesn't
+        # require a process restart.
+        effort = (os.getenv("EXA_AGENT_EFFORT", "medium").strip().lower() or "medium")
+        if effort not in {"low", "medium", "high", "xhigh", "auto"}:
+            logger.warning("EXA_AGENT_EFFORT=%r is invalid; falling back to 'medium'", effort)
+            effort = "medium"
         try:
             timeout_s = int(os.getenv("EXA_AGENT_TIMEOUT", "180").strip() or "180")
         except ValueError:
@@ -381,24 +389,36 @@ class ExaService:
         except ValueError:
             max_input = 25
 
+        # Soft-warn if a stale EXA_AGENT_MODEL is set from the prior Research
+        # API implementation. It's ignored now — kept here so operators don't
+        # think the agent is still on the old path.
+        if os.getenv("EXA_AGENT_MODEL"):
+            logger.info(
+                "EXA_AGENT_MODEL is set but ignored — Agent API uses EXA_AGENT_EFFORT instead."
+            )
+
         top_skills = ", ".join((skills or [])[:5]) or "(any)"
         seeds = [u for u in (seed_urls or []) if u][:max_input]
-        seed_block = ""
-        if seeds:
-            seed_lines = "\n".join(f"- {u}" for u in seeds)
-            seed_block = f"\nAlso enrich these existing profiles:\n{seed_lines}\n"
 
-        # Cap total instruction length at SDK limit (4096 chars).
-        instructions = (
+        # Natural-language task. URLs go into `input.data`, not the query.
+        query = (
             f"Find LinkedIn profiles matching: title=\"{jd_title}\" | role=\"{jd_role}\" "
-            f"| skills=\"{top_skills}\" | location=\"{location}\".{seed_block}"
-            "For each profile, extract: last_activity (most recent visible post/comment "
-            "with relative date, or null), follower_count (integer or null), "
-            "recent_companies (last 2 positions, each with company, title, start as "
-            "YYYY-MM, end as YYYY-MM or 'Present'), fit_rationale (one sentence ≤300 "
-            f"chars on why this candidate's titles fit the role \"{jd_role}\"). "
+            f"| skills=\"{top_skills}\" | location=\"{location}\". "
+            "Also enrich every profile passed in `input.data`. "
+            "For each profile, extract: last_activity (most recent visible "
+            "post/comment with relative date, or null), follower_count "
+            "(integer or null), recent_companies (last 2 positions, each with "
+            "company, title, start as YYYY-MM, end as YYYY-MM or 'Present'), "
+            f"fit_rationale (one sentence ≤300 chars on why this candidate's "
+            f"titles fit the role \"{jd_role}\"). "
             "Return at least 30 candidates with linkedin_url populated."
-        )[:4096]
+        )
+
+        # Pass A URLs as first-class input records — the Agent API processes
+        # them in addition to its own search-driven discovery.
+        agent_input: Optional[Dict[str, Any]] = None
+        if seeds:
+            agent_input = {"data": [{"linkedin_url": u} for u in seeds]}
 
         output_schema = {
             "type": "object",
@@ -437,79 +457,81 @@ class ExaService:
         }
 
         loop = asyncio.get_event_loop()
+        betas = ["agent-2026-05-07"]
 
         def do_create():
-            return self.exa.research.create(
-                instructions=instructions,
-                model=model,
+            return self.exa.beta.agent.runs.create(
+                betas=betas,
+                query=query,
+                input=agent_input,
                 output_schema=output_schema,
+                effort=effort,
             )
 
         def do_poll(rid: str):
-            return self.exa.research.poll_until_finished(
+            return self.exa.beta.agent.runs.poll_until_finished(
                 rid,
+                betas=betas,
                 poll_interval=2000,
                 timeout_ms=timeout_s * 1000,
             )
 
         try:
             logger.info(
-                "Exa research create: model=%s seeds=%d title=%r role=%r",
-                model, len(seeds), jd_title, jd_role,
+                "Exa Agent create: effort=%s seeds=%d title=%r role=%r",
+                effort, len(seeds), jd_title, jd_role,
             )
             created = await asyncio.wait_for(
                 loop.run_in_executor(None, do_create),
                 timeout=30.0,
             )
-            research_id = getattr(created, "research_id", None) or getattr(created, "researchId", None)
-            if not research_id:
-                # SDK returns ResearchDto which may wrap the field — try .root.
-                root = getattr(created, "root", None)
-                research_id = getattr(root, "research_id", None) if root is not None else None
-            if not research_id:
-                logger.warning("Exa research create returned no research_id")
+            run_id = getattr(created, "id", None)
+            if not run_id:
+                logger.warning("Exa Agent create returned no run id; response=%r", created)
                 return []
         except asyncio.TimeoutError:
-            logger.warning("Exa research create timed out")
+            logger.warning("Exa Agent create timed out")
             return []
         except Exception as e:
-            logger.warning("Exa research create failed: %s", e)
+            logger.warning("Exa Agent create failed: %s", e)
             return []
 
         try:
             completed = await asyncio.wait_for(
-                loop.run_in_executor(None, do_poll, research_id),
+                loop.run_in_executor(None, do_poll, run_id),
                 timeout=timeout_s + 10,
             )
         except asyncio.TimeoutError:
-            logger.warning("Exa research poll timeout for %s", research_id)
+            logger.warning("Exa Agent poll timeout for run_id=%s", run_id)
             return []
         except Exception as e:
-            logger.warning("Exa research poll failed for %s: %s", research_id, e)
+            logger.warning("Exa Agent poll failed for run_id=%s: %s", run_id, e)
             return []
 
-        # ResearchDto is a discriminated union; unwrap .root if present.
-        completed_root = getattr(completed, "root", completed)
-        status = getattr(completed_root, "status", "")
+        status = getattr(completed, "status", "")
+        stop_reason = getattr(completed, "stop_reason", None) or getattr(completed, "stopReason", None)
         if status != "completed":
-            logger.warning("Exa research finished with status=%s", status)
+            err = getattr(completed, "error", None)
+            logger.warning(
+                "Exa Agent finished with status=%s stop_reason=%s error=%r",
+                status, stop_reason, err,
+            )
             return []
 
-        # Log cost for tuning.
-        cost = getattr(completed_root, "cost_dollars", None) or getattr(completed_root, "costDollars", None)
+        cost = getattr(completed, "cost_dollars", None) or getattr(completed, "costDollars", None)
         if cost is not None:
-            logger.info("Exa research cost=%s research_id=%s", cost, research_id)
+            logger.info("Exa Agent run_id=%s cost=%s stop_reason=%s", run_id, cost, stop_reason)
 
-        output = getattr(completed_root, "output", None)
+        output = getattr(completed, "output", None)
         if output is None:
             return []
-        parsed = getattr(output, "parsed", None)
-        if not isinstance(parsed, dict):
+        structured = getattr(output, "structured", None)
+        if not isinstance(structured, dict):
             return []
-        candidates = parsed.get("candidates") or []
+        candidates = structured.get("candidates") or []
         if not isinstance(candidates, list):
             return []
-        logger.info("Exa research returned %d candidates", len(candidates))
+        logger.info("Exa Agent run_id=%s returned %d candidates", run_id, len(candidates))
         return candidates
 
     async def search_dice_candidates(self, skills: List[str], location: str, limit: int = 10, boolean_string: str = "", role_hint: str = "") -> List[Dict[str, Any]]:
