@@ -23,6 +23,7 @@ export interface LaunchBatchInfo {
   index: number;
   size: number;
   status: BatchStatus;
+  message?: string;
   savedCount: number;
   dncSkipped: number;
   engageSent: number;
