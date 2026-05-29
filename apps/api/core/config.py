@@ -108,6 +108,12 @@ AZURE_AI_AGENT_NAME       = os.getenv("AZURE_AI_AGENT_NAME", "skill-role-extract
 # ---- Exa API ----
 EXA_API_KEY = get_env_with_default("EXA_API_KEY", "")
 
+# ---- Apify (LinkedIn Open-to-Work enrichment for Exa-sourced candidates) ----
+APIFY_API_TOKEN = get_env_with_default("APIFY_API_TOKEN", "")
+APIFY_LINKEDIN_OTW_ACTOR = get_env_with_default(
+    "APIFY_LINKEDIN_OTW_ACTOR", "freshdata/linkedin-open-to-work-status"
+)
+
 # ---- Oxylabs Web Scraper API ----
 # HTTP Basic credentials for https://realtime.oxylabs.io/v1/queries.
 OXYLABS_USERNAME = get_env_with_default("OXYLABS_USERNAME", "")

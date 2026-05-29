@@ -1372,6 +1372,62 @@ function NewJobPageContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStep]);
 
+  // Open-to-Work polling for Exa-sourced LinkedIn candidates.
+  // Mirrors the Hoonrai/Revelio frontend polling pattern: every 5s POST any
+  // LinkedIn URL we haven't yet resolved to /candidates/open-to-work-statuses
+  // and patch candidates whose status flips from "PENDING" to true/false.
+  // Stops automatically once nothing is pending.
+  useEffect(() => {
+    const pendingUrls: string[] = [];
+    for (const c of candidates) {
+      const url = (c as any).profile_url || "";
+      const otw = (c as any).open_to_work;
+      if (!url || !String(url).toLowerCase().includes("linkedin.com")) continue;
+      if (otw === true || otw === false) continue;
+      pendingUrls.push(String(url));
+    }
+    if (pendingUrls.length === 0) return;
+
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const resp = await fetch(`${API_BASE}/candidates/open-to-work-statuses`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ links: pendingUrls }),
+        });
+        if (!resp.ok) return;
+        const json = await resp.json();
+        const cache = (json && json.openToWorkStatusCache) || {};
+        const resolved: Record<string, boolean> = {};
+        for (const u of pendingUrls) {
+          const v = cache[u];
+          if (v === true || v === false) resolved[u] = v;
+        }
+        if (cancelled || Object.keys(resolved).length === 0) return;
+        setCandidates((prev: any[]) =>
+          prev.map((c) => {
+            const u = (c as any).profile_url || "";
+            if (u && Object.prototype.hasOwnProperty.call(resolved, u)) {
+              return { ...c, open_to_work: resolved[u] };
+            }
+            return c;
+          })
+        );
+      } catch {
+        // network blip — next interval will retry
+      }
+    };
+
+    // Immediate first poll, then every 5s. Hoonrai uses 5s; matches actor latency.
+    poll();
+    const intervalId = setInterval(poll, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [candidates]);
+
   const showToast = (message: string, type: "success" | "info" | "error" = "success") => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3000);
