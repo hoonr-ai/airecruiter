@@ -16,7 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from ..core.config import APIFY_API_TOKEN, APIFY_LINKEDIN_OTW_ACTOR
+from core.config import APIFY_API_TOKEN, APIFY_LINKEDIN_OTW_ACTOR
 
 log = logging.getLogger(__name__)
 
@@ -138,9 +138,15 @@ async def annotate(candidates: List[Dict[str, Any]]) -> List[str]:
 async def enqueue(urls: List[str]) -> None:
     """Fire-and-forget Apify fetches for each URL not already cached / in flight."""
     if not urls:
+        log.info("Apify OTW enqueue: no urls (skipping)")
         return
     if not APIFY_API_TOKEN:
-        log.warning("APIFY_API_TOKEN not configured; skipping OTW enqueue (%d urls)", len(urls))
+        log.warning(
+            "Apify OTW enqueue: APIFY_API_TOKEN is EMPTY — set it in .env "
+            "and restart the API. Skipping %d urls; the frontend chip will "
+            "stay on 'Checking…' forever until the token is configured.",
+            len(urls),
+        )
         return
     async with _lock:
         to_fire = []
@@ -149,8 +155,31 @@ async def enqueue(urls: List[str]) -> None:
             if key in _results or key in _inflight:
                 continue
             to_fire.append(u)
+    log.info(
+        "Apify OTW enqueue: %d urls input → %d new tasks fired "
+        "(%d already cached / in-flight, skipped)",
+        len(urls),
+        len(to_fire),
+        len(urls) - len(to_fire),
+    )
     for u in to_fire:
         asyncio.create_task(fetch_open_to_work(u))
+
+
+def diagnostics() -> Dict[str, Any]:
+    """One-shot health snapshot for debugging the OTW pipeline.
+
+    Exposes whether the token is loaded and how many URLs have been resolved
+    so far. Surfaced via /candidates/open-to-work-statuses so a single curl
+    against the running API immediately reveals the most common failure mode
+    (missing token).
+    """
+    return {
+        "apify_token_configured": bool(APIFY_API_TOKEN),
+        "actor": APIFY_LINKEDIN_OTW_ACTOR,
+        "cache_size": len(_results),
+        "inflight_count": len(_inflight),
+    }
 
 
 def lookup_statuses(urls: List[str]) -> Dict[str, Any]:

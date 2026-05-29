@@ -275,10 +275,29 @@ async def get_open_to_work_statuses(payload: Dict[str, Any]):
     calls itself — it only reads the in-process cache. Frontend should poll
     every ~5s while any link is still "PENDING".
     """
-    from services.apify_open_to_work import lookup_statuses
+    from services.apify_open_to_work import lookup_statuses, diagnostics
     links_raw = payload.get("links") or []
     links: List[str] = [str(u) for u in links_raw if u]
-    return {"openToWorkStatusCache": lookup_statuses(links)}
+    return {
+        "openToWorkStatusCache": lookup_statuses(links),
+        # Embedded diag so a single curl reveals "is the token loaded?"
+        # without needing a separate health endpoint or log scraping.
+        "_diag": diagnostics(),
+    }
+
+
+@router.get("/candidates/open-to-work-diag")
+async def get_open_to_work_diag():
+    """Standalone diagnostic for the Apify OTW pipeline.
+
+    GET it from a browser or curl to see:
+      - apify_token_configured: false → APIFY_API_TOKEN env var not loaded
+      - cache_size: 0 → no Exa search has yet populated the cache (or
+        every call short-circuited because token is missing)
+      - inflight_count: > 0 → Apify calls are in progress right now
+    """
+    from services.apify_open_to_work import diagnostics
+    return diagnostics()
 
 
 @router.post("/candidates/search")
