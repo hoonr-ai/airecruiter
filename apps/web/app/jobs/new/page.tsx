@@ -5287,6 +5287,36 @@ function NewJobPageContent() {
   // that haven't been assigned a numeric/JobDiva id yet so wizard work survives
   // a reload before the first save.
   const sourcingResultsKey = `sourcing:results:${numericJobId || jobdivaId || "draft"}`;
+  // Sourcing results expire after 24h: recruiters who come back the next day
+  // should see a fresh search, not stale candidates from the prior session.
+  const SOURCING_RESULTS_TTL_MS = 24 * 60 * 60 * 1000;
+
+  // One-shot sweep on mount: drop any sourcing:results:* entries older than
+  // the TTL across all jobs. Lazy per-key expiry (below) handles the active
+  // job; this stops abandoned jobs from sitting in localStorage forever.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const now = Date.now();
+      const stale: string[] = [];
+      for (let i = 0; i < window.localStorage.length; i++) {
+        const k = window.localStorage.key(i);
+        if (!k || !k.startsWith("sourcing:results:")) continue;
+        try {
+          const parsed = JSON.parse(window.localStorage.getItem(k) || "null");
+          const savedAt = Number(parsed?.savedAt);
+          if (!savedAt || now - savedAt > SOURCING_RESULTS_TTL_MS) {
+            stale.push(k);
+          }
+        } catch {
+          stale.push(k);
+        }
+      }
+      for (const k of stale) window.localStorage.removeItem(k);
+    } catch {
+      /* localStorage unavailable — ignore */
+    }
+  }, []);
 
   // Persist results once a search completes. Runs on the transition from
   // `isSearching: true → false` (and also when `candidates` changes while idle).
@@ -5319,6 +5349,11 @@ function NewJobPageContent() {
       const raw = window.localStorage.getItem(sourcingResultsKey);
       if (!raw) return;
       const parsed = JSON.parse(raw);
+      const savedAt = Number(parsed?.savedAt);
+      if (!savedAt || Date.now() - savedAt > SOURCING_RESULTS_TTL_MS) {
+        window.localStorage.removeItem(sourcingResultsKey);
+        return;
+      }
       const cached = Array.isArray(parsed?.candidates) ? parsed.candidates : [];
       if (cached.length === 0) return;
       const dedupedCached = deduplicateCandidatesUI(cached);

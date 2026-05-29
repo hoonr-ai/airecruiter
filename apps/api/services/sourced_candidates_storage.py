@@ -512,12 +512,26 @@ class SourcedCandidatesStorage:
                 if num_key:
                     lookup_keys.add(str(num_key))
 
+            # Two-level dedup: first collapse by candidate_id (legacy behavior),
+            # then collapse rows that share a normalized profile_url. The second
+            # pass catches pre-fix Exa duplicates (different candidate_id, same
+            # LinkedIn profile) created before the stable-id change landed.
+            # NULLIF avoids merging rows with empty/null profile_url; those are
+            # keyed by candidate_id alone via the fallback expression.
             query = """
-                SELECT DISTINCT ON (sc.candidate_id) sc.*,
-                       sc.resume_match_percentage AS match_score
-                FROM sourced_candidates sc
-                WHERE sc.jobdiva_id = ANY(%s)
-                ORDER BY sc.candidate_id, sc.created_at DESC
+                SELECT DISTINCT ON (dedup_key) sub.*
+                FROM (
+                    SELECT DISTINCT ON (sc.candidate_id) sc.*,
+                           sc.resume_match_percentage AS match_score,
+                           COALESCE(
+                               NULLIF(LOWER(REGEXP_REPLACE(sc.profile_url, '^https?://(www\\.)?', '')), ''),
+                               sc.candidate_id
+                           ) AS dedup_key
+                    FROM sourced_candidates sc
+                    WHERE sc.jobdiva_id = ANY(%s)
+                    ORDER BY sc.candidate_id, sc.created_at DESC
+                ) sub
+                ORDER BY dedup_key, created_at DESC
             """
 
             cur.execute(query, (list(lookup_keys),))
@@ -705,19 +719,31 @@ class SourcedCandidatesStorage:
                     WHERE lookup_id IS NOT NULL AND lookup_id <> ''
                     ORDER BY lookup_id
                 ),
-                deduped AS (
+                deduped_by_id AS (
                     SELECT DISTINCT ON (sc.candidate_id)
                         sc.*,
                         COALESCE(
                             sc.resume_match_percentage,
                             NULLIF(sc.data->>'match_score','')::numeric
                         ) AS match_score,
-                        mjl.title AS job_title
+                        mjl.title AS job_title,
+                        COALESCE(
+                            NULLIF(LOWER(REGEXP_REPLACE(sc.profile_url, '^https?://(www\\.)?', '')), ''),
+                            sc.candidate_id
+                        ) AS dedup_key
                     FROM sourced_candidates sc
                     LEFT JOIN monitored_jobs_lookup mjl
                       ON sc.jobdiva_id = mjl.lookup_id
                     WHERE {inner_filter}
                     ORDER BY sc.candidate_id, sc.created_at DESC
+                ),
+                deduped AS (
+                    -- Second pass: collapse rows sharing the same normalized
+                    -- LinkedIn profile_url, covering pre-fix Exa duplicates
+                    -- that survived the candidate_id dedup above.
+                    SELECT DISTINCT ON (dedup_key) *
+                    FROM deduped_by_id
+                    ORDER BY dedup_key, created_at DESC
                 )
             """
 

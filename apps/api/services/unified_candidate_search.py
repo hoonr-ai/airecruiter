@@ -2382,14 +2382,30 @@ class UnifiedCandidateSearch:
             candidate.get("work_experience") or [],
         ]
         company_terms: List[str] = []
+        # Companies the candidate is *currently* at — used to scope the
+        # "must not company" exclusion to present employment only. A role is
+        # current when end_date is empty / null / "Present" / "Current".
+        # String-only entries (sparse fallbacks) are treated as not-current so
+        # we err toward not over-blocking on missing tenure data.
+        current_company_terms: List[str] = []
+        def _is_current_role(item: Dict[str, Any]) -> bool:
+            end = item.get("end_date") if isinstance(item, dict) else None
+            if end is None:
+                return True
+            end_str = str(end).strip().lower()
+            return end_str in ("", "present", "current", "now")
         for source in company_sources:
             if not isinstance(source, list):
                 continue
             for item in source:
                 if isinstance(item, dict):
+                    is_current = _is_current_role(item)
                     for key in ["company", "company_name", "employer", "name"]:
                         if item.get(key):
-                            company_terms.append(str(item.get(key)))
+                            name = str(item.get(key))
+                            company_terms.append(name)
+                            if is_current:
+                                current_company_terms.append(name)
                 elif isinstance(item, str):
                     company_terms.append(item)
 
@@ -2445,6 +2461,7 @@ class UnifiedCandidateSearch:
             "titles": title_terms,
             "skills": unique_terms(skill_terms),
             "companies": unique_terms(company_terms),
+            "current_companies": unique_terms(current_company_terms),
             "education": unique_terms(education_terms),
             "certifications": unique_terms(certification_terms),
             "locations": location_terms,
@@ -2767,9 +2784,10 @@ class UnifiedCandidateSearch:
         matched_required = 0
         for dimension in self._collect_sourcing_dimensions(criteria):
             collections = dimension["collections"]
+            excluded_collections = dimension.get("excluded_collections", collections)
             # Check exclusions - these are ALWAYS hard filters
             for group in dimension.get("excluded_groups", []):
-                if self._term_group_matches(profile, group, collections):
+                if self._term_group_matches(profile, group, excluded_collections):
                     excluded.append(f"{dimension['label']}: {self._group_label(group)}")
 
             # Count required matches/misses for the threshold gate below.
@@ -2866,9 +2884,10 @@ class UnifiedCandidateSearch:
             if not required_groups and not preferred_groups and not excluded_groups:
                 continue
 
+            excluded_collections = dimension.get("excluded_collections", dimension["collections"])
             required_matches = self._matched_term_groups(profile, required_groups, dimension["collections"])
             preferred_matches = self._matched_term_groups(profile, preferred_groups, dimension["collections"])
-            excluded_matches = self._matched_term_groups(profile, excluded_groups, dimension["collections"])
+            excluded_matches = self._matched_term_groups(profile, excluded_groups, excluded_collections)
 
             # Part 3: weighted mean across groups so recruiters can flag
             # individual filters as 2x or 0.5x in the UI. Default weight is
@@ -2975,7 +2994,7 @@ class UnifiedCandidateSearch:
                 if SCORING_EXCLUSION_HARD_VETO_THRESHOLD <= 1.0:
                     for group in excluded_groups:
                         strength = self._term_group_score(
-                            profile, group, dimension["collections"]
+                            profile, group, excluded_collections
                         )
                         if strength >= SCORING_EXCLUSION_HARD_VETO_THRESHOLD:
                             hard_veto_hits.append(
@@ -3159,6 +3178,9 @@ class UnifiedCandidateSearch:
                 "label": "Company Experience",
                 "weight": 5.0,
                 "collections": ["companies"],
+                # Exclusion ("must not company X") is current-employer-only;
+                # past tenure at X must not penalize.
+                "excluded_collections": ["current_companies"],
                 "required": [],
                 "preferred": [],
                 "excluded": [],
@@ -3332,6 +3354,7 @@ class UnifiedCandidateSearch:
                 "label": "Company Experience",
                 "weight": weights["companies"],
                 "collections": ["companies"],
+                "excluded_collections": ["current_companies"],
                 "required": [],
                 "preferred": [],
                 "excluded": [],

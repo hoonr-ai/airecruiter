@@ -10,6 +10,21 @@ from services.location import extract_us_location_from_text
 logger = logging.getLogger(__name__)
 
 
+def _normalize_linkedin_url(url: str) -> str:
+    """Stable key for a LinkedIn profile: scheme/host stripped, lowercased,
+    query/fragment dropped, trailing slash removed. Used to dedupe Exa
+    results across runs where the same profile can come back at different
+    result positions."""
+    if not url:
+        return ""
+    u = str(url).strip().lower()
+    u = re.sub(r"^https?://", "", u)
+    u = re.sub(r"^www\.", "", u)
+    u = u.split("?", 1)[0].split("#", 1)[0]
+    u = u.rstrip("/")
+    return u
+
+
 _RELOCATION_PATTERNS = re.compile(
     r"\b("
     r"open\s+to\s+relocat\w+"
@@ -257,8 +272,17 @@ class ExaService:
                     if not extracted_location and (extracted_city or extracted_state):
                         extracted_location = ", ".join(p for p in [extracted_city, extracted_state] if p)
 
+                    # Stable id: derived from the profile URL so the same
+                    # LinkedIn profile returned at different result positions
+                    # across runs upserts onto the same sourced_candidates row
+                    # via UNIQUE(jobdiva_id, candidate_id, source).
+                    stable_key = (
+                        _normalize_linkedin_url(url)
+                        or getattr(result, 'id', None)
+                        or f"exa_{idx}"
+                    )
                     cand = {
-                        "id": f"exa_{idx}_{getattr(result, 'id', idx)}",
+                        "id": f"exa_{stable_key}",
                         "provider_id": getattr(result, 'id', f"exa_{idx}"),
                         "firstName": first_name,
                         "lastName": last_name,
