@@ -5,15 +5,26 @@ Two surfaces:
 1. Provider helpers (`extract_zoominfo_contact_fields`, `extract_apollo_contact_fields`,
    `apollo_enrich_by_linkedin`) — moved here from `routers/candidates.py` so both
    the on-demand enrichment endpoint and the in-line sourcing path share the
-   same parsers and HTTP shapes. The on-demand path still owns the
-   ZoomInfo legacy → new-OAuth 401 fallback + cross-fill + name-search chain;
-   none of that is reused here.
+   same parsers and HTTP shapes.
 
-2. `enrich_contact_for_sourcing(linkedin_url, jobdiva_id)` — first-hit-wins
-   helper for the sourcing pipeline. ZoomInfo legacy enrich first; on miss,
-   Apollo by LinkedIn URL. Capped at `PER_JOB_CAP` enrichments per job to
-   bound provider cost. Failures are logged and swallowed — sourcing must
-   not fail on enrichment.
+2. `enrich_contact_for_sourcing(linkedin_url, jobdiva_id, full_name)` —
+   first-hit-wins helper for the sourcing pipeline. The new ZoomInfo Data
+   API doesn't accept a `linkedinUrl` as a match input (tested empirically —
+   `PFAPI0005 / Invalid field requested`), so the flow is:
+       ContactSearch by firstName + lastName  →  personId
+                                              →  ContactEnrich by personId
+   On any miss (no name → can't search; search returns nothing; enrich
+   returns no usable fields), fall through to Apollo by LinkedIn URL.
+
+   The legacy `/enrich/contact` POST is dead: ZoomInfo retired it for our
+   account and it 401s even with a fresh OAuth-minted token. That entire
+   code path was deleted.
+
+   Auth: `services.zoominfo_auth.get_access_token()` mints fresh 24h JWTs
+   via OAuth2 client_credentials. No more static `ZOOMINFO_BEARER_TOKEN`.
+
+   Capped at `PER_JOB_CAP` enrichments per job to bound provider cost.
+   Failures are logged and swallowed — sourcing must not fail on enrichment.
 """
 from __future__ import annotations
 
@@ -25,11 +36,11 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from core.config import (
-    APOLLO_API_KEY as _APOLLO_ENV_KEY,
-    ZOOMINFO_BEARER_TOKEN,
-    ZOOMINFO_CLIENT_ID,
-    ZOOMINFO_ENRICH_URL,
+from core.config import APOLLO_API_KEY as _APOLLO_ENV_KEY
+from services.zoominfo_auth import (
+    ZoomInfoAuthFailed,
+    ZoomInfoAuthNotConfigured,
+    get_access_token,
 )
 
 logger = logging.getLogger(__name__)
@@ -288,55 +299,186 @@ async def apollo_enrich_by_linkedin(candidate_id: str, linkedin_url: str) -> Dic
     return {"ok": True, "fields": extracted}
 
 
-async def _zoominfo_enrich_by_linkedin(linkedin_url: str) -> Dict[str, str]:
-    """Call the ZoomInfo legacy enrich endpoint by LinkedIn URL.
+ZOOMINFO_NEW_SEARCH_URL = "https://api.zoominfo.com/gtm/data/v1/contacts/search"
+ZOOMINFO_NEW_ENRICH_URL = "https://api.zoominfo.com/gtm/data/v1/contacts/enrich"
 
-    Returns the canonical four-field dict (possibly all empty). Empty dict on
-    HTTP / parse failure. Does NOT do the 401 → new-OAuth fallback that the
-    on-demand path does — sourcing-time enrichment intentionally trades that
-    extra latency for simplicity and bounded HTTP work.
+# Minimum acceptance threshold for a ContactSearch match. ZoomInfo's
+# `contactAccuracyScore` is a 0-100 confidence; below this we treat the
+# search result as a miss rather than enriching the wrong person.
+_MIN_CONTACT_ACCURACY_SCORE = 50.0
+
+
+def _split_name(full_name: str) -> Dict[str, str]:
+    """Split a free-form name into firstName / lastName for ContactSearch.
+
+    Empty parts return empty strings — caller checks for both before invoking
+    the search.
     """
-    if not ZOOMINFO_BEARER_TOKEN:
-        return {}
+    parts = [p for p in (full_name or "").strip().split() if p]
+    if not parts:
+        return {"first": "", "last": ""}
+    if len(parts) == 1:
+        return {"first": parts[0], "last": ""}
+    return {"first": parts[0], "last": " ".join(parts[1:])}
+
+
+async def _zoominfo_authed_post(
+    url: str,
+    json_body: Dict[str, Any],
+    *,
+    timeout: float = 15.0,
+) -> Optional[httpx.Response]:
+    """POST to a ZoomInfo Data API endpoint with auto-minted auth + 401 retry.
+
+    Returns the httpx.Response on a clean call (any status). Returns None when
+    auth isn't configured or the token endpoint itself fails — those are
+    soft "skip ZoomInfo for this call" signals, not exceptions.
+
+    Retries exactly once on 401 with ``force_refresh=True`` to handle the
+    case where ZoomInfo revoked the cached token server-side (admin rotated
+    the secret, max session count hit, etc.).
+    """
+    try:
+        token = await get_access_token()
+    except ZoomInfoAuthNotConfigured as exc:
+        logger.info("zoominfo disabled: %s", exc)
+        return None
+    except ZoomInfoAuthFailed as exc:
+        logger.warning("zoominfo token mint failed: %s", exc)
+        return None
 
     headers = {
-        "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    if ZOOMINFO_CLIENT_ID:
-        headers["X-Client-Id"] = ZOOMINFO_CLIENT_ID
-
-    payload = {
-        "inputFields": [
-            {
-                "fieldName": "linkedinUrl",
-                "fieldType": "String",
-                "value": linkedin_url,
-            }
-        ],
-        "outputFields": ["workPhone", "mobilePhone", "workEmail", "personalEmail"],
+        "Authorization": f"Bearer {token}",
+        "accept": "application/vnd.api+json",
+        "content-type": "application/vnd.api+json",
     }
 
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            res = await client.post(ZOOMINFO_ENRICH_URL, headers=headers, json=payload)
-    except Exception as e:
-        logger.warning("ZoomInfo request failed: %s", e)
-        return {}
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            res = await client.post(url, headers=headers, json=json_body)
+    except httpx.HTTPError as exc:
+        logger.warning("zoominfo POST %s failed: %s", url, exc)
+        return None
 
-    if res.status_code >= 400:
-        # 401 here means the legacy endpoint rejected the token; the on-demand
-        # path retries with the new OAuth Data API, but sourcing skips that
-        # chain (covered by the Apollo fallback in the caller).
-        logger.info("ZoomInfo non-2xx: %s", res.status_code)
+    if res.status_code != 401:
+        return res
+
+    # Token may have been revoked server-side; mint a fresh one and retry once.
+    logger.info("zoominfo 401 on %s — forcing token refresh and retrying", url)
+    try:
+        token = await get_access_token(force_refresh=True)
+    except (ZoomInfoAuthNotConfigured, ZoomInfoAuthFailed) as exc:
+        logger.warning("zoominfo force-refresh failed: %s", exc)
+        return res  # return original 401 so caller logs are accurate
+
+    headers["Authorization"] = f"Bearer {token}"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            return await client.post(url, headers=headers, json=json_body)
+    except httpx.HTTPError as exc:
+        logger.warning("zoominfo POST %s retry failed: %s", url, exc)
+        return None
+
+
+async def _zoominfo_resolve_person_id(full_name: str) -> Optional[str]:
+    """ContactSearch by firstName + lastName, return best-match personId.
+
+    ZoomInfo doesn't accept `linkedinUrl` as a search filter (tested:
+    `PFAPI0005 / Invalid field requested`). Name-based search is the only
+    sourcing-time entry point. Returns None if we don't have both names, if
+    search returns no hits, or if the top hit's accuracy score is below
+    ``_MIN_CONTACT_ACCURACY_SCORE``.
+    """
+    parts = _split_name(full_name)
+    if not parts["first"] or not parts["last"]:
+        return None
+
+    body = {
+        "data": {
+            "type": "ContactSearch",
+            "attributes": {
+                "firstName": parts["first"],
+                "lastName": parts["last"],
+            },
+        }
+    }
+    res = await _zoominfo_authed_post(ZOOMINFO_NEW_SEARCH_URL, body)
+    if res is None or res.status_code >= 400:
+        if res is not None:
+            logger.info(
+                "zoominfo ContactSearch non-2xx for %s: %s",
+                full_name,
+                res.status_code,
+            )
+        return None
+
+    try:
+        body_json = res.json()
+    except ValueError:
+        return None
+
+    data = body_json.get("data") if isinstance(body_json, dict) else None
+    if not isinstance(data, list) or not data:
+        return None
+
+    top = data[0]
+    attrs = top.get("attributes") if isinstance(top, dict) else {}
+    score = (attrs or {}).get("contactAccuracyScore")
+    try:
+        score_val = float(score)
+    except (TypeError, ValueError):
+        score_val = 0.0
+    if score_val < _MIN_CONTACT_ACCURACY_SCORE:
+        logger.info(
+            "zoominfo ContactSearch low score %.1f for %s — skipping",
+            score_val,
+            full_name,
+        )
+        return None
+
+    person_id = top.get("id")
+    return str(person_id) if person_id else None
+
+
+async def _zoominfo_enrich_by_person_id(person_id: str) -> Dict[str, str]:
+    """ContactEnrich by personId. Returns the canonical four-field dict."""
+    body = {
+        "data": {
+            "type": "ContactEnrich",
+            "attributes": {
+                "matchPersonInput": [{"personId": person_id}],
+                "outputFields": ["mobilePhone", "phone", "email", "emailAlt"],
+            },
+        }
+    }
+    res = await _zoominfo_authed_post(ZOOMINFO_NEW_ENRICH_URL, body)
+    if res is None or res.status_code >= 400:
+        if res is not None:
+            logger.info(
+                "zoominfo ContactEnrich non-2xx for personId=%s: %s",
+                person_id,
+                res.status_code,
+            )
         return {}
 
     try:
-        zoominfo_data = res.json()
-    except Exception:
+        body_json = res.json()
+    except ValueError:
         return {}
 
-    return _extract_enrichment_fields_legacy(zoominfo_data)
+    return extract_zoominfo_contact_fields(body_json)
+
+
+async def _zoominfo_enrich_for_sourcing(full_name: str) -> Dict[str, str]:
+    """Two-call ZoomInfo lookup for the sourcing pipeline.
+
+    Returns the canonical four-field dict (possibly all empty). Empty dict on
+    any miss — caller falls through to Apollo.
+    """
+    person_id = await _zoominfo_resolve_person_id(full_name)
+    if not person_id:
+        return {}
+    return await _zoominfo_enrich_by_person_id(person_id)
 
 
 def _has_usable_field(fields: Dict[str, Any]) -> bool:
@@ -349,7 +491,9 @@ def reset_job_counter(jobdiva_id: str) -> None:
 
 
 async def enrich_contact_for_sourcing(
-    linkedin_url: str, jobdiva_id: Optional[str] = None
+    linkedin_url: str,
+    jobdiva_id: Optional[str] = None,
+    full_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """First-hit-wins sourcing-time enrichment.
 
@@ -360,6 +504,15 @@ async def enrich_contact_for_sourcing(
       - linkedin_url is not a LinkedIn profile URL
       - both ZoomInfo and Apollo returned no usable fields
       - either provider call raised (logged at WARN, swallowed)
+
+    Args:
+        linkedin_url: candidate's LinkedIn profile URL. Used for the Apollo
+            fallback (Apollo accepts a LinkedIn URL directly).
+        jobdiva_id: job context, used as the key for the per-job cap counter.
+        full_name: candidate's name. Required for the ZoomInfo path because
+            the new Data API doesn't accept `linkedinUrl` as a match input,
+            so we need firstName + lastName for ContactSearch. If empty, the
+            ZoomInfo step is skipped and we go straight to Apollo.
     """
     if os.getenv("CONTACT_ENRICHMENT_INLINE_ENABLED", "true").strip().lower() != "true":
         return {}
@@ -380,11 +533,15 @@ async def enrich_contact_for_sourcing(
         _JOB_ENRICH_COUNTERS[job_key] = used + 1
 
     async with _PROVIDER_SEMAPHORE:
-        try:
-            zi_fields = await _zoominfo_enrich_by_linkedin(linkedin_url)
-        except Exception as e:
-            logger.warning("contact_enrichment ZoomInfo path raised for %s: %s", job_key, e)
-            zi_fields = {}
+        # ZoomInfo requires a name (new Data API doesn't accept linkedinUrl as
+        # a match input). If we don't have one, skip straight to Apollo.
+        zi_fields: Dict[str, str] = {}
+        if (full_name or "").strip():
+            try:
+                zi_fields = await _zoominfo_enrich_for_sourcing(full_name.strip())
+            except Exception as e:
+                logger.warning("contact_enrichment ZoomInfo path raised for %s: %s", job_key, e)
+                zi_fields = {}
 
         if _has_usable_field(zi_fields):
             logger.info("contact_enrichment: zoominfo hit for %s", job_key)
