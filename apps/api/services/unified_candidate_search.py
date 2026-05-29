@@ -4352,11 +4352,19 @@ class UnifiedCandidateSearch:
             # the frontend resolves by polling /candidates/open-to-work-statuses.
             if criteria.open_to_work and candidates:
                 try:
-                    from .apify_open_to_work import annotate as _otw_annotate, enqueue as _otw_enqueue
+                    from services.apify_open_to_work import (
+                        annotate as _otw_annotate,
+                        enqueue as _otw_enqueue,
+                    )
                     pending_urls = await _otw_annotate(candidates)
+                    logger.info(
+                        "Exa OTW: %d candidates, %d need Apify lookup",
+                        len(candidates),
+                        len(pending_urls),
+                    )
                     await _otw_enqueue(pending_urls)
                 except Exception as otw_exc:
-                    logger.warning(f"Exa OTW enrichment skipped: {otw_exc}")
+                    logger.warning(f"Exa OTW enrichment skipped: {otw_exc}", exc_info=True)
             return {"candidates": candidates, "source_type": "LinkedIn-Exa"}
         except Exception as e:
             logger.error(f"Exa search failed: {e}")
