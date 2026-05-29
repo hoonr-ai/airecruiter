@@ -6178,6 +6178,38 @@ function NewJobPageContent() {
               }).filter(Boolean);
               skippedCandidateNames.push(...skippedNames);
             }
+            
+            if (engageRes.bulk_id && batchEngageSent > 0) {
+              updateBatch(i, { status: "engaging", message: "Waiting for background processing..." });
+              try {
+                await new Promise<void>((resolve, reject) => {
+                  const eventSource = new EventSource(`${API_BASE}/api/v1/engagement/engage/bulk-status/stream?bulk_id=${engageRes.bulk_id}`);
+                  eventSource.onmessage = (event) => {
+                    try {
+                      const data = JSON.parse(event.data);
+                      if (data.status === "completed") {
+                        eventSource.close();
+                        resolve();
+                      } else if (data.status === "error") {
+                        eventSource.close();
+                        reject(new Error(data.message || "Background processing failed"));
+                      } else if (data.status === "processing") {
+                        updateBatch(i, { status: "engaging", message: `Processing ${data.pending} candidates...` });
+                      }
+                    } catch (e) {
+                      eventSource.close();
+                      reject(e);
+                    }
+                  };
+                  eventSource.onerror = (error) => {
+                    eventSource.close();
+                    reject(new Error("Lost connection to background processing status stream"));
+                  };
+                });
+              } catch (streamErr) {
+                console.warn(`Batch ${i + 1} SSE stream error:`, streamErr);
+              }
+            }
           } else {
             batchEngageError = engageRes.message || "PAIR rejected the batch";
           }
