@@ -54,10 +54,10 @@ APPS_API_DIR = SCRIPT_DIR.parent
 if str(APPS_API_DIR) not in sys.path:
     sys.path.insert(0, str(APPS_API_DIR))
 
-from core.config import (  # noqa: E402
-    ZOOMINFO_ENRICH_URL,
-    ZOOMINFO_BEARER_TOKEN,
-    ZOOMINFO_CLIENT_ID,
+from services.zoominfo_auth import (  # noqa: E402
+    ZoomInfoAuthFailed,
+    ZoomInfoAuthNotConfigured,
+    get_access_token,
 )
 
 ZOOMINFO_NEW_ENRICH_URL = "https://api.zoominfo.com/gtm/data/v1/contacts/enrich"
@@ -130,6 +130,48 @@ def _lookup_candidate(
         conn.close()
 
 
+def _fetch_recent_linkedin_rows(
+    n: int,
+    jobdiva_id: Optional[str],
+    source: Optional[str],
+    window_days: int,
+) -> List[Dict[str, Any]]:
+    """Pull the N most-recent sourced_candidates rows with a LinkedIn URL.
+
+    Used by --batch-from-db. Mirrors the filter knobs of
+    scripts/enrichment_hits_count.py so a batch can be scoped to a recent
+    sourcing run.
+    """
+    from psycopg2.extras import RealDictCursor
+
+    from routers._helpers import get_db_connection
+
+    query = (
+        "SELECT candidate_id, jobdiva_id, source, name, headline, "
+        "profile_url, email, phone, data "
+        "FROM sourced_candidates "
+        "WHERE profile_url ILIKE '%%linkedin.com/in/%%' "
+        "  AND updated_at >= NOW() - (%(window_days)s || ' days')::INTERVAL "
+        "  AND (%(jobdiva_id)s IS NULL OR jobdiva_id = %(jobdiva_id)s) "
+        "  AND (%(source)s     IS NULL OR source     = %(source)s) "
+        "ORDER BY updated_at DESC NULLS LAST "
+        "LIMIT %(n)s"
+    )
+    params = {
+        "n": int(n),
+        "jobdiva_id": jobdiva_id,
+        "source": source,
+        "window_days": str(int(window_days)),
+    }
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, params)
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 async def _send(
     client: httpx.AsyncClient,
     method: str,
@@ -178,34 +220,6 @@ async def _send(
     return record
 
 
-def _summarise_zoominfo_legacy(record: Dict[str, Any]) -> Dict[str, Any]:
-    """Walk the legacy enrich response to capture target fields."""
-    body = record.get("response_body_json")
-    targets = {"workPhone", "mobilePhone", "workEmail", "personalEmail"}
-    targets_lower = {t.lower(): t for t in targets}
-    found: Dict[str, str] = {}
-
-    def walk(node: Any) -> None:
-        if isinstance(node, dict):
-            field_name = node.get("fieldName")
-            field_value = node.get("value")
-            if isinstance(field_name, str) and isinstance(field_value, str) and field_value.strip():
-                canonical = targets_lower.get(field_name.strip().lower())
-                if canonical and canonical not in found:
-                    found[canonical] = field_value.strip()
-            for k, v in node.items():
-                canonical = targets_lower.get(str(k).strip().lower())
-                if canonical and isinstance(v, str) and v.strip() and canonical not in found:
-                    found[canonical] = v.strip()
-                walk(v)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-
-    walk(body)
-    return found
-
-
 def _summarise_zoominfo_new(record: Dict[str, Any]) -> Dict[str, Any]:
     body = record.get("response_body_json") or {}
     data = body.get("data") if isinstance(body, dict) else []
@@ -244,37 +258,21 @@ def _summarise_apollo(record: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-async def probe_zoominfo_legacy(
-    client: httpx.AsyncClient, linkedin_url: str
-) -> Dict[str, Any]:
-    if not ZOOMINFO_BEARER_TOKEN:
-        return {
-            "label": "zoominfo_legacy",
-            "skipped": True,
-            "skip_reason": "ZOOMINFO_BEARER_TOKEN not set",
-        }
-    headers = {
-        "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
-        "Content-Type": "application/json",
+async def _zi_auth_headers() -> Optional[Dict[str, str]]:
+    """Build the standard Data API headers using the OAuth auth module.
+
+    Returns None when OAuth isn't configured or token mint fails — caller
+    should record a `skipped` outcome.
+    """
+    try:
+        token = await get_access_token()
+    except (ZoomInfoAuthNotConfigured, ZoomInfoAuthFailed):
+        return None
+    return {
+        "Authorization": f"Bearer {token}",
+        "accept": "application/vnd.api+json",
+        "content-type": "application/vnd.api+json",
     }
-    if ZOOMINFO_CLIENT_ID:
-        headers["X-Client-Id"] = ZOOMINFO_CLIENT_ID
-    payload = {
-        "inputFields": [
-            {"fieldName": "linkedinUrl", "fieldType": "String", "value": linkedin_url}
-        ],
-        "outputFields": ["workPhone", "mobilePhone", "workEmail", "personalEmail"],
-    }
-    record = await _send(
-        client,
-        "POST",
-        ZOOMINFO_ENRICH_URL,
-        headers=headers,
-        json_body=payload,
-        label="zoominfo_legacy",
-    )
-    record["extracted_fields"] = _summarise_zoominfo_legacy(record)
-    return record
 
 
 async def probe_zoominfo_new(
@@ -285,15 +283,19 @@ async def probe_zoominfo_new(
     email: str,
     phone: str,
 ) -> Dict[str, Any]:
-    """Mirror the endpoint's 401-fallback path: build a matchPersonInput.
+    """Probe the ZoomInfo Data API end-to-end (ContactSearch → ContactEnrich).
 
-    Order: email > phone > firstName+lastName+companyName > ContactSearch by name.
+    Build matchPersonInput in this order:
+      email > phone > firstName+lastName+companyName > personId from ContactSearch.
+    The legacy `/enrich/contact` endpoint has been retired (returns 401 even
+    with a fresh OAuth-minted token); only the new Data API is probed.
     """
-    if not ZOOMINFO_BEARER_TOKEN:
+    headers = await _zi_auth_headers()
+    if headers is None:
         return {
             "label": "zoominfo_new",
             "skipped": True,
-            "skip_reason": "ZOOMINFO_BEARER_TOKEN not set",
+            "skip_reason": "ZoomInfo OAuth not configured or token mint failed",
         }
 
     match_input: Dict[str, Any] = {}
@@ -320,11 +322,6 @@ async def probe_zoominfo_new(
         split = _split_name(full_name)
         if split["first"] and split["last"]:
             used_search = True
-            headers = {
-                "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
-                "accept": "application/vnd.api+json",
-                "content-type": "application/vnd.api+json",
-            }
             search_payload = {
                 "data": {
                     "type": "ContactSearch",
@@ -359,11 +356,6 @@ async def probe_zoominfo_new(
             record["search_record"] = search_record
         return record
 
-    headers = {
-        "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
-        "accept": "application/vnd.api+json",
-        "content-type": "application/vnd.api+json",
-    }
     payload = {
         "data": {
             "type": "ContactEnrich",
@@ -491,8 +483,10 @@ async def run_probe(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     print(f"[probe] company_name   : {company_name!r}")
     print(f"[probe] seed_email     : {bool(seed_email)}")
     print(f"[probe] seed_phone     : {bool(seed_phone)}")
-    print(f"[probe] ZOOMINFO token : {'set' if ZOOMINFO_BEARER_TOKEN else 'MISSING'}")
+    print(f"[probe] ZOOMINFO auth   : OAuth client_credentials (auto-mint)")
     print(f"[probe] APOLLO key     : {'env' if os.getenv('APOLLO_API_KEY') else 'hardcoded fallback'}")
+    if getattr(args, "zoominfo_only", False):
+        print("[probe] --zoominfo-only : Apollo will NOT be called")
 
     if args.dry_run:
         print("[probe] --dry-run set — exiting without sending any requests.")
@@ -502,9 +496,8 @@ async def run_probe(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
     started_at_utc = _utc_iso()
     timeout = httpx.Timeout(30.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        legacy_record = await probe_zoominfo_legacy(client, linkedin_url)
-        records.append(legacy_record)
-
+        # Legacy `/enrich/contact` endpoint retired — it 401s even with a
+        # fresh OAuth-minted token. Only the new Data API is probed.
         new_record = await probe_zoominfo_new(
             client,
             full_name=full_name,
@@ -514,15 +507,22 @@ async def run_probe(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
         )
         records.append(new_record)
 
-        apollo_record = await probe_apollo(client, linkedin_url)
-        records.append(apollo_record)
+        if getattr(args, "zoominfo_only", False):
+            records.append({
+                "label": "apollo",
+                "skipped": True,
+                "skip_reason": "--zoominfo-only flag",
+            })
+        else:
+            apollo_record = await probe_apollo(client, linkedin_url)
+            records.append(apollo_record)
     ended_at_utc = _utc_iso()
 
     _print_table(records)
 
     out_doc: Dict[str, Any] = {
         "probe": {
-            "client": "airecruiter enrichment-provider probe v1",
+            "client": "airecruiter enrichment-provider probe v2 (OAuth)",
             "started_at_utc": started_at_utc,
             "ended_at_utc": ended_at_utc,
             "linkedin_url": linkedin_url,
@@ -533,18 +533,168 @@ async def run_probe(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
             "company_name": company_name,
             "had_seed_email": bool(seed_email),
             "had_seed_phone": bool(seed_phone),
-            "zoominfo_token_present": bool(ZOOMINFO_BEARER_TOKEN),
             "apollo_key_source": "env" if os.getenv("APOLLO_API_KEY") else "hardcoded_fallback",
+            "zoominfo_only": bool(getattr(args, "zoominfo_only", False)),
         },
         "records": records,
     }
 
+    if not getattr(args, "_batch", False):
+        out_dir = APPS_API_DIR / "tmp"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        out_path = out_dir / f"enrichment_probe_{stamp}.json"
+        out_path.write_text(json.dumps(out_doc, indent=2, default=str))
+        print(f"\n[probe] wrote evidence file: {out_path}")
+    return 0, out_doc
+
+
+def _classify_record(rec: Dict[str, Any]) -> str:
+    """Bucket one probe record for the aggregate summary.
+
+    Returns one of: 'skipped', '2xx_fields', '2xx_empty', '4xx', '5xx',
+    'error', 'other'.
+    """
+    if rec.get("skipped"):
+        return "skipped"
+    if rec.get("error"):
+        return "error"
+    status = rec.get("response_status")
+    if not isinstance(status, int):
+        return "other"
+    if 200 <= status < 300:
+        ef = rec.get("extracted_fields") or {}
+        has_field = any(
+            str(ef.get(k) or "").strip()
+            for k in ("mobilePhone", "workPhone", "workEmail", "personalEmail")
+        )
+        return "2xx_fields" if has_field else "2xx_empty"
+    if 400 <= status < 500:
+        # 401 is the one we most care about — break it out separately so the
+        # aggregate line tells us "token rejected" at a glance.
+        return "401" if status == 401 else "4xx"
+    if 500 <= status < 600:
+        return "5xx"
+    return "other"
+
+
+def _print_aggregate(per_label_buckets: Dict[str, Dict[str, int]]) -> None:
+    """Print one line per provider summarising N probes."""
+    order = ["zoominfo_new_search", "zoominfo_new", "apollo"]
+    print("\n[probe] === AGGREGATE ACROSS BATCH ===")
+    for label in order:
+        buckets = per_label_buckets.get(label)
+        if not buckets:
+            continue
+        n = sum(buckets.values())
+        parts: List[str] = [f"N={n}"]
+        for key in ("2xx_fields", "2xx_empty", "401", "4xx", "5xx", "error", "skipped", "other"):
+            v = buckets.get(key, 0)
+            if v:
+                parts.append(f"{key}={v}")
+        print(f"  {label:<18} {'  '.join(parts)}")
+
+
+async def run_batch(args: argparse.Namespace) -> Tuple[int, Dict[str, Any]]:
+    """Loop run_probe over the N most-recent linkedin rows."""
+    rows = _fetch_recent_linkedin_rows(
+        args.batch_from_db, args.jobdiva_id, args.source, args.window_days
+    )
+    if not rows:
+        print(
+            f"[probe] No sourced_candidates rows match (n={args.batch_from_db}, "
+            f"jobdiva_id={args.jobdiva_id!r}, source={args.source!r}, "
+            f"window_days={args.window_days}).",
+            file=sys.stderr,
+        )
+        return 2, {}
+
+    print(f"[probe] batch_from_db   : {len(rows)} row(s)")
+    print(f"[probe] jobdiva-id      : {args.jobdiva_id!r}")
+    print(f"[probe] source          : {args.source!r}")
+    print(f"[probe] window-days     : {args.window_days}")
+    print(f"[probe] ZOOMINFO auth   : OAuth client_credentials (auto-mint)")
+    if getattr(args, "zoominfo_only", False):
+        print("[probe] --zoominfo-only  : Apollo will NOT be called")
+    if args.dry_run:
+        print("[probe] --dry-run set — exiting without sending any requests.")
+        return 0, {}
+
+    started_at_utc = _utc_iso()
+    runs: List[Dict[str, Any]] = []
+    per_label_buckets: Dict[str, Dict[str, int]] = {}
+
+    # Reuse the same arg shape per row by mutating a copy of args so run_probe
+    # can read seed_email / seed_phone / company_name from the row.
+    for idx, row in enumerate(rows, start=1):
+        per_args = argparse.Namespace(**vars(args))
+        per_args.linkedin_url = (row.get("profile_url") or "").strip()
+        per_args.candidate_id = row.get("candidate_id")
+        # Don't override the user's --jobdiva-id / --source filters; just
+        # forward the row's own values so the JSON output records context.
+        # The run_probe path doesn't actually use jobdiva_id/source as
+        # request inputs — it uses them for the candidate-id lookup only.
+        per_args.full_name = (row.get("name") or "").strip() or None
+        per_args.email = (row.get("email") or "").strip() or None
+        per_args.phone = (row.get("phone") or "").strip() or None
+        data_blob = row.get("data") or {}
+        if isinstance(data_blob, str):
+            try:
+                data_blob = json.loads(data_blob)
+            except Exception:
+                data_blob = {}
+        enhanced = data_blob.get("enhanced_info") if isinstance(data_blob, dict) else {}
+        enhanced = enhanced if isinstance(enhanced, dict) else {}
+        per_args.company_name = str(
+            data_blob.get("company_name")
+            or data_blob.get("company")
+            or enhanced.get("current_company")
+            or enhanced.get("company")
+            or ""
+        ).strip() or None
+
+        if not per_args.linkedin_url:
+            print(f"[probe] skip row {idx}: no profile_url", file=sys.stderr)
+            continue
+        print(f"\n[probe] ── batch row {idx}/{len(rows)} ── candidate_id={per_args.candidate_id} ──")
+        # Suppress per-row file writes; we'll write one combined file at the
+        # end. Easiest way: pass a marker on the namespace.
+        per_args._batch = True
+        rc, doc = await run_probe(per_args)
+        if rc != 0 or not doc:
+            continue
+        runs.append(doc)
+        for rec in doc.get("records") or []:
+            label = rec.get("label", "?")
+            bucket = _classify_record(rec)
+            per_label_buckets.setdefault(label, {})
+            per_label_buckets[label][bucket] = per_label_buckets[label].get(bucket, 0) + 1
+
+    ended_at_utc = _utc_iso()
+    _print_aggregate(per_label_buckets)
+
+    out_doc: Dict[str, Any] = {
+        "probe": {
+            "client": "airecruiter enrichment-provider probe v2 (OAuth batch)",
+            "started_at_utc": started_at_utc,
+            "ended_at_utc": ended_at_utc,
+            "batch_size_requested": args.batch_from_db,
+            "batch_size_executed": len(runs),
+            "jobdiva_id": args.jobdiva_id,
+            "source": args.source,
+            "window_days": args.window_days,
+            "zoominfo_only": bool(getattr(args, "zoominfo_only", False)),
+            "zoominfo_auth_mode": "oauth_client_credentials",
+        },
+        "aggregate": per_label_buckets,
+        "runs": runs,
+    }
     out_dir = APPS_API_DIR / "tmp"
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out_path = out_dir / f"enrichment_probe_{stamp}.json"
+    out_path = out_dir / f"enrichment_probe_batch_{stamp}.json"
     out_path.write_text(json.dumps(out_doc, indent=2, default=str))
-    print(f"\n[probe] wrote evidence file: {out_path}")
+    print(f"\n[probe] wrote batch evidence file: {out_path}")
     return 0, out_doc
 
 
@@ -555,19 +705,44 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--linkedin-url", help="LinkedIn profile URL to probe.")
     src.add_argument("--candidate-id", help="Look up the row in sourced_candidates.")
+    src.add_argument(
+        "--batch-from-db",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Probe the N most-recent sourced_candidates rows that have a "
+            "linkedin.com/in/ profile URL. Combine with --jobdiva-id and/or "
+            "--source to scope the sample to a recent run."
+        ),
+    )
     p.add_argument("--jobdiva-id", default=None)
     p.add_argument("--source", default=None)
     p.add_argument("--full-name", default=None, help="First Last name (for ZoomInfo new path).")
     p.add_argument("--company-name", default=None, help="Current employer (for ZoomInfo new path).")
     p.add_argument("--email", default=None, help="Seed email (for ZoomInfo new matchPersonInput).")
     p.add_argument("--phone", default=None, help="Seed phone (for ZoomInfo new matchPersonInput).")
+    p.add_argument(
+        "--zoominfo-only",
+        action="store_true",
+        help="Skip the Apollo probe entirely. Useful when verifying the ZoomInfo path in isolation.",
+    )
+    p.add_argument(
+        "--window-days",
+        type=int,
+        default=7,
+        help="Recency window for --batch-from-db (default 7).",
+    )
     p.add_argument("--dry-run", action="store_true", help="Print plan and exit without sending.")
     return p.parse_args(argv)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = _parse_args(argv)
-    rc, _ = asyncio.run(run_probe(args))
+    if args.batch_from_db is not None:
+        rc, _ = asyncio.run(run_batch(args))
+    else:
+        rc, _ = asyncio.run(run_probe(args))
     return rc
 
 

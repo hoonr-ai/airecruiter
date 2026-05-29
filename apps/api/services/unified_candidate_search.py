@@ -871,12 +871,20 @@ class UnifiedCandidateSearch:
                         # nor phone. Gated by CONTACT_ENRICHMENT_INLINE_ENABLED
                         # inside the helper; capped per-job at
                         # contact_enrichment.PER_JOB_CAP so cost is bounded.
+                        #
+                        # `full_name` is required for the ZoomInfo path — the
+                        # new Data API doesn't accept linkedinUrl as a match
+                        # input, so we need firstName + lastName for
+                        # ContactSearch. Without a name we skip ZoomInfo and
+                        # go straight to Apollo (which does accept a URL).
                         if not (str(cand.get("email") or "").strip() or str(cand.get("phone") or "").strip()):
                             profile_url = str(cand.get("profile_url") or "").strip()
                             if "linkedin.com/in/" in profile_url.lower():
                                 try:
                                     enrich = await contact_enrichment.enrich_contact_for_sourcing(
-                                        profile_url, criteria.job_id
+                                        profile_url,
+                                        criteria.job_id,
+                                        full_name=str(cand.get("name") or "").strip() or None,
                                     )
                                 except Exception as e:
                                     logger.warning("contact_enrichment failed for %s: %s", cand.get("id"), e)
