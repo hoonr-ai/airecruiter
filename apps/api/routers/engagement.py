@@ -1043,6 +1043,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             return {
                 "success": True,
                 "message": "Interview(s) sent successfully",
+                "bulk_id": response_data.get("bulk_id"),
                 "data": interview_results,
                 "skipped_already_sent": skipped_already_sent,
                 "raw_response": response_data
@@ -1077,6 +1078,24 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             except Exception:
                 pass
 
+@router.get("/engage/bulk-status/stream")
+async def stream_engagement_status(bulk_id: str):
+    from fastapi.responses import StreamingResponse
+    import httpx
+    
+    external_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/bulk-interviews/{bulk_id}/stream"
+    
+    async def proxy_stream():
+        async with httpx.AsyncClient() as client:
+            try:
+                async with client.stream("GET", external_url, timeout=None) as response:
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+            except Exception as e:
+                logger.error(f"Error proxying SSE stream for bulk_id {bulk_id}: {e}")
+                yield b"data: {\"status\": \"error\"}\n\n"
+                
+    return StreamingResponse(proxy_stream(), media_type="text/event-stream")
 
 # Hard cap so a single sync run can never blast more than this many
 # candidates at pairbot, even if the job's filters are loose. The auto-sync
