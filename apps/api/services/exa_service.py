@@ -271,7 +271,9 @@ class ExaService:
                         "match_score": 0,
                         "profile_url": url,
                         "image_url": "",
-                        "open_to_work": False,
+                        # open_to_work intentionally omitted here — populated
+                        # asynchronously by services.apify_open_to_work via
+                        # unified_candidate_search._search_exa.
                         "open_to_relocation": _detect_relocation(highlights_text),
                         "resume_text": highlights_text,
                         "recruiter_candidate_id": None

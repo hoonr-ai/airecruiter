@@ -263,6 +263,24 @@ def _candidate_to_persist_row(job_id: str, cand: Dict[str, Any]) -> Dict[str, An
     }
 
 
+@router.post("/candidates/open-to-work-statuses")
+async def get_open_to_work_statuses(payload: Dict[str, Any]):
+    """Poll-friendly read-only lookup for LinkedIn Open-to-Work status.
+
+    Body: {"links": ["https://www.linkedin.com/in/...", ...]}
+    Returns: {"openToWorkStatusCache": {<original_url>: true | false | "PENDING"}}
+
+    The cache is populated asynchronously by the Exa search path (see
+    services/apify_open_to_work.py). This endpoint never triggers Apify
+    calls itself — it only reads the in-process cache. Frontend should poll
+    every ~5s while any link is still "PENDING".
+    """
+    from services.apify_open_to_work import lookup_statuses
+    links_raw = payload.get("links") or []
+    links: List[str] = [str(u) for u in links_raw if u]
+    return {"openToWorkStatusCache": lookup_statuses(links)}
+
+
 @router.post("/candidates/search")
 async def search_jobdiva_candidates(request: CandidateSearchRequest):
     """

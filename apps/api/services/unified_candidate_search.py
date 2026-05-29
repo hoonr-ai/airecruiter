@@ -4323,6 +4323,17 @@ class UnifiedCandidateSearch:
                 boolean_string=self._scope_boolean_to_us(boolean_string),
                 role_hint=self._role_hint_from_criteria(criteria),
             )
+            # Open-to-Work enrichment via Apify (mirrors Hoonrai/Revelio path).
+            # Cache-first: fills `open_to_work` for any LinkedIn URL already
+            # resolved in-process; fires background fetches for the rest, which
+            # the frontend resolves by polling /candidates/open-to-work-statuses.
+            if criteria.open_to_work and candidates:
+                try:
+                    from .apify_open_to_work import annotate as _otw_annotate, enqueue as _otw_enqueue
+                    pending_urls = await _otw_annotate(candidates)
+                    await _otw_enqueue(pending_urls)
+                except Exception as otw_exc:
+                    logger.warning(f"Exa OTW enrichment skipped: {otw_exc}")
             return {"candidates": candidates, "source_type": "LinkedIn-Exa"}
         except Exception as e:
             logger.error(f"Exa search failed: {e}")
