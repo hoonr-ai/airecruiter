@@ -279,7 +279,7 @@ async def get_open_to_work_statuses(payload: Dict[str, Any]):
     links_raw = payload.get("links") or []
     links: List[str] = [str(u) for u in links_raw if u]
     return {
-        "openToWorkStatusCache": lookup_statuses(links),
+        "openToWorkStatusCache": await lookup_statuses(links),
         # Embedded diag so a single curl reveals "is the token loaded?"
         # without needing a separate health endpoint or log scraping.
         "_diag": diagnostics(),
