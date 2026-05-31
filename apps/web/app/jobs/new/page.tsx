@@ -1420,8 +1420,28 @@ function NewJobPageContent() {
     };
 
     // Immediate first poll, then every 5s. Hoonrai uses 5s; matches actor latency.
+    // Cap at 24 polls (~2 min) so a stuck backend never spins the chip forever.
+    let attempts = 0;
+    const MAX_ATTEMPTS = 24;
     poll();
-    const intervalId = setInterval(poll, 5000);
+    attempts += 1;
+    const intervalId = setInterval(() => {
+      if (attempts >= MAX_ATTEMPTS) {
+        clearInterval(intervalId);
+        setCandidates((prev: any[]) =>
+          prev.map((c) => {
+            const u = (c as any).profile_url || "";
+            const otw = (c as any).open_to_work;
+            if (!u || !String(u).toLowerCase().includes("linkedin.com")) return c;
+            if (otw === true || otw === false) return c;
+            return { ...c, open_to_work: false };
+          })
+        );
+        return;
+      }
+      attempts += 1;
+      poll();
+    }, 5000);
     return () => {
       cancelled = true;
       clearInterval(intervalId);

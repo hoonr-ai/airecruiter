@@ -197,6 +197,71 @@ class UnifiedCandidateSearch:
     def _log_stage(self, stage: str, message: str) -> None:
         logger.info("[CandidateSearch] %s | %s", stage, message)
 
+    async def _apply_contact_enrichment(
+        self,
+        cand: Dict[str, Any],
+        criteria: "SearchCriteria",
+        *,
+        overwrite: bool,
+    ) -> None:
+        """In-line ZoomInfo → Apollo contact enrichment for one candidate.
+
+        ZoomInfo→Apollo is the source of truth for sourced contact info; the
+        precedence (ZoomInfo first, Apollo fallback) lives inside
+        ``contact_enrichment.enrich_contact_for_sourcing``. Gated by
+        CONTACT_ENRICHMENT_INLINE_ENABLED and capped at PER_JOB_CAP inside the
+        helper.
+
+        - ``overwrite=True`` (Exa / deep-search): the enrichment result REPLACES
+          any pre-existing email/phone — those sources are the authority.
+        - ``overwrite=False`` (JobDiva/Dice/Unipile): only backfill when a field
+          is empty, to preserve provider-supplied contact info and bound cost.
+
+        ``full_name`` is required for the ZoomInfo path (the new Data API doesn't
+        accept linkedinUrl as a match input — it needs firstName + lastName for
+        ContactSearch). Without a name we skip ZoomInfo and go straight to
+        Apollo (which does accept a URL). Mutates ``cand`` in place; never raises.
+        """
+        profile_url = str(cand.get("profile_url") or "").strip()
+        if "linkedin.com/in/" not in profile_url.lower():
+            return
+        try:
+            enrich = await contact_enrichment.enrich_contact_for_sourcing(
+                profile_url,
+                criteria.job_id,
+                full_name=str(cand.get("name") or "").strip() or None,
+            )
+        except Exception as e:
+            logger.warning("contact_enrichment failed for %s: %s", cand.get("id"), e)
+            enrich = {}
+        if not enrich:
+            return
+
+        if overwrite:
+            new_email = enrich.get("workEmail") or enrich.get("personalEmail") or ""
+            new_phone = enrich.get("mobilePhone") or enrich.get("workPhone") or ""
+            if new_email:
+                cand["email"] = new_email
+            if new_phone:
+                cand["phone"] = new_phone
+        else:
+            cand["email"] = (
+                cand.get("email")
+                or enrich.get("workEmail")
+                or enrich.get("personalEmail")
+                or ""
+            )
+            cand["phone"] = (
+                cand.get("phone")
+                or enrich.get("mobilePhone")
+                or enrich.get("workPhone")
+                or ""
+            )
+        if cand.get("email") or cand.get("phone"):
+            if not isinstance(cand.get("enhanced_info"), dict):
+                cand["enhanced_info"] = cand.get("enhanced_info") or {}
+            cand["enhanced_info"]["contact_enrichment_provider"] = enrich.get("provider_used")
+
     async def search_candidates(self, criteria: SearchCriteria):
         """
         Orchestrate candidate search across multiple providers with tiered JobDiva logic.
@@ -825,8 +890,14 @@ class UnifiedCandidateSearch:
 
                         cand["enhanced_info_status"] = "completed"
                         cand["name"] = cand["enhanced_info"].get("candidate_name") or cand.get("name")
-                        cand["email"] = cand["enhanced_info"].get("email") or cand.get("email")
-                        cand["phone"] = cand["enhanced_info"].get("phone") or cand.get("phone")
+                        # For LinkedIn-Exa, ZoomInfo→Apollo is the sole source of
+                        # truth for email/phone — enhanced_info values here are
+                        # LLM-extracted from profile text and frequently empty or
+                        # hallucinated. Skipping the assignment lets the inline
+                        # enrichment block below populate contact info cleanly.
+                        if source_type != "LinkedIn-Exa":
+                            cand["email"] = cand["enhanced_info"].get("email") or cand.get("email")
+                            cand["phone"] = cand["enhanced_info"].get("phone") or cand.get("phone")
                         cand["title"] = cand["enhanced_info"].get("job_title") or cand.get("title")
                         cand["location"] = cand["enhanced_info"].get("current_location") or cand.get("location")
                         if cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills"):
@@ -866,44 +937,30 @@ class UnifiedCandidateSearch:
                                     if s2 and not cand.get("state"):
                                         cand["state"] = s2
 
-                        # In-line ZoomInfo → Apollo enrichment for survivors of
-                        # the cheap filter gates that still have neither email
-                        # nor phone. Gated by CONTACT_ENRICHMENT_INLINE_ENABLED
-                        # inside the helper; capped per-job at
-                        # contact_enrichment.PER_JOB_CAP so cost is bounded.
+                        # In-line ZoomInfo → Apollo enrichment.
+                        #   - LinkedIn-Exa: ALWAYS run; the result overwrites any
+                        #     pre-existing email/phone. ZoomInfo→Apollo is the
+                        #     source of truth for Exa-sourced contact info.
+                        #   - Other sources (JobDiva/Dice/Unipile): only run as a
+                        #     backfill when both email and phone are missing, to
+                        #     bound enrichment cost.
+                        # Gated by CONTACT_ENRICHMENT_INLINE_ENABLED inside the
+                        # helper; capped per-job at contact_enrichment.PER_JOB_CAP.
                         #
                         # `full_name` is required for the ZoomInfo path — the
                         # new Data API doesn't accept linkedinUrl as a match
                         # input, so we need firstName + lastName for
                         # ContactSearch. Without a name we skip ZoomInfo and
                         # go straight to Apollo (which does accept a URL).
-                        if not (str(cand.get("email") or "").strip() or str(cand.get("phone") or "").strip()):
-                            profile_url = str(cand.get("profile_url") or "").strip()
-                            if "linkedin.com/in/" in profile_url.lower():
-                                try:
-                                    enrich = await contact_enrichment.enrich_contact_for_sourcing(
-                                        profile_url,
-                                        criteria.job_id,
-                                        full_name=str(cand.get("name") or "").strip() or None,
-                                    )
-                                except Exception as e:
-                                    logger.warning("contact_enrichment failed for %s: %s", cand.get("id"), e)
-                                    enrich = {}
-                                if enrich:
-                                    cand["email"] = (
-                                        cand.get("email")
-                                        or enrich.get("workEmail")
-                                        or enrich.get("personalEmail")
-                                        or ""
-                                    )
-                                    cand["phone"] = (
-                                        cand.get("phone")
-                                        or enrich.get("mobilePhone")
-                                        or enrich.get("workPhone")
-                                        or ""
-                                    )
-                                    if cand.get("email") or cand.get("phone"):
-                                        cand["enhanced_info"]["contact_enrichment_provider"] = enrich.get("provider_used")
+                        is_exa_source = source_type == "LinkedIn-Exa"
+                        has_existing_contact = bool(
+                            str(cand.get("email") or "").strip()
+                            or str(cand.get("phone") or "").strip()
+                        )
+                        if is_exa_source or not has_existing_contact:
+                            await self._apply_contact_enrichment(
+                                cand, criteria, overwrite=is_exa_source
+                            )
                         return {"status": "success", "candidate": cand}
 
                 process_tasks = [asyncio.create_task(_process_external_single(c)) for c in ext_candidates]
@@ -1078,6 +1135,14 @@ class UnifiedCandidateSearch:
                                 "passes": True, "matched": [], "missing": [],
                                 "excluded": [], "score": 0,
                             }
+                        # Deep-only candidates are born without contact info and
+                        # never pass through the Pass A enrichment block, so they
+                        # surfaced with blank email/phone. Run the same
+                        # ZoomInfo→Apollo enrichment (Exa = source of truth) here,
+                        # before emit so dedup sees the resolved contact fields.
+                        await self._apply_contact_enrichment(
+                            new_cand, criteria, overwrite=True
+                        )
                         await emit_candidate(new_cand, assessment)
                         new_found += 1
             except Exception as e:
