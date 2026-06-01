@@ -2,6 +2,11 @@ import type { NextConfig } from "next";
 import { withSentryConfig } from "@sentry/nextjs";
 
 const nextConfig: NextConfig = {
+  // Empty turbopack block silences the Next 16 warning when `next dev`
+  // (Turbopack-by-default) coexists with the webpack-based production
+  // build that @sentry/nextjs requires. Sentry doesn't yet fully
+  // support Turbopack: https://github.com/getsentry/sentry-javascript/issues/8105
+  turbopack: {},
 };
 
 export default withSentryConfig(nextConfig, {
