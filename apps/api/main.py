@@ -40,7 +40,9 @@ def readable_ist_now() -> str:
 # Datadog / OpenTelemetry can layer on later with zero code change.
 from core.logging import configure_logging, RequestIDMiddleware
 from core.amplitude import track_event_async
+from core.sentry import init_sentry
 configure_logging()
+init_sentry()
 logger = logging.getLogger(__name__)
 
 from services.ai_service import ai_service
