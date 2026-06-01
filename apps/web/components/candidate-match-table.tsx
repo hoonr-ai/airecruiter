@@ -696,11 +696,35 @@ function HoverDetailsCard({
       ""
   ).trim();
   const availabilityLower = recentAvailabilityRaw.toLowerCase();
-  const isOpenToWork =
-    !!candidate.open_to_work ||
-    !!candidate.open_to_relocation ||
-    availabilityLower.includes("open") ||
-    availabilityLower.includes("available");
+
+  // Tri-state Open-to-Work specifically for LinkedIn `open_to_work` (the
+  // Apify-backed signal from services/apify_open_to_work.py). When the value
+  // is explicitly true/false we trust it; when it's undefined AND the
+  // candidate has a LinkedIn profile_url, treat it as "checking" since the
+  // /candidates/open-to-work-statuses poller will resolve it shortly. For
+  // anything else, fall through to the legacy heuristic that folds in
+  // open_to_relocation + recent availability text.
+  const profileUrlStr = String(candidate.profile_url || "").toLowerCase();
+  const hasLinkedInUrl = profileUrlStr.includes("linkedin.com");
+  const otwExplicit: boolean | null =
+    candidate.open_to_work === true
+      ? true
+      : candidate.open_to_work === false
+      ? false
+      : null;
+  const otwState: "yes" | "no" | "checking" | "legacy_yes" | "none" =
+    otwExplicit === true
+      ? "yes"
+      : otwExplicit === false
+      ? "no"
+      : hasLinkedInUrl
+      ? "checking"
+      : !!candidate.open_to_relocation ||
+        availabilityLower.includes("open") ||
+        availabilityLower.includes("available")
+      ? "legacy_yes"
+      : "none";
+  const isOpenToWork = otwState === "yes" || otwState === "legacy_yes";
 
   const matchScore =
     typeof candidate.match_score === "number" ? candidate.match_score : null;
@@ -782,11 +806,28 @@ function HoverDetailsCard({
         </div>
 
         {/* Status chip row — Open to work / Email / Follower count / Last activity */}
-        {(isOpenToWork || candidate.email || exaFollowerStr || exaLastActivity || recentAvailabilityRaw) && (
+        {(otwState !== "none" || candidate.email || exaFollowerStr || exaLastActivity || recentAvailabilityRaw) && (
           <div className="flex flex-wrap items-center gap-1.5 mt-3">
-            {isOpenToWork && (
+            {(otwState === "yes" || otwState === "legacy_yes") && (
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border bg-emerald-50 text-emerald-700 border-emerald-200">
                 ✓ Open to work
+              </span>
+            )}
+            {otwState === "no" && (
+              <span
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border bg-slate-50 text-slate-500 border-slate-200"
+                title="LinkedIn #OpenToWork badge not set on this profile (checked via Apify)"
+              >
+                — Not open to work
+              </span>
+            )}
+            {otwState === "checking" && (
+              <span
+                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold border bg-amber-50 text-amber-700 border-amber-200"
+                title="Checking LinkedIn #OpenToWork status via Apify…"
+              >
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                Checking OTW…
               </span>
             )}
             {recentAvailabilityRaw && !isOpenToWork && (

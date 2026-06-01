@@ -33,6 +33,7 @@ export type SendBulkInterviewInput = {
 export type SendBulkInterviewResult = {
   success: boolean;
   message?: string;
+  bulk_id?: string;
   data?: Array<{
     interview_id: string;
     candidate_name: string;

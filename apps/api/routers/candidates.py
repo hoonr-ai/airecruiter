@@ -263,6 +263,43 @@ def _candidate_to_persist_row(job_id: str, cand: Dict[str, Any]) -> Dict[str, An
     }
 
 
+@router.post("/candidates/open-to-work-statuses")
+async def get_open_to_work_statuses(payload: Dict[str, Any]):
+    """Poll-friendly read-only lookup for LinkedIn Open-to-Work status.
+
+    Body: {"links": ["https://www.linkedin.com/in/...", ...]}
+    Returns: {"openToWorkStatusCache": {<original_url>: true | false | "PENDING"}}
+
+    The cache is populated asynchronously by the Exa search path (see
+    services/apify_open_to_work.py). This endpoint never triggers Apify
+    calls itself — it only reads the in-process cache. Frontend should poll
+    every ~5s while any link is still "PENDING".
+    """
+    from services.apify_open_to_work import lookup_statuses, diagnostics
+    links_raw = payload.get("links") or []
+    links: List[str] = [str(u) for u in links_raw if u]
+    return {
+        "openToWorkStatusCache": await lookup_statuses(links),
+        # Embedded diag so a single curl reveals "is the token loaded?"
+        # without needing a separate health endpoint or log scraping.
+        "_diag": diagnostics(),
+    }
+
+
+@router.get("/candidates/open-to-work-diag")
+async def get_open_to_work_diag():
+    """Standalone diagnostic for the Apify OTW pipeline.
+
+    GET it from a browser or curl to see:
+      - apify_token_configured: false → APIFY_API_TOKEN env var not loaded
+      - cache_size: 0 → no Exa search has yet populated the cache (or
+        every call short-circuited because token is missing)
+      - inflight_count: > 0 → Apify calls are in progress right now
+    """
+    from services.apify_open_to_work import diagnostics
+    return diagnostics()
+
+
 @router.post("/candidates/search")
 async def search_jobdiva_candidates(request: CandidateSearchRequest):
     """
@@ -1711,12 +1748,61 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     If sourced_candidates rows already exist, updates phone/email + data blob.
     """
     from psycopg2.extras import RealDictCursor
-    from core.config import (
-        ZOOMINFO_ENRICH_URL,
-        ZOOMINFO_BEARER_TOKEN,
-        ZOOMINFO_CLIENT_ID,
+    from services.zoominfo_auth import (
+        ZoomInfoAuthFailed,
+        ZoomInfoAuthNotConfigured,
+        get_access_token,
     )
     zoominfo_new_enrich_url = "https://api.zoominfo.com/gtm/data/v1/contacts/enrich"
+    zoominfo_new_search_url = "https://api.zoominfo.com/gtm/data/v1/contacts/search"
+
+    async def _zi_authed_post(url: str, json_body: Dict[str, Any], *, timeout: float = 20.0) -> Optional[httpx.Response]:
+        """POST to a ZoomInfo Data API endpoint with auto-minted OAuth auth
+        + one 401 retry against a force-refreshed token.
+
+        Returns the httpx.Response (any status) on a clean call, or None when
+        the OAuth mint fails (callers should fall through to Apollo).
+        """
+        try:
+            token = await get_access_token()
+        except ZoomInfoAuthNotConfigured as exc:
+            logger.info("zoominfo disabled for %s: %s", candidate_id, exc)
+            return None
+        except ZoomInfoAuthFailed as exc:
+            logger.warning("zoominfo token mint failed for %s: %s", candidate_id, exc)
+            return None
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "accept": "application/vnd.api+json",
+            "content-type": "application/vnd.api+json",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                res = await client.post(url, headers=headers, json=json_body)
+        except httpx.HTTPError as exc:
+            logger.warning("zoominfo POST %s failed for %s: %s", url, candidate_id, exc)
+            return None
+
+        if res.status_code != 401:
+            return res
+
+        # Token may have been revoked server-side; force-refresh and retry once.
+        logger.info("zoominfo 401 on %s — forcing token refresh for %s", url, candidate_id)
+        try:
+            token = await get_access_token(force_refresh=True)
+        except (ZoomInfoAuthNotConfigured, ZoomInfoAuthFailed) as exc:
+            logger.warning("zoominfo force-refresh failed for %s: %s", candidate_id, exc)
+            return res
+
+        headers["Authorization"] = f"Bearer {token}"
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                return await client.post(url, headers=headers, json=json_body)
+        except httpx.HTTPError as exc:
+            logger.warning("zoominfo POST %s retry failed for %s: %s", url, candidate_id, exc)
+            return None
 
     linkedin_url = (request.linkedin_url or "").strip()
     existing_rows: List[Dict[str, Any]] = []
@@ -1764,47 +1850,14 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
 
     provider_used = "zoominfo"
     extracted: Dict[str, Any] = {}
-    zres: Optional[httpx.Response] = None
-    zoominfo_data: Dict[str, Any] = {}
+    new_res: Optional[httpx.Response] = None  # primary ZoomInfo Data API response
     # Invariant: Apollo must be called at least once on every path that reaches
     # the parse stage. Flipped to True immediately after every Apollo invocation;
     # a final safety net below catches any future code path that misses it.
     apollo_attempted = False
 
-    if not ZOOMINFO_BEARER_TOKEN:
-        logger.warning("ZoomInfo token missing for %s, attempting Apollo fallback", candidate_id)
-        apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
-        apollo_attempted = True
-        if apollo_result.get("ok"):
-            provider_used = "apollo"
-            extracted = apollo_result.get("fields") or {}
-            logger.info("Apollo fallback succeeded for %s when ZoomInfo token missing", candidate_id)
-        else:
-            raise HTTPException(status_code=500, detail="ZOOMINFO_BEARER_TOKEN is not configured and Apollo fallback failed")
-
-    headers = {
-        "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    if ZOOMINFO_CLIENT_ID:
-        headers["X-Client-Id"] = ZOOMINFO_CLIENT_ID
-
-    zoominfo_payload = {
-        "inputFields": [
-            {
-                "fieldName": "linkedinUrl",
-                "fieldType": "String",
-                "value": linkedin_url,
-            }
-        ],
-        "outputFields": ["workPhone", "mobilePhone", "workEmail", "personalEmail"],
-    }
-
     async def _zoominfo_crossfill_from_email_or_phone(seed_email: str, seed_phone: str) -> Dict[str, str]:
         """If we only have email or phone, query ZoomInfo new API to fetch the missing side."""
-        if not ZOOMINFO_BEARER_TOKEN:
-            return {}
-
         normalised_email = str(seed_email or "").strip().lower()
         normalised_phone = _normalise_phone(seed_phone or "")
         if sum(1 for ch in normalised_phone if ch.isdigit()) < 7:
@@ -1818,11 +1871,6 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         else:
             return {}
 
-        headers = {
-            "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
-            "accept": "application/vnd.api+json",
-            "content-type": "application/vnd.api+json",
-        }
         payload = {
             "data": {
                 "type": "ContactEnrich",
@@ -1832,55 +1880,23 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                 },
             }
         }
-
-        try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                res = await client.post(zoominfo_new_enrich_url, headers=headers, json=payload)
-        except Exception as e:
-            logger.warning("ZoomInfo cross-fill request failed for %s: %s", candidate_id, e)
+        res = await _zi_authed_post(zoominfo_new_enrich_url, payload)
+        if res is None or res.status_code >= 400:
+            if res is not None:
+                logger.info("ZoomInfo cross-fill non-2xx for %s: %s", candidate_id, res.status_code)
             return {}
-
-        if res.status_code >= 400:
-            logger.info(
-                "ZoomInfo cross-fill non-2xx for %s: %s",
-                candidate_id,
-                res.status_code,
-            )
-            return {}
-
         try:
             payload_data = res.json()
         except Exception:
             return {}
-
         return _extract_new_zoominfo_contact_fields(payload_data)
 
     if provider_used == "zoominfo":
-        try:
-            async with httpx.AsyncClient(timeout=20.0) as client:
-                zres = await client.post(ZOOMINFO_ENRICH_URL, headers=headers, json=zoominfo_payload)
-        except Exception as e:
-            logger.error(f"ZoomInfo enrich request failed for {candidate_id}: {e}")
-            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
-            apollo_attempted = True
-            if apollo_result.get("ok"):
-                provider_used = "apollo"
-                extracted = apollo_result.get("fields") or {}
-                logger.info("Apollo fallback succeeded for %s after ZoomInfo request failure", candidate_id)
-            else:
-                raise HTTPException(status_code=502, detail=f"ZoomInfo request failed: {str(e)}")
-
-    if provider_used == "zoominfo" and zres is not None:
-        response_text = zres.text
-        try:
-            zoominfo_data = zres.json()
-        except Exception:
-            zoominfo_data = {"raw": response_text}
-    else:
-        response_text = ""
-
-    if provider_used == "zoominfo" and zres.status_code == 401:
-        # Legacy endpoint rejected this token. Fallback to the new OAuth Data API.
+        # The legacy `/enrich/contact` endpoint is fully retired for our
+        # account (401s even with a fresh OAuth-minted token), so we enter
+        # the new Data API path directly. ContactEnrich needs a matchPersonInput
+        # built from whatever signal we have — email, phone, name+company, or
+        # personId resolved by a ContactSearch by name.
         row0 = existing_rows[0] if existing_rows else {}
         row_data = _json_load_safe(row0.get("data"), {}) if isinstance(row0, dict) else {}
         row_enhanced = row_data.get("enhanced_info") if isinstance(row_data, dict) else {}
@@ -1922,11 +1938,6 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             search_name = full_name or _name_from_linkedin_url(linkedin_url)
             split = _split_name(search_name)
             if split["first"] and split["last"]:
-                search_headers = {
-                    "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
-                    "accept": "application/vnd.api+json",
-                    "content-type": "application/vnd.api+json",
-                }
                 search_payload = {
                     "data": {
                         "type": "ContactSearch",
@@ -1936,27 +1947,28 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                         },
                     }
                 }
-                try:
-                    async with httpx.AsyncClient(timeout=20.0) as client:
-                        sres = await client.post(
-                            "https://api.zoominfo.com/gtm/data/v1/contacts/search",
-                            headers=search_headers,
-                            json=search_payload,
-                        )
-                    if sres.status_code < 400:
+                sres = await _zi_authed_post(zoominfo_new_search_url, search_payload)
+                if sres is not None and sres.status_code < 400:
+                    try:
                         sjson = sres.json()
-                        sdata = sjson.get("data") if isinstance(sjson, dict) else []
-                        if isinstance(sdata, list) and sdata:
-                            person_id = sdata[0].get("id")
-                            if person_id:
-                                match_person_input["personId"] = str(person_id)
-                                logger.info(
-                                    "ZoomInfo fallback search resolved personId for %s using name '%s'",
-                                    candidate_id,
-                                    search_name,
-                                )
-                except Exception as e:
-                    logger.warning(f"ZoomInfo fallback search failed for {candidate_id}: {e}")
+                    except Exception:
+                        sjson = {}
+                    sdata = sjson.get("data") if isinstance(sjson, dict) else []
+                    if isinstance(sdata, list) and sdata:
+                        person_id = sdata[0].get("id")
+                        if person_id:
+                            match_person_input["personId"] = str(person_id)
+                            logger.info(
+                                "ZoomInfo ContactSearch resolved personId for %s using name '%s'",
+                                candidate_id,
+                                search_name,
+                            )
+                elif sres is not None:
+                    logger.info(
+                        "ZoomInfo ContactSearch non-2xx for %s: %s",
+                        candidate_id,
+                        sres.status_code,
+                    )
 
         if not match_person_input:
             logger.warning(
@@ -1991,11 +2003,6 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                     "message": "ZoomInfo fallback skipped: insufficient match inputs (no reliable person match).",
                 }
 
-        new_headers = {
-            "Authorization": f"Bearer {ZOOMINFO_BEARER_TOKEN}",
-            "accept": "application/vnd.api+json",
-            "content-type": "application/vnd.api+json",
-        }
         new_payload = {
             "data": {
                 "type": "ContactEnrich",
@@ -2007,23 +2014,22 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         }
 
         if provider_used == "zoominfo":
-            try:
-                async with httpx.AsyncClient(timeout=20.0) as client:
-                    new_res = await client.post(zoominfo_new_enrich_url, headers=new_headers, json=new_payload)
-            except Exception as e:
-                logger.error(f"ZoomInfo new API fallback request failed for {candidate_id}: {e}")
+            new_res = await _zi_authed_post(zoominfo_new_enrich_url, new_payload)
+            if new_res is None:
+                # Auth not configured, token mint failed, or HTTP raised — fall
+                # through to Apollo. The helper has already logged the cause.
                 apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
                 apollo_attempted = True
                 if apollo_result.get("ok"):
                     provider_used = "apollo"
                     extracted = apollo_result.get("fields") or {}
-                    logger.info("Apollo fallback succeeded for %s after ZoomInfo new API request failure", candidate_id)
+                    logger.info("Apollo fallback succeeded for %s after ZoomInfo auth/HTTP failure", candidate_id)
                 else:
-                    raise HTTPException(status_code=502, detail=f"ZoomInfo fallback request failed: {str(e)}")
+                    raise HTTPException(status_code=502, detail="ZoomInfo request failed and Apollo fallback failed")
 
-        if provider_used == "zoominfo" and new_res.status_code >= 400:
+        if provider_used == "zoominfo" and new_res is not None and new_res.status_code >= 400:
             logger.warning(
-                "ZoomInfo fallback non-2xx for %s: %s %s",
+                "ZoomInfo ContactEnrich non-2xx for %s: %s %s",
                 candidate_id,
                 new_res.status_code,
                 new_res.text[:300],
@@ -2033,7 +2039,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             if apollo_result.get("ok"):
                 provider_used = "apollo"
                 extracted = apollo_result.get("fields") or {}
-                logger.info("Apollo fallback succeeded for %s after ZoomInfo non-2xx fallback response", candidate_id)
+                logger.info("Apollo fallback succeeded for %s after ZoomInfo non-2xx response", candidate_id)
             elif 400 <= new_res.status_code < 500:
                 return {
                     "status": "success",
@@ -2054,52 +2060,13 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             else:
                 raise HTTPException(status_code=502, detail=f"ZoomInfo API error ({new_res.status_code})")
 
-        if provider_used == "zoominfo":
+        if provider_used == "zoominfo" and new_res is not None:
             try:
                 new_data = new_res.json()
             except Exception:
                 new_data = {"raw": new_res.text}
 
             extracted = _extract_new_zoominfo_contact_fields(new_data)
-    elif provider_used == "zoominfo" and zres.status_code >= 400:
-        logger.warning(
-            f"ZoomInfo enrich non-2xx for {candidate_id}: {zres.status_code} {response_text[:300]}"
-        )
-        apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
-        apollo_attempted = True
-        if apollo_result.get("ok"):
-            provider_used = "apollo"
-            extracted = apollo_result.get("fields") or {}
-            logger.info("Apollo fallback succeeded for %s after ZoomInfo non-2xx response", candidate_id)
-        elif 400 <= zres.status_code < 500:
-            return {
-                "status": "success",
-                "candidate_id": candidate_id,
-                "linkedin_url": linkedin_url,
-                "phone_source": "none",
-                "phone": None,
-                "phoneCandidates": [],
-                "email": None,
-                "workPhone": None,
-                "mobilePhone": None,
-                "workEmail": None,
-                "personalEmail": None,
-                "provider": "none",
-                "updated_rows": 0,
-                "message": f"ZoomInfo returned no contact match ({zres.status_code}).",
-            }
-        else:
-            raise HTTPException(status_code=502, detail=f"ZoomInfo API error ({zres.status_code})")
-    elif provider_used == "zoominfo":
-        extracted = _extract_enrichment_fields(zoominfo_data)
-        if not any(
-            extracted.get(k) for k in ("mobilePhone", "workPhone", "workEmail", "personalEmail")
-        ):
-            logger.info(
-                "ZoomInfo legacy returned no contact fields for %s (status=%s)",
-                candidate_id,
-                zres.status_code if zres is not None else "?",
-            )
 
     # Cross-fill pass: if we have only one side (email OR phone), use it to fetch the other.
     seed_phone = _normalise_phone((extracted.get("mobilePhone") or extracted.get("workPhone") or ""))

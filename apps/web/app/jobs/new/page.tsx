@@ -1372,6 +1372,82 @@ function NewJobPageContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStep]);
 
+  // Open-to-Work polling for Exa-sourced LinkedIn candidates.
+  // Mirrors the Hoonrai/Revelio frontend polling pattern: every 5s POST any
+  // LinkedIn URL we haven't yet resolved to /candidates/open-to-work-statuses
+  // and patch candidates whose status flips from "PENDING" to true/false.
+  // Stops automatically once nothing is pending.
+  useEffect(() => {
+    const pendingUrls: string[] = [];
+    for (const c of candidates) {
+      const url = (c as any).profile_url || "";
+      const otw = (c as any).open_to_work;
+      if (!url || !String(url).toLowerCase().includes("linkedin.com")) continue;
+      if (otw === true || otw === false) continue;
+      pendingUrls.push(String(url));
+    }
+    if (pendingUrls.length === 0) return;
+
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const resp = await fetch(`${API_BASE}/candidates/open-to-work-statuses`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ links: pendingUrls }),
+        });
+        if (!resp.ok) return;
+        const json = await resp.json();
+        const cache = (json && json.openToWorkStatusCache) || {};
+        const resolved: Record<string, boolean> = {};
+        for (const u of pendingUrls) {
+          const v = cache[u];
+          if (v === true || v === false) resolved[u] = v;
+        }
+        if (cancelled || Object.keys(resolved).length === 0) return;
+        setCandidates((prev: any[]) =>
+          prev.map((c) => {
+            const u = (c as any).profile_url || "";
+            if (u && Object.prototype.hasOwnProperty.call(resolved, u)) {
+              return { ...c, open_to_work: resolved[u] };
+            }
+            return c;
+          })
+        );
+      } catch {
+        // network blip — next interval will retry
+      }
+    };
+
+    // Immediate first poll, then every 5s. Hoonrai uses 5s; matches actor latency.
+    // Cap at 24 polls (~2 min) so a stuck backend never spins the chip forever.
+    let attempts = 0;
+    const MAX_ATTEMPTS = 24;
+    poll();
+    attempts += 1;
+    const intervalId = setInterval(() => {
+      if (attempts >= MAX_ATTEMPTS) {
+        clearInterval(intervalId);
+        setCandidates((prev: any[]) =>
+          prev.map((c) => {
+            const u = (c as any).profile_url || "";
+            const otw = (c as any).open_to_work;
+            if (!u || !String(u).toLowerCase().includes("linkedin.com")) return c;
+            if (otw === true || otw === false) return c;
+            return { ...c, open_to_work: false };
+          })
+        );
+        return;
+      }
+      attempts += 1;
+      poll();
+    }, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [candidates]);
+
   const showToast = (message: string, type: "success" | "info" | "error" = "success") => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3000);
@@ -5287,6 +5363,36 @@ function NewJobPageContent() {
   // that haven't been assigned a numeric/JobDiva id yet so wizard work survives
   // a reload before the first save.
   const sourcingResultsKey = `sourcing:results:${numericJobId || jobdivaId || "draft"}`;
+  // Sourcing results expire after 24h: recruiters who come back the next day
+  // should see a fresh search, not stale candidates from the prior session.
+  const SOURCING_RESULTS_TTL_MS = 24 * 60 * 60 * 1000;
+
+  // One-shot sweep on mount: drop any sourcing:results:* entries older than
+  // the TTL across all jobs. Lazy per-key expiry (below) handles the active
+  // job; this stops abandoned jobs from sitting in localStorage forever.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const now = Date.now();
+      const stale: string[] = [];
+      for (let i = 0; i < window.localStorage.length; i++) {
+        const k = window.localStorage.key(i);
+        if (!k || !k.startsWith("sourcing:results:")) continue;
+        try {
+          const parsed = JSON.parse(window.localStorage.getItem(k) || "null");
+          const savedAt = Number(parsed?.savedAt);
+          if (!savedAt || now - savedAt > SOURCING_RESULTS_TTL_MS) {
+            stale.push(k);
+          }
+        } catch {
+          stale.push(k);
+        }
+      }
+      for (const k of stale) window.localStorage.removeItem(k);
+    } catch {
+      /* localStorage unavailable — ignore */
+    }
+  }, []);
 
   // Persist results once a search completes. Runs on the transition from
   // `isSearching: true → false` (and also when `candidates` changes while idle).
@@ -5319,6 +5425,11 @@ function NewJobPageContent() {
       const raw = window.localStorage.getItem(sourcingResultsKey);
       if (!raw) return;
       const parsed = JSON.parse(raw);
+      const savedAt = Number(parsed?.savedAt);
+      if (!savedAt || Date.now() - savedAt > SOURCING_RESULTS_TTL_MS) {
+        window.localStorage.removeItem(sourcingResultsKey);
+        return;
+      }
       const cached = Array.isArray(parsed?.candidates) ? parsed.candidates : [];
       if (cached.length === 0) return;
       const dedupedCached = deduplicateCandidatesUI(cached);
@@ -6086,6 +6197,38 @@ function NewJobPageContent() {
                 return id;
               }).filter(Boolean);
               skippedCandidateNames.push(...skippedNames);
+            }
+            
+            if (engageRes.bulk_id && batchEngageSent > 0) {
+              updateBatch(i, { status: "engaging", message: "Waiting for background processing..." });
+              try {
+                await new Promise<void>((resolve, reject) => {
+                  const eventSource = new EventSource(`${API_BASE}/api/v1/engagement/engage/bulk-status/stream?bulk_id=${engageRes.bulk_id}`);
+                  eventSource.onmessage = (event) => {
+                    try {
+                      const data = JSON.parse(event.data);
+                      if (data.status === "completed") {
+                        eventSource.close();
+                        resolve();
+                      } else if (data.status === "error") {
+                        eventSource.close();
+                        reject(new Error(data.message || "Background processing failed"));
+                      } else if (data.status === "processing") {
+                        updateBatch(i, { status: "engaging", message: `Processing ${data.pending} candidates...` });
+                      }
+                    } catch (e) {
+                      eventSource.close();
+                      reject(e);
+                    }
+                  };
+                  eventSource.onerror = (error) => {
+                    eventSource.close();
+                    reject(new Error("Lost connection to background processing status stream"));
+                  };
+                });
+              } catch (streamErr) {
+                console.warn(`Batch ${i + 1} SSE stream error:`, streamErr);
+              }
             }
           } else {
             batchEngageError = engageRes.message || "PAIR rejected the batch";

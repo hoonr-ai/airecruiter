@@ -108,6 +108,12 @@ AZURE_AI_AGENT_NAME       = os.getenv("AZURE_AI_AGENT_NAME", "skill-role-extract
 # ---- Exa API ----
 EXA_API_KEY = get_env_with_default("EXA_API_KEY", "")
 
+# ---- Apify (LinkedIn Open-to-Work enrichment for Exa-sourced candidates) ----
+APIFY_API_TOKEN = get_env_with_default("APIFY_API_TOKEN", "")
+APIFY_LINKEDIN_OTW_ACTOR = get_env_with_default(
+    "APIFY_LINKEDIN_OTW_ACTOR", "freshdata/linkedin-open-to-work-status"
+)
+
 # ---- Oxylabs Web Scraper API ----
 # HTTP Basic credentials for https://realtime.oxylabs.io/v1/queries.
 OXYLABS_USERNAME = get_env_with_default("OXYLABS_USERNAME", "")
@@ -131,9 +137,24 @@ MONSTER_SEARCH_URL = get_env_with_default(
 MONSTER_MAX_PAGES = int(get_env_with_default("MONSTER_MAX_PAGES", "2"))
 
 # ---- ZoomInfo Contact Enrichment ----
-ZOOMINFO_ENRICH_URL = get_env_with_default("ZOOMINFO_ENRICH_URL", "https://api.zoominfo.com/enrich/contact")
-ZOOMINFO_BEARER_TOKEN = get_env_with_default("ZOOMINFO_BEARER_TOKEN", "")
-ZOOMINFO_CLIENT_ID = get_env_with_default("ZOOMINFO_CLIENT_ID", "")
+# Auth: OAuth2 client_credentials flow against ZoomInfo's Okta auth server.
+# `services.zoominfo_auth.get_access_token()` mints fresh 24-hour JWTs on
+# demand from CLIENT_ID + CLIENT_SECRET; nothing rotates manually anymore.
+#
+# `ZOOMINFO_BEARER_TOKEN` is the **legacy** static-token path. If CLIENT_SECRET
+# is set, the auth module ignores BEARER_TOKEN entirely. Kept as a break-glass
+# override for ops, and to avoid breaking pre-OAuth deployments mid-rollout.
+#
+# `ZOOMINFO_ENRICH_URL` formerly pointed at the now-deprecated legacy
+# `/enrich/contact`. The current codebase calls the new Data API
+# (`/gtm/data/v1/contacts/*`) directly; the var is retained for back-compat
+# but no longer read by the contact-enrichment service.
+ZOOMINFO_ENRICH_URL      = get_env_with_default("ZOOMINFO_ENRICH_URL",      "https://api.zoominfo.com/enrich/contact")
+ZOOMINFO_BEARER_TOKEN    = get_env_with_default("ZOOMINFO_BEARER_TOKEN",    "")
+ZOOMINFO_CLIENT_ID       = get_env_with_default("ZOOMINFO_CLIENT_ID",       "")
+ZOOMINFO_CLIENT_SECRET   = get_env_with_default("ZOOMINFO_CLIENT_SECRET",   "")
+ZOOMINFO_OAUTH_TOKEN_URL = get_env_with_default("ZOOMINFO_OAUTH_TOKEN_URL", "https://okta-login.zoominfo.com/oauth2/default/v1/token")
+ZOOMINFO_SCOPES          = get_env_with_default("ZOOMINFO_SCOPES",          "api:data:contact")
 
 # ---- Apollo Contact Enrichment ----
 # Fallback provider when ZoomInfo returns no match. Empty => routes that call

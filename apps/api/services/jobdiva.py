@@ -41,10 +41,20 @@ _CANDIDATE_PHONE_KEYS = [
     "PHONENUMBER",
     "mobilePhone",
     "MOBILEPHONE",
-    "phone1",
-    "PHONE1",
     "cellPhone",
     "CELLPHONE",
+    "homePhone",
+    "HOMEPHONE",
+    "workPhone",
+    "WORKPHONE",
+    "phone1",
+    "PHONE1",
+    "phone2",
+    "PHONE2",
+    "phone3",
+    "PHONE3",
+    "primaryPhone",
+    "PRIMARYPHONE",
 ]
 
 # LLM-only candidate enrichment is active for sourcing.
@@ -119,6 +129,13 @@ def get_field(data: Dict[str, Any], keys: List[str], default: Any = None) -> Any
         norm_key = normalize(key)
         if norm_key in normalized_data:
             val = normalized_data[norm_key]
+            # JobDiva returns many slot-style fields (PHONE1..PHONE4, EMAIL1/EMAIL2,
+            # ADDRESS1/ADDRESS2) where the earlier slots are blank for a given
+            # candidate but a later slot has the real value. Treat blank scalars
+            # as "field absent" so the loop falls through to the next candidate
+            # key instead of returning "" and shadowing the real value.
+            if val is None or (isinstance(val, str) and not val.strip()):
+                continue
             # Handle JobDiva returning lists for fields like email or phone when a candidate has multiple
             if isinstance(val, list) and val:
                 # JobDiva lists might be strings or dicts
@@ -1266,7 +1283,7 @@ class JobDivaService:
                             ),
                             "profile_url": get_field(c, ["profileUrl", "PROFILEURL", "profile_url", "PROFILE_URL"]),
                             "lastnote": get_field(c, ["lastNote", "LASTNOTE"]),
-                            "phone": get_field(c, ["phone", "phoneNumber", "PHONE"]) or "",
+                            "phone": _get_candidate_phone(c),
                             "resume_missing": True,
                         })
                         continue
@@ -1342,7 +1359,7 @@ class JobDivaService:
                         "abstract": raw_abstract,
                         "profile_url": profile_url,
                         "lastnote": get_field(c, ["lastNote", "LASTNOTE"]),
-                        "phone": get_field(c, ["phone", "phoneNumber", "PHONE"]) or "",
+                        "phone": _get_candidate_phone(c),
                     })
 
                 # Two-step enrichment: TalentSearch returns thin records;
@@ -2638,7 +2655,7 @@ class JobDivaService:
             "firstName": first_name,
             "lastName": last_name,
             "email": get_field(candidate_detail, ["EMAIL", "email"]) or get_field(applicant, ["EMAIL", "email"]),
-            "phone": get_field(candidate_detail, ["PHONE", "phone"]) or get_field(applicant, ["PHONE", "phone"]),
+            "phone": _get_candidate_phone(candidate_detail) or _get_candidate_phone(applicant),
             "headline": (get_field(candidate_detail, ["TITLE", "title", "currentTitle"]) or 
                         get_field(applicant, ["TITLE", "title"]) or ""),
             "location": self._extract_location(candidate_detail) or self._extract_location(applicant),
@@ -3608,7 +3625,7 @@ class JobDivaService:
                 "firstName": first_name,
                 "lastName": last_name,
                 "email": get_field(candidate_data, ["email", "EMAIL"]) or "",
-                "phone": get_field(candidate_data, ["phone", "PHONE", "phoneNumber"]) or "",
+                "phone": _get_candidate_phone(candidate_data),
                 "title": get_field(candidate_data, ["title", "currentTitle", "TITLE"]) or "",
                 "location": location,
                 "city": city,
