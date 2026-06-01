@@ -8,14 +8,11 @@ logging are all auto-instrumented).
 Wire-up: call ``init_sentry()`` once at process start, before ``FastAPI``
 is constructed. Safe to call multiple times — re-init is a no-op.
 
-Configuration (all optional, sensible defaults shipped):
-  * ``SENTRY_DSN``           — DSN; if unset, the project default is used.
-                               Set to empty string to disable Sentry.
-  * ``SENTRY_ENVIRONMENT``   — defaults to ``ENVIRONMENT`` or ``production``.
-  * ``SENTRY_RELEASE``       — git SHA / build tag, optional.
-  * ``SENTRY_TRACES_SAMPLE_RATE``   — float 0..1, default 0.1.
-  * ``SENTRY_PROFILES_SAMPLE_RATE`` — float 0..1, default 0.0.
-  * ``SENTRY_SEND_PII``      — "true" to forward request bodies/users.
+Configuration (read from environment):
+  * ``SENTRY_DSN``         — DSN; required to enable Sentry. Unset/empty
+                             disables the SDK (no-op).
+  * ``SENTRY_ENVIRONMENT`` — environment tag (e.g. ``qa``, ``production``).
+  * ``SENTRY_ORG``         — org slug; attached as a tag for filtering.
 """
 from __future__ import annotations
 
@@ -24,22 +21,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_DSN = (
-    "https://fb60d6234d86e140d169ea64a114faba@"
-    "o4511422243143680.ingest.us.sentry.io/4511492704632832"
-)
-
 _initialized = False
-
-
-def _float_env(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None or raw == "":
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
 
 
 def init_sentry() -> bool:
@@ -48,9 +30,9 @@ def init_sentry() -> bool:
     if _initialized:
         return True
 
-    dsn = os.getenv("SENTRY_DSN", _DEFAULT_DSN)
+    dsn = (os.getenv("SENTRY_DSN") or "").strip()
     if not dsn:
-        logger.info("sentry_disabled (empty SENTRY_DSN)")
+        logger.info("sentry_disabled (SENTRY_DSN not set)")
         return False
 
     try:
@@ -82,27 +64,21 @@ def init_sentry() -> bool:
     _try_add("sentry_sdk.integrations.httpx", "HttpxIntegration")
     _try_add("sentry_sdk.integrations.sqlalchemy", "SqlalchemyIntegration")
 
-    environment = (
-        os.getenv("SENTRY_ENVIRONMENT")
-        or os.getenv("ENVIRONMENT")
-        or os.getenv("ENV")
-        or "production"
-    )
-    release = os.getenv("SENTRY_RELEASE") or os.getenv("GIT_SHA")
-    send_pii = os.getenv("SENTRY_SEND_PII", "false").lower() in {"1", "true", "yes", "on"}
+    environment = os.getenv("SENTRY_ENVIRONMENT")
+    org = os.getenv("SENTRY_ORG")
 
     try:
         sentry_sdk.init(
             dsn=dsn,
             environment=environment,
-            release=release,
             integrations=integrations,
-            traces_sample_rate=_float_env("SENTRY_TRACES_SAMPLE_RATE", 0.1),
-            profiles_sample_rate=_float_env("SENTRY_PROFILES_SAMPLE_RATE", 0.0),
-            send_default_pii=send_pii,
+            traces_sample_rate=0.1,
+            send_default_pii=False,
             attach_stacktrace=True,
             max_breadcrumbs=100,
         )
+        if org:
+            sentry_sdk.set_tag("sentry.org", org)
     except Exception as e:  # noqa: BLE001
         logger.error("sentry_init_failed: %s", e, exc_info=True)
         return False
@@ -110,7 +86,7 @@ def init_sentry() -> bool:
     _initialized = True
     logger.info(
         "sentry_initialized",
-        extra={"environment": environment, "release": release or "unset"},
+        extra={"environment": environment, "org": org or "unset"},
     )
     return True
 
