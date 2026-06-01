@@ -822,7 +822,11 @@ export default function CandidateRankingsPage() {
   const [enrichStatusByCandidateId, setEnrichStatusByCandidateId] = useState<Record<string, EnrichStatus>>({});
 
   const hasUsablePhone = (p?: string | null) => {
-    const digits = String(p || "").replace(/\D/g, "");
+    const raw = String(p || "").trim();
+    if (raw.startsWith("+1555") || raw.startsWith("+12065551212") || raw.startsWith("+10000000000")) {
+      return false; // Treat known LLM fake numbers as missing
+    }
+    const digits = raw.replace(/\D/g, "");
     return digits.length >= 7;
   };
 

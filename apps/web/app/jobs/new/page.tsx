@@ -106,6 +106,10 @@ function launchPhoneDigits(value: string | null | undefined): string {
 }
 
 function isValidLaunchPhone(value: string | null | undefined): boolean {
+  const raw = String(value || "").trim();
+  if (raw.startsWith("+1555") || raw.startsWith("+12065551212") || raw.startsWith("+10000000000")) {
+    return false; // Treat known LLM fake numbers as invalid/missing
+  }
   return launchPhoneDigits(value).length >= 7;
 }
 

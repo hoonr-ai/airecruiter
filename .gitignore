@@ -28,4 +28,7 @@ scripts/*.log
 # Local probe / POC artifacts kept off-repo.
 apps/api/tmp/
 apps/api/scripts/smoke_launch_pair.py
+.agents/
+livekit-airecruiter/
+test_bulk.py
 

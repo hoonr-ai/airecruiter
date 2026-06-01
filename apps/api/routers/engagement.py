@@ -883,6 +883,28 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 if item_email:
                     interview_by_email[item_email] = item
 
+            # Build a lookup of candidates that PAIR explicitly rejected
+            # (e.g. InvalidPhone — fake/placeholder numbers). Keyed by both
+            # source_candidate_id and email so we can match whichever is present.
+            failed_by_source_id: Dict[str, Dict[str, Any]] = {}
+            failed_by_email: Dict[str, Dict[str, Any]] = {}
+            failed_by_index: Dict[int, Dict[str, Any]] = {}
+            for fi in response_data.get("failed_interviews", []):
+                if not isinstance(fi, dict):
+                    continue
+                
+                fi_index = fi.get("resume_index")
+                if isinstance(fi_index, int):
+                    failed_by_index[fi_index] = fi
+
+                fi_source_id = str(fi.get("source_candidate_id") or "").strip()
+                if fi_source_id:
+                    failed_by_source_id[fi_source_id] = fi
+                    
+                fi_email = str(fi.get("candidate_email") or fi.get("email") or "").lower().strip()
+                if fi_email:
+                    failed_by_email[fi_email] = fi
+
             # Position N in real_candidate_ids corresponds to position N in
             # payload_obj.resumes (both built from the same selection in
             # generate-payload), so we can recover the submitted identifiers
@@ -945,6 +967,50 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 candidate_name = interview_info.get("candidate_name", "")
                 candidate_email = interview_info.get("candidate_email", submitted_email)
 
+                # Check if PAIR explicitly rejected this candidate (e.g. InvalidPhone)
+                failed_info = (
+                    failed_by_source_id.get(submitted_source_id)
+                    or failed_by_email.get(submitted_email)
+                    or failed_by_index.get(idx)
+                )
+
+                # Extract job_id from payload (prefer reference jobdiva_id for UI consistency)
+                job_id_resolved = payload_obj.get("jd", {}).get("jobdiva_id") or payload_obj.get("jd", {}).get("job_id", "")
+
+                if failed_info:
+                    rejection_reason = failed_info.get("error", "Rejected by PAIR")
+                    error_type = failed_info.get("error_type", "Unknown")
+                    logger.warning(
+                        "engagement_candidate_rejected candidate_id=%s error_type=%s reason=%s",
+                        candidate_id,
+                        error_type,
+                        rejection_reason,
+                    )
+                    cur.execute("""
+                        INSERT INTO engage_interview_audit
+                            (candidate_id, jobdiva_id, interview_id, candidate_name, candidate_email, payload, response, status)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        candidate_id,
+                        job_id_resolved,
+                        "",
+                        candidate_name or failed_info.get("candidate_name", ""),
+                        candidate_email,
+                        json.dumps(payload_obj),
+                        json.dumps(failed_info),
+                        "Failed"
+                    ))
+                    _write_candidate_engage_status(
+                        candidate_id=candidate_id,
+                        status_value="failed",
+                        job_id_value=job_id_resolved,
+                        interview_id_value="",
+                        response_fragment=failed_info,
+                    )
+                    # Do NOT append to interview_results — expose in a separate list
+                    # so the caller knows which candidates were rejected and why.
+                    continue
+
                 if not interview_id:
                     logger.warning(
                         "engagement_no_interview_match candidate_id=%s submitted_email=%s response_data_count=%d request_count=%d",
@@ -953,9 +1019,6 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                         len(data_list),
                         len(request.real_candidate_ids),
                     )
-
-                # Extract job_id from payload (prefer reference jobdiva_id for UI consistency)
-                job_id_resolved = payload_obj.get("jd", {}).get("jobdiva_id") or payload_obj.get("jd", {}).get("job_id", "")
 
                 cur.execute("""
                     INSERT INTO engage_interview_audit
@@ -989,6 +1052,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                     "session_token": interview_info.get("session_token", ""),
                     "created_at": interview_info.get("created_at", "")
                 })
+
         else:
             # Still log the failed attempt
             for candidate_id in request.real_candidate_ids:
