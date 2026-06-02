@@ -827,7 +827,11 @@ async def message_candidate(request: CandidateMessageRequest):
         raise HTTPException(status_code=400, detail=f"Messaging not supported for source: {request.source}")
 
 @router.get("/jobs/{job_id_or_ref}/candidates")
-async def get_job_candidates(job_id_or_ref: str):
+async def get_job_candidates(
+    job_id_or_ref: str,
+    limit: Optional[int] = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
     """
     Fetches all sourced candidates tied to a specific job.
     Supports both numeric job_id and reference jobdiva_id.
@@ -862,7 +866,34 @@ async def get_job_candidates(job_id_or_ref: str):
         conn = get_db_connection()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total_candidates,
+                        COUNT(*) FILTER (
+                            WHERE COALESCE(NULLIF(data->>'engage_status', ''), '') <> ''
+                        ) AS launched_count
+                    FROM sourced_candidates
+                    WHERE jobdiva_id = %s
+                    """,
+                    (resolved_jobdiva_id,),
+                )
+                counts_row = cur.fetchone() or {}
+                total_candidates = int(counts_row.get("total_candidates") or 0)
+                launched_count = int(counts_row.get("launched_count") or 0)
+
+                pagination_clause = ""
+                params: List[Any] = [
+                    str(resolved_jobdiva_id),
+                    str(resolved_numeric_job_id),
+                    resolved_jobdiva_id,
+                ]
+                if limit is not None:
+                    pagination_clause = " LIMIT %s OFFSET %s"
+                    params.extend([int(limit), int(offset)])
+
+                cur.execute(
+                    f"""
                     WITH latest_audit AS (
                         SELECT DISTINCT ON (candidate_id)
                             candidate_id,
@@ -900,8 +931,11 @@ async def get_job_candidates(job_id_or_ref: str):
                         ON la.candidate_id = sc.candidate_id
 
                     WHERE sc.jobdiva_id = %s
-                    ORDER BY sc.created_at DESC;
-                """, (str(resolved_jobdiva_id), str(resolved_numeric_job_id), resolved_jobdiva_id,))
+                    ORDER BY sc.created_at DESC, sc.id DESC
+                    {pagination_clause};
+                """,
+                    tuple(params),
+                )
 
                 candidates = cur.fetchall()
         finally:
@@ -1019,7 +1053,25 @@ async def get_job_candidates(job_id_or_ref: str):
             cand.pop("audit_payload", None)
             cand.pop("audit_response", None)
 
-        return {"status": "success", "candidates": candidates}
+        effective_limit = limit if limit is not None else total_candidates
+        effective_offset = int(offset if limit is not None else 0)
+        has_more = (
+            limit is not None
+            and (effective_offset + len(candidates)) < total_candidates
+        )
+
+        return {
+            "status": "success",
+            "candidates": candidates,
+            "launched_count": launched_count,
+            "pagination": {
+                "limit": effective_limit,
+                "offset": effective_offset,
+                "returned": len(candidates),
+                "total": total_candidates,
+                "has_more": has_more,
+            },
+        }
     except Exception as e:
         logger.error(f"Error fetching job candidates: {e}")
         raise HTTPException(status_code=500, detail=str(e))
