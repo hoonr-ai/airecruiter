@@ -24,6 +24,3 @@ if (dsn) {
     ],
   });
 }
-
-// Required for Next.js App Router navigation instrumentation.
-export const onRouterTransitionStart = Sentry.captureRouterTransitionStart;
