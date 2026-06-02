@@ -18,10 +18,12 @@ export default withSentryConfig(nextConfig, {
   authToken: process.env.SENTRY_AUTH_TOKEN,
   // Hide source maps from public bundles after upload.
   widenClientFileUpload: true,
-  hideSourceMaps: true,
+  sourcemaps: {
+    // Generate source maps, upload them to Sentry, then delete them
+    // from the build output so they're never served publicly.
+    deleteSourcemapsAfterUpload: true,
+  },
   disableLogger: true,
   // Tunnel browser events through a same-origin route to bypass ad-blockers.
   tunnelRoute: "/sentry-tunnel",
-  // Don't fail the build if the Sentry release step errors out.
-  errorHandler: () => {},
 });
