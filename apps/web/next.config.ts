@@ -21,7 +21,7 @@ export default withSentryConfig(nextConfig, {
   hideSourceMaps: true,
   disableLogger: true,
   // Tunnel browser events through a same-origin route to bypass ad-blockers.
-  tunnelRoute: "/monitoring",
+  tunnelRoute: "/sentry-tunnel",
   // Don't fail the build if the Sentry release step errors out.
   errorHandler: () => {},
 });

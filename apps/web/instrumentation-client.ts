@@ -7,9 +7,6 @@ if (dsn) {
     dsn,
     // 10% transaction sampling — errors are always sent at 100%.
     tracesSampleRate: 0.1,
-    // Replay session sampling (off by default; flip to 0.1 to enable).
-    replaysSessionSampleRate: 0,
-    replaysOnErrorSampleRate: 1.0,
     // Don't auto-attach PII (cookies, IPs). Flip to true if you need it.
     sendDefaultPii: false,
     // Spam guards
@@ -24,6 +21,3 @@ if (dsn) {
     ],
   });
 }
-
-// Required for Next.js App Router navigation instrumentation.
-export const onRouterTransitionStart = Sentry.captureRouterTransitionStart;
