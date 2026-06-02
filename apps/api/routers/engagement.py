@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import httpx
+import re
 from datetime import datetime, timezone, timedelta
 from routers._helpers import get_db_connection
 
@@ -40,6 +41,25 @@ from core import (
 )
 
 logger = logging.getLogger(__name__)
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PLACEHOLDER_EMAILS = {
+    "your-email@example.com",
+    "email@example.com",
+    "example@example.com",
+    "test@example.com",
+    "candidate@example.com",
+    "noreply@example.com",
+}
+_PLACEHOLDER_DOMAINS = {
+    "example.com",
+    "example.org",
+    "example.net",
+    "test.com",
+    "invalid",
+    "localhost",
+    "local",
+}
 
 router = APIRouter(tags=["Engagement"])
 
@@ -85,6 +105,51 @@ def _format_normalized_score_100(score: Any, total: Any) -> Optional[str]:
     if normalized_score.is_integer():
         return f"{int(normalized_score)}/100"
     return f"{round(normalized_score, 1):.1f}/100"
+
+
+def _is_placeholder_email(email: str) -> bool:
+    normalized = (email or "").strip().lower()
+    if not normalized:
+        return True
+    if normalized in _PLACEHOLDER_EMAILS:
+        return True
+    if normalized.endswith("@noemail.pair.ai"):
+        return True
+    if "@" not in normalized:
+        return True
+    local_part, domain = normalized.rsplit("@", 1)
+    if domain in _PLACEHOLDER_DOMAINS:
+        return True
+    if local_part in {"your-email", "your_email", "email", "test", "example", "candidate"}:
+        return True
+    return False
+
+
+def _validate_pair_candidate_email(raw: str) -> str:
+    cleaned = (raw or "").strip().lower()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Candidate email is required before launching PAIR")
+    if not _EMAIL_RE.match(cleaned):
+        raise HTTPException(status_code=400, detail=f"Invalid candidate email address: {cleaned}")
+    if _is_placeholder_email(cleaned):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Placeholder candidate email is not allowed: {cleaned}",
+        )
+    return cleaned
+
+
+def _validate_pair_payload_emails(payload_obj: Dict[str, Any]) -> None:
+    resumes = payload_obj.get("resumes")
+    if not isinstance(resumes, list):
+        raise HTTPException(status_code=400, detail="Payload is missing resumes")
+
+    for idx, resume in enumerate(resumes, start=1):
+        if not isinstance(resume, dict):
+            raise HTTPException(status_code=400, detail=f"Resume {idx} payload is invalid")
+
+        email = _validate_pair_candidate_email(str(resume.get("email") or ""))
+        resume["email"] = email
 
 # ---------------------------------------------------------------------------
 # Auto-Migration: Ensure audit table exists
@@ -339,12 +404,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         final_resumes = []
         for r in resumes:
             candidate_name = r.get("name") or "Unknown"
-            candidate_email = r.get("email") or ""
-            # LiveKit DB has chk_interviews_email_format — empty string fails the constraint.
-            # If email is missing, generate a safe placeholder so the interview can still be created.
-            if not candidate_email:
-                safe_name = candidate_name.lower().replace(" ", ".").replace(",", "")
-                candidate_email = f"{safe_name}@noemail.pair.ai"
+            candidate_email = str(r.get("email") or "").strip().lower()
             final_resumes.append({
                 "source_candidate_id": r.get("source_candidate_id"),
                 "name": candidate_name,
@@ -667,6 +727,8 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             print(f"DEBUG: send_bulk_interview called for job {job_id_from_payload}")
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid JSON format in payload")
+
+        _validate_pair_payload_emails(payload_obj)
 
         # Defense-in-depth: refuse to engage candidates for jobs whose outreach
         # has been stopped. /candidates/save already blocks earlier, but this

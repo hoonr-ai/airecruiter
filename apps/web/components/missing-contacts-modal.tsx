@@ -56,10 +56,20 @@ function countDigits(s: string) {
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const CONTACT_SAVE_BATCH_SIZE = 4;
+const PLACEHOLDER_EMAILS = new Set([
+  "your-email@example.com",
+  "email@example.com",
+  "example@example.com",
+  "test@example.com",
+  "candidate@example.com",
+  "noreply@example.com",
+]);
 
 function isValidEmail(s: string) {
   const v = (s || "").trim().toLowerCase();
   if (!v || !EMAIL_RE.test(v)) return false;
+  if (PLACEHOLDER_EMAILS.has(v)) return false;
+  if (v.endsWith("@example.com")) return false;
   if (v.endsWith("@noemail.pair.ai")) return false;
   return true;
 }
