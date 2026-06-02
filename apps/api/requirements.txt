@@ -18,4 +18,3 @@ python-multipart
 openpyxl
 rapidfuzz
 redis>=5.0.0
-sentry-sdk[fastapi,httpx,sqlalchemy]>=2.0.0
