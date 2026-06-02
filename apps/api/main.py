@@ -40,14 +40,7 @@ def readable_ist_now() -> str:
 # Datadog / OpenTelemetry can layer on later with zero code change.
 from core.logging import configure_logging, RequestIDMiddleware
 from core.amplitude import track_event_async
-from core.sentry import (
-    init_sentry,
-    install_asyncio_handler,
-    install_scheduler_listener,
-    install_fastapi_handlers,
-)
 configure_logging()
-init_sentry()
 logger = logging.getLogger(__name__)
 
 from services.ai_service import ai_service
@@ -100,14 +93,6 @@ async def lifespan(app: FastAPI):
     logger.info("🚀 Starting dynamic job status monitoring scheduler...")
     
     scheduler.start()
-    # Route scheduled-job exceptions to Sentry with job_id tagging. APScheduler
-    # otherwise only logs to its own logger; this guarantees background-job
-    # failures (auto-sync, cache warmer, poll loop) always surface.
-    install_scheduler_listener(scheduler)
-    # Capture orphaned `asyncio.create_task(...)` failures — the codebase
-    # uses fire-and-forget tasks heavily (provisioning, emails, sync) and
-    # without this their exceptions die silently in the event loop.
-    install_asyncio_handler()
     
     # 1. Schedule job status polling (existing)
     schedule_next_poll()
@@ -337,9 +322,6 @@ app = FastAPI(title="Hoonr.ai API", lifespan=lifespan, redirect_slashes=False)
 # Request-correlation middleware. Must wrap every route so downstream
 # handlers and services see the same request_id via contextvars.
 app.add_middleware(RequestIDMiddleware)
-# Capture unhandled 5xx with request method/path tags. HTTPException is
-# excluded — those are deliberate API responses, not bugs.
-install_fastapi_handlers(app)
 
 def _mount(module, label: str, **kwargs) -> None:
     """Mount a router defensively. Same rationale as _safe_import."""

@@ -158,16 +158,6 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
         rid = request.headers.get("X-Request-ID") or uuid.uuid4().hex
         token = request_id_ctx.set(rid)
         try:
-            try:
-                from core.sentry import set_request_context
-
-                set_request_context(
-                    rid,
-                    path=request.url.path,
-                    method=request.method,
-                )
-            except Exception:
-                pass
             response = await call_next(request)
             response.headers["X-Request-ID"] = rid
             return response
