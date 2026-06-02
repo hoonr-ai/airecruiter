@@ -3,6 +3,7 @@ import logging
 import re
 import time
 import json
+import httpx as _httpx_module
 import httpx
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
@@ -16,6 +17,133 @@ from core import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# --- JobDiva HTTP request/response logging to Sentry ---------------------
+# Every httpx.AsyncClient(...) constructed in this module is transparently
+# wrapped (via the _JDHttpxProxy shim below) so each JobDiva request emits
+# a Sentry breadcrumb + capture_message with the full response body and
+# elapsed time. We do not modify the global httpx module — only the local
+# `httpx` name in this file's namespace.
+
+_JD_RESPONSE_BODY_LIMIT = 16000  # cap body bytes sent to Sentry per call
+
+
+def _jd_redact_url(url: "_httpx_module.URL") -> str:
+    s = str(url)
+    if "password=" in s:
+        s = re.sub(r"(password=)[^&]*", r"\1***", s)
+    return s
+
+
+async def _jd_on_request(request: "_httpx_module.Request") -> None:
+    request.extensions["_jd_t0"] = time.monotonic()
+
+
+async def _jd_on_response(response: "_httpx_module.Response") -> None:
+    try:
+        t0 = response.request.extensions.get("_jd_t0")
+        elapsed_ms = int((time.monotonic() - t0) * 1000) if t0 is not None else None
+
+        # Buffer the body so the caller's .text/.json() still works after us.
+        body_text = ""
+        try:
+            await response.aread()
+            body_text = response.text or ""
+        except Exception:
+            body_text = ""
+        body_size = len(body_text)
+        body_truncated = body_text[:_JD_RESPONSE_BODY_LIMIT]
+        was_truncated = body_size > len(body_truncated)
+
+        try:
+            from core.sentry import is_enabled
+        except Exception:
+            return
+        if not is_enabled():
+            return
+
+        try:
+            import sentry_sdk
+        except Exception:
+            return
+
+        method = response.request.method
+        url_path = response.request.url.path
+        url_full = _jd_redact_url(response.request.url)
+        status = response.status_code
+
+        try:
+            sentry_sdk.add_breadcrumb(
+                category="jobdiva.http",
+                level="info",
+                message=f"{method} {url_path} -> {status} ({elapsed_ms}ms)",
+                data={
+                    "url": url_full,
+                    "status_code": status,
+                    "elapsed_ms": elapsed_ms,
+                    "response_size_bytes": body_size,
+                },
+            )
+        except Exception:
+            pass
+
+        try:
+            with sentry_sdk.new_scope() as scope:
+                scope.set_tag("jobdiva_api", "1")
+                scope.set_tag("jobdiva_endpoint", url_path)
+                scope.set_tag("http_method", method)
+                scope.set_tag("status_code", str(status))
+                if elapsed_ms is not None:
+                    scope.set_tag("elapsed_ms", str(elapsed_ms))
+                scope.set_context(
+                    "jobdiva_response",
+                    {
+                        "url": url_full,
+                        "method": method,
+                        "status_code": status,
+                        "elapsed_ms": elapsed_ms,
+                        "response_size_bytes": body_size,
+                        "truncated": was_truncated,
+                        "response_body": body_truncated,
+                    },
+                )
+                level = "info" if 200 <= status < 400 else ("warning" if status < 500 else "error")
+                sentry_sdk.capture_message(
+                    f"JobDiva {method} {url_path} -> {status} ({elapsed_ms}ms)",
+                    level=level,
+                )
+        except Exception:
+            pass
+    except Exception:
+        # Logging must never break the actual API path.
+        return
+
+
+class _JDAsyncClient(_httpx_module.AsyncClient):
+    def __init__(self, *args, **kwargs):
+        hooks = kwargs.pop("event_hooks", None) or {}
+        request_hooks = list(hooks.get("request", [])) + [_jd_on_request]
+        response_hooks = list(hooks.get("response", [])) + [_jd_on_response]
+        kwargs["event_hooks"] = {"request": request_hooks, "response": response_hooks}
+        super().__init__(*args, **kwargs)
+
+
+class _JDHttpxProxy:
+    """Module-local stand-in for the `httpx` module.
+
+    AsyncClient is overridden to inject Sentry logging hooks; every other
+    attribute (TimeoutException, ConnectError, Request, ...) falls through
+    to the real httpx module untouched.
+    """
+    AsyncClient = _JDAsyncClient
+
+    def __getattr__(self, name):
+        return getattr(_httpx_module, name)
+
+
+httpx = _JDHttpxProxy()
+
 
 _CANDIDATE_EMAIL_KEYS = [
     "email",
