@@ -1607,12 +1607,22 @@ class BulkContactUpdateRequest(BaseModel):
 
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PLACEHOLDER_EMAILS = {
+    "your-email@example.com",
+    "email@example.com",
+    "example@example.com",
+    "test@example.com",
+    "candidate@example.com",
+    "noreply@example.com",
+}
 
 
 def _validate_email(raw: str) -> str:
     cleaned = (raw or "").strip().lower()
     if not cleaned or not _EMAIL_RE.match(cleaned):
         raise HTTPException(status_code=400, detail="Enter a valid email address")
+    if cleaned in _PLACEHOLDER_EMAILS or cleaned.endswith("@example.com"):
+        raise HTTPException(status_code=400, detail="Placeholder emails are not allowed")
     if cleaned.endswith("@noemail.pair.ai"):
         raise HTTPException(status_code=400, detail="Placeholder emails are not allowed")
     return cleaned

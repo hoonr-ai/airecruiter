@@ -93,10 +93,20 @@ import { logger } from "@/lib/logger";
 const IS_QA_CURATE =
   typeof window !== "undefined" && window.location.hostname === "qacurate.hoonr.ai";
 const LAUNCH_EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const PLACEHOLDER_LAUNCH_EMAILS = new Set([
+  "your-email@example.com",
+  "email@example.com",
+  "example@example.com",
+  "test@example.com",
+  "candidate@example.com",
+  "noreply@example.com",
+]);
 
 function isValidLaunchEmail(value: string | null | undefined): boolean {
   const email = String(value || "").trim().toLowerCase();
   if (!email || !LAUNCH_EMAIL_RE.test(email)) return false;
+  if (PLACEHOLDER_LAUNCH_EMAILS.has(email)) return false;
+  if (email.endsWith("@example.com")) return false;
   if (email.endsWith("@noemail.pair.ai")) return false;
   return true;
 }
