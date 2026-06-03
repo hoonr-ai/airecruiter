@@ -5162,6 +5162,11 @@ function NewJobPageContent() {
         typeof minExperienceYears === "number" && minExperienceYears > 0
           ? minExperienceYears
           : undefined,
+      // Hiring client / account name. Powers the "Same client / industry"
+      // scoring dimension and the currently-employed-by-client veto. The
+      // backend falls back to monitored_jobs.customer_name when this is
+      // omitted, and filters placeholder values ("External"/"Unknown").
+      client_name: (jobData?.customer_name || jobData?.customer || "").trim() || undefined,
       page: 1,
       page_size: 100
     };

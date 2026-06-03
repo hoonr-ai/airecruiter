@@ -19,6 +19,7 @@ from core.config import (
     SCORING_YEARS_UNKNOWN_MULT,
     SCORING_YEARS_FLOOR,
     SCORING_RECENT_PENALTY,
+    SCORING_RECENCY_DECAY,
     SCORING_EXCLUSION_CAP,
     SCORING_EXCLUSION_PER_HIT,
     SCORING_EXCLUSION_HARD_VETO_THRESHOLD,
@@ -138,6 +139,12 @@ class SearchCriteria(BaseModel):
     require_resume: bool = True
     include_relocation_candidates: bool = True
     min_experience_years: Optional[int] = None
+    # Hiring client / account name. Drives two rubric signals: the
+    # "currently employed by client" hard gate (via current-employer
+    # exclusion) and the positive "Same client / industry experience"
+    # dimension. Optional — when blank both signals degrade gracefully
+    # (the same-client dimension drops out and redistributes).
+    client_name: str = ""
 
     def sourcing_skill_values(self) -> List[str]:
         """Flat skill-like strings for sources that only accept a plain list
@@ -2554,10 +2561,11 @@ class UnifiedCandidateSearch:
                 if normalized == norm_item or normalized in norm_item or norm_item in normalized:
                     return True
 
-        # Critical: location matching must not fall back to generic resume text,
-        # otherwise stale historical locations can satisfy current-location checks.
-        is_location_only = len(collections) == 1 and collections[0] == "locations"
-        if is_location_only:
+        # Critical: some collections must NOT fall back to generic resume text.
+        #  - locations: stale historical locations can't satisfy a current-location check.
+        #  - current_companies: the "currently employed by client" veto must match
+        #    the present employer only; the resume text lists past employers too.
+        if len(collections) == 1 and collections[0] in ("locations", "current_companies"):
             return False
 
         return normalized in profile.get("text", "")
@@ -2593,7 +2601,9 @@ class UnifiedCandidateSearch:
 
         # Check against full text (broad keyword match, lower weight)
         profile_text = profile.get("text", "")
-        is_location_only = len(collections) == 1 and collections[0] == "locations"
+        # Structured-only collections (location, current employer) never use the
+        # resume-text fallback — see _contains_term for the rationale.
+        is_location_only = len(collections) == 1 and collections[0] in ("locations", "current_companies")
         if is_location_only:
             text_score = 0.0
         else:
@@ -2768,8 +2778,11 @@ class UnifiedCandidateSearch:
             terms = self._group_terms(group)
             recent_text = profile.get("recent_text", "")
             if terms and not any(term in recent_text for term in terms):
-                # T2: not-recent penalty (was 0.85, softened via env).
-                score *= SCORING_RECENT_PENALTY
+                # Recency decay: the term matches the candidate, but not within
+                # their most-recent roles (recent_text). The "Recent (3y) Title
+                # Relevance" dimension cares specifically about recent usage, so
+                # this is a firmer cut than the legacy flat penalty.
+                score *= SCORING_RECENCY_DECAY
 
         return score
 
@@ -2923,9 +2936,186 @@ class UnifiedCandidateSearch:
             "total_required": total_required,
         }
 
+    # ---- Synthetic scoring dimensions (2026-06 rubric rework) ----
+    # Each returns a float in [0, 1], or None when the candidate has no data
+    # for that dimension. A None result makes _score_candidate DROP the
+    # dimension from the weighted denominator, so its weight is redistributed
+    # proportionally across the dimensions that do have data.
+
+    @staticmethod
+    def _year_from_date(value: Any) -> Optional[int]:
+        """Best-effort 4-digit year out of a free-text date like 'Jan 2020'."""
+        if value is None:
+            return None
+        text = str(value).strip().lower()
+        if text in ("", "present", "current", "now", "ongoing"):
+            return None
+        m = re.search(r"(19|20)\d{2}", text)
+        return int(m.group(0)) if m else None
+
+    def _role_duration_years(self, item: Dict[str, Any]) -> Optional[float]:
+        """Tenure of a single company-experience entry, in years. Returns None
+        when neither bound is parseable. Open-ended ('Present') roles use the
+        current year as the end bound."""
+        if not isinstance(item, dict):
+            return None
+        start = self._year_from_date(item.get("start_date") or item.get("start") or item.get("from"))
+        if start is None:
+            return None
+        end = self._year_from_date(item.get("end_date") or item.get("end") or item.get("to"))
+        if end is None:
+            try:
+                from datetime import datetime, timezone
+                end = datetime.now(timezone.utc).year
+            except Exception:
+                return None
+        return max(0.0, float(end - start))
+
+    def _score_yoe(self, profile: Dict[str, Any], criteria: SearchCriteria) -> Optional[float]:
+        """Total relevant years of experience vs the recruiter's minimum.
+        None when no target is set or years are unknown (→ redistribute)."""
+        target = int(getattr(criteria, "min_experience_years", 0) or 0)
+        if target <= 0:
+            return None
+        years = float(profile.get("years_of_experience") or 0)
+        if years <= 0:
+            return None
+        return max(0.0, min(1.0, years / float(target)))
+
+    def _score_same_client(self, profile: Dict[str, Any], criteria: SearchCriteria) -> Optional[float]:
+        """Prior experience at the hiring client (or recruiter-named target
+        companies). None when we have no client/company reference."""
+        refs: List[str] = []
+        cn = str(getattr(criteria, "client_name", "") or "").strip()
+        if cn:
+            refs.append(cn)
+        for c in (getattr(criteria, "companies", []) or []):
+            if str(c).strip():
+                refs.append(str(c).strip())
+        if not refs:
+            return None
+        # No parsed employment history → can't assess; redistribute rather than
+        # penalise a parsing gap (consistent with the rest of the scorer).
+        if not profile.get("companies"):
+            return None
+        best = 0.0
+        for ref in refs:
+            best = max(best, self._fuzzy_term_score(profile, ref, "companies"))
+        return best
+
+    def _score_career_stability(self, candidate: Dict[str, Any]) -> Optional[float]:
+        """Average tenure across dated roles. Job-hoppers score low; stable
+        tenures score high. None when fewer than 2 dated roles (→ redistribute)."""
+        enhanced = candidate.get("enhanced_info") or {}
+        sources = [
+            enhanced.get("company_experience") or [],
+            candidate.get("company_experience") or [],
+            candidate.get("experience") or [],
+        ]
+        durations: List[float] = []
+        for source in sources:
+            if not isinstance(source, list):
+                continue
+            for item in source:
+                d = self._role_duration_years(item)
+                if d is not None:
+                    durations.append(d)
+            if durations:
+                break
+        if len(durations) < 2:
+            return None
+        avg = sum(durations) / len(durations)
+        if avg >= 2.5:
+            return 1.0
+        if avg >= 1.5:
+            return 0.75
+        if avg >= 1.0:
+            return 0.5
+        return 0.3
+
+    def _score_profile(self, candidate: Dict[str, Any]) -> Optional[float]:
+        """Profile completeness / external signal. LinkedIn present → full
+        credit; any other URL → partial. None when no URL data at all."""
+        urls = candidate.get("urls") or (candidate.get("enhanced_info") or {}).get("urls") or {}
+        if not isinstance(urls, dict) or not urls:
+            return None
+        present = [k for k, v in urls.items() if str(v or "").strip()]
+        if not present:
+            return None
+        if str(urls.get("linkedin") or "").strip():
+            return 1.0
+        return 0.6
+
+    def _score_availability(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Optional[float]:
+        """Candidate availability / record freshness. None when no signal
+        is present (→ redistribute)."""
+        enhanced = candidate.get("enhanced_info") or {}
+        avail = candidate.get("availability") or enhanced.get("availability")
+        if isinstance(avail, str) and avail.strip():
+            a = avail.strip().lower()
+            if any(k in a for k in ("immediate", "now", "available", "ready", "2 week", "two week")):
+                return 1.0
+            if any(k in a for k in ("unavailable", "not available", "month", "4 week", "8 week")):
+                return 0.4
+            return 0.6
+        for key in ("last_active", "last_activity_date", "last_updated", "updated_at", "date_modified"):
+            days = self._days_since(candidate.get(key) or enhanced.get(key))
+            if days is not None:
+                if days <= 30:
+                    return 1.0
+                if days <= 90:
+                    return 0.7
+                if days <= 180:
+                    return 0.5
+                return 0.3
+        if candidate.get("open_to_work") or candidate.get("open_to_relocation"):
+            return 0.8
+        return None
+
+    @staticmethod
+    def _days_since(value: Any) -> Optional[float]:
+        if value is None or str(value).strip() == "":
+            return None
+        try:
+            from datetime import datetime, timezone
+            text = str(value).strip().replace("Z", "+00:00")
+            dt = datetime.fromisoformat(text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds() / 86400.0)
+        except Exception:
+            return None
+
+    def _location_hard_gate(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Optional[str]:
+        """Evidence-based location gate. Returns a veto reason string ONLY when
+        the candidate's location is KNOWN and confirmed outside the radius;
+        returns None (no veto) when location is unknown/unparseable — those
+        candidates are kept (soft) per the existing location policy."""
+        if not self._should_enforce_location(criteria):
+            return None
+        ok, reason, distance = self._location_match_verdict(candidate, criteria)
+        if distance is not None:
+            candidate["distance_miles"] = (
+                None if distance == _UNKNOWN_DISTANCE_SENTINEL else round(float(distance), 1)
+            )
+        # Confirmed-outside reasons. "outside_radius_soft_keep" only counts as
+        # confirmed when we have a real (non-sentinel) distance beyond the radius.
+        miles = min(100, int(getattr(criteria, "within_miles", 25) or 25))
+        if reason in ("state_mismatch", "relocation_excluded_by_filter"):
+            return f"location outside {criteria.location}"
+        if (
+            reason == "outside_radius_soft_keep"
+            and isinstance(distance, (int, float))
+            and distance != _UNKNOWN_DISTANCE_SENTINEL
+            and distance > miles
+        ):
+            return f"location {round(float(distance))}mi outside {criteria.location} ({miles}mi radius)"
+        return None
+
     def _score_candidate(self, candidate: Dict[str, Any], criteria: SearchCriteria) -> Dict[str, Any]:
         profile = self._candidate_profile(candidate)
         dimensions = self._collect_scoring_dimensions(criteria)  # Use scoring dimensions for evaluation
+        weights = scoring_weights_for_family(self._current_family)
 
         weighted_scores: List[float] = []
         weighted_max = 0.0
@@ -3105,23 +3295,56 @@ class UnifiedCandidateSearch:
             dim_label = dimension["label"]
             for item in required_matches + preferred_matches:
                 matched_required_skills.append(
-                    item if dim_label == "Skills" else f"{dim_label}: {item}"
+                    item if dim_label == "Skills Match" else f"{dim_label}: {item}"
                 )
+
+        # ---- Synthetic dimensions (availability, yoe, same_client,
+        # career_stability, profile). Each is appended ONLY when its scorer
+        # returns a value; a None result drops the dimension from weighted_max
+        # so its weight is redistributed across the dimensions that have data. ----
+        synthetic = [
+            ("Availability", weights.get("availability", 0.0), self._score_availability(candidate, criteria)),
+            ("Total Relevant YOE", weights.get("yoe", 0.0), self._score_yoe(profile, criteria)),
+            ("Same Client / Industry", weights.get("same_client", 0.0), self._score_same_client(profile, criteria)),
+            ("Career Stability & Progression", weights.get("career_stability", 0.0), self._score_career_stability(candidate)),
+            ("Profile Completeness", weights.get("profile", 0.0), self._score_profile(candidate)),
+        ]
+        for label, w, raw in synthetic:
+            if raw is None or w <= 0:
+                continue
+            s = max(0.0, min(1.0, float(raw)))
+            dim_score = w * s
+            weighted_scores.append(dim_score)
+            weighted_max += w
+            score_details[label] = {
+                "weight": w,
+                "score": round(dim_score, 2),
+                "value": round(s, 3),
+            }
+            if s >= 0.5:
+                matched_required_skills.append(f"{label}: {round(s * 100)}%")
+
+        # ---- Location hard gate (evidence-based). Only vetoes when the
+        # candidate's location is known AND confirmed outside the radius. ----
+        location_veto = self._location_hard_gate(candidate, criteria)
 
         score = 0
         if weighted_max > 0:
             score = round(max(0.0, min(100.0, (sum(weighted_scores) / weighted_max) * 100)))
 
         score_details["hard_veto"] = {
-            "triggered": bool(hard_veto_hits),
-            "reasons": hard_veto_hits[:3],
+            "triggered": bool(hard_veto_hits) or bool(location_veto),
+            "reasons": (hard_veto_hits + ([location_veto] if location_veto else []))[:3],
         }
 
-        if hard_veto_hits:
+        if hard_veto_hits or location_veto:
             score = 0
+            reason = hard_veto_hits[0] if hard_veto_hits else location_veto
             explainability.insert(
                 0,
-                f"Hard exclusion: matches recruiter exclusion rule ({hard_veto_hits[0]})",
+                f"Hard exclusion: matches recruiter exclusion rule ({reason})"
+                if hard_veto_hits
+                else f"Hard exclusion: {reason}",
             )
         elif score >= 85:
             explainability.insert(0, "Excellent rubric and sourcing alignment")
@@ -3399,62 +3622,41 @@ class UnifiedCandidateSearch:
         """
         weights = scoring_weights_for_family(self._current_family)
         dimensions = {
-            "titles": {
-                "label": "Titles",
-                "weight": weights["titles"],
+            # Rubric-driven scored dimensions. "domain" and "education_certs"
+            # are merges of the legacy keywords / education+certifications
+            # dimensions. Location and standalone company-match dimensions are
+            # gone: location is now a hard gate (see _score_candidate) and
+            # company signal is split into the same_client synthetic dimension
+            # plus the company_exclusion veto below.
+            "title_recent": {
+                "label": "Recent Title Relevance",
+                "weight": weights["title_recent"],
                 "collections": ["titles"],
-                "required": [],
-                "preferred": [],
-                "excluded": [],
             },
             "skills": {
-                "label": "Skills",
+                "label": "Skills Match",
                 "weight": weights["skills"],
                 "collections": ["skills"],
-                "required": [],
-                "preferred": [],
-                "excluded": [],
             },
-            "location": {
-                "label": "Location",
-                "weight": weights["location"],
-                "collections": ["locations"],
-                "required": [],
-                "preferred": [],
-                "excluded": [],
+            "domain": {
+                "label": "Domain Experience",
+                "weight": weights["domain"],
+                "collections": ["skills", "titles", "companies", "education", "certifications", "locations"],
             },
-            "companies": {
-                "label": "Company Experience",
-                "weight": weights["companies"],
+            "education_certs": {
+                "label": "Education & Certifications",
+                "weight": weights["education_certs"],
+                "collections": ["education", "certifications"],
+            },
+            # Non-scored (weight 0). Carries the "currently employed by client" /
+            # "must not be employed by" exclusion into the soft-penalty + hard-veto
+            # path. Scoped to CURRENT employers only (excluded_collections) so a
+            # candidate who merely worked at the client in the past is not vetoed.
+            "company_exclusion": {
+                "label": "Currently Employed by Client",
+                "weight": 0.0,
                 "collections": ["companies"],
                 "excluded_collections": ["current_companies"],
-                "required": [],
-                "preferred": [],
-                "excluded": [],
-            },
-            "education": {
-                "label": "Education",
-                "weight": weights["education"],
-                "collections": ["education"],
-                "required": [],
-                "preferred": [],
-                "excluded": [],
-            },
-            "certifications": {
-                "label": "Certifications",
-                "weight": weights["certifications"],
-                "collections": ["certifications"],
-                "required": [],
-                "preferred": [],
-                "excluded": [],
-            },
-            "keywords": {
-                "label": "Keywords",
-                "weight": weights["keywords"],
-                "collections": ["skills", "titles", "companies", "education", "certifications", "locations"],
-                "required": [],
-                "preferred": [],
-                "excluded": [],
             },
         }
 
@@ -3513,7 +3715,8 @@ class UnifiedCandidateSearch:
         for item in criteria.title_criteria:
             value = str(item.get("value", "")).strip()
             variants = [value] + [str(s).strip() for s in item.get("similar_terms", []) if str(s).strip()]
-            add_terms("titles", item.get("match_type", "must"), variants, label=value, years=int(item.get("years") or 0))
+            # recent=True → title relevance is recency-weighted (rubric: "Recent (3y)").
+            add_terms("title_recent", item.get("match_type", "must"), variants, label=value, years=int(item.get("years") or 0), recent=True)
 
         for item in criteria.skill_criteria:
             value = str(item.get("value", "")).strip()
@@ -3542,22 +3745,24 @@ class UnifiedCandidateSearch:
                 fw = 1.0
 
             if "customer" in category or raw_value.lower().startswith("must not"):
-                add_terms("companies", "exclude", [term], weight=fw)
+                add_terms("company_exclusion", "exclude", [term], weight=fw)
             elif "title" in category:
-                add_terms("titles", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
+                add_terms("title_recent", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw, recent=True)
             elif "skill" in category:
                 add_terms("skills", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
             elif "edu" in category:
-                add_terms("education", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
+                add_terms("education_certs", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
             elif "cert" in category or "license" in category:
-                add_terms("certifications", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
+                add_terms("education_certs", "can" if "preferred" in category or raw_value.lower().startswith("can ") else "must", [term], weight=fw)
             elif "domain" in category:
-                add_terms("companies", "can", [term], weight=fw)
-                add_terms("keywords", "can", [term], weight=fw)
+                add_terms("domain", "can", [term], weight=fw)
             elif "local" in term.lower() or "location" in category:
-                add_terms("location", "must", [term], weight=fw)
+                # Location is a hard gate now (see _score_candidate), not a
+                # scored dimension — the structured criteria.location /
+                # within_miles already carry the requirement.
+                pass
             else:
-                add_terms("keywords", "must", [term], weight=fw)
+                add_terms("domain", "must", [term], weight=fw)
 
         return list(dimensions.values())
 
