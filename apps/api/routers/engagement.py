@@ -78,6 +78,41 @@ ENGAGE_PASSED_STATUSES = os.getenv("ENGAGE_PASSED_STATUSES", "completed,passed")
 # slots (briefly, after Fix 1). 5 matches the scale jobdiva_ratelimit_probe.py
 # has been probing — tunable via env if JobDiva's rate budget changes.
 _PROVISION_CONCURRENCY = asyncio.Semaphore(int(os.getenv("PROVISION_CONCURRENCY", "5")))
+_SENTRY_RESPONSE_BODY_LIMIT = 16000
+
+
+def _log_generate_payload_response_to_sentry(response_obj: Dict[str, Any], *, level: str = "info") -> None:
+    """Best-effort Sentry logging for /engage/generate-payload responses."""
+    try:
+        import sentry_sdk
+    except Exception:
+        return
+
+    try:
+        response_text = json.dumps(response_obj, default=str)
+    except Exception:
+        response_text = str(response_obj)
+
+    truncated = response_text[:_SENTRY_RESPONSE_BODY_LIMIT]
+    was_truncated = len(response_text) > len(truncated)
+
+    try:
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("api_endpoint", "/engage/generate-payload")
+            scope.set_tag("api_operation", "generate_payload")
+            scope.set_tag("truncated", str(was_truncated).lower())
+            scope.set_context(
+                "engage_generate_payload_response",
+                {
+                    "response_size_bytes": len(response_text),
+                    "truncated": was_truncated,
+                    "response": truncated,
+                },
+            )
+            sentry_sdk.capture_message("Engage generate-payload response", level=level)
+    except Exception:
+        # Sentry logging must never affect the API path.
+        return
 
 def _parse_json_list(val) -> list:
     """Safely parse a value that may be a JSON string, list, or empty."""
@@ -431,15 +466,26 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
 
         payload_str = json.dumps(payload, indent=2)
 
-        return {
+        response_body = {
             "success": True,
             "payload": payload_str,
             "candidate_count": len(resumes),
             "dnc_blocked_count": len(dnc_blocked_ids),
             "dnc_blocked_ids": dnc_blocked_ids,
         }
+        _log_generate_payload_response_to_sentry(response_body, level="info")
+        return response_body
 
     except Exception as e:
+        _log_generate_payload_response_to_sentry(
+            {
+                "success": False,
+                "error": str(e),
+                "candidate_ids": request.candidate_ids,
+                "job_id": request.job_id,
+            },
+            level="error",
+        )
         logger.error(f"❌ generate-payload failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
