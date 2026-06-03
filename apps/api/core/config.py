@@ -178,8 +178,10 @@ AMPLITUDE_TRACK_LOGS = get_env_bool("AMPLITUDE_TRACK_LOGS", True)
 # Sum should be 1.0. Old values were 0.75 / 0.25, then 0.60 / 0.40.
 # Rebalanced again after observing strong candidates (82% on Skills) getting
 # dragged to ~63% overall by arithmetic-mean penalties on Education/Keywords.
-SCORING_REQUIRED_WEIGHT = float(get_env_with_default("SCORING_REQUIRED_WEIGHT", "0.55"))
-SCORING_PREFERRED_WEIGHT = float(get_env_with_default("SCORING_PREFERRED_WEIGHT", "0.45"))
+# Rebalanced 2026-06 to the recruiter rubric: must-haves now clearly dominate
+# preferred ("higher weightage given to must-haves, some given to preferred").
+SCORING_REQUIRED_WEIGHT = float(get_env_with_default("SCORING_REQUIRED_WEIGHT", "0.70"))
+SCORING_PREFERRED_WEIGHT = float(get_env_with_default("SCORING_PREFERRED_WEIGHT", "0.30"))
 
 # L4: Floor for unmatched groups inside the weighted-mean ratio.
 # Previously a required group that didn't match contributed 0 to the numerator,
@@ -210,10 +212,22 @@ SCORING_COVERAGE_BLEND_THRESHOLD = float(get_env_with_default("SCORING_COVERAGE_
 # T2: per-group multipliers inside `_term_group_score`.
 #  - _UNKNOWN_MULT: applied when min_years > 0 but years_of_experience didn't parse.
 #  - _FLOOR:        applied as `max(FLOOR, years/min_years)` when years < min_years.
-#  - _RECENT_PENALTY: applied when a group is marked "recent" but term not in recent_text.
-SCORING_YEARS_UNKNOWN_MULT = float(get_env_with_default("SCORING_YEARS_UNKNOWN_MULT", "0.90"))
-SCORING_YEARS_FLOOR = float(get_env_with_default("SCORING_YEARS_FLOOR", "0.55"))
+#  - _RECENT_PENALTY: legacy flat recency penalty (superseded by SCORING_RECENCY_DECAY).
+# 2026-06: years now have their OWN scored dimension ("Total Relevant YOE"), so
+# the per-group year multipliers are relaxed toward neutral to avoid
+# double-counting experience inside the title/skill dimensions.
+SCORING_YEARS_UNKNOWN_MULT = float(get_env_with_default("SCORING_YEARS_UNKNOWN_MULT", "0.95"))
+SCORING_YEARS_FLOOR = float(get_env_with_default("SCORING_YEARS_FLOOR", "0.85"))
 SCORING_RECENT_PENALTY = float(get_env_with_default("SCORING_RECENT_PENALTY", "0.92"))
+
+# Recency for the "Recent (3y) Title Relevance" dimension. A title/skill term
+# whose match does NOT appear in the candidate's recent_text (most-recent roles)
+# is multiplied by SCORING_RECENCY_DECAY rather than the gentler legacy flat
+# penalty — recruiters care specifically about recent title relevance.
+# SCORING_RECENCY_WINDOW_YEARS documents the intended window (used by the
+# career-stability / recency helpers and surfaced to the UI).
+SCORING_RECENCY_DECAY = float(get_env_with_default("SCORING_RECENCY_DECAY", "0.70"))
+SCORING_RECENCY_WINDOW_YEARS = int(get_env_with_default("SCORING_RECENCY_WINDOW_YEARS", "3"))
 
 # T3: exclusion penalty cap.
 #   penalty = min(total_weight * _CAP, N_hits * max(4.0, total_weight * _PER_HIT))
@@ -322,82 +336,107 @@ EMBEDDING_SKILL_MATCH_BY_FAMILY = {
 
 
 # ---- Role-family-aware scoring weights ----
-# Default scoring path (used for IT and unknown family) is preserved
-# byte-for-byte from the pre-fix configuration — IT recruiters do not
-# get a different score on the same JD/candidate after this change.
-# Non-IT families use a rebalance that down-weights skills (which are
-# often a thin signal for these roles, since the rubric typically has
-# 2-4 skills) and up-weights titles + experience trajectory + certs/
-# licenses (CPA / CFA / Bar / RN).
+# 2026-06 rubric rework. The scored dimensions now mirror the recruiter
+# rubric. Each family's weights MUST sum to 100.0 (asserted in tests) so
+# scores are comparable across families. Dimension keys:
+#   title_recent      Recent (3y) Job Title Relevance
+#   skills            Recent Skills Match (must-have heavy / preferred light)
+#   availability      Candidate availability / freshness
+#   yoe               Total Relevant Years of Experience (title/skills)
+#   domain            Domain Experience
+#   same_client       Same client / industry experience
+#   education_certs   Education & Certifications (merged)
+#   career_stability  Career Stability & Progression
+#   profile           Profile completeness / external signal (LinkedIn)
+#
+# NOTE on redistribution: when a candidate lacks the data a dimension needs
+# (no availability signal, no parsed education, etc.) that dimension is
+# DROPPED from the denominator in `_score_candidate`, so its weight is
+# effectively redistributed proportionally across the dimensions that do
+# have data — implementing the rubric note "if domain/education/certs are
+# not present, re-distribute the weight to title, skills, and availability".
 SCORING_WEIGHTS_DEFAULT = {
-    "titles": 15.0,
-    "skills": 45.0,
-    "location": 4.0,
-    "companies": 5.0,
-    "education": 8.0,
-    "certifications": 7.0,
-    "keywords": 5.0,
+    "title_recent": 25.0,
+    "skills": 25.0,
+    "availability": 15.0,
+    "yoe": 10.0,
+    "domain": 10.0,
+    "same_client": 5.0,
+    "education_certs": 5.0,
+    "career_stability": 3.0,
+    "profile": 2.0,
 }
 
-# Non-IT weight sets. Each must sum to the same total as the default
-# (89.0) so an apples-to-apples score can be compared across families.
+# Per-family weight sets. Each MUST sum to 100.0.
 SCORING_WEIGHTS_BY_FAMILY = {
+    # Title-led non-IT families: the title trajectory is the strongest signal.
     "program_management": {
-        "titles": 25.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
-        "education": 8.0, "certifications": 7.0, "keywords": 9.0,
-    },
-    "sales": {
-        # Book-of-business signal lives in "company experience" for sales —
-        # the candidate's prior employers are themselves a quota signal.
-        "titles": 25.0, "skills": 30.0, "location": 4.0, "companies": 8.0,
-        "education": 7.0, "certifications": 6.0, "keywords": 9.0,
+        "title_recent": 30.0, "skills": 20.0, "availability": 15.0, "yoe": 10.0,
+        "domain": 8.0, "same_client": 5.0, "education_certs": 5.0,
+        "career_stability": 5.0, "profile": 2.0,
     },
     "hr": {
-        "titles": 25.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
-        "education": 8.0, "certifications": 7.0, "keywords": 9.0,
+        "title_recent": 30.0, "skills": 20.0, "availability": 15.0, "yoe": 10.0,
+        "domain": 8.0, "same_client": 5.0, "education_certs": 5.0,
+        "career_stability": 5.0, "profile": 2.0,
     },
     "marketing": {
-        "titles": 25.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
-        "education": 8.0, "certifications": 7.0, "keywords": 9.0,
+        "title_recent": 30.0, "skills": 20.0, "availability": 15.0, "yoe": 10.0,
+        "domain": 8.0, "same_client": 5.0, "education_certs": 5.0,
+        "career_stability": 5.0, "profile": 2.0,
     },
     "customer_success": {
-        "titles": 25.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
-        "education": 8.0, "certifications": 7.0, "keywords": 9.0,
-    },
-    "finance": {
-        # Cert-heavy: CPA / CFA / FRM signal is genuine.
-        "titles": 20.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
-        "education": 10.0, "certifications": 10.0, "keywords": 9.0,
-    },
-    "accounting": {
-        "titles": 20.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
-        "education": 10.0, "certifications": 10.0, "keywords": 9.0,
+        "title_recent": 30.0, "skills": 20.0, "availability": 15.0, "yoe": 10.0,
+        "domain": 8.0, "same_client": 5.0, "education_certs": 5.0,
+        "career_stability": 5.0, "profile": 2.0,
     },
     "ops": {
-        "titles": 25.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
-        "education": 8.0, "certifications": 7.0, "keywords": 9.0,
+        "title_recent": 30.0, "skills": 20.0, "availability": 15.0, "yoe": 10.0,
+        "domain": 8.0, "same_client": 5.0, "education_certs": 5.0,
+        "career_stability": 5.0, "profile": 2.0,
     },
     "recruiting": {
-        "titles": 25.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
-        "education": 8.0, "certifications": 7.0, "keywords": 9.0,
-    },
-    "healthcare": {
-        # License-heavy: RN / NP / PA / state license signal dominates.
-        "titles": 20.0, "skills": 30.0, "location": 4.0, "companies": 4.0,
-        "education": 12.0, "certifications": 15.0, "keywords": 4.0,
-    },
-    "legal": {
-        # Bar admission and jurisdiction signal dominates.
-        "titles": 20.0, "skills": 30.0, "location": 4.0, "companies": 4.0,
-        "education": 12.0, "certifications": 15.0, "keywords": 4.0,
+        "title_recent": 30.0, "skills": 20.0, "availability": 15.0, "yoe": 10.0,
+        "domain": 8.0, "same_client": 5.0, "education_certs": 5.0,
+        "career_stability": 5.0, "profile": 2.0,
     },
     "education": {
-        "titles": 20.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
-        "education": 12.0, "certifications": 8.0, "keywords": 9.0,
+        "title_recent": 28.0, "skills": 20.0, "availability": 13.0, "yoe": 10.0,
+        "domain": 8.0, "same_client": 5.0, "education_certs": 9.0,
+        "career_stability": 5.0, "profile": 2.0,
     },
     "generic_non_it": {
-        "titles": 25.0, "skills": 30.0, "location": 4.0, "companies": 6.0,
-        "education": 8.0, "certifications": 7.0, "keywords": 9.0,
+        "title_recent": 30.0, "skills": 20.0, "availability": 15.0, "yoe": 10.0,
+        "domain": 8.0, "same_client": 5.0, "education_certs": 5.0,
+        "career_stability": 5.0, "profile": 2.0,
+    },
+    # Sales: prior employers (book of business / same client) carry real signal.
+    "sales": {
+        "title_recent": 28.0, "skills": 18.0, "availability": 15.0, "yoe": 10.0,
+        "domain": 8.0, "same_client": 10.0, "education_certs": 4.0,
+        "career_stability": 5.0, "profile": 2.0,
+    },
+    # Cert/education-heavy: CPA / CFA / FRM signal is genuine.
+    "finance": {
+        "title_recent": 24.0, "skills": 20.0, "availability": 12.0, "yoe": 10.0,
+        "domain": 8.0, "same_client": 5.0, "education_certs": 14.0,
+        "career_stability": 5.0, "profile": 2.0,
+    },
+    "accounting": {
+        "title_recent": 24.0, "skills": 20.0, "availability": 12.0, "yoe": 10.0,
+        "domain": 8.0, "same_client": 5.0, "education_certs": 14.0,
+        "career_stability": 5.0, "profile": 2.0,
+    },
+    # License-heavy: RN / NP / PA / Bar / state license dominates.
+    "healthcare": {
+        "title_recent": 22.0, "skills": 18.0, "availability": 14.0, "yoe": 8.0,
+        "domain": 5.0, "same_client": 3.0, "education_certs": 23.0,
+        "career_stability": 5.0, "profile": 2.0,
+    },
+    "legal": {
+        "title_recent": 22.0, "skills": 18.0, "availability": 14.0, "yoe": 8.0,
+        "domain": 5.0, "same_client": 3.0, "education_certs": 23.0,
+        "career_stability": 5.0, "profile": 2.0,
     },
 }
 
@@ -405,10 +444,9 @@ SCORING_WEIGHTS_BY_FAMILY = {
 def scoring_weights_for_family(family: Optional[str] = None) -> dict:
     """Return the dimension-weight map for a family.
 
-    `None` and `"it"` return the legacy default — preserves IT scoring
-    behavior byte-for-byte. Unknown families fall back to default rather
-    than to `generic_non_it`, since unknown often means the classifier
-    couldn't read the title (e.g. blank string).
+    `None` and `"it"` return the default rubric weights. Unknown families
+    fall back to the default rather than to `generic_non_it`, since unknown
+    often means the classifier couldn't read the title (e.g. blank string).
     """
     if family is None or family == "it":
         return SCORING_WEIGHTS_DEFAULT

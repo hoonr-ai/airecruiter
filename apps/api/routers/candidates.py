@@ -114,7 +114,7 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT resume_match_filters, sourcing_filters, jobdiva_id
+                    SELECT resume_match_filters, sourcing_filters, jobdiva_id, customer_name
                     FROM monitored_jobs
                     WHERE job_id = %s OR jobdiva_id = %s
                     LIMIT 1
@@ -130,6 +130,8 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
         resume_match_filters = _json_load_safe(row[0], [])
         sourcing_filters = _json_load_safe(row[1], {})
         resolved_job_ref = row[2] or job_ref
+        customer_name = str(row[3] or "").strip() if len(row) > 3 else ""
+        client_name = "" if customer_name.lower() in ("", "external", "unknown", "n/a") else customer_name
 
         title_criteria = [
             {
@@ -165,6 +167,7 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
             page_size=100,
             sources=["JobDiva"],
             bypass_screening=False,
+            client_name=client_name,
         )
     except Exception as e:
         logger.warning(f"resume matching criteria load failed for {job_ref}: {e}")
@@ -355,6 +358,11 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
 
         companies = request.companies or []
 
+        # Hiring client / account name, used by the "Same client / industry"
+        # scoring dimension and the currently-employed-by-client veto. Prefer
+        # an explicit request value, else read customer_name from monitored_jobs.
+        client_name = (getattr(request, "client_name", None) or "").strip()
+
         # Load resume match filters from database if not provided in request
         resume_match_filters = []
         if request.resume_match_filters and len(request.resume_match_filters) > 0:
@@ -365,13 +373,15 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                 conn = get_db_connection()
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT resume_match_filters FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
+                    "SELECT resume_match_filters, customer_name FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
                     (request.job_id, request.job_id)
                 )
                 row = cursor.fetchone()
                 if row and row[0]:
                     resume_match_filters = row[0] if isinstance(row[0], list) else json.loads(row[0])
                     logger.info(f"Loaded {len(resume_match_filters)} resume match filters from database for job {request.job_id}")
+                if row and len(row) > 1 and row[1] and not client_name:
+                    client_name = str(row[1]).strip()
                 cursor.close()
                 conn.close()
             except Exception as e:
@@ -400,6 +410,11 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                 else bool(request.include_relocation_candidates)
             ),
             min_experience_years=request.min_experience_years,
+            # Placeholder customer values carry no client signal — skip them.
+            client_name=(
+                "" if client_name.lower() in ("", "external", "unknown", "n/a")
+                else client_name
+            ),
         )
 
         # Execute unified search as a stream. Persist each candidate to
