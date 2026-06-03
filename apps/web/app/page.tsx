@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Search, Plus, FileText, ArrowUpDown, MoreVertical, Link as LinkIcon, AlertTriangle, Archive } from "lucide-react";
+import { Search, Plus, FileText, ArrowUpDown, MoreVertical, Link as LinkIcon, AlertTriangle, Archive, Edit3 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -46,6 +47,7 @@ type SortField = keyof Job;
 type SortDirection = "asc" | "desc";
 
 export default function DashboardPage() {
+  const router = useRouter();
   const [searchQuery, setSearchQuery] = useState("");
   const [sortField, setSortField] = useState<keyof Job>("id");
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
@@ -79,6 +81,11 @@ export default function DashboardPage() {
   const [stopDialogOpen, setStopDialogOpen] = useState(false);
   const [jobToStop, setJobToStop] = useState<Job | null>(null);
   const [isStopping, setIsStopping] = useState(false);
+
+  // Edit Job Setup (create a new editable version) dialog state
+  const [editVersionDialogOpen, setEditVersionDialogOpen] = useState(false);
+  const [jobToEditVersion, setJobToEditVersion] = useState<Job | null>(null);
+  const [isCreatingVersion, setIsCreatingVersion] = useState(false);
 
   // Tab state
   const [activeTab, setActiveTab] = useState<"active" | "archived">("active");
@@ -493,11 +500,13 @@ export default function DashboardPage() {
                               </Link>
                             </DropdownMenuItem>
                             <DropdownMenuItem
-                              disabled
-                              className="cursor-not-allowed text-slate-400"
-                              title="Coming soon"
-                              onSelect={(e) => e.preventDefault()}
+                              className="cursor-pointer"
+                              onClick={() => {
+                                setJobToEditVersion(job);
+                                setEditVersionDialogOpen(true);
+                              }}
                             >
+                              <Edit3 className="h-4 w-4 mr-2" />
                               Edit Job Setup
                             </DropdownMenuItem>
                             <DropdownMenuItem
@@ -744,6 +753,84 @@ export default function DashboardPage() {
               disabled={isStopping}
             >
               {isStopping ? "Stopping..." : "Stop Activity"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Job Setup (new version) Confirmation Dialog */}
+      <Dialog open={editVersionDialogOpen} onOpenChange={setEditVersionDialogOpen}>
+        <DialogContent className="sm:max-w-[480px]">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-primary">
+              <Edit3 className="h-5 w-5" />
+              Edit Job Setup
+            </DialogTitle>
+            <DialogDescription>
+              This creates a new editable version of the job (e.g. <strong>v2</strong>) and reopens the setup wizard from Step 1.
+              The current version&apos;s candidates and rank list stay intact — the new version sources and launches PAIR fresh.
+              The job&apos;s rubric, filters, questions and JD are copied so you can edit from a complete copy.
+            </DialogDescription>
+          </DialogHeader>
+          {jobToEditVersion && (
+            <div className="py-4">
+              <div className="bg-slate-50 p-3 rounded-lg border border-slate-200">
+                <p className="font-semibold text-slate-900">{jobToEditVersion.title}</p>
+                <p className="text-sm text-slate-500">ID: {jobToEditVersion.jobdiva_id || jobToEditVersion.id}</p>
+                <p className="text-sm text-slate-500">Customer: {jobToEditVersion.customer_name}</p>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setEditVersionDialogOpen(false);
+                setJobToEditVersion(null);
+              }}
+              disabled={isCreatingVersion}
+            >
+              Cancel
+            </Button>
+            <Button
+              className="bg-primary hover:bg-primary/90 text-white"
+              onClick={async () => {
+                if (!jobToEditVersion) return;
+                setIsCreatingVersion(true);
+                try {
+                  const ref = jobToEditVersion.jobdiva_id || jobToEditVersion.id;
+                  const response = await fetch(
+                    `${API_BASE}/jobs/${encodeURIComponent(ref)}/new-version`,
+                    {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                    }
+                  );
+                  if (response.ok) {
+                    const data = await response.json();
+                    const newRef = data?.new_job_id;
+                    if (newRef) {
+                      setEditVersionDialogOpen(false);
+                      setJobToEditVersion(null);
+                      router.push(`/jobs/new?jobId=${encodeURIComponent(newRef)}&step=1`);
+                      return;
+                    }
+                    setToast({ message: "Version created but no id returned", type: "error" });
+                  } else {
+                    const errorData = await response.json().catch(() => ({ detail: "Unknown error" }));
+                    console.error("Create version error:", errorData);
+                    setToast({ message: errorData.detail || "Failed to create new version", type: "error" });
+                  }
+                } catch (error) {
+                  console.error("Create version exception:", error);
+                  setToast({ message: "Failed to create new version", type: "error" });
+                } finally {
+                  setIsCreatingVersion(false);
+                }
+              }}
+              disabled={isCreatingVersion}
+            >
+              {isCreatingVersion ? "Creating..." : "Create & Edit v2"}
             </Button>
           </DialogFooter>
         </DialogContent>
