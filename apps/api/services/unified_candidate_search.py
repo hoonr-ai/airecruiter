@@ -1198,6 +1198,21 @@ class UnifiedCandidateSearch:
         if exa_pass_b_should_run:
             producers.append(asyncio.create_task(produce_exa_agent()))
 
+        # Keepalive producer — emits {"type": "keepalive"} every 20 s while any
+        # producer is still running. Without this, the HTTP/2 stream is silent
+        # for the entire duration of slow upstream calls (e.g. JobDiva's
+        # JobAgentSearch which can take 3-4 minutes), and Chrome kills the
+        # stream with ERR_HTTP2_PROTOCOL_ERROR after ~90 s of inactivity.
+        _active_ref: List[int] = [len(producers)]  # mutable box so the coroutine sees updates
+
+        async def produce_keepalive():
+            while _active_ref[0] > 0:
+                await asyncio.sleep(20)
+                if _active_ref[0] > 0:
+                    await queue.put({"type": "keepalive"})
+
+        keepalive_task = asyncio.create_task(produce_keepalive())
+
         # Drain the queue until every producer emits its SENTINEL.
         # Accumulate JobDiva-sourced candidates so we can hydrate them in
         # the background after producers finish (fast-path mode only).
@@ -1209,6 +1224,10 @@ class UnifiedCandidateSearch:
                 event = await queue.get()
                 if event is SENTINEL:
                     active -= 1
+                    _active_ref[0] = active
+                    continue
+                if event.get("type") == "keepalive":
+                    yield event 
                     continue
                 if event.get("type") == "candidate":
                     cand_payload = event.get("data") or {}
@@ -1245,6 +1264,10 @@ class UnifiedCandidateSearch:
                         break
                     yield event
         finally:
+            # Stop the keepalive heartbeat.
+            _active_ref[0] = 0
+            if not keepalive_task.done():
+                keepalive_task.cancel()
             # If the generator is closed (e.g. client disconnect), cancel
             # all background work — producers and hydration alike.
             for task in producers:
@@ -1253,7 +1276,7 @@ class UnifiedCandidateSearch:
             if hydration_task and not hydration_task.done():
                 hydration_task.cancel()
 
-            pending = list(producers)
+            pending = [keepalive_task] + list(producers)
             if hydration_task:
                 pending.append(hydration_task)
             if pending:
