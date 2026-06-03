@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useEffectEvent, useMemo, useRef, Suspense, type ReactNode } from "react";
+import { useState, useEffect, useEffectEvent, useCallback, useMemo, useRef, Suspense, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -530,6 +530,10 @@ function NewJobPageContent() {
   const isViewOnly = wizardMode === 'view';
   // Already-launched candidate keys for Step 5 (only fetched in source/view modes).
   const [launchedCandidateKeys, setLaunchedCandidateKeys] = useState<Set<string>>(new Set());
+  // Bare candidate_ids (no source prefix) for already-launched people. Used as a
+  // resilient fallback so a candidate re-sourced under a slightly different
+  // `source` string still gets hidden once they're launched / in the rank list.
+  const [launchedCandidateIds, setLaunchedCandidateIds] = useState<Set<string>>(new Set());
   // DNC (Do Not Contact) phone set, fetched once at mount. Used to flag and
   // skip candidates whose phone matches a Zoom DNC entry.
   const [dncPhones, setDncPhones] = useState<Set<string>>(new Set());
@@ -1074,7 +1078,11 @@ function NewJobPageContent() {
     const filtered = candidates.filter((c: any) => {
       const candId = c.candidate_id || c.jobdiva_candidate_id || c.id;
       const key = `${c.source ?? ''}:${candId}`;
-      if (launchedCandidateKeys.has(key)) return false;
+      // Hide anyone already launched (now in sourced_candidates / the rank
+      // list). Match on the composite source:id key, falling back to the bare
+      // candidate_id so source-string drift between sourcing runs can't let a
+      // launched candidate re-surface.
+      if (launchedCandidateKeys.has(key) || launchedCandidateIds.has(String(candId))) return false;
       if (!matchesSourceFilter(c)) return false;
       // Progressive rows (agent_result / details_loaded) bypass score &
       // location filters so they stay visible while shimmering. Once the
@@ -1157,7 +1165,7 @@ function NewJobPageContent() {
     };
 
     return [...filtered].sort(cmp);
-  }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, sortKey, sortDir, launchedCandidateKeys]);
+  }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, sortKey, sortDir, launchedCandidateKeys, launchedCandidateIds]);
 
   const totalPages = Math.max(1, Math.ceil(sortedCandidates.length / candidatesPerPage));
   const paginatedCandidates = sortedCandidates.slice(
@@ -1313,33 +1321,41 @@ function NewJobPageContent() {
     setHasSeededSourceLocation(false);
   }, [numericJobId, jobdivaId]);
 
-  // In source/view mode, pull the (candidate_id, source) keys for everyone
-  // already launched so Step 5 can disable those rows.
-  useEffect(() => {
-    if (wizardMode === 'edit') return;
+  // Pull the (candidate_id, source) keys for everyone already launched (i.e.
+  // saved into sourced_candidates / showing in the rank list) so Step 5 hides
+  // those rows. Runs in every mode: after the first launch in edit mode and on
+  // every revisit in source mode, just-launched people must drop off the list
+  // so the recruiter can keep launching PAIR for the remaining candidates.
+  const refreshLaunchedKeys = useCallback(async () => {
     const ref = jobdivaId || numericJobId;
     if (!ref) return;
+    try {
+      const res = await fetch(`${API_BASE}/jobs/${ref}/launched-candidate-keys`);
+      if (!res.ok) return;
+      const json = await res.json();
+      const keys = new Set<string>();
+      const ids = new Set<string>();
+      for (const item of json?.launched ?? []) {
+        if (item?.candidate_id) {
+          keys.add(`${item.source ?? ''}:${item.candidate_id}`);
+          ids.add(String(item.candidate_id));
+        }
+      }
+      setLaunchedCandidateKeys(keys);
+      setLaunchedCandidateIds(ids);
+    } catch (err) {
+      console.warn('Failed to load launched candidate keys', err);
+    }
+  }, [jobdivaId, numericJobId]);
 
+  useEffect(() => {
     let cancelled = false;
     (async () => {
-      try {
-        const res = await fetch(`${API_BASE}/jobs/${ref}/launched-candidate-keys`);
-        if (!res.ok) return;
-        const json = await res.json();
-        if (cancelled) return;
-        const keys = new Set<string>();
-        for (const item of json?.launched ?? []) {
-          if (item?.candidate_id) {
-            keys.add(`${item.source ?? ''}:${item.candidate_id}`);
-          }
-        }
-        setLaunchedCandidateKeys(keys);
-      } catch (err) {
-        console.warn('Failed to load launched candidate keys', err);
-      }
+      if (cancelled) return;
+      await refreshLaunchedKeys();
     })();
     return () => { cancelled = true; };
-  }, [wizardMode, jobdivaId, numericJobId]);
+  }, [refreshLaunchedKeys]);
 
   // Fetch the DNC phone list once. Cached server-side; the small payload
   // (~95 phones) is fine to ship in full.
@@ -6317,15 +6333,15 @@ function NewJobPageContent() {
       finalMessage: engageFailureMessage ?? undefined,
     }));
 
+    // Launching used to redirect straight to the rank list, which made it
+    // impossible to launch PAIR for the rest of the list. Instead we now stay
+    // on Step 5: drop the just-launched people off the list (they're in the
+    // rank list now) and clear the selection so the recruiter can immediately
+    // pick and launch the remaining candidates. The progress modal offers a
+    // "View Rank List" button for anyone who does want to jump over.
     if (totalSaved > 0 && !options?.skipRedirect) {
-      setTimeout(() => {
-        setLaunchProgress(initialLaunchProgress);
-        if (jobIdForEngage) {
-          router.push(`/jobs/${encodeURIComponent(jobIdForEngage)}/rankings`);
-        } else {
-          router.push(`/`);
-        }
-      }, 1500);
+      setSelectedCandidates(new Set());
+      await refreshLaunchedKeys();
     }
 
     return { success: totalSaved > 0, savedCount: totalSaved };
@@ -6710,14 +6726,11 @@ function NewJobPageContent() {
     setMissingContactsReviewMode(false);
     setPendingLaunchOverrides({});
     if (readyLaunchedPendingRedirect) {
-      const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
-      setTimeout(() => {
-        if (jobIdForEngage) {
-          router.push(`/jobs/${encodeURIComponent(jobIdForEngage)}/rankings`);
-        } else {
-          router.push(`/`);
-        }
-      }, 200);
+      // A "ready" batch already launched; instead of bouncing to the rank
+      // list, stay on Step 5 with the launched people removed so the recruiter
+      // can keep launching the rest.
+      setSelectedCandidates(new Set());
+      refreshLaunchedKeys();
       setReadyLaunchedPendingRedirect(false);
     }
   };
@@ -7763,7 +7776,7 @@ function NewJobPageContent() {
                         const firstN = candidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                            return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
+                            return !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
                           })
                           .slice(0, n);
 
@@ -7796,7 +7809,7 @@ function NewJobPageContent() {
                         const firstN = candidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                            return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
+                            return !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
                           })
                           .slice(0, n);
                         const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.jobdiva_candidate_id || c.id));
@@ -7834,7 +7847,7 @@ function NewJobPageContent() {
                       onClick={() => {
                         const eligible = candidates.filter(c => {
                           const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                          return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
+                          return !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
                         });
                         const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
@@ -7851,7 +7864,7 @@ function NewJobPageContent() {
                       {(() => {
                         const eligible = candidates.filter(c => {
                           const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                          return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
+                          return !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
                         });
                         const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
@@ -8675,6 +8688,11 @@ return (
     <LaunchPairProgressModal
       progress={launchProgress}
       onClose={() => setLaunchProgress(initialLaunchProgress)}
+      onViewRankList={() => {
+        const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
+        setLaunchProgress(initialLaunchProgress);
+        router.push(jobIdForEngage ? `/jobs/${encodeURIComponent(jobIdForEngage)}/rankings` : `/`);
+      }}
     />
 
     {/* Paste Resume Modal (External requirement) */}

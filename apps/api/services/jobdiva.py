@@ -941,6 +941,11 @@ class JobDivaService:
         s = str(local_or_ref_id).strip()
         if not s:
             return None
+        # Strip an internal version suffix (e.g. "26-06182-v2" -> "26-06182").
+        # Versioned jobs are local clones used for re-editing after launch; they
+        # share the original JobDiva job, so sourcing must resolve against the
+        # un-versioned reference.
+        s = re.sub(r"-v\d+$", "", s)
         if "-" not in s:
             try:
                 return int(s)
