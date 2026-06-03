@@ -122,6 +122,10 @@ def _is_placeholder_email(email: str) -> bool:
         return True
     if local_part in {"your-email", "your_email", "email", "test", "example", "candidate"}:
         return True
+    # JobDiva auto-generates "Auto_<candidateId>@jobdiva.com" when a candidate
+    # has no real email on file — these are dead addresses, not contactable.
+    if domain == "jobdiva.com":
+        return True
     return False
 
 
@@ -510,6 +514,7 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job
                 recruiter_emails=clean_emails,
                 job_boards=job_boards,
                 ai_description=ai_desc,
+                job_id=db_job_id,
                 app_base_url=app_base_url,
             )
         else:

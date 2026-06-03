@@ -200,6 +200,10 @@ const ColumnFilterPopup = ({
 interface JobDetails {
   job_id: string;
   jobdiva_id?: string;
+  // JobDiva's internal numeric job id (monitored_jobs.job_id). The route param
+  // is usually the human reference (e.g. "26-02576"); the JobDiva portal deep
+  // link needs this numeric id, so we capture it separately from the API.
+  jobdiva_numeric_id?: string;
   title: string;
   customer_name?: string;
   openings?: number;
@@ -543,8 +547,10 @@ export default function CandidateRankingsPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
   const [minScore, setMinScore] = useState<number>(0);
-  const [sortField, setSortField] = useState<SortField>("index");
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  // Default the rank list to fit-score descending so it actually ranks by
+  // score rather than by the source-priority pre-sort applied at load time.
+  const [sortField, setSortField] = useState<SortField>("total_score");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [columnFilters, setColumnFilters] = useState<Record<string, ColumnFilter>>({});
   const [activeFilterField, setActiveFilterField] = useState<string | null>(null);
   const [isActivityLogModalOpen, setIsActivityLogModalOpen] = useState(false);
@@ -751,31 +757,53 @@ export default function CandidateRankingsPage() {
 
     if (sortField !== "index") {
       const dir = sortDir === "asc" ? 1 : -1;
+      // Coerce any score (number | string | null | "") to a finite number so a
+      // missing/non-numeric score sorts as 0 instead of producing NaN, which
+      // would scramble the comparator's ordering.
+      const num = (v: unknown) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : 0;
+      };
+      // Sort uses the SAME value the table cell displays (match_score, falling
+      // back to resume_match_percentage) so rows are never out of order
+      // relative to the number shown.
+      const getScore = (c: Candidate) => num(c.match_score ?? c.resume_match_percentage);
+      const getEngage = (c: Candidate) => (hasFinalEngageOutcome(c) ? num(c.engage_score) : -1);
+      const getTotalScore = (c: Candidate) => {
+        const screeningScore = getScore(c);
+        return hasFinalEngageOutcome(c)
+          ? Math.round((screeningScore + num(c.engage_score)) / 2 * 10) / 10
+          : screeningScore;
+      };
+      // Deterministic tie-break so equal scores keep a stable, repeatable order.
+      const tieBreak = (a: Candidate, b: Candidate) =>
+        (a.name || "").localeCompare(b.name || "") ||
+        String(a.candidate_id || a.id || "").localeCompare(String(b.candidate_id || b.id || ""));
       rows = [...rows].sort((a, b) => {
-        const getScore = (c: Candidate) => c.match_score ?? c.resume_match_percentage ?? 0;
-        const getEngage = (c: Candidate) => (hasFinalEngageOutcome(c) ? (c.engage_score ?? 0) : -1);
-        const getTotalScore = (c: Candidate) => {
-          const screeningScore = getScore(c);
-          return hasFinalEngageOutcome(c)
-            ? Math.round((screeningScore + (c.engage_score ?? 0)) / 2 * 10) / 10
-            : screeningScore;
-        };
+        let primary = 0;
         switch (sortField) {
           case "name":
-            return dir * (a.name || "").localeCompare(b.name || "");
+            primary = (a.name || "").localeCompare(b.name || "");
+            break;
           case "screening_score":
-            return dir * (getScore(a) - getScore(b));
+            primary = getScore(a) - getScore(b);
+            break;
           case "engage_score":
-            return dir * (getEngage(a) - getEngage(b));
+            primary = getEngage(a) - getEngage(b);
+            break;
           case "total_score":
-            return dir * (getTotalScore(a) - getTotalScore(b));
+            primary = getTotalScore(a) - getTotalScore(b);
+            break;
           case "source":
-            return dir * (normalizeSourceLabel(a.source)).localeCompare(normalizeSourceLabel(b.source));
+            primary = normalizeSourceLabel(a.source).localeCompare(normalizeSourceLabel(b.source));
+            break;
           case "engage_status":
-            return dir * (normalizeInterviewStatus(a).label).localeCompare(normalizeInterviewStatus(b).label);
+            primary = normalizeInterviewStatus(a).label.localeCompare(normalizeInterviewStatus(b).label);
+            break;
           default:
-            return 0;
+            primary = 0;
         }
+        return primary !== 0 ? dir * primary : tieBreak(a, b);
       });
     }
     return rows;
@@ -881,6 +909,19 @@ export default function CandidateRankingsPage() {
       } else {
         pushToast("LinkedIn profile URL not available", "info");
       }
+      return;
+    }
+
+    // JobDiva candidate: prefer a direct deep link built from the candidate's
+    // JobDiva id. The PROFILEURL-based API fetch below is frequently empty and
+    // can return a stale/dead format, so build the verified-live candidate URL
+    // ourselves (same format CandidateDetailsModal uses).
+    const jobdivaCandidateId = String(
+      candidate.jobdiva_candidate_id || candidate.data?.jobdiva_candidate_id || ""
+    ).trim();
+    if (jobdivaCandidateId) {
+      const url = `https://www1.jobdiva.com/employers/myreports/viewcandidate2_real.jsp?docids=-1&candidateid=${encodeURIComponent(jobdivaCandidateId)}`;
+      window.open(url, "_blank", "noopener,noreferrer");
       return;
     }
 
@@ -1412,6 +1453,7 @@ export default function CandidateRankingsPage() {
         setJob({
           job_id: jobId as string,
           jobdiva_id: data.jobdiva_id,
+          jobdiva_numeric_id: data.job_id ? String(data.job_id) : undefined,
           title: data.enhanced_title || data.title || `Job ${jobId}`,
           customer_name: data.customer_name,
           openings: data.openings,
@@ -1526,7 +1568,18 @@ export default function CandidateRankingsPage() {
                 <h2 className="text-2xl font-bold text-slate-900 m-0 flex items-center gap-2">
                   {job?.title}
                   <span className="text-slate-500 font-medium text-lg">
-                    ({job?.jobdiva_id || job?.job_id || jobId}) <span className="text-indigo-600 text-sm ml-1 cursor-pointer hover:underline">🔗</span>
+                    ({job?.jobdiva_id || job?.job_id || jobId})
+                    {(job?.jobdiva_numeric_id || job?.jobdiva_id) && (
+                      <a
+                        href={`https://www1.jobdiva.com/employers/myjobs/vieweditjobform.jsp?lstjobs=1&jobid=${encodeURIComponent(job.jobdiva_numeric_id || job.jobdiva_id || "")}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Open job in JobDiva"
+                        className="inline-flex items-center text-indigo-600 ml-1.5 align-middle hover:text-indigo-800"
+                      >
+                        <ExternalLink className="w-4 h-4" />
+                      </a>
+                    )}
                   </span>
                 </h2>
               </>
@@ -2044,7 +2097,9 @@ export default function CandidateRankingsPage() {
                 ) : (
                   filteredCandidates.map((candidate, idx) => {
                     const candidateKey = `${candidate.id || candidate.candidate_id || idx}`;
-                    const screeningScore = candidate.match_score || 0;
+                    // Keep this in sync with the sort comparator's getScore so the
+                    // displayed number always matches the sorted order.
+                    const screeningScore = candidate.match_score ?? candidate.resume_match_percentage ?? 0;
                     const showEngageScore = hasFinalEngageOutcome(candidate);
                     const engageScore = showEngageScore ? (candidate.engage_score || 0) : 0;
                     const totalScore = showEngageScore ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : null;

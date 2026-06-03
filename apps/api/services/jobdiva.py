@@ -339,14 +339,163 @@ def _clean_location_field(value: Any) -> str:
     return val_str
 
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PLACEHOLDER_EMAILS = {
+    "your-email@example.com",
+    "email@example.com",
+    "example@example.com",
+    "test@example.com",
+    "candidate@example.com",
+    "noreply@example.com",
+}
+_PLACEHOLDER_DOMAINS = {
+    "example.com",
+    "example.org",
+    "example.net",
+    "test.com",
+    "invalid",
+    "localhost",
+    "local",
+}
+_PLACEHOLDER_LOCALPARTS = {"your-email", "your_email", "email", "test", "example", "candidate"}
+
+
+def _is_placeholder_email(email: str) -> bool:
+    """Mirror of routers.engagement._is_placeholder_email so JobDiva extraction
+    skips synthetic/placeholder emails before they propagate downstream."""
+    normalized = (email or "").strip().lower()
+    if not normalized:
+        return True
+    if normalized in _PLACEHOLDER_EMAILS:
+        return True
+    if normalized.endswith("@noemail.pair.ai"):
+        return True
+    if "@" not in normalized:
+        return True
+    local_part, domain = normalized.rsplit("@", 1)
+    if domain in _PLACEHOLDER_DOMAINS:
+        return True
+    if local_part in _PLACEHOLDER_LOCALPARTS:
+        return True
+    # JobDiva auto-generates "Auto_<candidateId>@jobdiva.com" when a candidate
+    # has no real email on file. Treat any @jobdiva.com address as synthetic so
+    # a real ALTERNATEEMAIL is preferred and PAIR never emails a dead address.
+    if domain == "jobdiva.com":
+        return True
+    return False
+
+
+def _collect_field_values(data: Dict[str, Any], keys: List[str]) -> List[str]:
+    """Flatten every value found across `keys` (case/punctuation-insensitive),
+    expanding list and nested-date/value shapes into individual scalar strings.
+
+    Unlike get_field (which collapses to the first match), this preserves every
+    candidate value so callers like email/phone selection can apply their own
+    preference rule (e.g. prefer a non-placeholder email over the first one).
+    """
+    if not isinstance(data, dict):
+        return []
+
+    def normalize(s):
+        return re.sub(r'[^a-zA-Z0-9]', '', str(s).lower())
+
+    normalized_data = {normalize(k): v for k, v in data.items()}
+
+    def unwrap(item: Any) -> Optional[str]:
+        if isinstance(item, dict):
+            for subkey in ["dateTime", "date", "value", "$"]:
+                if subkey in item:
+                    item = item[subkey]
+                    break
+        if item is None:
+            return None
+        s = str(item).strip()
+        return s or None
+
+    values: List[str] = []
+    for key in keys:
+        norm_key = normalize(key)
+        if norm_key not in normalized_data:
+            continue
+        val = normalized_data[norm_key]
+        items = val if isinstance(val, list) else [val]
+        for item in items:
+            s = unwrap(item)
+            if s:
+                values.append(s)
+    return values
+
+
 def _get_candidate_email(data: Dict[str, Any]) -> str:
-    value = get_field(data, _CANDIDATE_EMAIL_KEYS) or ""
-    return str(value).strip()
+    """Return the candidate's best email: the first well-formed, non-placeholder
+    address across all email keys/list items. Falls back to the first well-formed
+    address only when every candidate is a placeholder, and finally to the first
+    raw value so behavior never regresses to empty when something is present."""
+    values = _collect_field_values(data, _CANDIDATE_EMAIL_KEYS)
+    if not values:
+        return ""
+
+    well_formed = [v for v in values if _EMAIL_RE.match(v.strip().lower())]
+    for v in well_formed:
+        if not _is_placeholder_email(v):
+            return v.strip()
+    if well_formed:
+        return well_formed[0].strip()
+    return values[0].strip()
 
 
 def _get_candidate_phone(data: Dict[str, Any]) -> str:
-    value = get_field(data, _CANDIDATE_PHONE_KEYS) or ""
-    return str(value).strip()
+    """Return the candidate's best phone, preferring a MOBILE/cell number.
+
+    JobDiva returns numbers in slots (CELLPHONE, PHONE1..PHONE4) where each
+    PHONE{n} carries a companion PHONE{n}_TYPE ('Mobile Phone', 'Home Phone',
+    'Work Phone', 'Home Fax'). PAIR contacts candidates on their mobile, so a
+    blank CELLPHONE must not let a Home/Work number in an earlier slot shadow a
+    real mobile sitting in a later, type-tagged slot. Preference order:
+      1) explicit mobile/cell fields (CELLPHONE, mobilePhone),
+      2) any PHONE{n} whose PHONE{n}_TYPE says mobile/cell,
+      3) otherwise the first phone slot that actually contains digits.
+    A value without digits (e.g. "Available upon request") is never a phone.
+    """
+    if not isinstance(data, dict):
+        return ""
+
+    def normalize(s):
+        return re.sub(r'[^a-zA-Z0-9]', '', str(s).lower())
+
+    norm = {normalize(k): v for k, v in data.items()}
+
+    def scalar(v: Any) -> str:
+        if isinstance(v, list):
+            v = next((x for x in v if x), None)
+        if isinstance(v, dict):
+            for sk in ["value", "$"]:
+                if sk in v:
+                    v = v[sk]
+                    break
+        return str(v).strip() if v is not None else ""
+
+    def has_digits(s: str) -> bool:
+        return any(ch.isdigit() for ch in s)
+
+    # 1) Explicit mobile/cell fields.
+    for key in ("mobilephone", "cellphone", "mobile", "cell"):
+        s = scalar(norm.get(key))
+        if has_digits(s):
+            return s
+
+    # 2) Slotted PHONE{n} whose companion PHONE{n}_TYPE indicates mobile/cell.
+    for n in range(1, 5):
+        s = scalar(norm.get(f"phone{n}"))
+        t = scalar(norm.get(f"phone{n}type")).lower()
+        if has_digits(s) and ("mobile" in t or "cell" in t):
+            return s
+
+    # 3) Fallback: first phone value that actually contains digits.
+    for v in _collect_field_values(data, _CANDIDATE_PHONE_KEYS):
+        if has_digits(v):
+            return v.strip()
+    return ""
 
 
 def _is_job_agent_criteria_unconfigured(status_code: int, body: str) -> bool:
