@@ -3,6 +3,7 @@ import logging
 import re
 import time
 import json
+import httpx as _httpx_module
 import httpx
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
@@ -16,6 +17,133 @@ from core import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# --- JobDiva HTTP request/response logging to Sentry ---------------------
+# Every httpx.AsyncClient(...) constructed in this module is transparently
+# wrapped (via the _JDHttpxProxy shim below) so each JobDiva request emits
+# a Sentry breadcrumb + capture_message with the full response body and
+# elapsed time. We do not modify the global httpx module — only the local
+# `httpx` name in this file's namespace.
+
+_JD_RESPONSE_BODY_LIMIT = 16000  # cap body bytes sent to Sentry per call
+
+
+def _jd_redact_url(url: "_httpx_module.URL") -> str:
+    s = str(url)
+    if "password=" in s:
+        s = re.sub(r"(password=)[^&]*", r"\1***", s)
+    return s
+
+
+async def _jd_on_request(request: "_httpx_module.Request") -> None:
+    request.extensions["_jd_t0"] = time.monotonic()
+
+
+async def _jd_on_response(response: "_httpx_module.Response") -> None:
+    try:
+        t0 = response.request.extensions.get("_jd_t0")
+        elapsed_ms = int((time.monotonic() - t0) * 1000) if t0 is not None else None
+
+        # Buffer the body so the caller's .text/.json() still works after us.
+        body_text = ""
+        try:
+            await response.aread()
+            body_text = response.text or ""
+        except Exception:
+            body_text = ""
+        body_size = len(body_text)
+        body_truncated = body_text[:_JD_RESPONSE_BODY_LIMIT]
+        was_truncated = body_size > len(body_truncated)
+
+        try:
+            from core.sentry import is_enabled
+        except Exception:
+            return
+        if not is_enabled():
+            return
+
+        try:
+            import sentry_sdk
+        except Exception:
+            return
+
+        method = response.request.method
+        url_path = response.request.url.path
+        url_full = _jd_redact_url(response.request.url)
+        status = response.status_code
+
+        try:
+            sentry_sdk.add_breadcrumb(
+                category="jobdiva.http",
+                level="info",
+                message=f"{method} {url_path} -> {status} ({elapsed_ms}ms)",
+                data={
+                    "url": url_full,
+                    "status_code": status,
+                    "elapsed_ms": elapsed_ms,
+                    "response_size_bytes": body_size,
+                },
+            )
+        except Exception:
+            pass
+
+        try:
+            with sentry_sdk.new_scope() as scope:
+                scope.set_tag("jobdiva_api", "1")
+                scope.set_tag("jobdiva_endpoint", url_path)
+                scope.set_tag("http_method", method)
+                scope.set_tag("status_code", str(status))
+                if elapsed_ms is not None:
+                    scope.set_tag("elapsed_ms", str(elapsed_ms))
+                scope.set_context(
+                    "jobdiva_response",
+                    {
+                        "url": url_full,
+                        "method": method,
+                        "status_code": status,
+                        "elapsed_ms": elapsed_ms,
+                        "response_size_bytes": body_size,
+                        "truncated": was_truncated,
+                        "response_body": body_truncated,
+                    },
+                )
+                level = "info" if 200 <= status < 400 else ("warning" if status < 500 else "error")
+                sentry_sdk.capture_message(
+                    f"JobDiva {method} {url_path} -> {status} ({elapsed_ms}ms)",
+                    level=level,
+                )
+        except Exception:
+            pass
+    except Exception:
+        # Logging must never break the actual API path.
+        return
+
+
+class _JDAsyncClient(_httpx_module.AsyncClient):
+    def __init__(self, *args, **kwargs):
+        hooks = kwargs.pop("event_hooks", None) or {}
+        request_hooks = list(hooks.get("request", [])) + [_jd_on_request]
+        response_hooks = list(hooks.get("response", [])) + [_jd_on_response]
+        kwargs["event_hooks"] = {"request": request_hooks, "response": response_hooks}
+        super().__init__(*args, **kwargs)
+
+
+class _JDHttpxProxy:
+    """Module-local stand-in for the `httpx` module.
+
+    AsyncClient is overridden to inject Sentry logging hooks; every other
+    attribute (TimeoutException, ConnectError, Request, ...) falls through
+    to the real httpx module untouched.
+    """
+    AsyncClient = _JDAsyncClient
+
+    def __getattr__(self, name):
+        return getattr(_httpx_module, name)
+
+
+httpx = _JDHttpxProxy()
+
 
 _CANDIDATE_EMAIL_KEYS = [
     "email",
@@ -211,14 +339,163 @@ def _clean_location_field(value: Any) -> str:
     return val_str
 
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PLACEHOLDER_EMAILS = {
+    "your-email@example.com",
+    "email@example.com",
+    "example@example.com",
+    "test@example.com",
+    "candidate@example.com",
+    "noreply@example.com",
+}
+_PLACEHOLDER_DOMAINS = {
+    "example.com",
+    "example.org",
+    "example.net",
+    "test.com",
+    "invalid",
+    "localhost",
+    "local",
+}
+_PLACEHOLDER_LOCALPARTS = {"your-email", "your_email", "email", "test", "example", "candidate"}
+
+
+def _is_placeholder_email(email: str) -> bool:
+    """Mirror of routers.engagement._is_placeholder_email so JobDiva extraction
+    skips synthetic/placeholder emails before they propagate downstream."""
+    normalized = (email or "").strip().lower()
+    if not normalized:
+        return True
+    if normalized in _PLACEHOLDER_EMAILS:
+        return True
+    if normalized.endswith("@noemail.pair.ai"):
+        return True
+    if "@" not in normalized:
+        return True
+    local_part, domain = normalized.rsplit("@", 1)
+    if domain in _PLACEHOLDER_DOMAINS:
+        return True
+    if local_part in _PLACEHOLDER_LOCALPARTS:
+        return True
+    # JobDiva auto-generates "Auto_<candidateId>@jobdiva.com" when a candidate
+    # has no real email on file. Treat any @jobdiva.com address as synthetic so
+    # a real ALTERNATEEMAIL is preferred and PAIR never emails a dead address.
+    if domain == "jobdiva.com":
+        return True
+    return False
+
+
+def _collect_field_values(data: Dict[str, Any], keys: List[str]) -> List[str]:
+    """Flatten every value found across `keys` (case/punctuation-insensitive),
+    expanding list and nested-date/value shapes into individual scalar strings.
+
+    Unlike get_field (which collapses to the first match), this preserves every
+    candidate value so callers like email/phone selection can apply their own
+    preference rule (e.g. prefer a non-placeholder email over the first one).
+    """
+    if not isinstance(data, dict):
+        return []
+
+    def normalize(s):
+        return re.sub(r'[^a-zA-Z0-9]', '', str(s).lower())
+
+    normalized_data = {normalize(k): v for k, v in data.items()}
+
+    def unwrap(item: Any) -> Optional[str]:
+        if isinstance(item, dict):
+            for subkey in ["dateTime", "date", "value", "$"]:
+                if subkey in item:
+                    item = item[subkey]
+                    break
+        if item is None:
+            return None
+        s = str(item).strip()
+        return s or None
+
+    values: List[str] = []
+    for key in keys:
+        norm_key = normalize(key)
+        if norm_key not in normalized_data:
+            continue
+        val = normalized_data[norm_key]
+        items = val if isinstance(val, list) else [val]
+        for item in items:
+            s = unwrap(item)
+            if s:
+                values.append(s)
+    return values
+
+
 def _get_candidate_email(data: Dict[str, Any]) -> str:
-    value = get_field(data, _CANDIDATE_EMAIL_KEYS) or ""
-    return str(value).strip()
+    """Return the candidate's best email: the first well-formed, non-placeholder
+    address across all email keys/list items. Falls back to the first well-formed
+    address only when every candidate is a placeholder, and finally to the first
+    raw value so behavior never regresses to empty when something is present."""
+    values = _collect_field_values(data, _CANDIDATE_EMAIL_KEYS)
+    if not values:
+        return ""
+
+    well_formed = [v for v in values if _EMAIL_RE.match(v.strip().lower())]
+    for v in well_formed:
+        if not _is_placeholder_email(v):
+            return v.strip()
+    if well_formed:
+        return well_formed[0].strip()
+    return values[0].strip()
 
 
 def _get_candidate_phone(data: Dict[str, Any]) -> str:
-    value = get_field(data, _CANDIDATE_PHONE_KEYS) or ""
-    return str(value).strip()
+    """Return the candidate's best phone, preferring a MOBILE/cell number.
+
+    JobDiva returns numbers in slots (CELLPHONE, PHONE1..PHONE4) where each
+    PHONE{n} carries a companion PHONE{n}_TYPE ('Mobile Phone', 'Home Phone',
+    'Work Phone', 'Home Fax'). PAIR contacts candidates on their mobile, so a
+    blank CELLPHONE must not let a Home/Work number in an earlier slot shadow a
+    real mobile sitting in a later, type-tagged slot. Preference order:
+      1) explicit mobile/cell fields (CELLPHONE, mobilePhone),
+      2) any PHONE{n} whose PHONE{n}_TYPE says mobile/cell,
+      3) otherwise the first phone slot that actually contains digits.
+    A value without digits (e.g. "Available upon request") is never a phone.
+    """
+    if not isinstance(data, dict):
+        return ""
+
+    def normalize(s):
+        return re.sub(r'[^a-zA-Z0-9]', '', str(s).lower())
+
+    norm = {normalize(k): v for k, v in data.items()}
+
+    def scalar(v: Any) -> str:
+        if isinstance(v, list):
+            v = next((x for x in v if x), None)
+        if isinstance(v, dict):
+            for sk in ["value", "$"]:
+                if sk in v:
+                    v = v[sk]
+                    break
+        return str(v).strip() if v is not None else ""
+
+    def has_digits(s: str) -> bool:
+        return any(ch.isdigit() for ch in s)
+
+    # 1) Explicit mobile/cell fields.
+    for key in ("mobilephone", "cellphone", "mobile", "cell"):
+        s = scalar(norm.get(key))
+        if has_digits(s):
+            return s
+
+    # 2) Slotted PHONE{n} whose companion PHONE{n}_TYPE indicates mobile/cell.
+    for n in range(1, 5):
+        s = scalar(norm.get(f"phone{n}"))
+        t = scalar(norm.get(f"phone{n}type")).lower()
+        if has_digits(s) and ("mobile" in t or "cell" in t):
+            return s
+
+    # 3) Fallback: first phone value that actually contains digits.
+    for v in _collect_field_values(data, _CANDIDATE_PHONE_KEYS):
+        if has_digits(v):
+            return v.strip()
+    return ""
 
 
 def _is_job_agent_criteria_unconfigured(status_code: int, body: str) -> bool:
@@ -813,6 +1090,11 @@ class JobDivaService:
         s = str(local_or_ref_id).strip()
         if not s:
             return None
+        # Strip an internal version suffix (e.g. "26-06182-v2" -> "26-06182").
+        # Versioned jobs are local clones used for re-editing after launch; they
+        # share the original JobDiva job, so sourcing must resolve against the
+        # un-versioned reference.
+        s = re.sub(r"-v\d+$", "", s)
         if "-" not in s:
             try:
                 return int(s)

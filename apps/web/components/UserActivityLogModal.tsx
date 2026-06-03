@@ -96,7 +96,10 @@ export function UserActivityLogModal({
       if (subtype === "sms") return <MessageSquare className="w-4 h-4" />;
       return <Mail className="w-4 h-4" />;
     }
-    if (type === "call_initiated" || type === "call_attempt") return <Phone className="w-4 h-4" />;
+    if (type === "call_initiated" || type === "call_attempt" || type.startsWith("call_status_")) return <Phone className="w-4 h-4" />;
+    if (type === "phase_transition") return <ChevronRight className="w-4 h-4" />;
+    if (type === "token_assigned" || type === "token_retry") return <ExternalLink className="w-4 h-4" />;
+    if (type === "interview_partial_completed") return <AlertCircle className="w-4 h-4" />;
     if (type.includes("started") || type.includes("joined")) return <Activity className="w-4 h-4" />;
     if (type.includes("completed") || type.includes("finished")) return <CheckCircle2 className="w-4 h-4" />;
     return <Info className="w-4 h-4" />;
@@ -114,12 +117,33 @@ export function UserActivityLogModal({
       case "pending":
       case "initiated":
         return "text-amber-600 bg-amber-50 border-amber-100";
+      case "partial":
+      case "started":
+        return "text-sky-600 bg-sky-50 border-sky-100";
       default:
         return "text-slate-600 bg-slate-50 border-slate-100";
     }
   };
 
   const formatActivityType = (type: string) => {
+    const labels: Record<string, string> = {
+      communication_sent: "Communication Sent",
+      call_initiated: "Call Initiated",
+      call_status_no_answer: "Call No Answer",
+      call_status_busy: "Call Busy",
+      call_status_failed: "Call Failed",
+      call_status_canceled: "Call Canceled",
+      call_status_unknown: "Call Status Updated",
+      phase_transition: "Phase Updated",
+      token_assigned: "Interview Link Created",
+      token_retry: "Interview Link Recreated",
+      interview_started_web: "Interview Launched",
+      interview_started_call: "Interview Started By Call",
+      interview_partial_completed: "Interview Partially Completed",
+      interview_completed: "Interview Completed",
+    };
+    if (labels[type]) return labels[type];
+
     return type
       .split("_")
       .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
@@ -230,7 +254,56 @@ export function UserActivityLogModal({
                             {log.activity_type === "communication_sent" && log.details.subject && (
                               <p className="text-slate-900 font-bold mb-1">Subject: {log.details.subject}</p>
                             )}
+                            {log.activity_type === "communication_sent" && log.details.message_type && (
+                              <p className="text-slate-700">
+                                Type: {String(log.details.message_type).replace(/_/g, " ")}
+                              </p>
+                            )}
+                            {log.activity_type === "phase_transition" && (
+                              <p className="text-slate-900">
+                                Phase changed from {log.details.old_phase || "unknown"} to {log.details.new_phase || log.phase}.
+                              </p>
+                            )}
+                            {(log.activity_type === "token_assigned" || log.activity_type === "token_retry") && (
+                              <p className="text-slate-900">
+                                Candidate interview link was {log.activity_type === "token_retry" ? "recreated" : "created"}.
+                              </p>
+                            )}
+                            {log.activity_type === "interview_started_web" && (
+                              <p className="text-slate-900">
+                                Candidate launched the web interview
+                                {log.details.launch_context === "partial_reminder_resume"
+                                  ? " from a partial reminder"
+                                  : ""}.
+                              </p>
+                            )}
+                            {log.activity_type === "interview_partial_completed" && (
+                              <p className="text-slate-900">
+                                Candidate left after partially completing the interview.
+                              </p>
+                            )}
+                            {log.activity_type === "interview_completed" && (
+                              <p className="text-slate-900">
+                                Candidate completed the interview successfully.
+                              </p>
+                            )}
+                            {typeof log.details.questions_completed === "number" && (
+                              <p className="text-slate-700">
+                                Questions completed: {log.details.questions_completed}
+                              </p>
+                            )}
+                            {log.details.session_started_at && (
+                              <p className="text-slate-700">
+                                Interview launched: {formatActivityDate(log.details.session_started_at)}
+                              </p>
+                            )}
+                            {typeof log.details.status === "string" && log.activity_type.startsWith("call_status_") && (
+                              <p className="text-slate-700">
+                                Call status: {log.details.status.replace(/_/g, " ")}
+                              </p>
+                            )}
                             {log.details.message && <p className="italic text-slate-500">"{log.details.message.substring(0, 150)}{log.details.message.length > 150 ? '...' : ''}"</p>}
+                            {log.details.content && <p className="italic text-slate-500">"{log.details.content.substring(0, 150)}{log.details.content.length > 150 ? '...' : ''}"</p>}
                             {log.details.phone_number && <p className="flex items-center gap-1.5"><Phone className="w-3.5 h-3.5 text-slate-400" /> {log.details.phone_number}</p>}
                             {log.details.error && <p className="text-rose-500 mt-1 bg-rose-50/50 p-2 rounded-lg border border-rose-100/50 text-xs font-semibold">{log.details.error}</p>}
                           </div>

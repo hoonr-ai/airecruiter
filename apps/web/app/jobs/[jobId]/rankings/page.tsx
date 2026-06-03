@@ -200,6 +200,10 @@ const ColumnFilterPopup = ({
 interface JobDetails {
   job_id: string;
   jobdiva_id?: string;
+  // JobDiva's internal numeric job id (monitored_jobs.job_id). The route param
+  // is usually the human reference (e.g. "26-02576"); the JobDiva portal deep
+  // link needs this numeric id, so we capture it separately from the API.
+  jobdiva_numeric_id?: string;
   title: string;
   customer_name?: string;
   openings?: number;
@@ -450,9 +454,15 @@ export default function CandidateRankingsPage() {
   const { jobId } = useParams();
   const router = useRouter();
   const engagement = useEngagementFlow();
+  const CANDIDATE_PAGE_SIZE = 100;
+  const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
   const [job, setJob] = useState<JobDetails | null>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
+  const [candidateTotalCount, setCandidateTotalCount] = useState(0);
+  const [candidateOffset, setCandidateOffset] = useState(0);
+  const [hasMoreCandidates, setHasMoreCandidates] = useState(false);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [launchedRowCount, setLaunchedRowCount] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -537,8 +547,10 @@ export default function CandidateRankingsPage() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
   const [minScore, setMinScore] = useState<number>(0);
-  const [sortField, setSortField] = useState<SortField>("index");
-  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  // Default the rank list to fit-score descending so it actually ranks by
+  // score rather than by the source-priority pre-sort applied at load time.
+  const [sortField, setSortField] = useState<SortField>("total_score");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [columnFilters, setColumnFilters] = useState<Record<string, ColumnFilter>>({});
   const [activeFilterField, setActiveFilterField] = useState<string | null>(null);
   const [isActivityLogModalOpen, setIsActivityLogModalOpen] = useState(false);
@@ -745,31 +757,53 @@ export default function CandidateRankingsPage() {
 
     if (sortField !== "index") {
       const dir = sortDir === "asc" ? 1 : -1;
+      // Coerce any score (number | string | null | "") to a finite number so a
+      // missing/non-numeric score sorts as 0 instead of producing NaN, which
+      // would scramble the comparator's ordering.
+      const num = (v: unknown) => {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : 0;
+      };
+      // Sort uses the SAME value the table cell displays (match_score, falling
+      // back to resume_match_percentage) so rows are never out of order
+      // relative to the number shown.
+      const getScore = (c: Candidate) => num(c.match_score ?? c.resume_match_percentage);
+      const getEngage = (c: Candidate) => (hasFinalEngageOutcome(c) ? num(c.engage_score) : -1);
+      const getTotalScore = (c: Candidate) => {
+        const screeningScore = getScore(c);
+        return hasFinalEngageOutcome(c)
+          ? Math.round((screeningScore + num(c.engage_score)) / 2 * 10) / 10
+          : screeningScore;
+      };
+      // Deterministic tie-break so equal scores keep a stable, repeatable order.
+      const tieBreak = (a: Candidate, b: Candidate) =>
+        (a.name || "").localeCompare(b.name || "") ||
+        String(a.candidate_id || a.id || "").localeCompare(String(b.candidate_id || b.id || ""));
       rows = [...rows].sort((a, b) => {
-        const getScore = (c: Candidate) => c.match_score ?? c.resume_match_percentage ?? 0;
-        const getEngage = (c: Candidate) => (hasFinalEngageOutcome(c) ? (c.engage_score ?? 0) : -1);
-        const getTotalScore = (c: Candidate) => {
-          const screeningScore = getScore(c);
-          return hasFinalEngageOutcome(c)
-            ? Math.round((screeningScore + (c.engage_score ?? 0)) / 2 * 10) / 10
-            : screeningScore;
-        };
+        let primary = 0;
         switch (sortField) {
           case "name":
-            return dir * (a.name || "").localeCompare(b.name || "");
+            primary = (a.name || "").localeCompare(b.name || "");
+            break;
           case "screening_score":
-            return dir * (getScore(a) - getScore(b));
+            primary = getScore(a) - getScore(b);
+            break;
           case "engage_score":
-            return dir * (getEngage(a) - getEngage(b));
+            primary = getEngage(a) - getEngage(b);
+            break;
           case "total_score":
-            return dir * (getTotalScore(a) - getTotalScore(b));
+            primary = getTotalScore(a) - getTotalScore(b);
+            break;
           case "source":
-            return dir * (normalizeSourceLabel(a.source)).localeCompare(normalizeSourceLabel(b.source));
+            primary = normalizeSourceLabel(a.source).localeCompare(normalizeSourceLabel(b.source));
+            break;
           case "engage_status":
-            return dir * (normalizeInterviewStatus(a).label).localeCompare(normalizeInterviewStatus(b).label);
+            primary = normalizeInterviewStatus(a).label.localeCompare(normalizeInterviewStatus(b).label);
+            break;
           default:
-            return 0;
+            primary = 0;
         }
+        return primary !== 0 ? dir * primary : tieBreak(a, b);
       });
     }
     return rows;
@@ -820,6 +854,7 @@ export default function CandidateRankingsPage() {
   const [pendingScreenCandidate, setPendingScreenCandidate] = useState<Candidate | null>(null);
   const [enrichingCandidateIds, setEnrichingCandidateIds] = useState<Set<string>>(new Set());
   const [enrichStatusByCandidateId, setEnrichStatusByCandidateId] = useState<Record<string, EnrichStatus>>({});
+  const tableScrollRef = useRef<HTMLDivElement | null>(null);
 
   const hasUsablePhone = (p?: string | null) => {
     const digits = String(p || "").replace(/\D/g, "");
@@ -874,6 +909,19 @@ export default function CandidateRankingsPage() {
       } else {
         pushToast("LinkedIn profile URL not available", "info");
       }
+      return;
+    }
+
+    // JobDiva candidate: prefer a direct deep link built from the candidate's
+    // JobDiva id. The PROFILEURL-based API fetch below is frequently empty and
+    // can return a stale/dead format, so build the verified-live candidate URL
+    // ourselves (same format CandidateDetailsModal uses).
+    const jobdivaCandidateId = String(
+      candidate.jobdiva_candidate_id || candidate.data?.jobdiva_candidate_id || ""
+    ).trim();
+    if (jobdivaCandidateId) {
+      const url = `https://www1.jobdiva.com/employers/myreports/viewcandidate2_real.jsp?docids=-1&candidateid=${encodeURIComponent(jobdivaCandidateId)}`;
+      window.open(url, "_blank", "noopener,noreferrer");
       return;
     }
 
@@ -1223,8 +1271,174 @@ export default function CandidateRankingsPage() {
     return () => clearTimeout(timer);
   }, [toast]);
 
+  const normalizeCandidateRows = useCallback((rows: any[]): Candidate[] => {
+    const getCanonicalCandidateKey = (c: any) => {
+      const jobDivaCandidateId = String(
+        c.jobdiva_candidate_id || c.data?.jobdiva_candidate_id || ""
+      ).trim();
+      const emailKey = String(c.email || c.data?.email || "").trim().toLowerCase();
+      const phoneKey = String(c.phone || c.data?.phone || "").replace(/\D/g, "");
+      const profileKey = String(c.profile_url || c.data?.urls?.linkedin || "").trim().toLowerCase();
+      const sourceCandidateId = String(c.candidate_id || "").trim();
+      const nameKey = String(c.name || "").trim().toLowerCase();
+
+      if (jobDivaCandidateId) return `jd:${jobDivaCandidateId}`;
+      if (emailKey) return `email:${emailKey}`;
+      if (phoneKey && nameKey) return `phone-name:${phoneKey}:${nameKey}`;
+      if (profileKey) return `profile:${profileKey}`;
+      if (sourceCandidateId) return `cid:${sourceCandidateId}`;
+      if (nameKey) return `name:${nameKey}`;
+      return `row:${String(c.id || "").trim()}`;
+    };
+
+    const getCandidateRank = (c: any) => {
+      const hasJobDivaCandidateId = Boolean(
+        String(c.jobdiva_candidate_id || c.data?.jobdiva_candidate_id || "").trim()
+      );
+      const source = String(c.source || "").toLowerCase();
+      const sourcePriority =
+        source.includes("linkedin") ? 0 :
+          source.includes("talentsearch") || source.includes("talent_search") ? 1 :
+            source.includes("applicants") ? 2 : 3;
+      const matchScore = Number(c.match_score || c.resume_match_percentage || c.data?.match_score || 0);
+      return {
+        hasJobDivaCandidateId,
+        sourcePriority,
+        matchScore,
+        createdAt: Date.parse(String(c.created_at || 0)) || 0,
+      };
+    };
+
+    const dedupedByIdentity = new Map<string, any>();
+    rows.forEach((candidate: any) => {
+      const dedupKey = getCanonicalCandidateKey(candidate);
+      const existing = dedupedByIdentity.get(dedupKey);
+      if (!existing) {
+        dedupedByIdentity.set(dedupKey, candidate);
+        return;
+      }
+
+      const currentRank = getCandidateRank(candidate);
+      const existingRank = getCandidateRank(existing);
+      const shouldReplace =
+        (currentRank.hasJobDivaCandidateId ? 1 : 0) > (existingRank.hasJobDivaCandidateId ? 1 : 0) ||
+        (
+          currentRank.hasJobDivaCandidateId === existingRank.hasJobDivaCandidateId &&
+          currentRank.sourcePriority < existingRank.sourcePriority
+        ) ||
+        (
+          currentRank.hasJobDivaCandidateId === existingRank.hasJobDivaCandidateId &&
+          currentRank.sourcePriority === existingRank.sourcePriority &&
+          currentRank.matchScore > existingRank.matchScore
+        ) ||
+        (
+          currentRank.hasJobDivaCandidateId === existingRank.hasJobDivaCandidateId &&
+          currentRank.sourcePriority === existingRank.sourcePriority &&
+          currentRank.matchScore === existingRank.matchScore &&
+          currentRank.createdAt > existingRank.createdAt
+        );
+
+      if (shouldReplace) {
+        dedupedByIdentity.set(dedupKey, candidate);
+      }
+    });
+    const uniqueCandidates = Array.from(dedupedByIdentity.values());
+
+    const getSourcePriority = (source: string) => {
+      const s = (source || "").toLowerCase();
+      if (s.includes('applicants')) return 1;
+      if (s.includes('linkedin')) return 2;
+      if (s.includes('talentsearch') || s.includes('talent_search')) return 3;
+      return 4;
+    };
+
+    const sorted = uniqueCandidates.sort((a: any, b: any) => {
+      const prioA = getSourcePriority(a.source);
+      const prioB = getSourcePriority(b.source);
+      if (prioA !== prioB) return prioA - prioB;
+
+      const totalA = (a.match_score || a.resume_match_percentage || 0);
+      const totalB = (b.match_score || b.resume_match_percentage || 0);
+      return totalB - totalA;
+    });
+
+    return sorted as Candidate[];
+  }, []);
+
+  const fetchCandidatesPage = useCallback(async (offset: number, replace: boolean) => {
+    const apiBase = API_BASE;
+    const query = new URLSearchParams({
+      limit: String(CANDIDATE_PAGE_SIZE),
+      offset: String(offset),
+    });
+    const candRes = await fetch(`${apiBase}/jobs/${jobId}/candidates?${query.toString()}`);
+    const candData = await candRes.json();
+
+    if (candData.status !== "success" || !Array.isArray(candData.candidates)) return;
+
+    const pageRows = candData.candidates;
+    const pageFeedbacks: Record<string, string> = {};
+    pageRows.forEach((c: any) => {
+      if (c.data?.feedback_type) {
+        pageFeedbacks[c.id] = c.data.feedback_type;
+      }
+    });
+    setFeedbacks(prev => ({ ...prev, ...pageFeedbacks }));
+
+    const launchedCount = Number(candData?.launched_count);
+    if (Number.isFinite(launchedCount)) {
+      setLaunchedRowCount(launchedCount);
+    }
+
+    const total = Number(candData?.pagination?.total);
+    if (Number.isFinite(total)) {
+      setCandidateTotalCount(total);
+    }
+
+    setHasMoreCandidates(Boolean(candData?.pagination?.has_more));
+    setCandidateOffset(offset + pageRows.length);
+
+    setCandidates(prev => {
+      const mergedRows = replace ? pageRows : [...prev, ...pageRows];
+      return normalizeCandidateRows(mergedRows);
+    });
+
+    // Fallback: if monitored job title is missing, infer from the first loaded row.
+    setJob(prev => {
+      if (!prev || prev.title === `Job ${jobId}`) {
+        const firstCand = pageRows[0];
+        const recoveredTitle = firstCand?.headline || firstCand?.job_title || `Job ${jobId}`;
+        return {
+          ...(prev || {}),
+          job_id: jobId as string,
+          title: recoveredTitle,
+        };
+      }
+      return prev;
+    });
+  }, [CANDIDATE_PAGE_SIZE, jobId, normalizeCandidateRows]);
+
+  const loadMoreCandidates = useCallback(async () => {
+    if (!jobId || isLoading || isLoadingMore || !hasMoreCandidates) return;
+    setIsLoadingMore(true);
+    try {
+      await fetchCandidatesPage(candidateOffset, false);
+    } catch (error) {
+      console.error("Error loading next candidate page:", error);
+    } finally {
+      setIsLoadingMore(false);
+    }
+  }, [candidateOffset, fetchCandidatesPage, hasMoreCandidates, isLoading, isLoadingMore, jobId]);
+
   const fetchData = async () => {
     setIsLoading(true);
+    setIsLoadingMore(false);
+    setCandidates([]);
+    setFeedbacks({});
+    setCandidateTotalCount(0);
+    setLaunchedRowCount(0);
+    setCandidateOffset(0);
+    setHasMoreCandidates(false);
     try {
       const apiBase = API_BASE;
 
@@ -1239,6 +1453,7 @@ export default function CandidateRankingsPage() {
         setJob({
           job_id: jobId as string,
           jobdiva_id: data.jobdiva_id,
+          jobdiva_numeric_id: data.job_id ? String(data.job_id) : undefined,
           title: data.enhanced_title || data.title || `Job ${jobId}`,
           customer_name: data.customer_name,
           openings: data.openings,
@@ -1274,137 +1489,50 @@ export default function CandidateRankingsPage() {
         console.warn("Failed to fetch job criteria:", e);
       }
 
-      // Fetch candidates
-      const candRes = await fetch(`${apiBase}/jobs/${jobId}/candidates`);
-      const candData = await candRes.json();
-      if (candData.status === "success" && Array.isArray(candData.candidates)) {
-        const actuallyLaunched = candData.candidates.filter((c: any) => c.data?.engage_status && c.data.engage_status !== "");
-        setLaunchedRowCount(actuallyLaunched.length);
-        // Initialize feedbacks state from persisted data
-        const initialFeedbacks: Record<string, string> = {};
-        candData.candidates.forEach((c: any) => {
-          if (c.data?.feedback_type) {
-            initialFeedbacks[c.id] = c.data.feedback_type;
-          }
-        });
-        setFeedbacks(initialFeedbacks);
-
-        // Deduplicate humans, not source-specific rows. Once Launchpad maps a
-        // sourced candidate into JobDiva we want one rankings row carrying the
-        // JobDiva identity, not a second "applicant" row.
-        const getCanonicalCandidateKey = (c: any) => {
-          const jobDivaCandidateId = String(
-            c.jobdiva_candidate_id || c.data?.jobdiva_candidate_id || ""
-          ).trim();
-          const emailKey = String(c.email || c.data?.email || "").trim().toLowerCase();
-          const phoneKey = String(c.phone || c.data?.phone || "").replace(/\D/g, "");
-          const profileKey = String(c.profile_url || c.data?.urls?.linkedin || "").trim().toLowerCase();
-          const sourceCandidateId = String(c.candidate_id || "").trim();
-          const nameKey = String(c.name || "").trim().toLowerCase();
-
-          if (jobDivaCandidateId) return `jd:${jobDivaCandidateId}`;
-          if (emailKey) return `email:${emailKey}`;
-          if (phoneKey && nameKey) return `phone-name:${phoneKey}:${nameKey}`;
-          if (profileKey) return `profile:${profileKey}`;
-          if (sourceCandidateId) return `cid:${sourceCandidateId}`;
-          if (nameKey) return `name:${nameKey}`;
-          return `row:${String(c.id || "").trim()}`;
-        };
-
-        const getCandidateRank = (c: any) => {
-          const hasJobDivaCandidateId = Boolean(
-            String(c.jobdiva_candidate_id || c.data?.jobdiva_candidate_id || "").trim()
-          );
-          const source = String(c.source || "").toLowerCase();
-          const sourcePriority =
-            source.includes("linkedin") ? 0 :
-              source.includes("talentsearch") || source.includes("talent_search") ? 1 :
-                source.includes("applicants") ? 2 : 3;
-          const matchScore = Number(c.match_score || c.resume_match_percentage || c.data?.match_score || 0);
-          return {
-            hasJobDivaCandidateId,
-            sourcePriority,
-            matchScore,
-            createdAt: Date.parse(String(c.created_at || 0)) || 0,
-          };
-        };
-
-        const dedupedByIdentity = new Map<string, any>();
-        candData.candidates.forEach((candidate: any) => {
-          const dedupKey = getCanonicalCandidateKey(candidate);
-          const existing = dedupedByIdentity.get(dedupKey);
-          if (!existing) {
-            dedupedByIdentity.set(dedupKey, candidate);
-            return;
-          }
-
-          const currentRank = getCandidateRank(candidate);
-          const existingRank = getCandidateRank(existing);
-          const shouldReplace =
-            (currentRank.hasJobDivaCandidateId ? 1 : 0) > (existingRank.hasJobDivaCandidateId ? 1 : 0) ||
-            (
-              currentRank.hasJobDivaCandidateId === existingRank.hasJobDivaCandidateId &&
-              currentRank.sourcePriority < existingRank.sourcePriority
-            ) ||
-            (
-              currentRank.hasJobDivaCandidateId === existingRank.hasJobDivaCandidateId &&
-              currentRank.sourcePriority === existingRank.sourcePriority &&
-              currentRank.matchScore > existingRank.matchScore
-            ) ||
-            (
-              currentRank.hasJobDivaCandidateId === existingRank.hasJobDivaCandidateId &&
-              currentRank.sourcePriority === existingRank.sourcePriority &&
-              currentRank.matchScore === existingRank.matchScore &&
-              currentRank.createdAt > existingRank.createdAt
-            );
-
-          if (shouldReplace) {
-            dedupedByIdentity.set(dedupKey, candidate);
-          }
-        });
-        const uniqueCandidates = Array.from(dedupedByIdentity.values());
-
-        const getSourcePriority = (source: string) => {
-          const s = (source || "").toLowerCase();
-          if (s.includes('applicants')) return 1;
-          if (s.includes('linkedin')) return 2;
-          if (s.includes('talentsearch') || s.includes('talent_search')) return 3;
-          return 4;
-        };
-
-        const sorted = uniqueCandidates.sort((a: any, b: any) => {
-          // 1. Primary sort by source priority
-          const prioA = getSourcePriority(a.source);
-          const prioB = getSourcePriority(b.source);
-          if (prioA !== prioB) return prioA - prioB;
-
-          // 2. Secondary sort by match percentage
-          const totalA = (a.match_score || a.resume_match_percentage || 0);
-          const totalB = (b.match_score || b.resume_match_percentage || 0);
-          return totalB - totalA;
-        });
-        setCandidates(sorted as Candidate[]);
-
-        // EXTRA FALLBACK: If job title is still Unknown, borrow from candidates
-        setJob(prev => {
-          if (!prev || prev.title === `Job ${jobId}`) {
-            const firstCand = sorted[0];
-            const recoveredTitle = firstCand?.headline || firstCand?.job_title || `Job ${jobId}`;
-            return {
-              ...(prev || {}),
-              job_id: jobId as string,
-              title: recoveredTitle,
-            };
-          }
-          return prev;
-        });
-      }
+      await fetchCandidatesPage(0, true);
     } catch (error) {
       console.error("Error fetching ranking data:", error);
     } finally {
       setIsLoading(false);
     }
   };
+
+  // Ref-based scroll listener to avoid stale closure issues
+  const loadMoreCandidatesRef = useRef(loadMoreCandidates);
+  useEffect(() => { loadMoreCandidatesRef.current = loadMoreCandidates; }, [loadMoreCandidates]);
+
+  useEffect(() => {
+    const container = tableScrollRef.current;
+    if (!container) return;
+
+    const onScroll = () => {
+      if (!hasMoreCandidates || isLoading || isLoadingMore) return;
+      const remaining = container.scrollHeight - container.scrollTop - container.clientHeight;
+      if (remaining < 400) {
+        loadMoreCandidatesRef.current();
+      }
+    };
+
+    container.addEventListener("scroll", onScroll, { passive: true });
+    return () => container.removeEventListener("scroll", onScroll);
+  }, [hasMoreCandidates, isLoading, isLoadingMore]);
+
+  // IntersectionObserver sentinel — fires when the bottom sentinel enters view
+  useEffect(() => {
+    const sentinel = loadMoreRef.current;
+    if (!sentinel) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          loadMoreCandidatesRef.current();
+        }
+      },
+      { root: tableScrollRef.current, rootMargin: "200px", threshold: 0 }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  // Re-attach when hasMoreCandidates changes so we stop observing when done
+  }, [hasMoreCandidates]);
 
   const openDetails = (candidate: Candidate) => {
     setSelectedCandidate(candidate);
@@ -1440,7 +1568,18 @@ export default function CandidateRankingsPage() {
                 <h2 className="text-2xl font-bold text-slate-900 m-0 flex items-center gap-2">
                   {job?.title}
                   <span className="text-slate-500 font-medium text-lg">
-                    ({job?.jobdiva_id || job?.job_id || jobId}) <span className="text-indigo-600 text-sm ml-1 cursor-pointer hover:underline">🔗</span>
+                    ({job?.jobdiva_id || job?.job_id || jobId})
+                    {(job?.jobdiva_numeric_id || job?.jobdiva_id) && (
+                      <a
+                        href={`https://www1.jobdiva.com/employers/myjobs/vieweditjobform.jsp?lstjobs=1&jobid=${encodeURIComponent(job.jobdiva_numeric_id || job.jobdiva_id || "")}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Open job in JobDiva"
+                        className="inline-flex items-center text-indigo-600 ml-1.5 align-middle hover:text-indigo-800"
+                      >
+                        <ExternalLink className="w-4 h-4" />
+                      </a>
+                    )}
                   </span>
                 </h2>
               </>
@@ -1720,15 +1859,19 @@ export default function CandidateRankingsPage() {
             </button>
           )}
 
-          <div className="ml-auto text-[13px] font-bold text-slate-500 px-2">
-            Showing <span className="text-slate-900">{filteredCandidates.length}</span> of <span className="text-slate-900">{candidates.length}</span>
+          <div className="ml-auto text-[13px] font-bold text-slate-500 px-2 text-right">
+            Showing <span className="text-slate-900">{filteredCandidates.length}</span> of <span className="text-slate-900">{candidateTotalCount || candidates.length}</span>
             <span className="text-slate-400"> visible candidates</span>
+            {(hasMoreCandidates || candidates.length < (candidateTotalCount || 0)) && (
+              <div className="text-[11px] font-medium text-slate-400">Loaded {candidates.length} so far</div>
+            )}
           </div>
         </div>
 
         {/* HTML Exact Replica Table */}
         <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm relative max-w-full">
           <div
+            ref={tableScrollRef}
             className="overflow-x-auto overflow-y-auto rounded-2xl pb-2 scrollbar-thin scrollbar-thumb-slate-200 scrollbar-track-transparent"
             style={{ maxHeight: 'calc(100vh - 320px)' }}
           >
@@ -1954,7 +2097,9 @@ export default function CandidateRankingsPage() {
                 ) : (
                   filteredCandidates.map((candidate, idx) => {
                     const candidateKey = `${candidate.id || candidate.candidate_id || idx}`;
-                    const screeningScore = candidate.match_score || 0;
+                    // Keep this in sync with the sort comparator's getScore so the
+                    // displayed number always matches the sorted order.
+                    const screeningScore = candidate.match_score ?? candidate.resume_match_percentage ?? 0;
                     const showEngageScore = hasFinalEngageOutcome(candidate);
                     const engageScore = showEngageScore ? (candidate.engage_score || 0) : 0;
                     const totalScore = showEngageScore ? Math.round((screeningScore + engageScore) / 2 * 10) / 10 : null;
@@ -2234,6 +2379,33 @@ export default function CandidateRankingsPage() {
                 )}
               </TableBody>
             </table>
+
+            {/* Sentinel div — IntersectionObserver watches this to trigger next page load */}
+            <div ref={loadMoreRef} className="h-1" aria-hidden="true" />
+
+            {/* In-table loading indicator */}
+            {isLoadingMore && (
+              <div className="flex items-center justify-center gap-2.5 py-5 border-t border-slate-100 bg-white">
+                <Loader2 className="w-4 h-4 animate-spin text-indigo-500" />
+                <span className="text-[12px] font-semibold text-slate-500">Loading more candidates…</span>
+              </div>
+            )}
+
+            {/* Manual load-more button as fallback when auto-scroll hasn't triggered */}
+            {!isLoadingMore && hasMoreCandidates && (
+              <div className="flex flex-col items-center gap-2 py-4 border-t border-slate-100 bg-white">
+                <p className="text-[11px] text-slate-400">
+                  Showing {candidates.length} of {candidateTotalCount} candidates
+                </p>
+                <button
+                  onClick={loadMoreCandidates}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-lg border border-indigo-200 bg-indigo-50 text-indigo-700 text-[12px] font-bold hover:bg-indigo-100 transition-colors shadow-sm"
+                >
+                  <ChevronDown className="w-4 h-4" />
+                  Load more
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -2325,6 +2497,8 @@ export default function CandidateRankingsPage() {
         title="Phone number required"
         description="PAIR can only call candidates with a phone number on file. Add it below to continue."
         primaryLabel="Save & Screen"
+        jobId={String(jobId || "")}
+        jobDivaId={job?.jobdiva_id || String(jobId || "")}
       />
 
       {/* Integration Modals */}
