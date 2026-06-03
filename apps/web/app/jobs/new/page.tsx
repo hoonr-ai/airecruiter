@@ -6333,15 +6333,20 @@ function NewJobPageContent() {
       finalMessage: engageFailureMessage ?? undefined,
     }));
 
-    // Launching used to redirect straight to the rank list, which made it
-    // impossible to launch PAIR for the rest of the list. Instead we now stay
-    // on Step 5: drop the just-launched people off the list (they're in the
-    // rank list now) and clear the selection so the recruiter can immediately
-    // pick and launch the remaining candidates. The progress modal offers a
-    // "View Rank List" button for anyone who does want to jump over.
+    // After a successful launch, redirect to this job's rank list. The
+    // just-launched candidates now live there; to launch PAIR for the
+    // remaining candidates the recruiter re-opens the job in source mode
+    // ("Source Candidates"), where already-launched people are filtered out
+    // of Step 5 so only the remaining ones can be selected and launched.
     if (totalSaved > 0 && !options?.skipRedirect) {
-      setSelectedCandidates(new Set());
-      await refreshLaunchedKeys();
+      setTimeout(() => {
+        setLaunchProgress(initialLaunchProgress);
+        if (jobIdForEngage) {
+          router.push(`/jobs/${encodeURIComponent(jobIdForEngage)}/rankings`);
+        } else {
+          router.push(`/`);
+        }
+      }, 1500);
     }
 
     return { success: totalSaved > 0, savedCount: totalSaved };
@@ -6726,11 +6731,14 @@ function NewJobPageContent() {
     setMissingContactsReviewMode(false);
     setPendingLaunchOverrides({});
     if (readyLaunchedPendingRedirect) {
-      // A "ready" batch already launched; instead of bouncing to the rank
-      // list, stay on Step 5 with the launched people removed so the recruiter
-      // can keep launching the rest.
-      setSelectedCandidates(new Set());
-      refreshLaunchedKeys();
+      const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
+      setTimeout(() => {
+        if (jobIdForEngage) {
+          router.push(`/jobs/${encodeURIComponent(jobIdForEngage)}/rankings`);
+        } else {
+          router.push(`/`);
+        }
+      }, 200);
       setReadyLaunchedPendingRedirect(false);
     }
   };
@@ -8688,11 +8696,6 @@ return (
     <LaunchPairProgressModal
       progress={launchProgress}
       onClose={() => setLaunchProgress(initialLaunchProgress)}
-      onViewRankList={() => {
-        const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
-        setLaunchProgress(initialLaunchProgress);
-        router.push(jobIdForEngage ? `/jobs/${encodeURIComponent(jobIdForEngage)}/rankings` : `/`);
-      }}
     />
 
     {/* Paste Resume Modal (External requirement) */}

@@ -81,10 +81,6 @@ export const initialLaunchProgress: LaunchPairProgress = {
 interface LaunchPairProgressModalProps {
   progress: LaunchPairProgress;
   onClose: () => void;
-  // Optional: when the launch saved at least one candidate, surface a button
-  // to jump to the rank list. Closing instead keeps the recruiter on Step 5 so
-  // they can launch PAIR for the remaining candidates.
-  onViewRankList?: () => void;
 }
 
 function StageIcon({ status }: { status: BatchStatus }) {
@@ -120,7 +116,6 @@ function batchLabel(b: LaunchBatchInfo): string {
 export function LaunchPairProgressModal({
   progress,
   onClose,
-  onViewRankList,
 }: LaunchPairProgressModalProps) {
   const {
     open,
@@ -300,21 +295,12 @@ export function LaunchPairProgressModal({
         )}
 
         <DialogFooter>
-          {isDone && totalSaved > 0 && onViewRankList && (
-            <Button
-              variant="outline"
-              onClick={onViewRankList}
-              className="border-slate-200"
-            >
-              View Rank List
-            </Button>
-          )}
           <Button
             disabled={!isDone}
             onClick={onClose}
             className="bg-[#6366f1] hover:bg-[#4f46e5] text-white"
           >
-            {isDone ? (totalSaved > 0 ? "Launch More" : "Close") : "Working…"}
+            {isDone ? "Close" : "Working…"}
           </Button>
         </DialogFooter>
       </DialogContent>
