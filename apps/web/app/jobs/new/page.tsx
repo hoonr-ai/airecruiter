@@ -643,6 +643,15 @@ function NewJobPageContent() {
         resumeText: resumeText,
         keywords: primary,
         similarKeywords: similar,
+        jobdivaCandidateId: String(
+          candidate.jobdiva_candidate_id ||
+            candidate.data?.jobdiva_candidate_id ||
+            candidate.candidate_id ||
+            candidate.candidateId ||
+            candidate.id ||
+            ""
+        ).trim() || undefined,
+        source: candidate.source,
       });
       setResumeModalOpen(true);
     } else {
@@ -6040,6 +6049,9 @@ function NewJobPageContent() {
     // this check at /candidates/save — defense in depth.
     const candidatesPayload = effective
       .filter(c => launchIds.has(c.candidate_id || c.jobdiva_candidate_id || c.id))
+      // Hard filter fail safety net: a 0% candidate must never reach
+      // /candidates/save, even via the second MissingContactsModal pass.
+      .filter(c => getCandidateMatchScore(c) !== 0)
       .filter(c => {
         if (dncPhones.size === 0) return true;
         const np = normalizePhone(c.phone);
@@ -6363,9 +6375,26 @@ function NewJobPageContent() {
       showToast("Select at least one candidate before launching PAIR.", "info");
       return;
     }
+
+    // Hard filter fail: candidates scored exactly 0% are never launched, even
+    // when selected. Compute the skip set once and thread it through the flow
+    // below WITHOUT touching the table selection — they are simply excluded
+    // from the launch payload and reported on the completion screen.
+    const hardFilterSkipIds = new Set<string>();
+    const hardFilterSkippedNames: string[] = [];
+    for (const c of candidates) {
+      const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
+      if (!id || !selectedCandidates.has(id)) continue;
+      if (getCandidateMatchScore(c) === 0) {
+        hardFilterSkipIds.add(id);
+        hardFilterSkippedNames.push(getCandidateDisplayName(c) || c.name || "Unnamed");
+      }
+    }
+
     trackEvent("job_wizard_step5_launch_pair_clicked", {
       step: 5,
       selected_candidates_count: selectedCandidates.size,
+      hard_filter_skipped: hardFilterSkipIds.size,
     });
 
     // Persist the latest Step-5 sourcing state before launching so titles /
@@ -6382,7 +6411,7 @@ function NewJobPageContent() {
         const launchJobdivaId = jobdivaId || jobData?.jobdiva_id || numericJobId || undefined;
         for (const c of candidates) {
           const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-          if (!id || !selectedCandidates.has(id)) continue;
+          if (!id || !selectedCandidates.has(id) || hardFilterSkipIds.has(id)) continue;
           const currentPhone = getCandidateLaunchPhone(c);
           const currentEmail = getCandidateLaunchEmail(c);
           reviewList.push({
@@ -6412,6 +6441,7 @@ function NewJobPageContent() {
       const candidatesMissingContact = candidates.filter(c => {
         const id = c.candidate_id || c.jobdiva_candidate_id || c.id;
         if (!selectedCandidates.has(id)) return false;
+        if (hardFilterSkipIds.has(String(id || "").trim())) return false;
         const phone = getCandidateLaunchPhone(c);
         const email = getCandidateLaunchEmail(c);
         return !isValidLaunchPhone(phone) || !isValidLaunchEmail(email);
@@ -6424,9 +6454,11 @@ function NewJobPageContent() {
         ...initialLaunchProgress,
         open: true,
         phase: candidatesMissingContact.length > 0 ? "enriching" : "launching",
-        totalCandidates: selectedCandidates.size,
+        totalCandidates: Math.max(0, selectedCandidates.size - hardFilterSkipIds.size),
         batchSize: LAUNCH_BATCH_SIZE,
         enrichTotal: candidatesMissingContact.length,
+        hardFilterSkipped: hardFilterSkipIds.size,
+        hardFilterSkippedNames,
       });
 
       const contactOverrides: Record<string, { phone?: string; email?: string }> = {};
@@ -6602,7 +6634,7 @@ function NewJobPageContent() {
       const phoneToCandidateIds = new Map<string, string[]>();
       for (const c of candidates) {
         const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-        if (!id || !selectedCandidates.has(id) || dncDropped.has(id)) continue;
+        if (!id || !selectedCandidates.has(id) || dncDropped.has(id) || hardFilterSkipIds.has(id)) continue;
         const overrideEmail = contactOverrides[id]?.email;
         const overridePhone = contactOverrides[id]?.phone;
         const effectiveEmail = String(overrideEmail || getCandidateLaunchEmail(c)).trim().toLowerCase();
@@ -6631,7 +6663,7 @@ function NewJobPageContent() {
       }
       for (const c of candidates) {
         const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-        if (!id || !selectedCandidates.has(id) || dncDropped.has(id)) continue;
+        if (!id || !selectedCandidates.has(id) || dncDropped.has(id) || hardFilterSkipIds.has(id)) continue;
         const overridePhone = contactOverrides[id]?.phone;
         const overrideEmail = contactOverrides[id]?.email;
         const effectivePhone = overridePhone || getCandidateLaunchPhone(c);
@@ -6684,6 +6716,20 @@ function NewJobPageContent() {
         if (hasNeeds) {
           setLaunchProgress(initialLaunchProgress);
         }
+      } else if (!hasNeeds && hardFilterSkipIds.size > 0) {
+        setReadyLaunchedPendingRedirect(false);
+        // Nothing to launch, but the only reason is hard-filter skips. Keep the
+        // progress modal open in a completed state so the recruiter sees which
+        // candidates were skipped (and why) instead of a bare toast.
+        setLaunchProgress(prev => ({
+          ...prev,
+          open: true,
+          phase: "completed",
+          totalCandidates: 0,
+          enrichTotal: 0,
+          batches: [],
+          finalMessage: "No candidates launched — all selected candidates failed the hard filter (0% match).",
+        }));
       } else {
         setReadyLaunchedPendingRedirect(false);
         // No ready candidates: nothing for runLaunchPair to do, so drop
@@ -6696,6 +6742,11 @@ function NewJobPageContent() {
         setMissingContactCandidates(needsInfo);
         setMissingContactsReviewMode(false);
         setMissingContactsOpen(true);
+      } else if (!hasReady && hardFilterSkipIds.size > 0) {
+        showToast(
+          `${hardFilterSkipIds.size} candidate${hardFilterSkipIds.size === 1 ? "" : "s"} skipped — hard filter failed (0% match).`,
+          "info",
+        );
       } else if (!hasReady) {
         showToast("No candidates available to launch.", "info");
       }
@@ -8665,6 +8716,8 @@ return (
         resumeText={selectedCandidateForResume.resumeText}
         keywords={selectedCandidateForResume.keywords}
         similarKeywords={selectedCandidateForResume.similarKeywords}
+        jobdivaCandidateId={selectedCandidateForResume.jobdivaCandidateId}
+        source={selectedCandidateForResume.source}
         isOpen={resumeModalOpen}
         onClose={() => {
           setResumeModalOpen(false);
