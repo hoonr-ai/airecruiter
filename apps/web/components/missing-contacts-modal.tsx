@@ -48,6 +48,8 @@ interface MissingContactsModalProps {
   title?: string;
   description?: string;
   primaryLabel?: string;
+  jobId?: string;
+  jobDivaId?: string;
 }
 
 function countDigits(s: string) {
