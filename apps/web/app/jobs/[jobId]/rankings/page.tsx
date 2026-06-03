@@ -2325,6 +2325,8 @@ export default function CandidateRankingsPage() {
         title="Phone number required"
         description="PAIR can only call candidates with a phone number on file. Add it below to continue."
         primaryLabel="Save & Screen"
+        jobId={String(jobId || "")}
+        jobDivaId={job?.jobdiva_id || String(jobId || "")}
       />
 
       {/* Integration Modals */}
