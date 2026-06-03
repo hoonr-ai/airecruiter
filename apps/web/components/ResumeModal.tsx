@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useMemo } from "react";
+import { ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -16,6 +17,11 @@ interface ResumeModalProps {
   resumeText: string;
   keywords?: string[];
   similarKeywords?: string[];
+  // For JobDiva-sourced candidates, render a "View on JobDiva" link in the
+  // header that deep-links to the candidate record. Same URL format as
+  // CandidateDetailsModal and the rankings list row.
+  jobdivaCandidateId?: string;
+  source?: string;
 }
 
 type Tier = "primary" | "similar";
@@ -94,7 +100,16 @@ export function ResumeModal({
   resumeText,
   keywords,
   similarKeywords,
+  jobdivaCandidateId,
+  source,
 }: ResumeModalProps) {
+  const showJobDivaLink =
+    !!jobdivaCandidateId &&
+    typeof source === "string" &&
+    source.toLowerCase().startsWith("jobdiva");
+  const jobDivaUrl = showJobDivaLink
+    ? `https://www1.jobdiva.com/employers/myreports/viewcandidate2_real.jsp?docids=-1&candidateid=${encodeURIComponent(jobdivaCandidateId!)}`
+    : null;
   const index = useMemo(
     () => buildKeywordIndex(keywords, similarKeywords),
     [keywords, similarKeywords]
@@ -195,9 +210,23 @@ export function ResumeModal({
         onCloseAutoFocus={(e) => e.preventDefault()}
       >
         <DialogHeader className="border-b border-slate-200 pb-4 mb-4">
-          <DialogTitle className="text-xl font-bold text-slate-900">
-            Resume: {candidateName}
-          </DialogTitle>
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <DialogTitle className="text-xl font-bold text-slate-900">
+              Resume: {candidateName}
+            </DialogTitle>
+            {jobDivaUrl && (
+              <a
+                href={jobDivaUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                title="Open candidate record in JobDiva"
+                className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-[#c2410c] bg-[#fff7ed] hover:bg-[#ffedd5] border border-[#fed7aa] px-3 py-1.5 rounded-lg transition-colors"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                View on JobDiva
+              </a>
+            )}
+          </div>
           {totalMatched > 0 && (
             <div className="flex flex-col gap-1.5 mt-2">
               {matchedPrimary.length > 0 && (
