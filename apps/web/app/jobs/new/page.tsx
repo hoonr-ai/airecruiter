@@ -8691,6 +8691,9 @@ return (
       primaryLabel={
         missingContactsReviewMode ? "Confirm & launch PAIR" : undefined
       }
+
+      jobId={numericJobId || jobData?.jobdiva_id?.toString() || undefined}
+      jobDivaId={jobdivaId || jobData?.jobdiva_id?.toString() || undefined}
     />
 
     <LaunchPairProgressModal

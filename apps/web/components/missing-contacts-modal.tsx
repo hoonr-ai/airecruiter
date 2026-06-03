@@ -13,6 +13,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { API_BASE } from "@/lib/api";
 import { logger } from "@/lib/logger";
+import * as Sentry from "@sentry/nextjs";
+import { useMsal } from "@azure/msal-react";
 
 export interface MissingContactCandidate {
   candidate_id: string;
@@ -82,7 +84,11 @@ export function MissingContactsModal({
   title = "Missing contact details",
   description = "PAIR needs a unique real phone number and email for each candidate. Add or correct the details below and we'll launch for them too.",
   primaryLabel = "Launch PAIR for remaining",
+  jobId,
+  jobDivaId,
 }: MissingContactsModalProps) {
+  const { accounts } = useMsal();
+  const username = accounts?.[0]?.username ?? accounts?.[0]?.name ?? "unknown";
   const [phones, setPhones] = useState<Record<string, string>>({});
   const [emails, setEmails] = useState<Record<string, string>>({});
   const [savingPhone, setSavingPhone] = useState<Record<string, boolean>>({});
@@ -434,7 +440,27 @@ export function MissingContactsModal({
         </div>
 
         <DialogFooter className="px-6 py-4 border-t border-slate-100 shrink-0 flex justify-between sm:justify-between gap-2">
-          <Button variant="outline" onClick={onClose}>
+          <Button
+            variant="outline"
+            onClick={() => {
+              Sentry.captureMessage("PAIR launch: candidates skipped (missing contacts)", {
+                level: "info",
+                extra: {
+                  username,
+                  job_id: jobId,
+                  job_diva_id: jobDivaId,
+                  skipped_candidates: candidates.map((c) => ({
+                    candidate_id: c.candidate_id,
+                    name: c.name,
+                    jobdiva_id: c.jobdiva_id,
+                    needsPhone: c.needsPhone,
+                    needsEmail: c.needsEmail,
+                  })),
+                },
+              });
+              onClose();
+            }}
+          >
             Skip remaining
           </Button>
           <Button
