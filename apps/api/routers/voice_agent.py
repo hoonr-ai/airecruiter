@@ -159,7 +159,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 else:
                     logger.warning(f"Webhook: No audit log found for interview {payload.interview_id}")
 
-                # --- 70% threshold + hard filter check (Curate owns this logic) ---
+                # Pass logic: completed interview → pass = hard filters passed (no score threshold)
                 # Pair Bot sends 'completed' when all questions are answered.
                 # Curate decides the final pass/fail from that completed result.
                 # For in_progress: no evaluation yet — just track the status.
@@ -169,14 +169,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     # No hard filter (None / empty / 'not_hard_filter') = automatically passed
                     hf_passed = hf_raw in ('passed', 'pass', '', 'not_hard_filter') or payload.hard_filter_status is None
 
-                    # Score threshold: candidate_score is on 0–100 scale from Pair Bot.
-                    # If None → no scored questions in this interview → skip threshold.
-                    if payload.candidate_score is not None:
-                        score_passed = payload.candidate_score >= 70.0
-                    else:
-                        score_passed = True  # No scored Q10+ questions → threshold doesn't apply
-
-                    if hf_passed and score_passed:
+                    if hf_passed:
                         effective_status = 'passed'
                         logger.info(
                             f"Webhook: interview {payload.interview_id} → PASSED "
@@ -187,7 +180,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                         logger.info(
                             f"Webhook: interview {payload.interview_id} → FAILED "
                             f"(hf={hf_raw or 'none'}, hf_passed={hf_passed}, "
-                            f"score={payload.candidate_score}, score_passed={score_passed})"
+                            f"score={payload.candidate_score})"
                         )
 
                 # 1. Update engage_interview_audit (matching interview_id)
