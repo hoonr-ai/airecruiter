@@ -1591,18 +1591,12 @@ async def _check_and_fire_candidate_passed_notification(
         cand_score = interview_block.get("candidate_score")
         total_possible = interview_block.get("total_score")
         
-        # Pass logic: Must have 'passed' status AND (if scores provided) score >= 70% of total
+        # Pass logic: Must have 'passed' status (no score ratio check)
         meets_criteria = (hf_status == HARD_FILTER_PASS_STATUS)
         
         normalized_score_display = "Passed"
         if meets_criteria and cand_score is not None and total_possible:
-            # Check ratio (e.g. 35/40 = 0.875 >= 0.7) and normalize for email display.
-            ratio = float(cand_score) / float(total_possible)
-            if ratio < PASS_CANDIDATE_SCORE_RATIO:
-                logger.info(f"⏭️ Candidate {candidate_id} passed hard filters but score ratio {ratio:.2f} is below threshold {PASS_CANDIDATE_SCORE_RATIO}")
-                meets_criteria = False
-            else:
-                normalized_score_display = _format_normalized_score_100(cand_score, total_possible) or "Passed"
+            normalized_score_display = _format_normalized_score_100(cand_score, total_possible) or "Passed"
         
         if not meets_criteria:
             logger.info(f"⏭️ Candidate {candidate_id} did not meet strict pass criteria (HF: {hf_status}, Score: {cand_score}/{total_possible}).")
