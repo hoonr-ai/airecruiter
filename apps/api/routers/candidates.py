@@ -1039,8 +1039,7 @@ async def get_job_candidates(
                 status_display = "In Progress"
             elif s == "completed":
                 hf_passed = hf_display in ["", "pass", "passed", "not_hard_filter"]
-                score_passed = score_display is None or float(score_display) >= 70.0
-                status_display = "Pass" if (hf_passed and score_passed) else "Fail"
+                status_display = "Pass" if hf_passed else "Fail"
             
             cand["engage_status"] = status_display
 
@@ -3229,8 +3228,7 @@ async def get_candidate_evaluation_report(
             elif s == "completed":
                 hf_display = (hard_filter_status or "").lower()
                 hf_passed = hf_display in ["", "pass", "passed", "not_hard_filter"]
-                score_passed = display_engage_score is None or float(display_engage_score) >= 70.0
-                status_display = "Pass" if (hf_passed and score_passed) else "Fail"
+                status_display = "Pass" if hf_passed else "Fail"
 
         scores = {
             "resume_match_score":    resume_match_score,
