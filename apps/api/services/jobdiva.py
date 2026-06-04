@@ -1197,16 +1197,43 @@ class JobDivaService:
         _ja_delays = [5, 15]
         response = None
         _last_response = None  # saved even on 5xx, for criteria-unconfigured check
+
+        # --- timing instrumentation (observation only; no behavior change) ---
+        # Splits the app-side wall-clock into the segments Postman never pays
+        # for: connection setup + HTTP, retry backoff, JSON parse, and the
+        # synchronous candidate-normalization loop. Grep "JobAgent TIMING".
+        _t_start = time.perf_counter()
+        _request_ms = 0.0    # cumulative setup+http across attempts
+        _sleep_ms = 0.0      # cumulative retry backoff (asyncio.sleep)
+        _json_ms = 0.0       # response.json() deserialization
+        _normalize_ms = 0.0  # per-candidate normalization loop
+        _attempts_made = 0
+        _resp_bytes = 0
         try:
             for _attempt, _timeout_val in enumerate(_ja_timeouts):
                 try:
+                    # Time client creation (fresh DNS+TCP+TLS handshake — no
+                    # connection reuse) together with the GET, since that whole
+                    # cost is what Postman avoids via a warm keep-alive socket.
+                    _attempts_made += 1
+                    _req_t0 = time.perf_counter()
                     async with httpx.AsyncClient(timeout=_timeout_val) as client:
                         logger.info(
                             "JobAgentSearch jobId=%s attempt %d/%d timeout=%.0fs",
                             job_id, _attempt + 1, len(_ja_timeouts), _timeout_val,
                         )
                         response = await client.get(url, params=params, headers=headers)
+                        _req_ms = (time.perf_counter() - _req_t0) * 1000.0
+                    _request_ms += _req_ms
                     _last_response = response
+                    try:
+                        _resp_bytes = len(response.content)
+                    except Exception:
+                        _resp_bytes = 0
+                    logger.info(
+                        "JobAgentSearch jobId=%s attempt %d: HTTP %d in %.0fms (setup+http), %d bytes",
+                        job_id, _attempts_made, response.status_code, _req_ms, _resp_bytes,
+                    )
                     if response.status_code < 500:
                         break
                     body = response.text or ""
@@ -1225,7 +1252,9 @@ class JobDivaService:
                 if _attempt < len(_ja_timeouts) - 1:
                     _delay = _ja_delays[_attempt]
                     logger.info("JobAgentSearch retrying in %ds...", _delay)
+                    _sleep_t0 = time.perf_counter()
                     await asyncio.sleep(_delay)
+                    _sleep_ms += (time.perf_counter() - _sleep_t0) * 1000.0
                 else:
                     logger.error(
                         "JobAgentSearch all %d attempts exhausted for jobId=%s",
@@ -1245,6 +1274,12 @@ class JobDivaService:
                         "JobAgentSearch jobId=%s: criteria not configured in JobDiva; surfacing to UI.",
                         job_id,
                     )
+            logger.info(
+                "JobAgent TIMING jobId=%s resumeCount=%s attempts=%d FAILED (no usable response) | "
+                "request_ms=%.0f sleep_ms=%.0f total_ms=%.0f",
+                job_id, resume_count, _attempts_made,
+                _request_ms, _sleep_ms, (time.perf_counter() - _t_start) * 1000.0,
+            )
             return [], criteria_unconfigured
 
         if response.status_code != 200:
@@ -1259,16 +1294,25 @@ class JobDivaService:
                 logger.warning(
                     f"JobAgentSearch failed: {response.status_code} - {body[:200]}"
                 )
+            logger.info(
+                "JobAgent TIMING jobId=%s resumeCount=%s attempts=%d status=%d (non-200) | "
+                "request_ms=%.0f sleep_ms=%.0f total_ms=%.0f resp_bytes=%d",
+                job_id, resume_count, _attempts_made, response.status_code,
+                _request_ms, _sleep_ms, (time.perf_counter() - _t_start) * 1000.0, _resp_bytes,
+            )
             return [], criteria_unconfigured
 
         try:
+            _json_t0 = time.perf_counter()
             data = response.json()
+            _json_ms = (time.perf_counter() - _json_t0) * 1000.0
             candidates = data.get("data") if isinstance(data, dict) else data
             candidates = candidates or []
         except Exception as e:
             logger.error(f"JobAgentSearch error: {e}")
             return [], criteria_unconfigured
 
+        _norm_t0 = time.perf_counter()
         for api_rank, c in enumerate(candidates):
             candidate_id = str(
                 get_field(c, ["candidateId", "CANDIDATEID", "id", "ID"]) or ""
@@ -1339,6 +1383,17 @@ class JobDivaService:
                 profile_only_results.append(record)
                 continue
             jd_results.append(record)
+
+        _normalize_ms = (time.perf_counter() - _norm_t0) * 1000.0
+        logger.info(
+            "JobAgent TIMING jobId=%s resumeCount=%s attempts=%d raw=%d kept=%d | "
+            "request_ms=%.0f (setup+http) sleep_ms=%.0f json_ms=%.0f "
+            "normalize_ms=%.0f total_ms=%.0f resp_bytes=%d",
+            job_id, resume_count, _attempts_made, len(candidates),
+            len(jd_results) + len(profile_only_results),
+            _request_ms, _sleep_ms, _json_ms, _normalize_ms,
+            (time.perf_counter() - _t_start) * 1000.0, _resp_bytes,
+        )
 
         # Same enrichment + rescue flow as _search_talent_pool.
         merge_targets = jd_results + profile_only_results
@@ -2106,7 +2161,9 @@ class JobDivaService:
 
         Used by `_search_talent_pool` to enrich Talent Search results with
         fields the search payload doesn't reliably populate (address1,
-        linkedinUrl, full email/phone). Chunks are issued concurrently.
+        linkedinUrl, full email/phone). Chunks are issued with bounded
+        concurrency (CANDIDATES_DETAIL_CONCURRENCY) and retried on 429/5xx
+        with backoff so JobDiva's rate limiter doesn't silently drop records.
         """
         ids = [str(cid).strip() for cid in (candidate_ids or []) if cid and str(cid).strip()]
         if not ids:
@@ -2116,34 +2173,67 @@ class JobDivaService:
         endpoint = f"{self.api_url}/apiv2/bi/CandidatesDetail"
         chunks = [ids[i:i + chunk_size] for i in range(0, len(ids), chunk_size)]
 
-        async def _fetch_chunk(chunk: List[str]) -> List[Dict[str, Any]]:
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.get(
-                        endpoint,
-                        params={"candidateIds": chunk},
-                        headers=headers,
+        # Bound how many chunks hit JobDiva at once and retry 429/5xx with
+        # backoff. JobDiva rate-limits bursts of concurrent CandidatesDetail
+        # requests (observed: 3 of 4 concurrent chunks 429'd), and the old
+        # code dropped those records with no retry. See sourcing_config.
+        from core import sourcing_config as _sc_det
+        conc = max(1, int(getattr(_sc_det, "CANDIDATES_DETAIL_CONCURRENCY", 2)))
+        backoffs = list(getattr(_sc_det, "CANDIDATES_DETAIL_RETRY_BACKOFF_S", [1.0, 3.0, 6.0]))
+        sem = asyncio.Semaphore(conc)
+
+        async def _fetch_chunk(chunk: List[str], idx: int = 0) -> List[Dict[str, Any]]:
+            for attempt in range(len(backoffs) + 1):
+                try:
+                    async with sem:
+                        _c_t0 = time.perf_counter()
+                        async with httpx.AsyncClient(timeout=30.0) as client:
+                            response = await client.get(
+                                endpoint,
+                                params={"candidateIds": chunk},
+                                headers=headers,
+                            )
+                        _c_ms = (time.perf_counter() - _c_t0) * 1000.0
+                    try:
+                        _c_bytes = len(response.content)
+                    except Exception:
+                        _c_bytes = 0
+                    logger.info(
+                        "CandidatesDetail chunk %d: %d ids -> HTTP %d in %.0fms "
+                        "(setup+http), %d bytes (attempt %d/%d)",
+                        idx, len(chunk), response.status_code, _c_ms, _c_bytes,
+                        attempt + 1, len(backoffs) + 1,
                     )
-                if response.status_code != 200:
+                    if response.status_code == 200:
+                        data = response.json()
+                        if isinstance(data, dict):
+                            payload = data.get("data") or []
+                        else:
+                            payload = data or []
+                        if isinstance(payload, dict):
+                            payload = [payload]
+                        return list(payload)
+                    # Retry rate-limit / server errors; give up on other 4xx.
+                    if (response.status_code == 429 or response.status_code >= 500) and attempt < len(backoffs):
+                        await asyncio.sleep(backoffs[attempt])
+                        continue
                     logger.warning(
-                        f"CandidatesDetail batch failed: {response.status_code} - "
+                        f"CandidatesDetail chunk {idx} failed: {response.status_code} - "
                         f"{response.text[:200]}"
                     )
                     return []
-                data = response.json()
-                if isinstance(data, dict):
-                    payload = data.get("data") or []
-                else:
-                    payload = data or []
-                if isinstance(payload, dict):
-                    payload = [payload]
-                return list(payload)
-            except Exception as e:
-                logger.warning(f"CandidatesDetail batch error: {e}")
-                return []
+                except Exception as e:
+                    if attempt < len(backoffs):
+                        await asyncio.sleep(backoffs[attempt])
+                        continue
+                    logger.warning(f"CandidatesDetail chunk {idx} error: {e}")
+                    return []
+            return []
 
         results: Dict[str, Dict[str, Any]] = {}
-        chunked = await asyncio.gather(*[_fetch_chunk(chunk) for chunk in chunks])
+        _det_t0 = time.perf_counter()
+        chunked = await asyncio.gather(*[_fetch_chunk(chunk, i) for i, chunk in enumerate(chunks)])
+        _det_ms = (time.perf_counter() - _det_t0) * 1000.0
         for batch in chunked:
             for record in batch:
                 if not isinstance(record, dict):
@@ -2152,6 +2242,11 @@ class JobDivaService:
                 if cid is None:
                     continue
                 results[str(cid)] = record
+        logger.info(
+            "CandidatesDetail TIMING: ids=%d chunks=%d (chunk_size=%d, max_concurrency=%d) "
+            "matched=%d total_ms=%.0f",
+            len(ids), len(chunks), chunk_size, conc, len(results), _det_ms,
+        )
         return results
 
     async def _fetch_resume_text_batch(
