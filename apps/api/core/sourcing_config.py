@@ -83,6 +83,24 @@ JOBDIVA_BYPASS_PASS_GATE = True
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# JobDiva — max candidates fetched per source before enrichment
+# ─────────────────────────────────────────────────────────────────────────
+# Hard upper bound applied to each JobDiva source (Applicants, Talent /
+# JobAgent) after the recency / api_rank sort, before the enrichment +
+# per-candidate upsert path runs. Raised from the original 100 HOTFIX bound
+# so Step-5 surfaces more of the agentsearch results — candidates should not
+# be silently truncated away. The pre-truncation sort is preserved, so if the
+# cap is ever hit the strongest-ranked candidates still survive.
+#
+# Trade-off: higher = more sourced but more DB/enrichment throughput. The
+# original cap existed to prevent pool contention during auto-sync when a job
+# returned 500+ records; 500 keeps a guardrail while honoring "don't drop
+# candidates". Set to None to disable the cap entirely (reintroduces the
+# original contention risk).
+JOBDIVA_SOURCE_CAP = 500
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # Fast-path TalentSearch (skip blocking CandidatesDetail, hydrate async)
 # ─────────────────────────────────────────────────────────────────────────
 # When True, `_search_talent_pool` and the JobAgent sibling path skip the
