@@ -56,6 +56,17 @@ class AutoAssignService:
         mirroring the original ORDER BY (applicants source first, then
         most-recent created_at).
         """
+        # Resolve both IDs from monitored_jobs first
+        cur.execute(
+            "SELECT jobdiva_id, job_id FROM monitored_jobs WHERE (jobdiva_id = %s OR job_id = %s) LIMIT 1",
+            (target_job_id, target_job_id)
+        )
+        mj_row = cur.fetchone()
+        if mj_row:
+            ref_id, num_id = mj_row
+        else:
+            ref_id, num_id = target_job_id, target_job_id
+
         cur.execute(
             r"""
             SELECT id, candidate_id, source, email, phone, name, headline, location,
@@ -68,9 +79,9 @@ class AutoAssignService:
                    COALESCE(profile_url, '')                                 AS profile_url_norm,
                    COALESCE(data->'urls'->>'linkedin', '')                   AS linkedin_norm
             FROM sourced_candidates
-            WHERE jobdiva_id = %s
+            WHERE (jobdiva_id = %s OR jobdiva_id = %s)
             """,
-            (target_job_id,),
+            (ref_id, num_id),
         )
         rows = cur.fetchall() or []
 
@@ -312,17 +323,27 @@ class AutoAssignService:
         try:
             with self._get_db_connection() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    # Get both IDs first
+                    cur.execute(
+                        "SELECT jobdiva_id, job_id FROM monitored_jobs WHERE (jobdiva_id = %s OR job_id = %s) LIMIT 1",
+                        (target_job_id, target_job_id)
+                    )
+                    mj_row = cur.fetchone()
+                    if not mj_row:
+                        return 0
+                    ref_id, num_id = mj_row
+
                     # Count where feedback_type is set and feedback_reason is not null/empty
                     cur.execute(
                         """
                         SELECT COUNT(*)
                         FROM sourced_candidates
-                        WHERE jobdiva_id = %s
+                        WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                           AND data->>'feedback_type' IS NOT NULL
                           AND data->>'feedback_reason' IS NOT NULL
                           AND data->>'feedback_reason' != ''
                         """,
-                        (target_job_id,)
+                        (ref_id, num_id)
                     )
                     row = cur.fetchone()
                     return row[0] if row else 0
@@ -910,26 +931,47 @@ class AutoAssignService:
             with self._get_db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SET LOCAL statement_timeout = '10000ms'")
+                    # Resolve both IDs from monitored_jobs first
+                    cur.execute(
+                        "SELECT jobdiva_id, job_id FROM monitored_jobs WHERE (jobdiva_id = %s OR job_id = %s) LIMIT 1",
+                        (target_job_id, target_job_id)
+                    )
+                    mj_row = cur.fetchone()
+                    if not mj_row:
+                        return zero
+                    ref_id, num_id = mj_row
+
                     # Match both storage shapes — some rows are keyed by
                     # jobdiva_id (alphanumeric ref), others by job_id::text.
                     cur.execute(
                         """
                         SELECT
-                            COUNT(DISTINCT candidate_id)                                 AS candidates_sourced,
-                            COUNT(DISTINCT CASE WHEN data->>'engage_status' IS NOT NULL AND data->>'engage_status' != '' THEN candidate_id END) AS candidates_launched,
+                            COUNT(DISTINCT sc.candidate_id)                                 AS candidates_sourced,
+                            COUNT(DISTINCT CASE 
+                                WHEN sc.data->>'engage_status' IS NOT NULL AND sc.data->>'engage_status' != '' 
+                                 AND (
+                                     sc.data->>'engage_interview_id' IS NOT NULL AND sc.data->>'engage_interview_id' != ''
+                                     OR EXISTS (
+                                         SELECT 1 FROM engage_interview_audit ea
+                                         WHERE ea.candidate_id = sc.candidate_id
+                                           AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
+                                     )
+                                 )
+                                THEN sc.candidate_id 
+                            END) AS candidates_launched,
                             COUNT(DISTINCT CASE
-                                WHEN data->>'engage_status' IN
+                                WHEN sc.data->>'engage_status' IN
                                     ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
-                                THEN candidate_id
+                                THEN sc.candidate_id
                             END)                                                          AS complete_submissions,
                             COUNT(DISTINCT CASE
-                                WHEN LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
-                                THEN candidate_id
+                                WHEN LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed')
+                                THEN sc.candidate_id
                             END)                                                          AS pass_submissions
-                        FROM sourced_candidates
-                        WHERE jobdiva_id = %s
+                        FROM sourced_candidates sc
+                        WHERE (sc.jobdiva_id = %s OR sc.jobdiva_id = %s)
                         """,
-                        (target_job_id,),
+                        (ref_id, num_id, ref_id, num_id, ref_id, num_id),
                     )
                     row = cur.fetchone()
                     if not row:
