@@ -368,7 +368,7 @@ class AutoAssignService:
                         ) AS first_pass_ts
                         FROM sourced_candidates
                         WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                          AND (data->>'engage_status') IN ('pass', 'passed', 'Passed', 'PASS')
+                          AND LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
                         """,
                         (ref_id, num_id)
                     )
@@ -923,8 +923,7 @@ class AutoAssignService:
                                 THEN candidate_id
                             END)                                                          AS complete_submissions,
                             COUNT(DISTINCT CASE
-                                WHEN (data->>'engage_status' IN ('passed', 'pass'))
-                                  OR (LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed'))
+                                WHEN LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
                                 THEN candidate_id
                             END)                                                          AS pass_submissions
                         FROM sourced_candidates
