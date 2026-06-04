@@ -924,7 +924,8 @@ class AutoAssignService:
                             END)                                                          AS complete_submissions,
                             COUNT(DISTINCT CASE
                                 WHEN (data->>'engage_status' IN ('passed', 'pass'))
-                                  OR (LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed'))
+                                  OR (LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
+                                      AND (NULLIF(data->>'engage_score', '')::float >= 70))
                                 THEN candidate_id
                             END)                                                          AS pass_submissions
                         FROM sourced_candidates
