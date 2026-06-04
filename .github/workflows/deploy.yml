@@ -43,12 +43,14 @@ jobs:
           EOF
 
       - name: Deployment Info
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
           echo "🚀 QA Deployment Complete"
           echo "Branch: ${{ github.ref_name }}"
           echo "Commit: ${{ github.sha }}"
           echo "👤 Author: ${{ github.event.head_commit.author.name }}"
-          echo "💬 Message: ${{ github.event.head_commit.message }}"
+          echo "💬 Message: $COMMIT_MSG"
 
 
 
@@ -88,9 +90,11 @@ jobs:
           EOF
 
       - name: Deployment Info
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
           echo "🚀 PRODUCTION Deployment Complete"
           echo "Branch: ${{ github.ref_name }}"
           echo "Commit: ${{ github.sha }}"
           echo "👤 Author: ${{ github.event.head_commit.author.name }}"
-          echo "💬 Message: ${{ github.event.head_commit.message }}"
+          echo "💬 Message: $COMMIT_MSG"
