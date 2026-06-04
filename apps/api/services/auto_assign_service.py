@@ -946,21 +946,32 @@ class AutoAssignService:
                     cur.execute(
                         """
                         SELECT
-                            COUNT(DISTINCT candidate_id)                                 AS candidates_sourced,
-                            COUNT(DISTINCT CASE WHEN data->>'engage_status' IS NOT NULL AND data->>'engage_status' != '' THEN candidate_id END) AS candidates_launched,
+                            COUNT(DISTINCT sc.candidate_id)                                 AS candidates_sourced,
+                            COUNT(DISTINCT CASE 
+                                WHEN sc.data->>'engage_status' IS NOT NULL AND sc.data->>'engage_status' != '' 
+                                 AND (
+                                     sc.data->>'engage_interview_id' IS NOT NULL AND sc.data->>'engage_interview_id' != ''
+                                     OR EXISTS (
+                                         SELECT 1 FROM engage_interview_audit ea
+                                         WHERE ea.candidate_id = sc.candidate_id
+                                           AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
+                                     )
+                                 )
+                                THEN sc.candidate_id 
+                            END) AS candidates_launched,
                             COUNT(DISTINCT CASE
-                                WHEN data->>'engage_status' IN
+                                WHEN sc.data->>'engage_status' IN
                                     ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
-                                THEN candidate_id
+                                THEN sc.candidate_id
                             END)                                                          AS complete_submissions,
                             COUNT(DISTINCT CASE
-                                WHEN LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
-                                THEN candidate_id
+                                WHEN LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed')
+                                THEN sc.candidate_id
                             END)                                                          AS pass_submissions
-                        FROM sourced_candidates
-                        WHERE (jobdiva_id = %s OR jobdiva_id = %s)
+                        FROM sourced_candidates sc
+                        WHERE (sc.jobdiva_id = %s OR sc.jobdiva_id = %s)
                         """,
-                        (ref_id, num_id),
+                        (ref_id, num_id, ref_id, num_id, ref_id, num_id),
                     )
                     row = cur.fetchone()
                     if not row:

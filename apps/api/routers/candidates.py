@@ -884,14 +884,23 @@ async def get_job_candidates(
                 cur.execute(
                     """
                     SELECT
-                        COUNT(DISTINCT candidate_id) AS total_candidates,
-                        COUNT(DISTINCT candidate_id) FILTER (
-                            WHERE COALESCE(NULLIF(data->>'engage_status', ''), '') <> ''
+                        COUNT(DISTINCT sc.candidate_id) AS total_candidates,
+                        COUNT(DISTINCT sc.candidate_id) FILTER (
+                            WHERE COALESCE(NULLIF(sc.data->>'engage_status', ''), '') <> ''
+                              AND (
+                                  COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''
+                                  OR EXISTS (
+                                      SELECT 1 FROM engage_interview_audit ea
+                                      WHERE ea.candidate_id = sc.candidate_id
+                                        AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
+                                  )
+                              )
                         ) AS launched_count
-                    FROM sourced_candidates
-                    WHERE (jobdiva_id = %s OR jobdiva_id = %s)
+                    FROM sourced_candidates sc
+                    WHERE (sc.jobdiva_id = %s OR sc.jobdiva_id = %s)
                     """,
-                    (resolved_jobdiva_id, str(resolved_numeric_job_id)),
+                    (resolved_jobdiva_id, str(resolved_numeric_job_id),
+                     resolved_jobdiva_id, str(resolved_numeric_job_id)),
                 )
                 counts_row = cur.fetchone() or {}
                 total_candidates = int(counts_row.get("total_candidates") or 0)
