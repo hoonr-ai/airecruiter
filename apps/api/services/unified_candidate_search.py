@@ -1449,11 +1449,26 @@ class UnifiedCandidateSearch:
             criteria_unconfigured = False
 
             if criteria.job_id:
-                resume_count = max(200, (criteria.page_size or 50) * 4)
+                # resumeCount drives JobAgentSearch latency (it scales with the
+                # number of candidates JobDiva ranks). We cap the pool to the
+                # top-100 for display + hydration anyway, so over-requesting
+                # just slows the call. See sourcing_config.JOBAGENT_RESUME_COUNT.
+                from core import sourcing_config as _sc_rc
+                resume_count = _sc_rc.JOBAGENT_RESUME_COUNT
+                # Wall-clock as the orchestrator sees it. Comparing this to the
+                # service's "JobAgent TIMING total_ms" reveals event-loop
+                # contention: if this is much larger, the coroutine was starved
+                # by concurrent producers/scoring, not by JobDiva itself.
+                _ja_wall_t0 = time.perf_counter()
                 ja_result = await self.jobdiva_service.search_via_job_agent(
                     job_id=criteria.job_id,
                     resume_count=resume_count,
                     require_resume=getattr(criteria, "require_resume", True),
+                )
+                self._log_stage(
+                    "TalentSearch",
+                    f"JobAgent orchestrator wall-clock="
+                    f"{(time.perf_counter() - _ja_wall_t0) * 1000.0:.0f}ms",
                 )
                 # Back-compat: tolerate either list or dict shape.
                 if isinstance(ja_result, dict):

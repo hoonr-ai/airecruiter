@@ -116,6 +116,37 @@ FAST_PATH_DETAIL_BACKGROUND_PAGE_DELAY_S = 1.0
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# JobAgentSearch resumeCount
+# ─────────────────────────────────────────────────────────────────────────
+# JobAgentSearch latency scales with resumeCount — measured 2026-06-04 on
+# real jobs: jobId 32364764 took 13s @ rc=100 vs 110s @ rc=400; jobId
+# 32344914 took 1.6s @ rc=100 vs 3.8s @ rc=400. The talent pool is capped
+# to the top-100 for display AND background hydration
+# (FAST_PATH_DETAIL_BACKGROUND_MAX_CANDIDATES) regardless, so the old
+# max(200, page_size*4)=400 just made JobDiva rank ~300 candidates we
+# immediately discard. 150 = the 100 display cap + headroom to absorb the
+# client-side state filter and cross-source dedup, while keeping the call
+# fast. Bump if a search's state filter is dropping enough to starve the
+# top-100; lower toward 100 for the fastest first paint.
+JOBAGENT_RESUME_COUNT = 150
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# CandidatesDetail batch — concurrency + retry
+# ─────────────────────────────────────────────────────────────────────────
+# JobDiva rate-limits (429) bursts of concurrent CandidatesDetail requests.
+# Measured 2026-06-04: firing 4 chunks at once via asyncio.gather, 3 of 4
+# came back 429 with a 22-byte error body and the records were silently
+# dropped (no retry). Cap how many chunks run at once and retry 429/5xx
+# with backoff so detail records aren't lost under load.
+CANDIDATES_DETAIL_CONCURRENCY = 2
+
+# Backoff (seconds) before each CandidatesDetail chunk retry. Length also
+# bounds the retry count (len == max retries after the first attempt).
+CANDIDATES_DETAIL_RETRY_BACKOFF_S = [1.0, 3.0, 6.0]
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # Exa Agent API (Websets 2.0) — agentic deep-search pass for LinkedIn-Exa
 # ─────────────────────────────────────────────────────────────────────────
 # When True, every Step-5 search that includes the "Exa" source also fires
