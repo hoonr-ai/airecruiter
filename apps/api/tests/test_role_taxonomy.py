@@ -14,11 +14,22 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from services.role_taxonomy import expand_title  # noqa: E402
+from services.role_taxonomy import (  # noqa: E402
+    _context_tokens,
+    _distinctive_tokens_supported,
+    compare,
+    expand_title,
+    expand_title_grounded,
+    is_grounded_variant,
+)
 
 
 def _titles(input_title: str) -> list[str]:
     return [e["title"] for e in expand_title(input_title, max_results=30)]
+
+
+def _grounded(input_title: str, context: str) -> list[str]:
+    return [e["title"] for e in expand_title_grounded(input_title, context, max_results=30)]
 
 
 def _check(name: str, ok: bool, detail: str = "") -> int:
@@ -114,6 +125,78 @@ def run() -> int:
         "Sr. Java Developer resolves to the same family as Java Developer",
         set(sr) == set(bare),
         f"sr={sr}\nbare={bare}",
+    )
+
+    # --- Grounded expansion: similar titles must relate to THIS job's domain ---
+
+    # 10. "Business Analyst" in a HEALTHCARE JD must NOT surface the off-domain
+    # finance/robotics family the context-free expand_title returns.
+    hc_ctx = ("clinical workflows EMR Epic patient care HIPAA healthcare hospital "
+              "claims revenue cycle data reporting")
+    hc = _grounded("Business Analyst", hc_ctx)
+    BAD = ("mortgage", "robotics", "payment", "fleet", "licensing", "sports",
+           "telecom", "agriculture", "mining")
+    failures += _check(
+        "Healthcare BA: no off-domain (mortgage/robotics/payment/...) variants",
+        not any(any(b in t.lower() for b in BAD) for t in hc),
+        f"got: {hc}",
+    )
+
+    # 11. "Business Analyst" in a MORTGAGE/LENDING JD keeps the mortgage variant
+    # but still drops robotics/sports.
+    loan_ctx = "mortgage lending underwriting loan origination FHA servicing escrow"
+    loan = _grounded("Business Analyst", loan_ctx)
+    failures += _check(
+        "Mortgage BA: includes a mortgage/lending variant",
+        any("mortgage" in t.lower() or "lending" in t.lower() for t in loan),
+        f"got: {loan}",
+    )
+    failures += _check(
+        "Mortgage BA: still excludes robotics/sports variants",
+        not any("robotics" in t.lower() or "sports" in t.lower() for t in loan),
+        f"got: {loan}",
+    )
+
+    # 12. Empty context => tight set, never the full ~30-member noisy family.
+    empty_ctx = _grounded("Business Analyst", "")
+    full_family = _titles("Business Analyst")
+    failures += _check(
+        "Empty-context BA: far fewer than the context-free family",
+        len(empty_ctx) <= 5 and len(empty_ctx) < len(full_family),
+        f"empty={len(empty_ctx)} full={len(full_family)}: {empty_ctx}",
+    )
+
+    # 13. _distinctive_tokens_supported unit rule (strict AND, exact match).
+    hc_tokens = _context_tokens("healthcare hospital clinical patient")
+    failures += _check(
+        "distinctive: Mortgage BA NOT supported in a healthcare context",
+        not _distinctive_tokens_supported("Business Analyst", "Mortgage Business Analyst", hc_tokens),
+    )
+    failures += _check(
+        "distinctive: zero-distinctive variant (Senior Business Analyst) supported",
+        _distinctive_tokens_supported("Business Analyst", "Senior Business Analyst", _context_tokens("")),
+    )
+
+    # 14. is_grounded_variant closes the K5000-family hole: an off-domain LLM
+    # title is rejected even though compare() puts it in the same family.
+    failures += _check(
+        "K5000 hole closed: compare() treats Mortgage BA as related to BA",
+        compare("Business Analyst", "Mortgage Business Analyst") != "none",
+        f"compare returned {compare('Business Analyst', 'Mortgage Business Analyst')!r}",
+    )
+    failures += _check(
+        "is_grounded_variant: rejects off-domain Mortgage BA in a healthcare JD",
+        not is_grounded_variant("Business Analyst", "Mortgage Business Analyst", hc_ctx),
+    )
+    failures += _check(
+        "is_grounded_variant: accepts on-domain Healthcare BA in a healthcare JD",
+        is_grounded_variant("Business Analyst", "Healthcare Business Analyst", hc_ctx),
+    )
+
+    # 15. Regression: legacy expand_title behaviour is unchanged.
+    failures += _check(
+        "expand_title (legacy) still returns >= 5 for Software Engineer",
+        len(_titles("Software Engineer")) >= 5,
     )
 
     if failures:
