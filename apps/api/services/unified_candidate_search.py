@@ -652,21 +652,24 @@ class UnifiedCandidateSearch:
                 applicants = applicants_res.get("candidates", [])
                 summary["job_applicants_count"] = len(applicants)
 
-                # HOTFIX: Hard cap at 100 to prevent database locking & latency
-                # loops. The downstream enrichment + per-candidate upsert path
-                # is the dominant source of pool contention during auto-sync
-                # cycles; without a hard cap a single job returning 500+
+                # Source cap (JOBDIVA_SOURCE_CAP) to prevent database locking &
+                # latency loops. The downstream enrichment + per-candidate upsert
+                # path is the dominant source of pool contention during auto-sync
+                # cycles; without a cap a single job returning many hundreds of
                 # applicants can pin the API for minutes. Applied at the
                 # search-service layer so every caller (auto-sync, manual
                 # source, UI preview) gets the bound regardless of what
-                # criteria.page_size the caller requested.
+                # criteria.page_size the caller requested. Originally a hard 100;
+                # raised to JOBDIVA_SOURCE_CAP so Step-5 surfaces more results.
                 #
                 # F5: order by application recency before truncating so the
-                # freshest 100 applicants survive, not whatever order JobDiva
+                # freshest applicants survive, not whatever order JobDiva
                 # returned them in. Applicants are thin records (no resume
                 # title/skill haystack pre-enrichment) so we can't pre-rank by
                 # skill match — recency is the next-best signal we have.
-                if applicants and len(applicants) > 100:
+                from core import sourcing_config as _sc_cap
+                _applicant_cap = _sc_cap.JOBDIVA_SOURCE_CAP
+                if applicants and _applicant_cap and len(applicants) > _applicant_cap:
                     def _applicant_recency_key(a: Dict[str, Any]) -> str:
                         # JobApplicantsDetail.RECEIVED is an ISO-ish date string;
                         # lexicographic sort on the ISO form is reverse-chronological
@@ -675,9 +678,9 @@ class UnifiedCandidateSearch:
                     applicants.sort(key=_applicant_recency_key, reverse=True)
                     self._log_stage(
                         "Applicants",
-                        f"Capping {len(applicants)} applicants to top-100 by recency.",
+                        f"Capping {len(applicants)} applicants to top-{_applicant_cap} by recency.",
                     )
-                    applicants = applicants[:100]
+                    applicants = applicants[:_applicant_cap]
 
                 if not applicants:
                     self._log_stage("Applicants", "No applicants found.")
@@ -762,16 +765,18 @@ class UnifiedCandidateSearch:
                 if talent_res.get("jobdiva_criteria_unconfigured"):
                     summary["jobdiva_criteria_unconfigured"] = True
 
-                # HOTFIX: Hard cap at 100 — see Applicants stage above.
+                # Source cap (JOBDIVA_SOURCE_CAP) — see Applicants stage above.
                 # JobAgent results arrive in JobDiva's API rank order
                 # (preserved end-to-end via `api_rank`); this slice keeps the
-                # top-100 by JobDiva's own ranking.
-                if talent_pool and len(talent_pool) > 100:
+                # top-N by JobDiva's own ranking.
+                from core import sourcing_config as _sc_cap
+                _talent_cap = _sc_cap.JOBDIVA_SOURCE_CAP
+                if talent_pool and _talent_cap and len(talent_pool) > _talent_cap:
                     self._log_stage(
                         "TalentSearch",
-                        f"Capping {len(talent_pool)} talent profiles to top-100 by JobAgent rank.",
+                        f"Capping {len(talent_pool)} talent profiles to top-{_talent_cap} by JobAgent rank.",
                     )
-                    talent_pool = talent_pool[:100]
+                    talent_pool = talent_pool[:_talent_cap]
 
                 if not talent_pool:
                     self._log_stage("TalentSearch", "No talent-pool candidates returned.")
@@ -4067,10 +4072,13 @@ class UnifiedCandidateSearch:
         - ``{"type": "candidate_enriched", "candidate": cand}`` (internal) after
           LLM extraction; the caller scores + dedups + emits the ``scored``
           stage patch so cross-source dedup state stays in one place.
-        - ``{"type": "candidate_detail", "candidate_id", "stage": "dropped",
-          "patch": {"_stage": "dropped", "_drop_reason": "..."}}`` when the
-          candidate fails a gate (no_resume / failed_filter / failed_location /
-          below_min_years / pre_llm / error).
+
+        Policy: this enricher never drops a JobDiva candidate. Gate failures
+        (no_resume / failed_filter / failed_location / below_min_years / error)
+        skip the LLM step but still emit ``candidate_enriched`` so the caller
+        scores + shows the row — hard-filter-fails surface at 0% and are
+        excluded only at Launch PAIR, never hidden on Step 5. The only row
+        removal left is cross-source dedup, handled in ``emit_jobdiva_scored``.
         """
         from services.sourced_candidates_storage import process_jobdiva_candidate
 
@@ -4105,12 +4113,18 @@ class UnifiedCandidateSearch:
                 if not cid:
                     return
 
-                async def _drop(reason: str):
+                async def _keep(status: str):
+                    # Policy: JobDiva (agentsearch) candidates are never removed
+                    # from Step 5. Instead of dropping on a gate failure, skip
+                    # the expensive LLM step (these score low/0 anyway via the
+                    # hard-veto path) and emit so the caller scores + shows them.
+                    # 0% hard-filter-fails are excluded only at Launch PAIR.
+                    candidate["enhanced_info"] = candidate.get("enhanced_info") or {}
+                    candidate["enhanced_info_status"] = status
+                    counters["screened"] += 1
                     await out_queue.put({
-                        "type": "candidate_detail",
-                        "candidate_id": cid,
-                        "stage": "dropped",
-                        "patch": {"_stage": "dropped", "_drop_reason": reason},
+                        "type": "candidate_enriched",
+                        "candidate": candidate,
                     })
 
                 try:
@@ -4138,10 +4152,9 @@ class UnifiedCandidateSearch:
                             )
 
                     if not candidate.get("resume_text") and not pre_enriched:
-                        self._log_stage("ResumeScreen", f"skipped candidate_id={cid}; no resume text available")
+                        self._log_stage("ResumeScreen", f"kept candidate_id={cid}; no resume text available (scored without LLM)")
                         counters["no_resume"] += 1
-                        counters["skipped"] += 1
-                        await _drop("no_resume")
+                        await _keep("kept_no_resume")
                         return
 
                     # Emit the jobdiva_details patch as soon as resume + profile
@@ -4166,14 +4179,12 @@ class UnifiedCandidateSearch:
                         counters["pre_llm_skipped_min_years"] += 1
                         self._log_stage(
                             "LLMGate",
-                            "skipping LLM for candidate_id=%s reason=below_min_years_pre_llm threshold=%s" % (
+                            "skipping LLM for candidate_id=%s reason=below_min_years_pre_llm threshold=%s (kept, scored)" % (
                                 cid,
                                 int(criteria.min_experience_years or 0),
                             ),
                         )
-                        counters["failed_filter"] += 1
-                        counters["skipped"] += 1
-                        await _drop("below_min_years_pre_llm")
+                        await _keep("kept_min_years")
                         return
 
                     if criteria.bypass_screening:
@@ -4196,7 +4207,7 @@ class UnifiedCandidateSearch:
                         location_reason = assessment.get("location_failure_reason")
                         self._log_stage(
                             "ResumeScreen",
-                            "FAILED FILTER candidate_id=%s matched=%s missing=%s excluded=%s location_reason=%s" % (
+                            "FAILED FILTER (kept, scored) candidate_id=%s matched=%s missing=%s excluded=%s location_reason=%s" % (
                                 cid,
                                 assessment["matched"][:5],
                                 assessment["missing"][:5],
@@ -4204,22 +4215,23 @@ class UnifiedCandidateSearch:
                                 location_reason,
                             ),
                         )
+                        # JobDiva candidates are never dropped here. Skip the LLM
+                        # step (hard-filter / location fails score low/0 anyway
+                        # via the hard-veto path) but keep + score them so the
+                        # row stays visible. The 0% hard-filter-fails (e.g. last
+                        # company == the company asked for) are excluded only at
+                        # Launch PAIR, never hidden on Step 5.
                         if location_reason:
                             if location_reason in {"candidate_ungeocodable", "target_ungeocodable"}:
                                 counters["failed_location_geocode"] += 1
                                 counters["failed_location"] += 1
-                                counters["failed_filter"] += 1
-                                counters["skipped"] += 1
-                                await _drop("failed_location_geocode")
+                                await _keep("kept_location_geocode")
                                 return
                             counters["failed_location"] += 1
-                            counters["failed_filter"] += 1
-                            counters["skipped"] += 1
-                            await _drop("failed_location")
+                            await _keep("kept_location")
                             return
                         counters["failed_filter"] += 1
-                        counters["skipped"] += 1
-                        await _drop("failed_filter")
+                        await _keep("kept_hard_filter")
                         return
 
                     self._log_stage(
@@ -4312,11 +4324,11 @@ class UnifiedCandidateSearch:
                     })
                 except Exception as e:
                     logger.error(
-                        f"❌ Progressive JobDiva enrichment FAILED for {cid}: {e}",
+                        f"❌ Progressive JobDiva enrichment FAILED for {cid}: {e}; keeping candidate (scored without LLM)",
                         exc_info=True,
                     )
-                    counters["skipped"] += 1
-                    await _drop("error")
+                    counters["llm_extraction_errors"] += 1
+                    await _keep("error")
 
         tasks = [asyncio.create_task(_process(c)) for c in jobdiva_candidates]
 
@@ -4344,10 +4356,9 @@ class UnifiedCandidateSearch:
 
         self._log_stage(
             "ResumeScreen",
-            "RESULTS (progressive): kept %s of %s JobDiva candidate(s); skipped %s total (no_resume=%s, failed_filter=%s, failed_location=%s, geocode_failures=%s, llm_extraction_errors=%s)" % (
+            "RESULTS (progressive): kept %s of %s JobDiva candidate(s); none dropped — kept-without-LLM (no_resume=%s, failed_filter=%s, failed_location=%s, geocode_failures=%s, llm_extraction_errors=%s)" % (
                 counters["screened"],
                 len(jobdiva_candidates),
-                counters["skipped"],
                 counters["no_resume"],
                 counters["failed_filter"],
                 counters["failed_location"],
