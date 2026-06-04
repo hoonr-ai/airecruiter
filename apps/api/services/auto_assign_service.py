@@ -56,6 +56,17 @@ class AutoAssignService:
         mirroring the original ORDER BY (applicants source first, then
         most-recent created_at).
         """
+        # Resolve both IDs from monitored_jobs first
+        cur.execute(
+            "SELECT jobdiva_id, job_id FROM monitored_jobs WHERE (jobdiva_id = %s OR job_id = %s) LIMIT 1",
+            (target_job_id, target_job_id)
+        )
+        mj_row = cur.fetchone()
+        if mj_row:
+            ref_id, num_id = mj_row
+        else:
+            ref_id, num_id = target_job_id, target_job_id
+
         cur.execute(
             r"""
             SELECT id, candidate_id, source, email, phone, name, headline, location,
@@ -68,9 +79,9 @@ class AutoAssignService:
                    COALESCE(profile_url, '')                                 AS profile_url_norm,
                    COALESCE(data->'urls'->>'linkedin', '')                   AS linkedin_norm
             FROM sourced_candidates
-            WHERE jobdiva_id = %s
+            WHERE (jobdiva_id = %s OR jobdiva_id = %s)
             """,
-            (target_job_id,),
+            (ref_id, num_id),
         )
         rows = cur.fetchall() or []
 
@@ -312,17 +323,27 @@ class AutoAssignService:
         try:
             with self._get_db_connection() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                    # Get both IDs first
+                    cur.execute(
+                        "SELECT jobdiva_id, job_id FROM monitored_jobs WHERE (jobdiva_id = %s OR job_id = %s) LIMIT 1",
+                        (target_job_id, target_job_id)
+                    )
+                    mj_row = cur.fetchone()
+                    if not mj_row:
+                        return 0
+                    ref_id, num_id = mj_row
+
                     # Count where feedback_type is set and feedback_reason is not null/empty
                     cur.execute(
                         """
                         SELECT COUNT(*)
                         FROM sourced_candidates
-                        WHERE jobdiva_id = %s
+                        WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                           AND data->>'feedback_type' IS NOT NULL
                           AND data->>'feedback_reason' IS NOT NULL
                           AND data->>'feedback_reason' != ''
                         """,
-                        (target_job_id,)
+                        (ref_id, num_id)
                     )
                     row = cur.fetchone()
                     return row[0] if row else 0
@@ -910,6 +931,16 @@ class AutoAssignService:
             with self._get_db_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SET LOCAL statement_timeout = '10000ms'")
+                    # Resolve both IDs from monitored_jobs first
+                    cur.execute(
+                        "SELECT jobdiva_id, job_id FROM monitored_jobs WHERE (jobdiva_id = %s OR job_id = %s) LIMIT 1",
+                        (target_job_id, target_job_id)
+                    )
+                    mj_row = cur.fetchone()
+                    if not mj_row:
+                        return zero
+                    ref_id, num_id = mj_row
+
                     # Match both storage shapes — some rows are keyed by
                     # jobdiva_id (alphanumeric ref), others by job_id::text.
                     cur.execute(
@@ -927,9 +958,9 @@ class AutoAssignService:
                                 THEN candidate_id
                             END)                                                          AS pass_submissions
                         FROM sourced_candidates
-                        WHERE jobdiva_id = %s
+                        WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                         """,
-                        (target_job_id,),
+                        (ref_id, num_id),
                     )
                     row = cur.fetchone()
                     if not row:

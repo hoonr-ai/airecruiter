@@ -884,14 +884,14 @@ async def get_job_candidates(
                 cur.execute(
                     """
                     SELECT
-                        COUNT(*) AS total_candidates,
-                        COUNT(*) FILTER (
+                        COUNT(DISTINCT candidate_id) AS total_candidates,
+                        COUNT(DISTINCT candidate_id) FILTER (
                             WHERE COALESCE(NULLIF(data->>'engage_status', ''), '') <> ''
                         ) AS launched_count
                     FROM sourced_candidates
-                    WHERE jobdiva_id = %s
+                    WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                     """,
-                    (resolved_jobdiva_id,),
+                    (resolved_jobdiva_id, str(resolved_numeric_job_id)),
                 )
                 counts_row = cur.fetchone() or {}
                 total_candidates = int(counts_row.get("total_candidates") or 0)
@@ -902,6 +902,7 @@ async def get_job_candidates(
                     str(resolved_jobdiva_id),
                     str(resolved_numeric_job_id),
                     resolved_jobdiva_id,
+                    str(resolved_numeric_job_id),
                 ]
                 if limit is not None:
                     pagination_clause = " LIMIT %s OFFSET %s"
@@ -920,6 +921,13 @@ async def get_job_candidates(
                         FROM engage_interview_audit
                         WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                         ORDER BY candidate_id, id DESC
+                    ),
+                    deduped_candidates AS (
+                        SELECT DISTINCT ON (candidate_id)
+                            *
+                        FROM sourced_candidates
+                        WHERE (jobdiva_id = %s OR jobdiva_id = %s)
+                        ORDER BY candidate_id, created_at DESC, id DESC
                     )
                     SELECT
                         sc.id,
@@ -941,11 +949,9 @@ async def get_job_candidates(
                         la.created_at as audit_created_at,
                         la.payload as audit_payload,
                         la.response as audit_response
-                    FROM sourced_candidates sc
+                    FROM deduped_candidates sc
                     LEFT JOIN latest_audit la
                         ON la.candidate_id = sc.candidate_id
-
-                    WHERE sc.jobdiva_id = %s
                     ORDER BY sc.created_at DESC, sc.id DESC
                     {pagination_clause};
                 """,
@@ -1119,8 +1125,8 @@ async def get_launched_candidate_keys(job_id_or_ref: str):
                 cur.execute("""
                     SELECT candidate_id, source
                     FROM sourced_candidates
-                    WHERE jobdiva_id = %s
-                """, (str(resolved_jobdiva_id),))
+                    WHERE (jobdiva_id = %s OR jobdiva_id = %s)
+                """, (str(resolved_jobdiva_id), str(job_id_or_ref)))
                 rows = cur.fetchall()
         finally:
             conn.close()
@@ -1173,25 +1179,25 @@ async def refresh_candidate_resume_match(
                         """
                         SELECT *
                         FROM sourced_candidates
-                        WHERE jobdiva_id = %s
+                        WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                           AND candidate_id = %s
                           AND source = %s
                         ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
                         LIMIT 1
                         """,
-                        (resolved_jobdiva_id, candidate_id, request.source),
+                        (resolved_jobdiva_id, str(resolved_numeric_job_id), candidate_id, request.source),
                     )
                 else:
                     cur.execute(
                         """
                         SELECT *
                         FROM sourced_candidates
-                        WHERE jobdiva_id = %s
+                        WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                           AND candidate_id = %s
                         ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
                         LIMIT 1
                         """,
-                        (resolved_jobdiva_id, candidate_id),
+                        (resolved_jobdiva_id, str(resolved_numeric_job_id), candidate_id),
                     )
                 candidate_row = cur.fetchone()
 
