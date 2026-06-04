@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, BackgroundTasks, Body, Query, Uplo
 from typing import List, Dict, Any, Optional
 import json
 import logging
+import re
 import time
 import copy
 import threading
@@ -181,6 +182,13 @@ def _ensure_monitored_jobs_schema() -> None:
             # JobDiva's web UI to set the criteria.
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS jobdiva_criteria_unconfigured BOOLEAN DEFAULT FALSE",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS current_step INTEGER",
+            # Job versioning: "Edit Job Setup" after launch clones a job into a
+            # new row keyed by a versioned reference (e.g. 26-06182-v2). v1's
+            # sourced_candidates / rank list stay intact under the original ref.
+            # parent_job_id is the root (un-versioned) reference; version is the
+            # 1-based version number (1 for original jobs).
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS parent_job_id TEXT",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS version INTEGER DEFAULT 1",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS user_session TEXT",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS ai_enhanced BOOLEAN DEFAULT FALSE",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS processing_stage TEXT",
@@ -247,9 +255,7 @@ def _backfill_monitored_jobs_counters_sync() -> None:
                                 THEN candidate_id
                             END) AS cm,
                             COUNT(DISTINCT CASE
-                WHEN (data->>'engage_status' IN ('passed', 'pass'))
-                  OR (LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
-                      AND (NULLIF(data->>'engage_score', '')::float >= 70))
+                WHEN LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
                 THEN candidate_id
                             END) AS ps
                         FROM sourced_candidates
@@ -818,7 +824,12 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
         # inside the single `with get_db_connection()` block below — the
         # endpoint borrows exactly one pool connection per request now
         # (was two), which is what unblocks the wizard's step 4→5 save.
-        is_jobdiva_ref = (not is_external) and ("-" in job_id_str)
+        # Versioned refs (e.g. 26-06182-v2) are local-only clones — they are
+        # NOT real JobDiva references. Route them through the local-DB branch
+        # below so we (a) skip a guaranteed-failing JobDiva lookup and (b) never
+        # resolve the suffix away to the original numeric PK and clobber v1.
+        is_versioned = bool(re.search(r"-v\d+$", job_id_str))
+        is_jobdiva_ref = (not is_external) and (not is_versioned) and ("-" in job_id_str)
         jobdiva_lookup = await jobdiva_service.get_job_by_id(job_id) if is_jobdiva_ref else None
 
         with get_db_connection() as conn:
@@ -1507,6 +1518,152 @@ async def get_monitored_job_data(job_id: str):
         logger.error(f"Get Monitored Job Data Error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to get data: {str(e)}")
 
+
+def _create_job_version_sync(job_id_or_ref: str) -> dict:
+    """Clone a job into a new versioned row so it can be re-edited from Step 1.
+
+    The clone gets a versioned reference (e.g. 26-06182 -> 26-06182-v2) used as
+    both its job_id (PK) and jobdiva_id. Because sourced_candidates and the rank
+    list are keyed by jobdiva_id, the new version sources/launches into its own
+    bucket while the original version's candidates stay untouched. The full
+    rubric (skills/titles/education/questions/etc.), filters, JD and sourcing
+    config are copied so the recruiter starts from a complete, editable copy.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT job_id, jobdiva_id, version FROM monitored_jobs
+                WHERE job_id = %s OR jobdiva_id = %s
+                LIMIT 1
+                """,
+                (job_id_or_ref, job_id_or_ref),
+            )
+            row = cur.fetchone()
+            if not row:
+                return {"status": "error", "message": f"No job found for {job_id_or_ref}"}
+
+            src_job_id, src_jobdiva_id = row[0], row[1]
+            # Root reference = the original, un-versioned ref. Versions always
+            # chain off the original so we get v2, v3, ... not v2-v2.
+            base_ref = str(src_jobdiva_id or src_job_id)
+            root_ref = re.sub(r"-v\d+$", "", base_ref)
+
+            # Next version: 1 greater than the highest existing version in the
+            # family (the original + any prior clones).
+            cur.execute(
+                """
+                SELECT COALESCE(MAX(version), 1) FROM monitored_jobs
+                WHERE job_id = %s OR jobdiva_id = %s OR parent_job_id = %s
+                   OR job_id LIKE %s OR jobdiva_id LIKE %s
+                """,
+                (root_ref, root_ref, root_ref, root_ref + "-v%", root_ref + "-v%"),
+            )
+            max_version = cur.fetchone()[0] or 1
+            new_version = int(max_version) + 1
+            new_ref = f"{root_ref}-v{new_version}"
+
+            # Discover columns + which ones auto-generate (serial/identity) so
+            # the INSERT…SELECT survives schema drift and lets PKs auto-fill.
+            cur.execute(
+                """
+                SELECT column_name, column_default
+                FROM information_schema.columns
+                WHERE table_name = 'monitored_jobs'
+                ORDER BY ordinal_position
+                """
+            )
+            col_rows = cur.fetchall()
+
+            # Fields reset for a fresh, unlaunched draft of the new version.
+            overrides = {
+                "job_id": new_ref,
+                "jobdiva_id": new_ref,
+                "parent_job_id": root_ref,
+                "version": new_version,
+                "current_step": 1,
+                "processing_status": "step_1_complete",
+                "processing_stage": None,
+                "pair_launched_at": None,
+                "outreach_stopped_at": None,
+                "candidates_sourced": 0,
+                "candidates_launched": 0,
+                "complete_submissions": 0,
+                "pass_submissions": 0,
+                "resumes_shortlisted": 0,
+                "pair_external_subs": 0,
+                "feedback_completed": 0,
+                "time_to_first_pass": None,
+                "is_archived": False,
+                "archive_reason": None,
+                "archived_at": None,
+            }
+
+            insert_cols: List[str] = []
+            select_exprs: List[str] = []
+            params: List[Any] = []
+            for name, default in col_rows:
+                # Skip auto-generated columns (serial/identity) so the DB fills them.
+                if default and "nextval(" in str(default):
+                    continue
+                insert_cols.append(name)
+                if name in ("created_at", "updated_at"):
+                    select_exprs.append("NOW()")
+                elif name in overrides:
+                    select_exprs.append("%s")
+                    params.append(overrides[name])
+                else:
+                    select_exprs.append(name)
+
+            sql = (
+                f"INSERT INTO monitored_jobs ({', '.join(insert_cols)}) "
+                f"SELECT {', '.join(select_exprs)} FROM monitored_jobs WHERE job_id = %s"
+            )
+            params.append(src_job_id)
+            cur.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Clone the structured rubric (skills/titles/education/customer/other
+    # requirements + screen questions + bot intro) keyed by the reference.
+    try:
+        rubric_db = JobRubricDB()
+        rubric = rubric_db.get_full_rubric(base_ref)
+        if rubric and (rubric.get("titles") or rubric.get("skills") or rubric.get("screen_questions")):
+            rubric_db.save_full_rubric(
+                new_ref,
+                rubric,
+                bot_introduction=rubric.get("bot_introduction"),
+            )
+    except Exception as e:
+        logger.warning(f"create_job_version: rubric clone failed for {new_ref}: {e}")
+
+    logger.info(f"🆕 Created job version {new_ref} (v{new_version}) from {base_ref}")
+    return {
+        "status": "success",
+        "new_job_id": new_ref,
+        "version": new_version,
+        "parent_job_id": root_ref,
+    }
+
+
+@router.post("/jobs/{job_id_or_ref}/new-version")
+async def create_job_version(job_id_or_ref: str):
+    """Create an editable v2+ of a launched job (clones everything, fresh sourcing)."""
+    try:
+        result = await asyncio.to_thread(_create_job_version_sync, job_id_or_ref)
+        if result.get("status") == "error":
+            raise HTTPException(status_code=404, detail=result.get("message"))
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Create Job Version Error for {job_id_or_ref}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create job version: {str(e)}")
+
+
 @router.post("/jobs/{job_id}/publish")
 async def publish_job_draft(job_id: str, publish_request: JobPublishRequest):
     """
@@ -1833,9 +1990,7 @@ def _aggregate_candidate_metrics(cursor, jobdiva_keys: List[str]) -> Dict[str, D
                 THEN candidate_id
             END)                                                                       AS complete_submissions,
             COUNT(DISTINCT CASE
-                WHEN (data->>'engage_status' IN ('passed', 'pass'))
-                  OR (LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
-                      AND (NULLIF(data->>'engage_score', '')::float >= 70))
+                WHEN LOWER(data->>'engage_hard_filter_status') IN ('pass', 'passed')
                 THEN candidate_id
             END)                                                                       AS pass_submissions
         FROM sourced_candidates

@@ -10,6 +10,21 @@ from core.db import get_db_connection
 logger = logging.getLogger(__name__)
 
 
+def _pick_valid_email(emails: List[Any]) -> Optional[str]:
+    """From a list of emails prefer the first well-formed, non-placeholder one,
+    falling back to the first value so we never drop a present contact entirely."""
+    from services.jobdiva import _EMAIL_RE, _is_placeholder_email
+
+    cleaned = [str(e).strip() for e in emails if e and str(e).strip()]
+    if not cleaned:
+        return None
+    well_formed = [e for e in cleaned if _EMAIL_RE.match(e.lower())]
+    for e in well_formed:
+        if not _is_placeholder_email(e):
+            return e
+    return well_formed[0] if well_formed else cleaned[0]
+
+
 # v23: Dropped the standalone SQLAlchemy engine (pool_size=5 + overflow=10)
 # that used to live here. It was a second, fragmented pool — independent of
 # the psycopg2 pool in core/db.py — that competed for the same Postgres
@@ -78,10 +93,13 @@ class CandidateProfilesDB:
 
                         email = c.get("email")
                         if isinstance(email, list):
-                            email = email[0] if email else None
+                            email = _pick_valid_email(email)
                         phone = c.get("phone")
                         if isinstance(phone, list):
-                            phone = phone[0] if phone else None
+                            phone = next(
+                                (p for p in phone if p and any(ch.isdigit() for ch in str(p))),
+                                (phone[0] if phone else None),
+                            )
 
                         title = c.get("job_title") or c.get("title") or c.get("headline")
                         location = c.get("current_location") or c.get("location") or c.get("city")

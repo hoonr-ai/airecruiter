@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import httpx
+import re
 from datetime import datetime, timezone, timedelta
 from routers._helpers import get_db_connection
 
@@ -41,6 +42,25 @@ from core import (
 
 logger = logging.getLogger(__name__)
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PLACEHOLDER_EMAILS = {
+    "your-email@example.com",
+    "email@example.com",
+    "example@example.com",
+    "test@example.com",
+    "candidate@example.com",
+    "noreply@example.com",
+}
+_PLACEHOLDER_DOMAINS = {
+    "example.com",
+    "example.org",
+    "example.net",
+    "test.com",
+    "invalid",
+    "localhost",
+    "local",
+}
+
 router = APIRouter(tags=["Engagement"])
 
 # ---------------------------------------------------------------------------
@@ -58,6 +78,41 @@ ENGAGE_PASSED_STATUSES = os.getenv("ENGAGE_PASSED_STATUSES", "completed,passed")
 # slots (briefly, after Fix 1). 5 matches the scale jobdiva_ratelimit_probe.py
 # has been probing — tunable via env if JobDiva's rate budget changes.
 _PROVISION_CONCURRENCY = asyncio.Semaphore(int(os.getenv("PROVISION_CONCURRENCY", "5")))
+_SENTRY_RESPONSE_BODY_LIMIT = 16000
+
+
+def _log_generate_payload_response_to_sentry(response_obj: Dict[str, Any], *, level: str = "info") -> None:
+    """Best-effort Sentry logging for /engage/generate-payload responses."""
+    try:
+        import sentry_sdk
+    except Exception:
+        return
+
+    try:
+        response_text = json.dumps(response_obj, default=str)
+    except Exception:
+        response_text = str(response_obj)
+
+    truncated = response_text[:_SENTRY_RESPONSE_BODY_LIMIT]
+    was_truncated = len(response_text) > len(truncated)
+
+    try:
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("api_endpoint", "/engage/generate-payload")
+            scope.set_tag("api_operation", "generate_payload")
+            scope.set_tag("truncated", str(was_truncated).lower())
+            scope.set_context(
+                "engage_generate_payload_response",
+                {
+                    "response_size_bytes": len(response_text),
+                    "truncated": was_truncated,
+                    "response": truncated,
+                },
+            )
+            sentry_sdk.capture_message("Engage generate-payload response", level=level)
+    except Exception:
+        # Sentry logging must never affect the API path.
+        return
 
 def _parse_json_list(val) -> list:
     """Safely parse a value that may be a JSON string, list, or empty."""
@@ -85,6 +140,55 @@ def _format_normalized_score_100(score: Any, total: Any) -> Optional[str]:
     if normalized_score.is_integer():
         return f"{int(normalized_score)}/100"
     return f"{round(normalized_score, 1):.1f}/100"
+
+
+def _is_placeholder_email(email: str) -> bool:
+    normalized = (email or "").strip().lower()
+    if not normalized:
+        return True
+    if normalized in _PLACEHOLDER_EMAILS:
+        return True
+    if normalized.endswith("@noemail.pair.ai"):
+        return True
+    if "@" not in normalized:
+        return True
+    local_part, domain = normalized.rsplit("@", 1)
+    if domain in _PLACEHOLDER_DOMAINS:
+        return True
+    if local_part in {"your-email", "your_email", "email", "test", "example", "candidate"}:
+        return True
+    # JobDiva auto-generates "Auto_<candidateId>@jobdiva.com" when a candidate
+    # has no real email on file — these are dead addresses, not contactable.
+    if domain == "jobdiva.com":
+        return True
+    return False
+
+
+def _validate_pair_candidate_email(raw: str) -> str:
+    cleaned = (raw or "").strip().lower()
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Candidate email is required before launching PAIR")
+    if not _EMAIL_RE.match(cleaned):
+        raise HTTPException(status_code=400, detail=f"Invalid candidate email address: {cleaned}")
+    if _is_placeholder_email(cleaned):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Placeholder candidate email is not allowed: {cleaned}",
+        )
+    return cleaned
+
+
+def _validate_pair_payload_emails(payload_obj: Dict[str, Any]) -> None:
+    resumes = payload_obj.get("resumes")
+    if not isinstance(resumes, list):
+        raise HTTPException(status_code=400, detail="Payload is missing resumes")
+
+    for idx, resume in enumerate(resumes, start=1):
+        if not isinstance(resume, dict):
+            raise HTTPException(status_code=400, detail=f"Resume {idx} payload is invalid")
+
+        email = _validate_pair_candidate_email(str(resume.get("email") or ""))
+        resume["email"] = email
 
 # ---------------------------------------------------------------------------
 # Auto-Migration: Ensure audit table exists
@@ -339,12 +443,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         final_resumes = []
         for r in resumes:
             candidate_name = r.get("name") or "Unknown"
-            candidate_email = r.get("email") or ""
-            # LiveKit DB has chk_interviews_email_format — empty string fails the constraint.
-            # If email is missing, generate a safe placeholder so the interview can still be created.
-            if not candidate_email:
-                safe_name = candidate_name.lower().replace(" ", ".").replace(",", "")
-                candidate_email = f"{safe_name}@noemail.pair.ai"
+            candidate_email = str(r.get("email") or "").strip().lower()
             final_resumes.append({
                 "source_candidate_id": r.get("source_candidate_id"),
                 "name": candidate_name,
@@ -367,15 +466,26 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
 
         payload_str = json.dumps(payload, indent=2)
 
-        return {
+        response_body = {
             "success": True,
             "payload": payload_str,
             "candidate_count": len(resumes),
             "dnc_blocked_count": len(dnc_blocked_ids),
             "dnc_blocked_ids": dnc_blocked_ids,
         }
+        _log_generate_payload_response_to_sentry(response_body, level="info")
+        return response_body
 
     except Exception as e:
+        _log_generate_payload_response_to_sentry(
+            {
+                "success": False,
+                "error": str(e),
+                "candidate_ids": request.candidate_ids,
+                "job_id": request.job_id,
+            },
+            level="error",
+        )
         logger.error(f"❌ generate-payload failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -450,6 +560,7 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job
                 recruiter_emails=clean_emails,
                 job_boards=job_boards,
                 ai_description=ai_desc,
+                job_id=db_job_id,
                 app_base_url=app_base_url,
             )
         else:
@@ -667,6 +778,8 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             print(f"DEBUG: send_bulk_interview called for job {job_id_from_payload}")
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid JSON format in payload")
+
+        _validate_pair_payload_emails(payload_obj)
 
         # Defense-in-depth: refuse to engage candidates for jobs whose outreach
         # has been stopped. /candidates/save already blocks earlier, but this
@@ -1478,18 +1591,12 @@ async def _check_and_fire_candidate_passed_notification(
         cand_score = interview_block.get("candidate_score")
         total_possible = interview_block.get("total_score")
         
-        # Pass logic: Must have 'passed' status AND (if scores provided) score >= 70% of total
+        # Pass logic: Must have 'passed' status (no score ratio check)
         meets_criteria = (hf_status == HARD_FILTER_PASS_STATUS)
         
         normalized_score_display = "Passed"
         if meets_criteria and cand_score is not None and total_possible:
-            # Check ratio (e.g. 35/40 = 0.875 >= 0.7) and normalize for email display.
-            ratio = float(cand_score) / float(total_possible)
-            if ratio < PASS_CANDIDATE_SCORE_RATIO:
-                logger.info(f"⏭️ Candidate {candidate_id} passed hard filters but score ratio {ratio:.2f} is below threshold {PASS_CANDIDATE_SCORE_RATIO}")
-                meets_criteria = False
-            else:
-                normalized_score_display = _format_normalized_score_100(cand_score, total_possible) or "Passed"
+            normalized_score_display = _format_normalized_score_100(cand_score, total_possible) or "Passed"
         
         if not meets_criteria:
             logger.info(f"⏭️ Candidate {candidate_id} did not meet strict pass criteria (HF: {hf_status}, Score: {cand_score}/{total_possible}).")

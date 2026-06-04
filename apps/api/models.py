@@ -139,6 +139,10 @@ class CandidateSearchRequest(BaseModel):
     require_resume: Optional[bool] = None
     include_relocation_candidates: Optional[bool] = None
     min_experience_years: Optional[int] = None
+    # Optional hiring client / account name. When omitted the backend reads
+    # customer_name from monitored_jobs. Powers the "Same client / industry"
+    # scoring dimension and the currently-employed-by-client veto.
+    client_name: Optional[str] = None
 
 class JobFetchRequest(BaseModel):
     job_id: str

@@ -114,7 +114,7 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT resume_match_filters, sourcing_filters, jobdiva_id
+                    SELECT resume_match_filters, sourcing_filters, jobdiva_id, customer_name
                     FROM monitored_jobs
                     WHERE job_id = %s OR jobdiva_id = %s
                     LIMIT 1
@@ -130,6 +130,8 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
         resume_match_filters = _json_load_safe(row[0], [])
         sourcing_filters = _json_load_safe(row[1], {})
         resolved_job_ref = row[2] or job_ref
+        customer_name = str(row[3] or "").strip() if len(row) > 3 else ""
+        client_name = "" if customer_name.lower() in ("", "external", "unknown", "n/a") else customer_name
 
         title_criteria = [
             {
@@ -165,6 +167,7 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
             page_size=100,
             sources=["JobDiva"],
             bypass_screening=False,
+            client_name=client_name,
         )
     except Exception as e:
         logger.warning(f"resume matching criteria load failed for {job_ref}: {e}")
@@ -355,6 +358,11 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
 
         companies = request.companies or []
 
+        # Hiring client / account name, used by the "Same client / industry"
+        # scoring dimension and the currently-employed-by-client veto. Prefer
+        # an explicit request value, else read customer_name from monitored_jobs.
+        client_name = (getattr(request, "client_name", None) or "").strip()
+
         # Load resume match filters from database if not provided in request
         resume_match_filters = []
         if request.resume_match_filters and len(request.resume_match_filters) > 0:
@@ -365,13 +373,15 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                 conn = get_db_connection()
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT resume_match_filters FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
+                    "SELECT resume_match_filters, customer_name FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
                     (request.job_id, request.job_id)
                 )
                 row = cursor.fetchone()
                 if row and row[0]:
                     resume_match_filters = row[0] if isinstance(row[0], list) else json.loads(row[0])
                     logger.info(f"Loaded {len(resume_match_filters)} resume match filters from database for job {request.job_id}")
+                if row and len(row) > 1 and row[1] and not client_name:
+                    client_name = str(row[1]).strip()
                 cursor.close()
                 conn.close()
             except Exception as e:
@@ -400,6 +410,11 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                 else bool(request.include_relocation_candidates)
             ),
             min_experience_years=request.min_experience_years,
+            # Placeholder customer values carry no client signal — skip them.
+            client_name=(
+                "" if client_name.lower() in ("", "external", "unknown", "n/a")
+                else client_name
+            ),
         )
 
         # Execute unified search as a stream. Persist each candidate to
@@ -827,7 +842,11 @@ async def message_candidate(request: CandidateMessageRequest):
         raise HTTPException(status_code=400, detail=f"Messaging not supported for source: {request.source}")
 
 @router.get("/jobs/{job_id_or_ref}/candidates")
-async def get_job_candidates(job_id_or_ref: str):
+async def get_job_candidates(
+    job_id_or_ref: str,
+    limit: Optional[int] = Query(default=None, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
     """
     Fetches all sourced candidates tied to a specific job.
     Supports both numeric job_id and reference jobdiva_id.
@@ -862,7 +881,34 @@ async def get_job_candidates(job_id_or_ref: str):
         conn = get_db_connection()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total_candidates,
+                        COUNT(*) FILTER (
+                            WHERE COALESCE(NULLIF(data->>'engage_status', ''), '') <> ''
+                        ) AS launched_count
+                    FROM sourced_candidates
+                    WHERE jobdiva_id = %s
+                    """,
+                    (resolved_jobdiva_id,),
+                )
+                counts_row = cur.fetchone() or {}
+                total_candidates = int(counts_row.get("total_candidates") or 0)
+                launched_count = int(counts_row.get("launched_count") or 0)
+
+                pagination_clause = ""
+                params: List[Any] = [
+                    str(resolved_jobdiva_id),
+                    str(resolved_numeric_job_id),
+                    resolved_jobdiva_id,
+                ]
+                if limit is not None:
+                    pagination_clause = " LIMIT %s OFFSET %s"
+                    params.extend([int(limit), int(offset)])
+
+                cur.execute(
+                    f"""
                     WITH latest_audit AS (
                         SELECT DISTINCT ON (candidate_id)
                             candidate_id,
@@ -900,8 +946,11 @@ async def get_job_candidates(job_id_or_ref: str):
                         ON la.candidate_id = sc.candidate_id
 
                     WHERE sc.jobdiva_id = %s
-                    ORDER BY sc.created_at DESC;
-                """, (str(resolved_jobdiva_id), str(resolved_numeric_job_id), resolved_jobdiva_id,))
+                    ORDER BY sc.created_at DESC, sc.id DESC
+                    {pagination_clause};
+                """,
+                    tuple(params),
+                )
 
                 candidates = cur.fetchall()
         finally:
@@ -990,8 +1039,7 @@ async def get_job_candidates(job_id_or_ref: str):
                 status_display = "In Progress"
             elif s == "completed":
                 hf_passed = hf_display in ["", "pass", "passed", "not_hard_filter"]
-                score_passed = score_display is None or float(score_display) >= 70.0
-                status_display = "Pass" if (hf_passed and score_passed) else "Fail"
+                status_display = "Pass" if hf_passed else "Fail"
             
             cand["engage_status"] = status_display
 
@@ -1019,7 +1067,25 @@ async def get_job_candidates(job_id_or_ref: str):
             cand.pop("audit_payload", None)
             cand.pop("audit_response", None)
 
-        return {"status": "success", "candidates": candidates}
+        effective_limit = limit if limit is not None else total_candidates
+        effective_offset = int(offset if limit is not None else 0)
+        has_more = (
+            limit is not None
+            and (effective_offset + len(candidates)) < total_candidates
+        )
+
+        return {
+            "status": "success",
+            "candidates": candidates,
+            "launched_count": launched_count,
+            "pagination": {
+                "limit": effective_limit,
+                "offset": effective_offset,
+                "returned": len(candidates),
+                "total": total_candidates,
+                "has_more": has_more,
+            },
+        }
     except Exception as e:
         logger.error(f"Error fetching job candidates: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -1607,12 +1673,22 @@ class BulkContactUpdateRequest(BaseModel):
 
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PLACEHOLDER_EMAILS = {
+    "your-email@example.com",
+    "email@example.com",
+    "example@example.com",
+    "test@example.com",
+    "candidate@example.com",
+    "noreply@example.com",
+}
 
 
 def _validate_email(raw: str) -> str:
     cleaned = (raw or "").strip().lower()
     if not cleaned or not _EMAIL_RE.match(cleaned):
         raise HTTPException(status_code=400, detail="Enter a valid email address")
+    if cleaned in _PLACEHOLDER_EMAILS or cleaned.endswith("@example.com"):
+        raise HTTPException(status_code=400, detail="Placeholder emails are not allowed")
     if cleaned.endswith("@noemail.pair.ai"):
         raise HTTPException(status_code=400, detail="Placeholder emails are not allowed")
     return cleaned
@@ -3152,8 +3228,7 @@ async def get_candidate_evaluation_report(
             elif s == "completed":
                 hf_display = (hard_filter_status or "").lower()
                 hf_passed = hf_display in ["", "pass", "passed", "not_hard_filter"]
-                score_passed = display_engage_score is None or float(display_engage_score) >= 70.0
-                status_display = "Pass" if (hf_passed and score_passed) else "Fail"
+                status_display = "Pass" if hf_passed else "Fail"
 
         scores = {
             "resume_match_score":    resume_match_score,

@@ -13,6 +13,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { API_BASE } from "@/lib/api";
 import { logger } from "@/lib/logger";
+import * as Sentry from "@sentry/nextjs";
+import { useMsal } from "@azure/msal-react";
 
 export interface MissingPhoneCandidate {
   candidate_id: string;
@@ -41,6 +43,8 @@ interface MissingPhonesModalProps {
   description?: string;
   primaryLabel?: string;
   persist?: boolean;
+  jobId?: string;
+  jobDivaId?: string;
 }
 
 function countDigits(s: string) {
@@ -58,7 +62,11 @@ export function MissingPhonesModal({
   description = "PAIR can only call candidates with a phone number. Add the missing numbers below and we'll retry.",
   primaryLabel = "Launch PAIR",
   persist = true,
+  jobId,
+  jobDivaId,
 }: MissingPhonesModalProps) {
+  const { accounts } = useMsal();
+  const username = accounts?.[0]?.username ?? accounts?.[0]?.name ?? "unknown";
   const [phones, setPhones] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState<Record<string, boolean>>({});
   const [savedAt, setSavedAt] = useState<Record<string, number>>({});
@@ -184,7 +192,25 @@ export function MissingPhonesModal({
         </div>
 
         <DialogFooter className="px-6 py-4 border-t border-slate-100 shrink-0 flex justify-between sm:justify-between gap-2">
-          <Button variant="outline" onClick={onClose}>
+          <Button
+            variant="outline"
+            onClick={() => {
+              Sentry.captureMessage("PAIR launch: candidates skipped (missing phones)", {
+                level: "info",
+                extra: {
+                  username,
+                  job_id: jobId,
+                  job_diva_id: jobDivaId,
+                  skipped_candidates: candidates.map((c) => ({
+                    candidate_id: c.candidate_id,
+                    name: c.name,
+                    jobdiva_id: c.jobdiva_id,
+                  })),
+                },
+              });
+              onClose();
+            }}
+          >
             Cancel
           </Button>
           <Button

@@ -65,6 +65,22 @@ JOBDIVA_URL        = _cfg("JOBDIVA_URL",         "https://www1.jobdiva.com")
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+def jobdiva_job_link(job_id_numeric: str = "", jobdiva_ref: str = "") -> str:
+    """Build a JobDiva job deep link.
+
+    The legacy `/jobdiva/servlet/jd?uid=` path is dead (it 404s at
+    jd.jobdiva.com). The live recruiter-portal deep link is
+    `/employers/myjobs/vieweditjobform.jsp?lstjobs=1&jobid=<numeric job id>`,
+    which expects JobDiva's *numeric* internal job id (monitored_jobs.job_id),
+    not the human reference (monitored_jobs.jobdiva_id). We prefer the numeric
+    id and fall back to the reference only when the numeric id is unavailable.
+    """
+    jid = str(job_id_numeric or jobdiva_ref or "").strip()
+    if not jid:
+        return ""
+    return f"{JOBDIVA_URL}/employers/myjobs/vieweditjobform.jsp?lstjobs=1&jobid={jid}"
+
+
 def resolve_app_base_url(override: Optional[str] = None) -> str:
     """Prefer the caller's current frontend origin over the env default."""
     candidate = (override or "").strip().rstrip("/")
@@ -344,7 +360,7 @@ def notify_pair_launched(
     Subj : PAIR Has Been Launched for [jobdiva_id]
     """
     base_url = resolve_app_base_url(app_base_url)
-    jobdiva_link   = f"{JOBDIVA_URL}/jobdiva/servlet/jd?uid={jobdiva_id}"
+    jobdiva_link   = jobdiva_job_link(job_id, jobdiva_id)
     rankings_link  = f"{base_url}/jobs/{job_id}/rankings"
 
     jd_hyperlink = (
@@ -413,6 +429,7 @@ def notify_job_posting(
     recruiter_emails: List[str],
     job_boards: List[str],
     ai_description: str,
+    job_id: str = "",               # internal numeric DB job_id for deep-link
     app_base_url: Optional[str] = None,
 ) -> bool:
     """
@@ -428,7 +445,7 @@ def notify_job_posting(
     import re as _re
 
     _ = resolve_app_base_url(app_base_url)
-    jobdiva_link = f"{JOBDIVA_URL}/jobdiva/servlet/jd?uid={jobdiva_id}"
+    jobdiva_link = jobdiva_job_link(job_id, jobdiva_id)
 
     jd_hyperlink = (
         f'<a href="{jobdiva_link}" target="_blank" '
@@ -652,7 +669,7 @@ def notify_candidate_passed(
     Subj : [Candidate Name] – Passed Phone Screen for [jobdiva_id]
     """
     base_url = resolve_app_base_url(app_base_url)
-    jobdiva_link   = f"{JOBDIVA_URL}/jobdiva/servlet/jd?uid={jobdiva_id}"
+    jobdiva_link   = jobdiva_job_link(job_id, jobdiva_id)
     rankings_link  = f"{base_url}/jobs/{job_id}/rankings"
     # Deep link to the candidate evaluation report
     report_link    = f"{base_url}/jobs/{job_id}/report?candidateId={candidate_id}"
@@ -787,13 +804,14 @@ def notify_pair_inactive(
     *,
     jobdiva_id: str,
     recruiter_emails: List[str],
+    job_id: str = "",               # internal numeric DB job_id for deep-link
 ) -> bool:
     """
     Email #4 – PAIR Is Now Inactive.
 
     Triggered when PAIR status is updated to Inactive (manual or JobDiva sync).
     """
-    jobdiva_link = f"{JOBDIVA_URL}/jobdiva/servlet/jd?uid={jobdiva_id}"
+    jobdiva_link = jobdiva_job_link(job_id, jobdiva_id)
     
     jd_hyperlink = (
         f'<a href="{jobdiva_link}" target="_blank" '

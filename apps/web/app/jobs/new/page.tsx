@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useEffectEvent, useMemo, useRef, Suspense, type ReactNode } from "react";
+import { useState, useEffect, useEffectEvent, useCallback, useMemo, useRef, Suspense, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
@@ -93,10 +93,20 @@ import { logger } from "@/lib/logger";
 const IS_QA_CURATE =
   typeof window !== "undefined" && window.location.hostname === "qacurate.hoonr.ai";
 const LAUNCH_EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+const PLACEHOLDER_LAUNCH_EMAILS = new Set([
+  "your-email@example.com",
+  "email@example.com",
+  "example@example.com",
+  "test@example.com",
+  "candidate@example.com",
+  "noreply@example.com",
+]);
 
 function isValidLaunchEmail(value: string | null | undefined): boolean {
   const email = String(value || "").trim().toLowerCase();
   if (!email || !LAUNCH_EMAIL_RE.test(email)) return false;
+  if (PLACEHOLDER_LAUNCH_EMAILS.has(email)) return false;
+  if (email.endsWith("@example.com")) return false;
   if (email.endsWith("@noemail.pair.ai")) return false;
   return true;
 }
@@ -520,6 +530,10 @@ function NewJobPageContent() {
   const isViewOnly = wizardMode === 'view';
   // Already-launched candidate keys for Step 5 (only fetched in source/view modes).
   const [launchedCandidateKeys, setLaunchedCandidateKeys] = useState<Set<string>>(new Set());
+  // Bare candidate_ids (no source prefix) for already-launched people. Used as a
+  // resilient fallback so a candidate re-sourced under a slightly different
+  // `source` string still gets hidden once they're launched / in the rank list.
+  const [launchedCandidateIds, setLaunchedCandidateIds] = useState<Set<string>>(new Set());
   // DNC (Do Not Contact) phone set, fetched once at mount. Used to flag and
   // skip candidates whose phone matches a Zoom DNC entry.
   const [dncPhones, setDncPhones] = useState<Set<string>>(new Set());
@@ -629,6 +643,15 @@ function NewJobPageContent() {
         resumeText: resumeText,
         keywords: primary,
         similarKeywords: similar,
+        jobdivaCandidateId: String(
+          candidate.jobdiva_candidate_id ||
+            candidate.data?.jobdiva_candidate_id ||
+            candidate.candidate_id ||
+            candidate.candidateId ||
+            candidate.id ||
+            ""
+        ).trim() || undefined,
+        source: candidate.source,
       });
       setResumeModalOpen(true);
     } else {
@@ -1064,7 +1087,11 @@ function NewJobPageContent() {
     const filtered = candidates.filter((c: any) => {
       const candId = c.candidate_id || c.jobdiva_candidate_id || c.id;
       const key = `${c.source ?? ''}:${candId}`;
-      if (launchedCandidateKeys.has(key)) return false;
+      // Hide anyone already launched (now in sourced_candidates / the rank
+      // list). Match on the composite source:id key, falling back to the bare
+      // candidate_id so source-string drift between sourcing runs can't let a
+      // launched candidate re-surface.
+      if (launchedCandidateKeys.has(key) || launchedCandidateIds.has(String(candId))) return false;
       if (!matchesSourceFilter(c)) return false;
       // Progressive rows (agent_result / details_loaded) bypass score &
       // location filters so they stay visible while shimmering. Once the
@@ -1147,7 +1174,7 @@ function NewJobPageContent() {
     };
 
     return [...filtered].sort(cmp);
-  }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, sortKey, sortDir, launchedCandidateKeys]);
+  }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, sortKey, sortDir, launchedCandidateKeys, launchedCandidateIds]);
 
   const totalPages = Math.max(1, Math.ceil(sortedCandidates.length / candidatesPerPage));
   const paginatedCandidates = sortedCandidates.slice(
@@ -1303,33 +1330,41 @@ function NewJobPageContent() {
     setHasSeededSourceLocation(false);
   }, [numericJobId, jobdivaId]);
 
-  // In source/view mode, pull the (candidate_id, source) keys for everyone
-  // already launched so Step 5 can disable those rows.
-  useEffect(() => {
-    if (wizardMode === 'edit') return;
+  // Pull the (candidate_id, source) keys for everyone already launched (i.e.
+  // saved into sourced_candidates / showing in the rank list) so Step 5 hides
+  // those rows. Runs in every mode: after the first launch in edit mode and on
+  // every revisit in source mode, just-launched people must drop off the list
+  // so the recruiter can keep launching PAIR for the remaining candidates.
+  const refreshLaunchedKeys = useCallback(async () => {
     const ref = jobdivaId || numericJobId;
     if (!ref) return;
+    try {
+      const res = await fetch(`${API_BASE}/jobs/${ref}/launched-candidate-keys`);
+      if (!res.ok) return;
+      const json = await res.json();
+      const keys = new Set<string>();
+      const ids = new Set<string>();
+      for (const item of json?.launched ?? []) {
+        if (item?.candidate_id) {
+          keys.add(`${item.source ?? ''}:${item.candidate_id}`);
+          ids.add(String(item.candidate_id));
+        }
+      }
+      setLaunchedCandidateKeys(keys);
+      setLaunchedCandidateIds(ids);
+    } catch (err) {
+      console.warn('Failed to load launched candidate keys', err);
+    }
+  }, [jobdivaId, numericJobId]);
 
+  useEffect(() => {
     let cancelled = false;
     (async () => {
-      try {
-        const res = await fetch(`${API_BASE}/jobs/${ref}/launched-candidate-keys`);
-        if (!res.ok) return;
-        const json = await res.json();
-        if (cancelled) return;
-        const keys = new Set<string>();
-        for (const item of json?.launched ?? []) {
-          if (item?.candidate_id) {
-            keys.add(`${item.source ?? ''}:${item.candidate_id}`);
-          }
-        }
-        setLaunchedCandidateKeys(keys);
-      } catch (err) {
-        console.warn('Failed to load launched candidate keys', err);
-      }
+      if (cancelled) return;
+      await refreshLaunchedKeys();
     })();
     return () => { cancelled = true; };
-  }, [wizardMode, jobdivaId, numericJobId]);
+  }, [refreshLaunchedKeys]);
 
   // Fetch the DNC phone list once. Cached server-side; the small payload
   // (~95 phones) is fine to ship in full.
@@ -5162,6 +5197,11 @@ function NewJobPageContent() {
         typeof minExperienceYears === "number" && minExperienceYears > 0
           ? minExperienceYears
           : undefined,
+      // Hiring client / account name. Powers the "Same client / industry"
+      // scoring dimension and the currently-employed-by-client veto. The
+      // backend falls back to monitored_jobs.customer_name when this is
+      // omitted, and filters placeholder values ("External"/"Unknown").
+      client_name: (jobData?.customer_name || jobData?.customer || "").trim() || undefined,
       page: 1,
       page_size: 100
     };
@@ -6014,6 +6054,9 @@ function NewJobPageContent() {
     // this check at /candidates/save — defense in depth.
     const candidatesPayload = effective
       .filter(c => launchIds.has(c.candidate_id || c.jobdiva_candidate_id || c.id))
+      // Hard filter fail safety net: a 0% candidate must never reach
+      // /candidates/save, even via the second MissingContactsModal pass.
+      .filter(c => getCandidateMatchScore(c) !== 0)
       .filter(c => {
         if (dncPhones.size === 0) return true;
         const np = normalizePhone(c.phone);
@@ -6307,6 +6350,11 @@ function NewJobPageContent() {
       finalMessage: engageFailureMessage ?? undefined,
     }));
 
+    // After a successful launch, redirect to this job's rank list. The
+    // just-launched candidates now live there; to launch PAIR for the
+    // remaining candidates the recruiter re-opens the job in source mode
+    // ("Source Candidates"), where already-launched people are filtered out
+    // of Step 5 so only the remaining ones can be selected and launched.
     if (totalSaved > 0 && !options?.skipRedirect) {
       setTimeout(() => {
         setLaunchProgress(initialLaunchProgress);
@@ -6332,9 +6380,26 @@ function NewJobPageContent() {
       showToast("Select at least one candidate before launching PAIR.", "info");
       return;
     }
+
+    // Hard filter fail: candidates scored exactly 0% are never launched, even
+    // when selected. Compute the skip set once and thread it through the flow
+    // below WITHOUT touching the table selection — they are simply excluded
+    // from the launch payload and reported on the completion screen.
+    const hardFilterSkipIds = new Set<string>();
+    const hardFilterSkippedNames: string[] = [];
+    for (const c of candidates) {
+      const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
+      if (!id || !selectedCandidates.has(id)) continue;
+      if (getCandidateMatchScore(c) === 0) {
+        hardFilterSkipIds.add(id);
+        hardFilterSkippedNames.push(getCandidateDisplayName(c) || c.name || "Unnamed");
+      }
+    }
+
     trackEvent("job_wizard_step5_launch_pair_clicked", {
       step: 5,
       selected_candidates_count: selectedCandidates.size,
+      hard_filter_skipped: hardFilterSkipIds.size,
     });
 
     // Persist the latest Step-5 sourcing state before launching so titles /
@@ -6351,7 +6416,7 @@ function NewJobPageContent() {
         const launchJobdivaId = jobdivaId || jobData?.jobdiva_id || numericJobId || undefined;
         for (const c of candidates) {
           const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-          if (!id || !selectedCandidates.has(id)) continue;
+          if (!id || !selectedCandidates.has(id) || hardFilterSkipIds.has(id)) continue;
           const currentPhone = getCandidateLaunchPhone(c);
           const currentEmail = getCandidateLaunchEmail(c);
           reviewList.push({
@@ -6381,6 +6446,7 @@ function NewJobPageContent() {
       const candidatesMissingContact = candidates.filter(c => {
         const id = c.candidate_id || c.jobdiva_candidate_id || c.id;
         if (!selectedCandidates.has(id)) return false;
+        if (hardFilterSkipIds.has(String(id || "").trim())) return false;
         const phone = getCandidateLaunchPhone(c);
         const email = getCandidateLaunchEmail(c);
         return !isValidLaunchPhone(phone) || !isValidLaunchEmail(email);
@@ -6393,9 +6459,11 @@ function NewJobPageContent() {
         ...initialLaunchProgress,
         open: true,
         phase: candidatesMissingContact.length > 0 ? "enriching" : "launching",
-        totalCandidates: selectedCandidates.size,
+        totalCandidates: Math.max(0, selectedCandidates.size - hardFilterSkipIds.size),
         batchSize: LAUNCH_BATCH_SIZE,
         enrichTotal: candidatesMissingContact.length,
+        hardFilterSkipped: hardFilterSkipIds.size,
+        hardFilterSkippedNames,
       });
 
       const contactOverrides: Record<string, { phone?: string; email?: string }> = {};
@@ -6571,7 +6639,7 @@ function NewJobPageContent() {
       const phoneToCandidateIds = new Map<string, string[]>();
       for (const c of candidates) {
         const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-        if (!id || !selectedCandidates.has(id) || dncDropped.has(id)) continue;
+        if (!id || !selectedCandidates.has(id) || dncDropped.has(id) || hardFilterSkipIds.has(id)) continue;
         const overrideEmail = contactOverrides[id]?.email;
         const overridePhone = contactOverrides[id]?.phone;
         const effectiveEmail = String(overrideEmail || getCandidateLaunchEmail(c)).trim().toLowerCase();
@@ -6600,7 +6668,7 @@ function NewJobPageContent() {
       }
       for (const c of candidates) {
         const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-        if (!id || !selectedCandidates.has(id) || dncDropped.has(id)) continue;
+        if (!id || !selectedCandidates.has(id) || dncDropped.has(id) || hardFilterSkipIds.has(id)) continue;
         const overridePhone = contactOverrides[id]?.phone;
         const overrideEmail = contactOverrides[id]?.email;
         const effectivePhone = overridePhone || getCandidateLaunchPhone(c);
@@ -6653,6 +6721,20 @@ function NewJobPageContent() {
         if (hasNeeds) {
           setLaunchProgress(initialLaunchProgress);
         }
+      } else if (!hasNeeds && hardFilterSkipIds.size > 0) {
+        setReadyLaunchedPendingRedirect(false);
+        // Nothing to launch, but the only reason is hard-filter skips. Keep the
+        // progress modal open in a completed state so the recruiter sees which
+        // candidates were skipped (and why) instead of a bare toast.
+        setLaunchProgress(prev => ({
+          ...prev,
+          open: true,
+          phase: "completed",
+          totalCandidates: 0,
+          enrichTotal: 0,
+          batches: [],
+          finalMessage: "No candidates launched — all selected candidates failed the hard filter (0% match).",
+        }));
       } else {
         setReadyLaunchedPendingRedirect(false);
         // No ready candidates: nothing for runLaunchPair to do, so drop
@@ -6665,6 +6747,11 @@ function NewJobPageContent() {
         setMissingContactCandidates(needsInfo);
         setMissingContactsReviewMode(false);
         setMissingContactsOpen(true);
+      } else if (!hasReady && hardFilterSkipIds.size > 0) {
+        showToast(
+          `${hardFilterSkipIds.size} candidate${hardFilterSkipIds.size === 1 ? "" : "s"} skipped — hard filter failed (0% match).`,
+          "info",
+        );
       } else if (!hasReady) {
         showToast("No candidates available to launch.", "info");
       }
@@ -7753,7 +7840,7 @@ function NewJobPageContent() {
                         const firstN = candidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                            return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
+                            return !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
                           })
                           .slice(0, n);
 
@@ -7786,7 +7873,7 @@ function NewJobPageContent() {
                         const firstN = candidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                            return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
+                            return !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
                           })
                           .slice(0, n);
                         const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.jobdiva_candidate_id || c.id));
@@ -7824,7 +7911,7 @@ function NewJobPageContent() {
                       onClick={() => {
                         const eligible = candidates.filter(c => {
                           const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                          return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
+                          return !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
                         });
                         const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
@@ -7841,7 +7928,7 @@ function NewJobPageContent() {
                       {(() => {
                         const eligible = candidates.filter(c => {
                           const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                          return !launchedCandidateKeys.has(key) && !dncCandidateKeys.has(key);
+                          return !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
                         });
                         const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
@@ -8634,6 +8721,8 @@ return (
         resumeText={selectedCandidateForResume.resumeText}
         keywords={selectedCandidateForResume.keywords}
         similarKeywords={selectedCandidateForResume.similarKeywords}
+        jobdivaCandidateId={selectedCandidateForResume.jobdivaCandidateId}
+        source={selectedCandidateForResume.source}
         isOpen={resumeModalOpen}
         onClose={() => {
           setResumeModalOpen(false);
@@ -8660,6 +8749,9 @@ return (
       primaryLabel={
         missingContactsReviewMode ? "Confirm & launch PAIR" : undefined
       }
+
+      jobId={numericJobId || jobData?.jobdiva_id?.toString() || undefined}
+      jobDivaId={jobdivaId || jobData?.jobdiva_id?.toString() || undefined}
     />
 
     <LaunchPairProgressModal

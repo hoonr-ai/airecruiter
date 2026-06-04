@@ -3,6 +3,7 @@ import logging
 import re
 import time
 import json
+import httpx as _httpx_module
 import httpx
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
@@ -16,6 +17,133 @@ from core import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# --- JobDiva HTTP request/response logging to Sentry ---------------------
+# Every httpx.AsyncClient(...) constructed in this module is transparently
+# wrapped (via the _JDHttpxProxy shim below) so each JobDiva request emits
+# a Sentry breadcrumb + capture_message with the full response body and
+# elapsed time. We do not modify the global httpx module — only the local
+# `httpx` name in this file's namespace.
+
+_JD_RESPONSE_BODY_LIMIT = 16000  # cap body bytes sent to Sentry per call
+
+
+def _jd_redact_url(url: "_httpx_module.URL") -> str:
+    s = str(url)
+    if "password=" in s:
+        s = re.sub(r"(password=)[^&]*", r"\1***", s)
+    return s
+
+
+async def _jd_on_request(request: "_httpx_module.Request") -> None:
+    request.extensions["_jd_t0"] = time.monotonic()
+
+
+async def _jd_on_response(response: "_httpx_module.Response") -> None:
+    try:
+        t0 = response.request.extensions.get("_jd_t0")
+        elapsed_ms = int((time.monotonic() - t0) * 1000) if t0 is not None else None
+
+        # Buffer the body so the caller's .text/.json() still works after us.
+        body_text = ""
+        try:
+            await response.aread()
+            body_text = response.text or ""
+        except Exception:
+            body_text = ""
+        body_size = len(body_text)
+        body_truncated = body_text[:_JD_RESPONSE_BODY_LIMIT]
+        was_truncated = body_size > len(body_truncated)
+
+        try:
+            from core.sentry import is_enabled
+        except Exception:
+            return
+        if not is_enabled():
+            return
+
+        try:
+            import sentry_sdk
+        except Exception:
+            return
+
+        method = response.request.method
+        url_path = response.request.url.path
+        url_full = _jd_redact_url(response.request.url)
+        status = response.status_code
+
+        try:
+            sentry_sdk.add_breadcrumb(
+                category="jobdiva.http",
+                level="info",
+                message=f"{method} {url_path} -> {status} ({elapsed_ms}ms)",
+                data={
+                    "url": url_full,
+                    "status_code": status,
+                    "elapsed_ms": elapsed_ms,
+                    "response_size_bytes": body_size,
+                },
+            )
+        except Exception:
+            pass
+
+        try:
+            with sentry_sdk.new_scope() as scope:
+                scope.set_tag("jobdiva_api", "1")
+                scope.set_tag("jobdiva_endpoint", url_path)
+                scope.set_tag("http_method", method)
+                scope.set_tag("status_code", str(status))
+                if elapsed_ms is not None:
+                    scope.set_tag("elapsed_ms", str(elapsed_ms))
+                scope.set_context(
+                    "jobdiva_response",
+                    {
+                        "url": url_full,
+                        "method": method,
+                        "status_code": status,
+                        "elapsed_ms": elapsed_ms,
+                        "response_size_bytes": body_size,
+                        "truncated": was_truncated,
+                        "response_body": body_truncated,
+                    },
+                )
+                level = "info" if 200 <= status < 400 else ("warning" if status < 500 else "error")
+                sentry_sdk.capture_message(
+                    f"JobDiva {method} {url_path} -> {status} ({elapsed_ms}ms)",
+                    level=level,
+                )
+        except Exception:
+            pass
+    except Exception:
+        # Logging must never break the actual API path.
+        return
+
+
+class _JDAsyncClient(_httpx_module.AsyncClient):
+    def __init__(self, *args, **kwargs):
+        hooks = kwargs.pop("event_hooks", None) or {}
+        request_hooks = list(hooks.get("request", [])) + [_jd_on_request]
+        response_hooks = list(hooks.get("response", [])) + [_jd_on_response]
+        kwargs["event_hooks"] = {"request": request_hooks, "response": response_hooks}
+        super().__init__(*args, **kwargs)
+
+
+class _JDHttpxProxy:
+    """Module-local stand-in for the `httpx` module.
+
+    AsyncClient is overridden to inject Sentry logging hooks; every other
+    attribute (TimeoutException, ConnectError, Request, ...) falls through
+    to the real httpx module untouched.
+    """
+    AsyncClient = _JDAsyncClient
+
+    def __getattr__(self, name):
+        return getattr(_httpx_module, name)
+
+
+httpx = _JDHttpxProxy()
+
 
 _CANDIDATE_EMAIL_KEYS = [
     "email",
@@ -211,14 +339,163 @@ def _clean_location_field(value: Any) -> str:
     return val_str
 
 
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PLACEHOLDER_EMAILS = {
+    "your-email@example.com",
+    "email@example.com",
+    "example@example.com",
+    "test@example.com",
+    "candidate@example.com",
+    "noreply@example.com",
+}
+_PLACEHOLDER_DOMAINS = {
+    "example.com",
+    "example.org",
+    "example.net",
+    "test.com",
+    "invalid",
+    "localhost",
+    "local",
+}
+_PLACEHOLDER_LOCALPARTS = {"your-email", "your_email", "email", "test", "example", "candidate"}
+
+
+def _is_placeholder_email(email: str) -> bool:
+    """Mirror of routers.engagement._is_placeholder_email so JobDiva extraction
+    skips synthetic/placeholder emails before they propagate downstream."""
+    normalized = (email or "").strip().lower()
+    if not normalized:
+        return True
+    if normalized in _PLACEHOLDER_EMAILS:
+        return True
+    if normalized.endswith("@noemail.pair.ai"):
+        return True
+    if "@" not in normalized:
+        return True
+    local_part, domain = normalized.rsplit("@", 1)
+    if domain in _PLACEHOLDER_DOMAINS:
+        return True
+    if local_part in _PLACEHOLDER_LOCALPARTS:
+        return True
+    # JobDiva auto-generates "Auto_<candidateId>@jobdiva.com" when a candidate
+    # has no real email on file. Treat any @jobdiva.com address as synthetic so
+    # a real ALTERNATEEMAIL is preferred and PAIR never emails a dead address.
+    if domain == "jobdiva.com":
+        return True
+    return False
+
+
+def _collect_field_values(data: Dict[str, Any], keys: List[str]) -> List[str]:
+    """Flatten every value found across `keys` (case/punctuation-insensitive),
+    expanding list and nested-date/value shapes into individual scalar strings.
+
+    Unlike get_field (which collapses to the first match), this preserves every
+    candidate value so callers like email/phone selection can apply their own
+    preference rule (e.g. prefer a non-placeholder email over the first one).
+    """
+    if not isinstance(data, dict):
+        return []
+
+    def normalize(s):
+        return re.sub(r'[^a-zA-Z0-9]', '', str(s).lower())
+
+    normalized_data = {normalize(k): v for k, v in data.items()}
+
+    def unwrap(item: Any) -> Optional[str]:
+        if isinstance(item, dict):
+            for subkey in ["dateTime", "date", "value", "$"]:
+                if subkey in item:
+                    item = item[subkey]
+                    break
+        if item is None:
+            return None
+        s = str(item).strip()
+        return s or None
+
+    values: List[str] = []
+    for key in keys:
+        norm_key = normalize(key)
+        if norm_key not in normalized_data:
+            continue
+        val = normalized_data[norm_key]
+        items = val if isinstance(val, list) else [val]
+        for item in items:
+            s = unwrap(item)
+            if s:
+                values.append(s)
+    return values
+
+
 def _get_candidate_email(data: Dict[str, Any]) -> str:
-    value = get_field(data, _CANDIDATE_EMAIL_KEYS) or ""
-    return str(value).strip()
+    """Return the candidate's best email: the first well-formed, non-placeholder
+    address across all email keys/list items. Falls back to the first well-formed
+    address only when every candidate is a placeholder, and finally to the first
+    raw value so behavior never regresses to empty when something is present."""
+    values = _collect_field_values(data, _CANDIDATE_EMAIL_KEYS)
+    if not values:
+        return ""
+
+    well_formed = [v for v in values if _EMAIL_RE.match(v.strip().lower())]
+    for v in well_formed:
+        if not _is_placeholder_email(v):
+            return v.strip()
+    if well_formed:
+        return well_formed[0].strip()
+    return values[0].strip()
 
 
 def _get_candidate_phone(data: Dict[str, Any]) -> str:
-    value = get_field(data, _CANDIDATE_PHONE_KEYS) or ""
-    return str(value).strip()
+    """Return the candidate's best phone, preferring a MOBILE/cell number.
+
+    JobDiva returns numbers in slots (CELLPHONE, PHONE1..PHONE4) where each
+    PHONE{n} carries a companion PHONE{n}_TYPE ('Mobile Phone', 'Home Phone',
+    'Work Phone', 'Home Fax'). PAIR contacts candidates on their mobile, so a
+    blank CELLPHONE must not let a Home/Work number in an earlier slot shadow a
+    real mobile sitting in a later, type-tagged slot. Preference order:
+      1) explicit mobile/cell fields (CELLPHONE, mobilePhone),
+      2) any PHONE{n} whose PHONE{n}_TYPE says mobile/cell,
+      3) otherwise the first phone slot that actually contains digits.
+    A value without digits (e.g. "Available upon request") is never a phone.
+    """
+    if not isinstance(data, dict):
+        return ""
+
+    def normalize(s):
+        return re.sub(r'[^a-zA-Z0-9]', '', str(s).lower())
+
+    norm = {normalize(k): v for k, v in data.items()}
+
+    def scalar(v: Any) -> str:
+        if isinstance(v, list):
+            v = next((x for x in v if x), None)
+        if isinstance(v, dict):
+            for sk in ["value", "$"]:
+                if sk in v:
+                    v = v[sk]
+                    break
+        return str(v).strip() if v is not None else ""
+
+    def has_digits(s: str) -> bool:
+        return any(ch.isdigit() for ch in s)
+
+    # 1) Explicit mobile/cell fields.
+    for key in ("mobilephone", "cellphone", "mobile", "cell"):
+        s = scalar(norm.get(key))
+        if has_digits(s):
+            return s
+
+    # 2) Slotted PHONE{n} whose companion PHONE{n}_TYPE indicates mobile/cell.
+    for n in range(1, 5):
+        s = scalar(norm.get(f"phone{n}"))
+        t = scalar(norm.get(f"phone{n}type")).lower()
+        if has_digits(s) and ("mobile" in t or "cell" in t):
+            return s
+
+    # 3) Fallback: first phone value that actually contains digits.
+    for v in _collect_field_values(data, _CANDIDATE_PHONE_KEYS):
+        if has_digits(v):
+            return v.strip()
+    return ""
 
 
 def _is_job_agent_criteria_unconfigured(status_code: int, body: str) -> bool:
@@ -813,6 +1090,11 @@ class JobDivaService:
         s = str(local_or_ref_id).strip()
         if not s:
             return None
+        # Strip an internal version suffix (e.g. "26-06182-v2" -> "26-06182").
+        # Versioned jobs are local clones used for re-editing after launch; they
+        # share the original JobDiva job, so sourcing must resolve against the
+        # un-versioned reference.
+        s = re.sub(r"-v\d+$", "", s)
         if "-" not in s:
             try:
                 return int(s)
@@ -915,16 +1197,43 @@ class JobDivaService:
         _ja_delays = [5, 15]
         response = None
         _last_response = None  # saved even on 5xx, for criteria-unconfigured check
+
+        # --- timing instrumentation (observation only; no behavior change) ---
+        # Splits the app-side wall-clock into the segments Postman never pays
+        # for: connection setup + HTTP, retry backoff, JSON parse, and the
+        # synchronous candidate-normalization loop. Grep "JobAgent TIMING".
+        _t_start = time.perf_counter()
+        _request_ms = 0.0    # cumulative setup+http across attempts
+        _sleep_ms = 0.0      # cumulative retry backoff (asyncio.sleep)
+        _json_ms = 0.0       # response.json() deserialization
+        _normalize_ms = 0.0  # per-candidate normalization loop
+        _attempts_made = 0
+        _resp_bytes = 0
         try:
             for _attempt, _timeout_val in enumerate(_ja_timeouts):
                 try:
+                    # Time client creation (fresh DNS+TCP+TLS handshake — no
+                    # connection reuse) together with the GET, since that whole
+                    # cost is what Postman avoids via a warm keep-alive socket.
+                    _attempts_made += 1
+                    _req_t0 = time.perf_counter()
                     async with httpx.AsyncClient(timeout=_timeout_val) as client:
                         logger.info(
                             "JobAgentSearch jobId=%s attempt %d/%d timeout=%.0fs",
                             job_id, _attempt + 1, len(_ja_timeouts), _timeout_val,
                         )
                         response = await client.get(url, params=params, headers=headers)
+                        _req_ms = (time.perf_counter() - _req_t0) * 1000.0
+                    _request_ms += _req_ms
                     _last_response = response
+                    try:
+                        _resp_bytes = len(response.content)
+                    except Exception:
+                        _resp_bytes = 0
+                    logger.info(
+                        "JobAgentSearch jobId=%s attempt %d: HTTP %d in %.0fms (setup+http), %d bytes",
+                        job_id, _attempts_made, response.status_code, _req_ms, _resp_bytes,
+                    )
                     if response.status_code < 500:
                         break
                     body = response.text or ""
@@ -943,7 +1252,9 @@ class JobDivaService:
                 if _attempt < len(_ja_timeouts) - 1:
                     _delay = _ja_delays[_attempt]
                     logger.info("JobAgentSearch retrying in %ds...", _delay)
+                    _sleep_t0 = time.perf_counter()
                     await asyncio.sleep(_delay)
+                    _sleep_ms += (time.perf_counter() - _sleep_t0) * 1000.0
                 else:
                     logger.error(
                         "JobAgentSearch all %d attempts exhausted for jobId=%s",
@@ -963,6 +1274,12 @@ class JobDivaService:
                         "JobAgentSearch jobId=%s: criteria not configured in JobDiva; surfacing to UI.",
                         job_id,
                     )
+            logger.info(
+                "JobAgent TIMING jobId=%s resumeCount=%s attempts=%d FAILED (no usable response) | "
+                "request_ms=%.0f sleep_ms=%.0f total_ms=%.0f",
+                job_id, resume_count, _attempts_made,
+                _request_ms, _sleep_ms, (time.perf_counter() - _t_start) * 1000.0,
+            )
             return [], criteria_unconfigured
 
         if response.status_code != 200:
@@ -977,16 +1294,25 @@ class JobDivaService:
                 logger.warning(
                     f"JobAgentSearch failed: {response.status_code} - {body[:200]}"
                 )
+            logger.info(
+                "JobAgent TIMING jobId=%s resumeCount=%s attempts=%d status=%d (non-200) | "
+                "request_ms=%.0f sleep_ms=%.0f total_ms=%.0f resp_bytes=%d",
+                job_id, resume_count, _attempts_made, response.status_code,
+                _request_ms, _sleep_ms, (time.perf_counter() - _t_start) * 1000.0, _resp_bytes,
+            )
             return [], criteria_unconfigured
 
         try:
+            _json_t0 = time.perf_counter()
             data = response.json()
+            _json_ms = (time.perf_counter() - _json_t0) * 1000.0
             candidates = data.get("data") if isinstance(data, dict) else data
             candidates = candidates or []
         except Exception as e:
             logger.error(f"JobAgentSearch error: {e}")
             return [], criteria_unconfigured
 
+        _norm_t0 = time.perf_counter()
         for api_rank, c in enumerate(candidates):
             candidate_id = str(
                 get_field(c, ["candidateId", "CANDIDATEID", "id", "ID"]) or ""
@@ -1057,6 +1383,17 @@ class JobDivaService:
                 profile_only_results.append(record)
                 continue
             jd_results.append(record)
+
+        _normalize_ms = (time.perf_counter() - _norm_t0) * 1000.0
+        logger.info(
+            "JobAgent TIMING jobId=%s resumeCount=%s attempts=%d raw=%d kept=%d | "
+            "request_ms=%.0f (setup+http) sleep_ms=%.0f json_ms=%.0f "
+            "normalize_ms=%.0f total_ms=%.0f resp_bytes=%d",
+            job_id, resume_count, _attempts_made, len(candidates),
+            len(jd_results) + len(profile_only_results),
+            _request_ms, _sleep_ms, _json_ms, _normalize_ms,
+            (time.perf_counter() - _t_start) * 1000.0, _resp_bytes,
+        )
 
         # Same enrichment + rescue flow as _search_talent_pool.
         merge_targets = jd_results + profile_only_results
@@ -1824,7 +2161,9 @@ class JobDivaService:
 
         Used by `_search_talent_pool` to enrich Talent Search results with
         fields the search payload doesn't reliably populate (address1,
-        linkedinUrl, full email/phone). Chunks are issued concurrently.
+        linkedinUrl, full email/phone). Chunks are issued with bounded
+        concurrency (CANDIDATES_DETAIL_CONCURRENCY) and retried on 429/5xx
+        with backoff so JobDiva's rate limiter doesn't silently drop records.
         """
         ids = [str(cid).strip() for cid in (candidate_ids or []) if cid and str(cid).strip()]
         if not ids:
@@ -1834,34 +2173,67 @@ class JobDivaService:
         endpoint = f"{self.api_url}/apiv2/bi/CandidatesDetail"
         chunks = [ids[i:i + chunk_size] for i in range(0, len(ids), chunk_size)]
 
-        async def _fetch_chunk(chunk: List[str]) -> List[Dict[str, Any]]:
-            try:
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.get(
-                        endpoint,
-                        params={"candidateIds": chunk},
-                        headers=headers,
+        # Bound how many chunks hit JobDiva at once and retry 429/5xx with
+        # backoff. JobDiva rate-limits bursts of concurrent CandidatesDetail
+        # requests (observed: 3 of 4 concurrent chunks 429'd), and the old
+        # code dropped those records with no retry. See sourcing_config.
+        from core import sourcing_config as _sc_det
+        conc = max(1, int(getattr(_sc_det, "CANDIDATES_DETAIL_CONCURRENCY", 2)))
+        backoffs = list(getattr(_sc_det, "CANDIDATES_DETAIL_RETRY_BACKOFF_S", [1.0, 3.0, 6.0]))
+        sem = asyncio.Semaphore(conc)
+
+        async def _fetch_chunk(chunk: List[str], idx: int = 0) -> List[Dict[str, Any]]:
+            for attempt in range(len(backoffs) + 1):
+                try:
+                    async with sem:
+                        _c_t0 = time.perf_counter()
+                        async with httpx.AsyncClient(timeout=30.0) as client:
+                            response = await client.get(
+                                endpoint,
+                                params={"candidateIds": chunk},
+                                headers=headers,
+                            )
+                        _c_ms = (time.perf_counter() - _c_t0) * 1000.0
+                    try:
+                        _c_bytes = len(response.content)
+                    except Exception:
+                        _c_bytes = 0
+                    logger.info(
+                        "CandidatesDetail chunk %d: %d ids -> HTTP %d in %.0fms "
+                        "(setup+http), %d bytes (attempt %d/%d)",
+                        idx, len(chunk), response.status_code, _c_ms, _c_bytes,
+                        attempt + 1, len(backoffs) + 1,
                     )
-                if response.status_code != 200:
+                    if response.status_code == 200:
+                        data = response.json()
+                        if isinstance(data, dict):
+                            payload = data.get("data") or []
+                        else:
+                            payload = data or []
+                        if isinstance(payload, dict):
+                            payload = [payload]
+                        return list(payload)
+                    # Retry rate-limit / server errors; give up on other 4xx.
+                    if (response.status_code == 429 or response.status_code >= 500) and attempt < len(backoffs):
+                        await asyncio.sleep(backoffs[attempt])
+                        continue
                     logger.warning(
-                        f"CandidatesDetail batch failed: {response.status_code} - "
+                        f"CandidatesDetail chunk {idx} failed: {response.status_code} - "
                         f"{response.text[:200]}"
                     )
                     return []
-                data = response.json()
-                if isinstance(data, dict):
-                    payload = data.get("data") or []
-                else:
-                    payload = data or []
-                if isinstance(payload, dict):
-                    payload = [payload]
-                return list(payload)
-            except Exception as e:
-                logger.warning(f"CandidatesDetail batch error: {e}")
-                return []
+                except Exception as e:
+                    if attempt < len(backoffs):
+                        await asyncio.sleep(backoffs[attempt])
+                        continue
+                    logger.warning(f"CandidatesDetail chunk {idx} error: {e}")
+                    return []
+            return []
 
         results: Dict[str, Dict[str, Any]] = {}
-        chunked = await asyncio.gather(*[_fetch_chunk(chunk) for chunk in chunks])
+        _det_t0 = time.perf_counter()
+        chunked = await asyncio.gather(*[_fetch_chunk(chunk, i) for i, chunk in enumerate(chunks)])
+        _det_ms = (time.perf_counter() - _det_t0) * 1000.0
         for batch in chunked:
             for record in batch:
                 if not isinstance(record, dict):
@@ -1870,6 +2242,11 @@ class JobDivaService:
                 if cid is None:
                     continue
                 results[str(cid)] = record
+        logger.info(
+            "CandidatesDetail TIMING: ids=%d chunks=%d (chunk_size=%d, max_concurrency=%d) "
+            "matched=%d total_ms=%.0f",
+            len(ids), len(chunks), chunk_size, conc, len(results), _det_ms,
+        )
         return results
 
     async def _fetch_resume_text_batch(
