@@ -2625,21 +2625,23 @@ class JobDivaService:
                 
                 # Determine rate unit suffix dynamically based on 'rate per' from JobDiva
                 # Handles all JobDiva units: $/Hour, $/Day, $/Month, $/Year, INR/*, C$/*, MXN/*
+                # JobDiva uses single-char codes: 'y'=year, 'h'=hour, 'd'=day, 'm'/'mo'=month
                 # If no unit is provided, display rate as-is without any suffix
                 rate_per = get_field(j, ["rate per", "rate_per", "PAYRATEPER", "payRatePer"])
                 rate_unit = "" # No suffix by default
                 
                 if rate_per:
                     rate_per_str = str(rate_per).lower().strip()
-                    # Check most specific terms first to avoid mis-matches
-                    if any(term in rate_per_str for term in ["year", "yearly", "annual", "annum", "/yr"]):
+                    # Exact match for JobDiva single-char codes first, then substring for full words
+                    if rate_per_str in ["y"] or any(term in rate_per_str for term in ["year", "yearly", "annual", "annum", "/yr"]):
                         rate_unit = "/yr"
-                    elif any(term in rate_per_str for term in ["month", "monthly", "/mo"]):
+                    elif rate_per_str in ["mo", "m"] or any(term in rate_per_str for term in ["month", "monthly", "/mo"]):
                         rate_unit = "/mo"
-                    elif any(term in rate_per_str for term in ["day", "daily", "/day"]):
+                    elif rate_per_str in ["d"] or any(term in rate_per_str for term in ["day", "daily", "/day"]):
                         rate_unit = "/day"
-                    elif any(term in rate_per_str for term in ["hour", "hourly", "/hr", "/h"]):
+                    elif rate_per_str in ["h"] or any(term in rate_per_str for term in ["hour", "hourly", "/hr", "/h"]):
                         rate_unit = "/h"
+
 
                 if p_min and p_max:
                     p_range = f"${p_min} - ${p_max}{rate_unit}"
