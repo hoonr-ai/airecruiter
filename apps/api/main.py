@@ -43,6 +43,11 @@ from core.amplitude import track_event_async
 configure_logging()
 logger = logging.getLogger(__name__)
 
+# Initialise Sentry as early as possible so all subsequent import-time and
+# runtime errors are captured. Safe no-op when SENTRY_DSN is not set.
+from core.sentry import init as _sentry_init
+_sentry_init()
+
 from services.ai_service import ai_service
 from models import (
     JobDescription, MatchResult, ParsedJobRequest, ParsedJobResponse,
