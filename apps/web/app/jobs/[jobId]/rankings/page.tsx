@@ -535,7 +535,7 @@ export default function CandidateRankingsPage() {
 
   // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
   // filter updates the table synchronously (no stale state via setFilteredCandidates).
-  type StatusFilter = "all" | "completed" | "pending";
+  type StatusFilter = "all" | "pass" | "fail" | "in_progress" | "pending";
   type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score" | "source" | "engage_status";
   type SortDir = "asc" | "desc";
   type ColumnFilterCondition = "contains" | "not_contains" | "equals" | "starts_with";
@@ -709,7 +709,11 @@ export default function CandidateRankingsPage() {
         if (!hay.includes(q)) return false;
       }
       // Status
-      if (statusFilter !== "all" && deriveStatus(c) !== statusFilter) return false;
+      if (statusFilter !== "all") {
+        const engageLabel = normalizeInterviewStatus(c).label.toLowerCase();
+        const sf = statusFilter === "in_progress" ? "in progress" : statusFilter;
+        if (engageLabel !== sf) return false;
+      }
       // Source
       if (sourceFilter !== "all" && c.source !== sourceFilter) return false;
       // Min score
@@ -1815,7 +1819,9 @@ export default function CandidateRankingsPage() {
               className="text-[13px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer py-2 pr-2"
             >
               <option value="all">All</option>
-              <option value="completed">Completed</option>
+              <option value="pass">Pass</option>
+              <option value="fail">Fail</option>
+              <option value="in_progress">In Progress</option>
               <option value="pending">Pending</option>
             </select>
           </div>
