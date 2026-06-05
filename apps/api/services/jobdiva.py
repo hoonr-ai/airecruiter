@@ -2623,12 +2623,30 @@ class JobDivaService:
                 if str(p_min) == "0" or str(p_min) == "0.0": p_min = None
                 if str(p_max) == "0" or str(p_max) == "0.0": p_max = None
                 
+                # Determine rate unit suffix dynamically based on 'rate per' from JobDiva
+                # Handles all JobDiva units: $/Hour, $/Day, $/Month, $/Year, INR/*, C$/*, MXN/*
+                # If no unit is provided, display rate as-is without any suffix
+                rate_per = get_field(j, ["rate per", "rate_per", "PAYRATEPER", "payRatePer"])
+                rate_unit = "" # No suffix by default
+                
+                if rate_per:
+                    rate_per_str = str(rate_per).lower().strip()
+                    # Check most specific terms first to avoid mis-matches
+                    if any(term in rate_per_str for term in ["year", "yearly", "annual", "annum", "/yr"]):
+                        rate_unit = "/yr"
+                    elif any(term in rate_per_str for term in ["month", "monthly", "/mo"]):
+                        rate_unit = "/mo"
+                    elif any(term in rate_per_str for term in ["day", "daily", "/day"]):
+                        rate_unit = "/day"
+                    elif any(term in rate_per_str for term in ["hour", "hourly", "/hr", "/h"]):
+                        rate_unit = "/h"
+
                 if p_min and p_max:
-                    p_range = f"${p_min} - ${p_max}/h"
+                    p_range = f"${p_min} - ${p_max}{rate_unit}"
                 elif p_max:
-                    p_range = f"${p_max}/h"
+                    p_range = f"${p_max}{rate_unit}"
                 elif p_min:
-                    p_range = f"${p_min}/h"
+                    p_range = f"${p_min}{rate_unit}"
                 else:
                     p_range = ""
                 
