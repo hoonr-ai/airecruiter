@@ -252,6 +252,49 @@ def _is_relevant_sibling(input_title: str, sibling_leaf: str) -> bool:
     return fuzz.token_set_ratio(input_title, sibling_leaf) >= 60
 
 
+def _content_tokens(text: str) -> set[str]:
+    """Distinctive content tokens (≥2 chars) used for JD-grounding tests.
+
+    Keeps short domain/tech acronyms (AI, ML, HR, QA, BI, UX, IoT, ERP, EMR,
+    SAP, AWS) that distinguish one role variant from another, but drops generic
+    role words (`_GENERIC_TOKENS`) and seniority qualifiers (`_QUALIFIERS`) that
+    carry no domain meaning.
+    """
+    return {
+        t for t in _tokenise(text)
+        if len(t) >= 2 and t not in _GENERIC_TOKENS and t not in _QUALIFIERS
+    }
+
+
+def _context_tokens(context_text: str) -> set[str]:
+    """Content-token set of the JD context (grounding text + domain + skill names)."""
+    return _content_tokens(context_text)
+
+
+def _distinctive_tokens_supported(
+    base_title: str, candidate: str, context_tokens: set[str]
+) -> bool:
+    """True iff every distinctive content token `candidate` adds over `base_title`
+    is present in the JD context.
+
+        distinctive = _content_tokens(candidate) - _content_tokens(base_title)
+
+    - No distinctive tokens (near-exact variant differing only by generics or
+      seniority, e.g. "Senior Business Analyst" over "Business Analyst") → supported.
+    - Otherwise EVERY distinctive token must appear verbatim in `context_tokens`.
+      Matching is exact (no prefix matching) on purpose: prefix matching let
+      "Hospitality Business Analyst" match a healthcare JD via "hospital", and
+      the AND-over-distinctive rule keeps off-domain variants like "Mortgage" /
+      "Robotics" / "Payment" out unless the JD actually names that domain.
+    - Empty context → unsupported unless distinctive is empty, so a context-free
+      call contributes only near-exact variants, never the full noisy family.
+    """
+    distinctive = _content_tokens(candidate) - _content_tokens(base_title)
+    if not distinctive:
+        return True
+    return all(tok in context_tokens for tok in distinctive)
+
+
 def _resolve(title: str) -> dict | None:
     """Resolve a free-text title to its taxonomy record.
 
@@ -329,6 +372,51 @@ def _direct_family_leaves(title: str) -> list[tuple[str, str]]:
     return out
 
 
+def _collect_family_candidates(base_title: str) -> list[tuple[str, str]]:
+    """Gather (leaf, level) family candidates for a title, before relevance filtering.
+
+    Two paths feed the candidate pool:
+      a. Path A — the input itself is a K10000/K5000 family name (covers generic
+         titles like "Software Engineer" that aren't K17000 leaves but ARE
+         canonical family names).
+      b. Path B — resolve the input to a K17000 leaf via `_resolve` and collect
+         its K10000 then K5000 siblings. Run regardless of Path A: for titles
+         like "Project Manager" that ARE K17000 leaves, the leaf-family path
+         produces a bigger and better-curated set than the input-as-family-name
+         path alone.
+
+    The input (raw + qualifier-stripped) and the resolved seed leaf are excluded
+    so we never recommend the user's own title back at them. K10000 (near-
+    identical tier) comes before K5000 (broader, noisier).
+    """
+    if not base_title:
+        return []
+
+    excluded: set[str] = {_norm(base_title)}
+    stripped_input = _norm(_strip_qualifiers(base_title))
+    if stripped_input:
+        excluded.add(stripped_input)
+    candidates: list[tuple[str, str]] = []  # (leaf, level)
+
+    for leaf, level in _direct_family_leaves(base_title):
+        k = _norm(leaf)
+        if k not in excluded:
+            candidates.append((leaf, level))
+            excluded.add(k)
+
+    rec = _resolve(base_title)
+    if rec:
+        seed_leaf = rec.get("ROLE_K17000")
+        if seed_leaf:
+            excluded.add(_norm(seed_leaf))
+        for level in ("ROLE_K10000", "ROLE_K5000"):
+            for leaf in _collect(rec, level, excluded):
+                candidates.append((leaf, level))
+                excluded.add(_norm(leaf))
+
+    return candidates
+
+
 def expand_title(base_title: str, *, max_results: int = 10) -> list[dict]:
     """
     Expand a free-text title into similar/related titles using the taxonomy hierarchy.
@@ -336,54 +424,18 @@ def expand_title(base_title: str, *, max_results: int = 10) -> list[dict]:
     Returns a list of dicts ordered by relevance:
         [{"title": "Strategic Project Manager", "relevance": "similar", "level": "ROLE_K10000"}, ...]
 
-    Two paths feed the candidate pool:
-      a. If the input itself is a K10000/K5000 family name, take the whole family
-         directly (generic-title path).
-      b. Otherwise resolve the input to a K17000 leaf via `_resolve` and collect
-         its K10000 then K5000 siblings.
-
-    A per-sibling relevance filter then drops members that don't share a real
+    Candidates come from `_collect_family_candidates` (the input's own
+    K10000/K5000 family and/or its resolved K17000 leaf's siblings). A
+    per-sibling relevance filter then drops members that don't share a real
     concept with the input — this is what prevents K5000 noise like
     "Last Mile Coordinator" leaking into a "Project Manager" expansion.
 
-    Returns [] if neither path produces candidates.
+    Returns [] if no candidates are produced.
     """
     if not base_title:
         return []
 
-    # Seed exclusion with the input itself (raw + qualifier-stripped) so we
-    # never recommend the user's own title back at them.
-    excluded: set[str] = {_norm(base_title)}
-    stripped_input = _norm(_strip_qualifiers(base_title))
-    if stripped_input:
-        excluded.add(stripped_input)
-    candidates: list[tuple[str, str]] = []  # (leaf, level)
-
-    # Path A — input itself is a K10000/K5000 family name (covers generic
-    # titles like "Software Engineer" that aren't K17000 leaves but ARE
-    # canonical family names).
-    for leaf, level in _direct_family_leaves(base_title):
-        k = _norm(leaf)
-        if k not in excluded:
-            candidates.append((leaf, level))
-            excluded.add(k)
-
-    # Path B — resolve the input to a K17000 leaf and take its K10000 then
-    # K5000 family. Run regardless of Path A: for titles like "Project Manager"
-    # that ARE K17000 leaves, the leaf-family path produces a bigger and
-    # better-curated set than the input-as-family-name path alone (which only
-    # finds K5000 members where the input is the exact family name).
-    rec = _resolve(base_title)
-    if rec:
-        seed_leaf = rec.get("ROLE_K17000")
-        if seed_leaf:
-            excluded.add(_norm(seed_leaf))
-        # K10000 (near-identical tier) before K5000 (broader, noisier).
-        for level in ("ROLE_K10000", "ROLE_K5000"):
-            for leaf in _collect(rec, level, excluded):
-                candidates.append((leaf, level))
-                excluded.add(_norm(leaf))
-
+    candidates = _collect_family_candidates(base_title)
     if not candidates:
         return []
 
@@ -396,6 +448,78 @@ def expand_title(base_title: str, *, max_results: int = 10) -> list[dict]:
         out.append({"title": leaf, "relevance": "similar", "level": level})
 
     return out
+
+
+def expand_title_grounded(
+    base_title: str, context_text: str = "", *, max_results: int = 10
+) -> list[dict]:
+    """Context-filtered variant of `expand_title`.
+
+    Same candidate collection and same `_is_relevant_sibling` gate, but
+    additionally drops any sibling whose distinctive qualifier tokens are not
+    supported by `context_text` (the JD grounding text + extracted domain +
+    skill names). This keeps a generic "Business Analyst" from pulling in
+    "Mortgage / Robotics / Payment Business Analyst" when the JD never mentions
+    those domains.
+
+    Returns the same [{"title", "relevance", "level"}] shape as `expand_title`.
+    With empty `context_text` only near-exact variants survive (tight, never noisy).
+    """
+    if not base_title:
+        return []
+
+    context_tokens = _context_tokens(context_text)
+    candidates = _collect_family_candidates(base_title)
+    if not candidates:
+        return []
+
+    out: list[dict] = []
+    for leaf, level in candidates:
+        if len(out) >= max_results:
+            break
+        if not _is_relevant_sibling(base_title, leaf):
+            continue
+        if not _distinctive_tokens_supported(base_title, leaf, context_tokens):
+            continue
+        out.append({"title": leaf, "relevance": "similar", "level": level})
+
+    return out
+
+
+def is_grounded_variant(base_title: str, candidate: str, context_text: str) -> bool:
+    """Gate for an externally-proposed (e.g. LLM-generated) similar title.
+
+    Kept iff it is both related to the main title (the DB "clubbing" check) and
+    on-domain for this job (the off-domain guard):
+
+      - related: `compare(base, candidate) != "none"` OR it shares a significant
+        token with the base title. This validates/clubs the LLM title against
+        the taxonomy DB and the main title.
+      - on-domain: it introduces no distinctive content token, OR at least one
+        distinctive token it adds over `base_title` is named in the JD context.
+
+    The off-domain guard closes the hole where relatedness alone would admit an
+    off-domain variant that merely shares the same taxonomy K5000 family (e.g.
+    "Mortgage Business Analyst" vs "Business Analyst" when the JD never mentions
+    mortgage). It is looser than the taxonomy-side AND rule because the LLM has
+    already read the JD: a genuinely adjacent title (e.g. "Healthcare Data
+    Analyst") may add a descriptive word the JD doesn't state verbatim, so we
+    require only that some distinctive token is grounded, not all of them.
+    """
+    if not base_title or not candidate:
+        return False
+    if _norm(candidate) == _norm(base_title):
+        return False
+    related = compare(base_title, candidate) != "none" or _share_significant_token(
+        base_title, candidate
+    )
+    if not related:
+        return False
+    distinctive = _content_tokens(candidate) - _content_tokens(base_title)
+    if not distinctive:
+        return True
+    context_tokens = _context_tokens(context_text)
+    return any(tok in context_tokens for tok in distinctive)
 
 
 def compare(title_a: str, title_b: str) -> Relevance:

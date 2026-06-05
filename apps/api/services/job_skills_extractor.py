@@ -320,6 +320,21 @@ TITLE HINT (applies to SKILLS section below):
    - **All match types must be "Similar"**. Do not use Exact, Broad, etc.
    - Order: put the most canonical / most common resume token FIRST. The rest
      are alternatives.
+   - **SIMILAR / ADJACENT TITLES**: For the FIRST (most canonical) job_role
+     ONLY, also output a "similar_titles" array of 3-8 ADJACENT or ALTERNATIVE
+     role titles that a real candidate for THIS SPECIFIC job — given the DOMAIN
+     and the SKILLS extracted above — would plausibly also list on their resume,
+     and that a recruiter would also want to search for.
+     - GROUND every entry in THIS job's domain + skills. Do NOT emit generic
+       industry variants the JD never implies. For a HEALTHCARE business-analyst
+       JD, GOOD: "Healthcare Business Analyst", "Clinical Business Analyst",
+       "Healthcare Systems Analyst"; BAD: "Mortgage Business Analyst", "Robotics
+       Analyst", "Payment Business Analyst" (wrong domain — never mentioned).
+     - Keep them in the SAME role family as the canonical title (a Business
+       Analyst's similar titles are other Business/Systems Analysts, not Nurses).
+     - Strip level suffixes/prefixes (I-V, Sr, Jr, Lead, Principal) as above and
+       use resume-matchable real titles only — no abstract phrases.
+     - QUALITY OVER QUANTITY: if you cannot ground at least 3, return fewer.
 
 JD TEXT:
 {grounding_text}
@@ -327,7 +342,7 @@ JD TEXT:
 Return JSON:
 {{
   "job_roles": [
-    {{ "name": "Canonical Title", "match_type": "Similar", "required": "Preferred" }},
+    {{ "name": "Canonical Title", "match_type": "Similar", "required": "Preferred", "similar_titles": ["Adjacent Title 1", "Adjacent Title 2", "Adjacent Title 3"] }},
     {{ "name": "Alias 1", "match_type": "Similar", "required": "Preferred" }},
     {{ "name": "Alias 2", "match_type": "Similar", "required": "Preferred" }},
     {{ "name": "Alias 3", "match_type": "Similar", "required": "Preferred" }}
@@ -347,10 +362,12 @@ IMPORTANT:
 - Do not use any other match type values like "Exact", "Broad", etc.
 - job_roles MUST contain 3 to 5 entries (not just one), with the most
   resume-common token first.
+- Only the FIRST job_role carries "similar_titles"; every entry there must be a
+  domain-grounded adjacent title in the SAME role family as the canonical title.
 """
         # Cache phase-2 by the user prompt content (the only thing that
         # varies per call — system prompt is byte-identical).
-        phase2_cache_key = llm_cache.make_key("rubric_p2", 1, phase2_prompt)
+        phase2_cache_key = llm_cache.make_key("rubric_p2_v2", 1, phase2_prompt)
         phase2_result = await llm_cache.get_json(phase2_cache_key)
         if phase2_result is not None:
             logger.info("rubric phase 2: cache HIT")
@@ -364,7 +381,7 @@ IMPORTANT:
                     ],
                     temperature=0.2,  # Slightly higher to encourage more comprehensive extraction
                     response_format={"type": "json_object"},
-                    prompt_cache_key="job-skills-p2-v1",
+                    prompt_cache_key="job-skills-p2-v2",
                 )
                 phase2_result = json.loads(p2_resp.choices[0].message.content)
                 await llm_cache.set_json(
@@ -475,10 +492,17 @@ IMPORTANT:
             for item in phase2_result.get("job_roles", []):
                 if isinstance(item, dict) and 'name' in item:
                     grounded_roles.append({
-                        "value": item["name"], 
+                        "value": item["name"],
                         "source": "PAIR",
                         "matchType": "Similar",  # Always use Similar for job titles
-                        "required": item.get('required', 'Preferred')
+                        "required": item.get('required', 'Preferred'),
+                        # Transient: JD-grounded adjacent titles proposed by the
+                        # LLM for the canonical role. Consumed (and popped) by the
+                        # augmentation loop below before the dict reaches the DB.
+                        "_llm_similar": [
+                            s for s in (item.get("similar_titles") or [])
+                            if isinstance(s, str) and s.strip()
+                        ],
                     })
 
         if not grounded_roles:
@@ -491,22 +515,70 @@ IMPORTANT:
                 r['required'] = r.get('required', 'Preferred')
                 final_titles.append(r)
 
-        # Augment each title with similar_titles from the role taxonomy.
-        # Source: apps/api/data/job_role_taxonomy.json (17k roles, 9-level hierarchy).
-        # Adds K17000 siblings in the same K5000/K1500 family, giving Step 5
-        # a tight set of the closest 10 chips per title without an LLM call.
+        # Augment each title with similar_titles, grounded in THIS job.
+        # Two sources feed a hard JD-grounding gate so a generic "Business
+        # Analyst" no longer pulls in "Mortgage / Robotics / Payment Business
+        # Analyst" unless the JD actually names those domains:
+        #   (a) context-filtered taxonomy siblings from job_role_taxonomy.json
+        #       (role_taxonomy.expand_title_grounded), and
+        #   (b) the LLM's domain-grounded adjacent titles, validated/clubbed
+        #       against the main title via role_taxonomy.is_grounded_variant.
+        # JD context = grounding text + extracted domain sectors + skill names.
+        domain_words = " ".join(
+            (d.get("value") if isinstance(d, dict) else str(d)) or ""
+            for d in phase2_result.get("domain", [])
+        )
+        skill_words = " ".join(
+            s.get("value", "") for s in (grounded_hard_skills + grounded_soft_skills)
+        )
+        similar_title_context = " ".join([grounding_text, domain_words, skill_words])
+
+        # Multi-title jobs "club" each candidate under the single most-related
+        # main title (canonical first), so the same similar title never appears
+        # in two groups. No padding: stop when relevant candidates run out.
+        # Seed with every main title so a similar-title chip never duplicates a
+        # title the recruiter is already searching as its own row.
+        MAX_SIMILAR = 10
+        claimed: set[str] = {
+            (t.get("value") or "").lower()
+            for t in final_titles
+            if isinstance(t, dict) and (t.get("value") or "").strip()
+        }
         for t in final_titles:
+            main = (t.get("value") or "") if isinstance(t, dict) else ""
+            llm_titles = t.pop("_llm_similar", []) if isinstance(t, dict) else []
+
             try:
-                expansions = role_taxonomy.expand_title(t.get("value", ""), max_results=10)
-            except Exception as e:
-                logger.warning("role_taxonomy.expand_title failed for %r: %s", t.get("value"), e)
+                expansions = role_taxonomy.expand_title_grounded(
+                    main, similar_title_context, max_results=MAX_SIMILAR
+                )
+            except Exception as exc:
+                logger.warning("expand_title_grounded failed for %r: %s", main, exc)
                 expansions = []
-            existing = list(t.get("similar_titles") or [])
-            for entry in expansions:
-                title = entry.get("title") if isinstance(entry, dict) else None
-                if title and title != t.get("value") and title not in existing:
-                    existing.append(title)
-            t["similar_titles"] = existing[:10]
+            taxonomy_titles = [
+                entry.get("title") for entry in expansions
+                if isinstance(entry, dict) and entry.get("title")
+            ]
+
+            validated_llm = [
+                cand.strip() for cand in llm_titles
+                if isinstance(cand, str) and cand.strip()
+                and role_taxonomy.is_grounded_variant(main, cand.strip(), similar_title_context)
+            ]
+
+            out: list[str] = []
+            seen_local = {main.lower()}
+            sources = list(t.get("similar_titles") or []) + taxonomy_titles + validated_llm
+            for cand_title in sources:
+                key = cand_title.lower()
+                if key in seen_local or key in claimed:
+                    continue
+                seen_local.add(key)
+                claimed.add(key)
+                out.append(cand_title)
+                if len(out) >= MAX_SIMILAR:
+                    break
+            t["similar_titles"] = out
 
         # Normalise additional education items
         education_raw = phase2_result.get("education", [])
