@@ -108,6 +108,17 @@ AZURE_AI_AGENT_NAME       = os.getenv("AZURE_AI_AGENT_NAME", "skill-role-extract
 # ---- Exa API ----
 EXA_API_KEY = get_env_with_default("EXA_API_KEY", "")
 
+# ---- Exa Agent contact enrichment (primary URL-based enricher) ----
+# ZoomInfo can't match by LinkedIn URL and Apollo burns credits, so the Exa
+# Agent API (POST https://api.exa.ai/agent/runs) is our URL-keyed enricher.
+# ON by default. Billed per run (~$0.02 email + $0.07 phone + agent compute,
+# observed ~$0.115 total). Set EXA_CONTACT_ENRICH_ENABLED=false to disable.
+EXA_CONTACT_ENRICH_ENABLED = get_env_bool("EXA_CONTACT_ENRICH_ENABLED", True)
+# Bounded poll budget for one agent run (~10s observed at low effort).
+EXA_CONTACT_ENRICH_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_ENRICH_TIMEOUT_S", "60"))
+# Agent effort (low|medium|high|xhigh|auto); low is fastest/cheapest.
+EXA_CONTACT_ENRICH_EFFORT = get_env_with_default("EXA_CONTACT_ENRICH_EFFORT", "low")
+
 # ---- Apify (LinkedIn Open-to-Work enrichment for Exa-sourced candidates) ----
 APIFY_API_TOKEN = get_env_with_default("APIFY_API_TOKEN", "")
 APIFY_LINKEDIN_OTW_ACTOR = get_env_with_default(

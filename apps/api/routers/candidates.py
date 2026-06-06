@@ -1824,6 +1824,9 @@ APOLLO_KEY_SOURCE = contact_enrichment.APOLLO_KEY_SOURCE
 _extract_apollo_contact_fields = contact_enrichment.extract_apollo_contact_fields
 _apollo_enrich_by_linkedin = contact_enrichment.apollo_enrich_by_linkedin
 
+# Exa Agent enrichment by LinkedIn URL (primary URL-keyed enricher).
+_exa_enrich_by_linkedin = contact_enrichment.exa_enrich_by_linkedin
+
 
 async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandidateContactRequest):
     """
@@ -1839,61 +1842,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     If sourced_candidates rows already exist, updates phone/email + data blob.
     """
     from psycopg2.extras import RealDictCursor
-    from services.zoominfo_auth import (
-        ZoomInfoAuthFailed,
-        ZoomInfoAuthNotConfigured,
-        get_access_token,
-    )
-    zoominfo_new_enrich_url = "https://api.zoominfo.com/gtm/data/v1/contacts/enrich"
-    zoominfo_new_search_url = "https://api.zoominfo.com/gtm/data/v1/contacts/search"
-
-    async def _zi_authed_post(url: str, json_body: Dict[str, Any], *, timeout: float = 20.0) -> Optional[httpx.Response]:
-        """POST to a ZoomInfo Data API endpoint with auto-minted OAuth auth
-        + one 401 retry against a force-refreshed token.
-
-        Returns the httpx.Response (any status) on a clean call, or None when
-        the OAuth mint fails (callers should fall through to Apollo).
-        """
-        try:
-            token = await get_access_token()
-        except ZoomInfoAuthNotConfigured as exc:
-            logger.info("zoominfo disabled for %s: %s", candidate_id, exc)
-            return None
-        except ZoomInfoAuthFailed as exc:
-            logger.warning("zoominfo token mint failed for %s: %s", candidate_id, exc)
-            return None
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "accept": "application/vnd.api+json",
-            "content-type": "application/vnd.api+json",
-        }
-
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                res = await client.post(url, headers=headers, json=json_body)
-        except httpx.HTTPError as exc:
-            logger.warning("zoominfo POST %s failed for %s: %s", url, candidate_id, exc)
-            return None
-
-        if res.status_code != 401:
-            return res
-
-        # Token may have been revoked server-side; force-refresh and retry once.
-        logger.info("zoominfo 401 on %s — forcing token refresh for %s", url, candidate_id)
-        try:
-            token = await get_access_token(force_refresh=True)
-        except (ZoomInfoAuthNotConfigured, ZoomInfoAuthFailed) as exc:
-            logger.warning("zoominfo force-refresh failed for %s: %s", candidate_id, exc)
-            return res
-
-        headers["Authorization"] = f"Bearer {token}"
-        try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                return await client.post(url, headers=headers, json=json_body)
-        except httpx.HTTPError as exc:
-            logger.warning("zoominfo POST %s retry failed for %s: %s", url, candidate_id, exc)
-            return None
+    from core.config import EXA_CONTACT_ENRICH_ENABLED
 
     linkedin_url = (request.linkedin_url or "").strip()
     existing_rows: List[Dict[str, Any]] = []
@@ -1939,354 +1888,105 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             "updated_rows": 0,
         }
 
-    provider_used = "zoominfo"
+    # --- Contact enrichment by reliable identifiers only (no name guessing).
+    # Order, stopping as soon as we have BOTH an email and a phone so we never
+    # spend Exa/Apollo credits needlessly:
+    #   1. ZoomInfo by EMAIL  - only when we already have an email (ZoomInfo
+    #      cannot match by LinkedIn URL on our entitlement).
+    #   2. Exa Agent by URL   - primary URL-keyed enricher.
+    #   3. Apollo by URL      - fills any remaining gap.
+    provider_used = "none"
     extracted: Dict[str, Any] = {}
-    new_res: Optional[httpx.Response] = None  # primary ZoomInfo Data API response
-    # Invariant: Apollo must be called at least once on every path that reaches
-    # the parse stage. Flipped to True immediately after every Apollo invocation;
-    # a final safety net below catches any future code path that misses it.
+    exa_contributed = False
+    zoominfo_contributed = False
     apollo_attempted = False
 
-    async def _zoominfo_crossfill_from_email_or_phone(seed_email: str, seed_phone: str) -> Dict[str, str]:
-        """If we only have email or phone, query ZoomInfo new API to fetch the missing side."""
-        normalised_email = str(seed_email or "").strip().lower()
-        normalised_phone = _normalise_phone(seed_phone or "")
-        if sum(1 for ch in normalised_phone if ch.isdigit()) < 7:
-            normalised_phone = ""
+    # Contact the candidate already has (request or sourced row) - ZoomInfo's
+    # match key and the short-circuit signal.
+    seed_email = (request.email or "").strip()
+    seed_phone = (request.phone or "").strip()
+    if existing_rows and isinstance(existing_rows[0], dict):
+        if not seed_email:
+            seed_email = str(existing_rows[0].get("email") or "").strip()
+        if not seed_phone:
+            seed_phone = str(existing_rows[0].get("phone") or "").strip()
 
-        match_person_input: Dict[str, Any] = {}
-        if normalised_email:
-            match_person_input["emailAddress"] = normalised_email
-        elif normalised_phone:
-            match_person_input["phone"] = normalised_phone
-        else:
-            return {}
+    def _have_email_and_phone() -> bool:
+        have_email = bool(seed_email) or bool(str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip())
+        _p = _normalise_phone(seed_phone or extracted.get("mobilePhone") or extracted.get("workPhone") or "")
+        return have_email and sum(1 for ch in _p if ch.isdigit()) >= 7
 
-        payload = {
-            "data": {
-                "type": "ContactEnrich",
-                "attributes": {
-                    "matchPersonInput": [match_person_input],
-                    "outputFields": ["mobilePhone", "phone", "email", "emailAlt"],
-                },
-            }
-        }
-        res = await _zi_authed_post(zoominfo_new_enrich_url, payload)
-        if res is None or res.status_code >= 400:
-            if res is not None:
-                logger.info("ZoomInfo cross-fill non-2xx for %s: %s", candidate_id, res.status_code)
-            return {}
-        try:
-            payload_data = res.json()
-        except Exception:
-            return {}
-        return _extract_new_zoominfo_contact_fields(payload_data)
+    def _merge_primary(fields: Dict[str, Any]) -> bool:
+        """Fill only empty primary slots from `fields`; merge phone candidates.
 
-    if provider_used == "zoominfo":
-        # The legacy `/enrich/contact` endpoint is fully retired for our
-        # account (401s even with a fresh OAuth-minted token), so we enter
-        # the new Data API path directly. ContactEnrich needs a matchPersonInput
-        # built from whatever signal we have — email, phone, name+company, or
-        # personId resolved by a ContactSearch by name.
-        row0 = existing_rows[0] if existing_rows else {}
-        row_data = _json_load_safe(row0.get("data"), {}) if isinstance(row0, dict) else {}
-        row_enhanced = row_data.get("enhanced_info") if isinstance(row_data, dict) else {}
-        if not isinstance(row_enhanced, dict):
-            row_enhanced = {}
+        Returns True if it filled any primary field (so the caller can record
+        provider attribution).
+        """
+        contributed = False
+        for key in ("mobilePhone", "workPhone", "workEmail", "personalEmail"):
+            if fields.get(key) and not extracted.get(key):
+                extracted[key] = fields[key]
+                contributed = True
+        existing = extracted.get("phoneCandidates") if isinstance(extracted.get("phoneCandidates"), list) else []
+        incoming = fields.get("phoneCandidates") if isinstance(fields.get("phoneCandidates"), list) else []
+        merged: List[str] = []
+        seen = set()
+        for cand in [*existing, *incoming, fields.get("mobilePhone"), fields.get("workPhone")]:
+            n = _normalise_phone(str(cand or ""))
+            if not n or sum(1 for ch in n if ch.isdigit()) < 7 or n in seen:
+                continue
+            seen.add(n)
+            merged.append(n)
+        if merged:
+            extracted["phoneCandidates"] = merged
+        return contributed
 
-        full_name = (request.full_name or row0.get("name") or "").strip()
-        company_name = (
+    # 1. ZoomInfo by EMAIL (only when we have an email and still need a phone).
+    if seed_email and not _have_email_and_phone():
+        _zi = await contact_enrichment.zoominfo_enrich_by_email(candidate_id, seed_email)
+        if _zi.get("ok") and _merge_primary(_zi.get("fields") or {}):
+            zoominfo_contributed = True
+
+    # 2. Exa Agent by LinkedIn URL - primary URL-keyed enricher.
+    if EXA_CONTACT_ENRICH_ENABLED and not _have_email_and_phone():
+        _row0 = existing_rows[0] if existing_rows else {}
+        _row0_data = _json_load_safe(_row0.get("data"), {}) if isinstance(_row0, dict) else {}
+        _row0_enh = _row0_data.get("enhanced_info") if isinstance(_row0_data, dict) else {}
+        if not isinstance(_row0_enh, dict):
+            _row0_enh = {}
+        _exa_name = (request.full_name or (_row0.get("name") if isinstance(_row0, dict) else "") or "").strip()
+        _exa_company = str(
             request.company_name
-            or row_data.get("company_name")
-            or row_data.get("company")
-            or row_enhanced.get("current_company")
-            or row_enhanced.get("company")
+            or (_row0_data.get("company_name") if isinstance(_row0_data, dict) else "")
+            or (_row0_data.get("company") if isinstance(_row0_data, dict) else "")
+            or _row0_enh.get("current_company")
+            or _row0_enh.get("company")
             or ""
-        )
-        company_name = str(company_name or "").strip()
+        ).strip()
+        _exa = await _exa_enrich_by_linkedin(candidate_id, linkedin_url, _exa_name, _exa_company)
+        if _exa.get("ok") and _merge_primary(_exa.get("fields") or {}):
+            exa_contributed = True
 
-        fallback_email = (request.email or row0.get("email") or "").strip()
-        fallback_phone = _normalise_phone(request.phone or row0.get("phone") or "")
-
-        match_person_input: Dict[str, Any] = {}
-        if fallback_email:
-            match_person_input["emailAddress"] = fallback_email
-        elif fallback_phone and sum(1 for ch in fallback_phone if ch.isdigit()) >= 7:
-            match_person_input["phone"] = fallback_phone
-        elif full_name and company_name:
-            split = _split_name(full_name)
-            if split["first"] and split["last"]:
-                match_person_input["firstName"] = split["first"]
-                match_person_input["lastName"] = split["last"]
-                match_person_input["companyName"] = company_name
-            else:
-                match_person_input["fullName"] = full_name
-                match_person_input["companyName"] = company_name
-
-        if not match_person_input:
-            # Last-resort fallback: search by name and enrich by personId.
-            # Useful when we only have a LinkedIn URL and no persisted company/email/phone yet.
-            search_name = full_name or _name_from_linkedin_url(linkedin_url)
-            split = _split_name(search_name)
-            if split["first"] and split["last"]:
-                search_payload = {
-                    "data": {
-                        "type": "ContactSearch",
-                        "attributes": {
-                            "firstName": split["first"],
-                            "lastName": split["last"],
-                        },
-                    }
-                }
-                sres = await _zi_authed_post(zoominfo_new_search_url, search_payload)
-                if sres is not None and sres.status_code < 400:
-                    try:
-                        sjson = sres.json()
-                    except Exception:
-                        sjson = {}
-                    sdata = sjson.get("data") if isinstance(sjson, dict) else []
-                    if isinstance(sdata, list) and sdata:
-                        person_id = sdata[0].get("id")
-                        if person_id:
-                            match_person_input["personId"] = str(person_id)
-                            logger.info(
-                                "ZoomInfo ContactSearch resolved personId for %s using name '%s'",
-                                candidate_id,
-                                search_name,
-                            )
-                elif sres is not None:
-                    logger.info(
-                        "ZoomInfo ContactSearch non-2xx for %s: %s",
-                        candidate_id,
-                        sres.status_code,
-                    )
-
-        if not match_person_input:
-            logger.warning(
-                "ZoomInfo new API fallback skipped for %s: insufficient match inputs after search (need email OR phone OR full name + company OR resolvable name)",
-                candidate_id,
-            )
-            logger.info(
-                "ZoomInfo fallback insufficient inputs for %s; returning no-contact result",
-                candidate_id,
-            )
-            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
-            apollo_attempted = True
-            if apollo_result.get("ok"):
-                provider_used = "apollo"
-                extracted = apollo_result.get("fields") or {}
-                logger.info("Apollo fallback succeeded for %s after ZoomInfo insufficient match inputs", candidate_id)
-            else:
-                return {
-                    "status": "success",
-                    "candidate_id": candidate_id,
-                    "linkedin_url": linkedin_url,
-                    "phone_source": "none",
-                    "phone": None,
-                    "phoneCandidates": [],
-                    "email": None,
-                    "workPhone": None,
-                    "mobilePhone": None,
-                    "workEmail": None,
-                    "personalEmail": None,
-                    "provider": "none",
-                    "updated_rows": 0,
-                    "message": "ZoomInfo fallback skipped: insufficient match inputs (no reliable person match).",
-                }
-
-        new_payload = {
-            "data": {
-                "type": "ContactEnrich",
-                "attributes": {
-                    "matchPersonInput": [match_person_input],
-                    "outputFields": ["mobilePhone", "phone", "email", "emailAlt"],
-                },
-            }
-        }
-
-        if provider_used == "zoominfo":
-            new_res = await _zi_authed_post(zoominfo_new_enrich_url, new_payload)
-            if new_res is None:
-                # Auth not configured, token mint failed, or HTTP raised — fall
-                # through to Apollo. The helper has already logged the cause.
-                apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
-                apollo_attempted = True
-                if apollo_result.get("ok"):
-                    provider_used = "apollo"
-                    extracted = apollo_result.get("fields") or {}
-                    logger.info("Apollo fallback succeeded for %s after ZoomInfo auth/HTTP failure", candidate_id)
-                else:
-                    raise HTTPException(status_code=502, detail="ZoomInfo request failed and Apollo fallback failed")
-
-        if provider_used == "zoominfo" and new_res is not None and new_res.status_code >= 400:
-            logger.warning(
-                "ZoomInfo ContactEnrich non-2xx for %s: %s %s",
-                candidate_id,
-                new_res.status_code,
-                new_res.text[:300],
-            )
-            apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
-            apollo_attempted = True
-            if apollo_result.get("ok"):
-                provider_used = "apollo"
-                extracted = apollo_result.get("fields") or {}
-                logger.info("Apollo fallback succeeded for %s after ZoomInfo non-2xx response", candidate_id)
-            elif 400 <= new_res.status_code < 500:
-                return {
-                    "status": "success",
-                    "candidate_id": candidate_id,
-                    "linkedin_url": linkedin_url,
-                    "phone_source": "none",
-                    "phone": None,
-                    "phoneCandidates": [],
-                    "email": None,
-                    "workPhone": None,
-                    "mobilePhone": None,
-                    "workEmail": None,
-                    "personalEmail": None,
-                    "provider": "none",
-                    "updated_rows": 0,
-                    "message": f"ZoomInfo returned no contact match ({new_res.status_code}).",
-                }
-            else:
-                raise HTTPException(status_code=502, detail=f"ZoomInfo API error ({new_res.status_code})")
-
-        if provider_used == "zoominfo" and new_res is not None:
-            try:
-                new_data = new_res.json()
-            except Exception:
-                new_data = {"raw": new_res.text}
-
-            extracted = _extract_new_zoominfo_contact_fields(new_data)
-
-    # Cross-fill pass: if we have only one side (email OR phone), use it to fetch the other.
-    seed_phone = _normalise_phone((extracted.get("mobilePhone") or extracted.get("workPhone") or ""))
-    if sum(1 for ch in seed_phone if ch.isdigit()) < 7:
-        seed_phone = ""
-    seed_email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip().lower()
-
-    if (seed_email and not seed_phone) or (seed_phone and not seed_email):
-        supplemental = await _zoominfo_crossfill_from_email_or_phone(seed_email, seed_phone)
-        if supplemental:
-            for key in ("mobilePhone", "workPhone", "workEmail", "personalEmail"):
-                if not extracted.get(key) and supplemental.get(key):
-                    extracted[key] = supplemental.get(key)
-
-            existing_candidates = extracted.get("phoneCandidates") if isinstance(extracted.get("phoneCandidates"), list) else []
-            supplemental_candidates = [supplemental.get("mobilePhone"), supplemental.get("workPhone")]
-            merged_candidates: List[str] = []
-            merged_seen = set()
-            for candidate in [*existing_candidates, *supplemental_candidates]:
-                n = _normalise_phone(str(candidate or ""))
-                if not n:
-                    continue
-                if sum(1 for ch in n if ch.isdigit()) < 7:
-                    continue
-                if n in merged_seen:
-                    continue
-                merged_seen.add(n)
-                merged_candidates.append(n)
-            if merged_candidates:
-                extracted["phoneCandidates"] = merged_candidates
-
-            logger.info(
-                "Contact enrich cross-fill succeeded for %s | had_email=%s | had_phone=%s",
-                candidate_id,
-                bool(seed_email),
-                bool(seed_phone),
-            )
-
-    if not apollo_attempted:
-        probe_phone = _normalise_phone((extracted.get("mobilePhone") or extracted.get("workPhone") or ""))
-        probe_email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip().lower()
-        if sum(1 for ch in probe_phone if ch.isdigit()) < 7:
-            probe_phone = ""
-
-        # Both providers run on every enrichment so phone candidates from both
-        # are merged. ZoomInfo still wins for primary fields when both have data.
+    # 3. Apollo by LinkedIn URL - fills any remaining gap.
+    apollo_contributed = False
+    if not _have_email_and_phone():
         apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
         apollo_attempted = True
         if apollo_result.get("ok"):
-            apollo_fields = apollo_result.get("fields") or {}
+            apollo_contributed = _merge_primary(apollo_result.get("fields") or {})
 
-            # Fill only missing sides so ZoomInfo data remains preferred.
-            if not probe_phone:
-                if not extracted.get("mobilePhone") and apollo_fields.get("mobilePhone"):
-                    extracted["mobilePhone"] = apollo_fields.get("mobilePhone")
-                if not extracted.get("workPhone") and apollo_fields.get("workPhone"):
-                    extracted["workPhone"] = apollo_fields.get("workPhone")
+    # Provider attribution = first source that contributed.
+    if zoominfo_contributed:
+        provider_used = "zoominfo"
+    elif exa_contributed:
+        provider_used = "exa"
+    elif apollo_contributed:
+        provider_used = "apollo"
 
-            if not probe_email:
-                if not extracted.get("workEmail") and apollo_fields.get("workEmail"):
-                    extracted["workEmail"] = apollo_fields.get("workEmail")
-                if not extracted.get("personalEmail") and apollo_fields.get("personalEmail"):
-                    extracted["personalEmail"] = apollo_fields.get("personalEmail")
-
-            # Merge phone candidates from both providers.
-            existing_candidates = extracted.get("phoneCandidates") if isinstance(extracted.get("phoneCandidates"), list) else []
-            apollo_candidates = apollo_fields.get("phoneCandidates") if isinstance(apollo_fields.get("phoneCandidates"), list) else []
-            merged_candidates: List[str] = []
-            merged_seen = set()
-            for candidate in [*existing_candidates, *apollo_candidates, apollo_fields.get("mobilePhone"), apollo_fields.get("workPhone")]:
-                n = _normalise_phone(str(candidate or ""))
-                if not n:
-                    continue
-                if sum(1 for ch in n if ch.isdigit()) < 7:
-                    continue
-                if n in merged_seen:
-                    continue
-                merged_seen.add(n)
-                merged_candidates.append(n)
-            if merged_candidates:
-                extracted["phoneCandidates"] = merged_candidates
-
-            # Re-probe after merge; if ZoomInfo had nothing and Apollo filled,
-            # mark provider as Apollo for accurate telemetry/response.
-            post_probe_phone = _normalise_phone((extracted.get("mobilePhone") or extracted.get("workPhone") or ""))
-            post_probe_email = str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip().lower()
-            if sum(1 for ch in post_probe_phone if ch.isdigit()) < 7:
-                post_probe_phone = ""
-            if not probe_phone and not probe_email and (post_probe_phone or post_probe_email):
-                provider_used = "apollo"
-
-            logger.info(
-                "Apollo merged for %s | zoominfo_had_phone=%s | zoominfo_had_email=%s | apollo_returned_data=%s | final_has_phone=%s | final_has_email=%s",
-                candidate_id,
-                bool(probe_phone),
-                bool(probe_email),
-                bool(apollo_fields.get("mobilePhone") or apollo_fields.get("workPhone") or apollo_fields.get("workEmail") or apollo_fields.get("personalEmail")),
-                bool(post_probe_phone),
-                bool(post_probe_email),
-            )
-
-    # Invariant safety net: if we somehow reach this point without having called
-    # Apollo (a code-path bug), call it now and merge so the "both providers
-    # always attempted" contract is never violated. This block should never fire
-    # under correct code — the error log below is the alarm if it does.
-    if not apollo_attempted:
-        logger.error(
-            "Apollo invariant breach for %s: reached parse stage without calling Apollo; running safety-net call",
-            candidate_id,
-        )
-        apollo_result = await _apollo_enrich_by_linkedin(candidate_id, linkedin_url)
-        apollo_attempted = True
-        if apollo_result.get("ok"):
-            apollo_fields = apollo_result.get("fields") or {}
-            for key in ("mobilePhone", "workPhone", "workEmail", "personalEmail"):
-                if not extracted.get(key) and apollo_fields.get(key):
-                    extracted[key] = apollo_fields.get(key)
-            existing_candidates = extracted.get("phoneCandidates") if isinstance(extracted.get("phoneCandidates"), list) else []
-            apollo_candidates = apollo_fields.get("phoneCandidates") if isinstance(apollo_fields.get("phoneCandidates"), list) else []
-            merged_candidates: List[str] = []
-            merged_seen = set()
-            for cand in [*existing_candidates, *apollo_candidates, apollo_fields.get("mobilePhone"), apollo_fields.get("workPhone")]:
-                n = _normalise_phone(str(cand or ""))
-                if not n or sum(1 for ch in n if ch.isdigit()) < 7 or n in merged_seen:
-                    continue
-                merged_seen.add(n)
-                merged_candidates.append(n)
-            if merged_candidates:
-                extracted["phoneCandidates"] = merged_candidates
+    logger.info(
+        "Contact enrich providers for %s | zoominfo=%s exa=%s apollo_called=%s apollo=%s | provider=%s",
+        candidate_id, zoominfo_contributed, exa_contributed, apollo_attempted, apollo_contributed, provider_used,
+    )
 
     raw_mobile_phone = str(extracted.get("mobilePhone") or "").strip()
     raw_work_phone = str(extracted.get("workPhone") or "").strip()
@@ -2368,6 +2068,7 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
                         data_blob["zoominfo_contact_enrichment"] = {
                             "linkedin_url": linkedin_url,
                             "provider": provider_used,
+                            "exa_contributed": exa_contributed,
                             "workPhone": extracted.get("workPhone"),
                             "mobilePhone": extracted.get("mobilePhone"),
                             "phoneCandidates": phone_candidates_top2,
