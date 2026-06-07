@@ -51,6 +51,7 @@ import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
 import { API_BASE } from "@/lib/api";
+import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 
 // Utility function to format dates
@@ -916,47 +917,39 @@ export default function CandidateRankingsPage() {
       return;
     }
 
-    // JobDiva candidate: prefer a direct deep link built from the candidate's
-    // JobDiva id. The PROFILEURL-based API fetch below is frequently empty and
-    // can return a stale/dead format, so build the verified-live candidate URL
-    // ourselves (same format CandidateDetailsModal uses).
+    // JobDiva candidate: build a direct deep link from the JobDiva candidate id
+    // (same verified-live format CandidateDetailsModal uses). The PROFILEURL API
+    // fetch is frequently empty and can return a stale/dead format. The
+    // /jobs/{id}/candidates API returns the JobDiva candidate id as
+    // `candidate_id` (not `jobdiva_candidate_id`), so fall back to candidateKey
+    // for JobDiva sources — otherwise the link never resolves.
+    const isJobDivaSource = source.startsWith("jobdiva");
     const jobdivaCandidateId = String(
-      candidate.jobdiva_candidate_id || candidate.data?.jobdiva_candidate_id || ""
+      candidate.jobdiva_candidate_id ||
+      candidate.data?.jobdiva_candidate_id ||
+      (isJobDivaSource ? candidateKey : "")
     ).trim();
     if (jobdivaCandidateId) {
-      const url = `https://www1.jobdiva.com/employers/myreports/viewcandidate2_real.jsp?docids=-1&candidateid=${encodeURIComponent(jobdivaCandidateId)}`;
-      window.open(url, "_blank", "noopener,noreferrer");
-      return;
+      const url = buildJobDivaCandidateUrl(jobdivaCandidateId);
+      if (url) {
+        setCandidateProfileUrls(prev => ({ ...prev, [candidateKey]: url }));
+        window.open(url, "_blank", "noopener,noreferrer");
+        return;
+      }
     }
 
-    const existingJobDivaUrl =
+    // Non-JobDiva source: fall back to an explicit profile URL if present.
+    const existingProfileUrl =
       String(candidate.profile_url || "").trim() ||
       String(candidate.data?.profile_url || "").trim() ||
       String(candidateProfileUrls[candidateKey] || "").trim();
 
-    if (existingJobDivaUrl) {
-      window.open(existingJobDivaUrl, "_blank", "noopener,noreferrer");
+    if (existingProfileUrl) {
+      window.open(existingProfileUrl, "_blank", "noopener,noreferrer");
       return;
     }
 
-    try {
-      const res = await fetch(`${API_BASE}/candidates/${encodeURIComponent(candidateKey)}/profile-url`);
-      if (!res.ok) {
-        pushToast("JobDiva profile URL not available", "info");
-        return;
-      }
-      const payload = await res.json().catch(() => ({}));
-      const url = String(payload?.profile_url || "").trim();
-      if (!url) {
-        pushToast("JobDiva profile URL not available", "info");
-        return;
-      }
-
-      setCandidateProfileUrls(prev => ({ ...prev, [candidateKey]: url }));
-      window.open(url, "_blank", "noopener,noreferrer");
-    } catch {
-      pushToast("Failed to fetch profile URL", "error");
-    }
+    pushToast("Profile URL not available", "info");
   };
 
   const handleEnrichContact = async (candidate: Candidate) => {

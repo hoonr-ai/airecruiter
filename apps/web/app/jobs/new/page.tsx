@@ -850,6 +850,10 @@ function NewJobPageContent() {
   const [isCheckingJobdivaCriteria, setIsCheckingJobdivaCriteria] = useState(false);
   const [hasCheckedJobdivaCriteria, setHasCheckedJobdivaCriteria] = useState(false);
   const seenCandidateIdsRef = useRef<Set<string>>(new Set());
+  // Candidate ids whose detail lookup failed during the current search run
+  // (JobDiva 429 / no resume). They're kept and scored from the JobAgent
+  // skills; size drives the one summary toast fired when the run completes.
+  const detailFailedIdsRef = useRef<Set<string>>(new Set());
   const searchAbortRef = useRef<AbortController | null>(null);
   // Fires handleEnhanceJob() exactly once per session when the user first lands on
   // Step 2 without an existing AI JD. Prevents a re-fire after a user wipe and
@@ -5341,6 +5345,12 @@ function NewJobPageContent() {
                 ? event.patch
                 : {};
               if (Object.keys(patch).length === 0) continue;
+              // Detail-lookup failures (JobDiva 429 / no resume) are kept and
+              // scored from the JobAgent skills; track them for one summary toast
+              // when the run completes.
+              if (["kept_no_resume", "error"].includes(String((patch as any).enhanced_info_status || ""))) {
+                detailFailedIdsRef.current.add(targetId);
+              }
               // Update local runList copy used elsewhere in this run.
               for (const r of runList) {
                 if (String(r.candidate_id || r.id || "") === targetId) {
@@ -5496,6 +5506,7 @@ function NewJobPageContent() {
     setIsSearching(true);
     setHasSearched(true);
     setRestoredFromCache(false);
+    detailFailedIdsRef.current = new Set<string>();
     trackEvent("job_wizard_step5_candidate_search_started", {
       step: 5,
       query: truncateForTelemetry(resolvedGeneratedBoolean, 260),
@@ -5568,6 +5579,13 @@ function NewJobPageContent() {
       });
     } finally {
       setIsSearching(false);
+      const detailFailedCount = detailFailedIdsRef.current.size;
+      if (detailFailedCount > 0) {
+        showToast(
+          `Detail lookup failed for ${detailFailedCount} candidate${detailFailedCount === 1 ? "" : "s"} (e.g. JobDiva rate limit) — matched on JobDiva agent skills only. They're still launchable.`,
+          "info",
+        );
+      }
       const runtimeSeconds = Number(((Date.now() - searchStartMs) / 1000).toFixed(2));
       setLastSearchRuntimeSec(runtimeSeconds);
       setLastSearchRunsExecuted(runBreakdown.length || 1);
