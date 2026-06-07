@@ -157,6 +157,10 @@ def _ensure_monitored_jobs_schema() -> None:
             # outreach_stopped_at: set when recruiter clicks "Stop Job Activity",
             # flips HC status to Inactive and blocks further launches.
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS outreach_stopped_at TIMESTAMP NULL",
+            # pair_inactive_notified_at: stamped when the "PAIR Is Now Inactive"
+            # email (Email #4) is sent, so the 8 uvicorn workers don't each
+            # re-send it on the same poll cycle. Cleared when a job reactivates.
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS pair_inactive_notified_at TIMESTAMP NULL",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS pair_external_subs INTEGER DEFAULT 0",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS feedback_completed INTEGER DEFAULT 0",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS time_to_first_pass DOUBLE PRECISION",

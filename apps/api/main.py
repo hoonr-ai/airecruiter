@@ -43,6 +43,11 @@ from core.amplitude import track_event_async
 configure_logging()
 logger = logging.getLogger(__name__)
 
+# Initialise Sentry as early as possible so all subsequent import-time and
+# runtime errors are captured. Safe no-op when SENTRY_DSN is not set.
+from core.sentry import init as _sentry_init
+_sentry_init()
+
 from services.ai_service import ai_service
 from models import (
     JobDescription, MatchResult, ParsedJobRequest, ParsedJobResponse,
@@ -442,19 +447,58 @@ def save_monitored_jobs(jobs_data: Dict[str, Any]):
     for jid, details in jobs_data.get("jobs", {}).items():
         jobdiva_service.monitor_job_locally(jid, details)
 
+POLL_LOCK_KEY = 728193  # app-wide constant for the cross-worker poll advisory lock
+
+
 async def poll_all_jobs():
-    """Background task to poll all monitored jobs for status changes"""
+    """Scheduler entry point (runs in every uvicorn worker).
+
+    A Postgres session advisory lock ensures only ONE worker executes the
+    poll body per cycle (the others skip), so JobDiva is polled once and the
+    "PAIR Inactive" email fires once. Every worker still reschedules its next
+    poll so the 5-min cadence survives even if the current lock-holder dies.
+    """
+    lock_conn = None
+    got_lock = False
+    try:
+        lock_conn = get_db_connection()
+        lc = lock_conn.cursor()
+        lc.execute("SELECT pg_try_advisory_lock(%s)", (POLL_LOCK_KEY,))
+        got_lock = bool(lc.fetchone()[0])
+        lock_conn.commit()
+        if not got_lock:
+            logger.info("🔒 [Poll] Another worker is polling this cycle; skipping.")
+            return
+        return await _run_poll_cycle()
+    finally:
+        if lock_conn is not None:
+            try:
+                if got_lock:
+                    uc = lock_conn.cursor()
+                    uc.execute("SELECT pg_advisory_unlock(%s)", (POLL_LOCK_KEY,))
+                    lock_conn.commit()
+            except Exception as e:
+                logger.warning(f"poll advisory unlock failed: {e}")
+            finally:
+                lock_conn.close()
+        # Always reschedule so every worker keeps the 5-min cadence — including
+        # those that skipped this cycle and the lock-holder once it finishes.
+        schedule_next_poll()
+
+
+async def _run_poll_cycle():
+    """The actual poll body — runs in exactly one worker per cycle."""
     logger.info("🔄 Starting job status polling...")
-    
+
     jobs_data = load_monitored_jobs()
     job_ids = list(jobs_data.get("jobs", {}).keys())
-    
+
     if not job_ids:
         logger.info("No jobs to monitor")
         return
-    
+
     logger.info(f"Polling {len(job_ids)} jobs: {job_ids}")
-    
+
     # Batch fetch statuses
     statuses = await jobdiva_service.get_multiple_jobs_status(job_ids)
     
@@ -508,6 +552,9 @@ async def poll_all_jobs():
         if current_status.lower() in PAIR_INACTIVE_STATUSES and old_status.lower() not in PAIR_INACTIVE_STATUSES:
             logger.info(f"⏸️ Job {job_id} switched to Inactive ({current_status}). Triggering notification...")
             asyncio.create_task(_fire_pair_inactive_notification(job_id))
+        elif old_status.lower() in PAIR_INACTIVE_STATUSES and current_status.lower() not in PAIR_INACTIVE_STATUSES:
+            logger.info(f"▶️ Job {job_id} reactivated ({current_status}). Clearing inactive-notified marker.")
+            asyncio.create_task(_clear_pair_inactive_marker(job_id))
     
     # Save updated data
     jobs_data["last_sync"] = readable_ist_now()
@@ -517,54 +564,100 @@ async def poll_all_jobs():
         logger.info(f"📢 Status changes detected: {changes_detected}")
     else:
         logger.info("✅ No status changes detected")
-    
-    # Schedule next poll 5 minutes from now
-    schedule_next_poll()
-    
+
     return {"polled": len(job_ids), "changes": changes_detected}
 
 
 
 async def _fire_pair_inactive_notification(job_id: str):
+    """Claim-and-send Email #4 (PAIR Is Now Inactive).
+
+    An atomic conditional UPDATE acts as the lock: only the worker that flips
+    pair_inactive_notified_at from NULL->NOW() gets a row back and sends. The
+    other 7 workers (and any re-fire after a restart) get no row and skip, so
+    exactly one email goes out per inactive event.
     """
-    Background helper to fetch metadata and fire Email #4.
-    """
+    conn = None
     try:
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        
-        # Fetch recruiter emails
-        cur.execute("""
-            SELECT recruiter_emails, jobdiva_id 
-            FROM monitored_jobs 
-            WHERE job_id = %s OR jobdiva_id = %s
-            LIMIT 1
-        """, (job_id, job_id))
-        row = cur.fetchone()
-        
-        if row:
-            import json
-            
-            emails_raw = row.get("recruiter_emails", [])
-            if isinstance(emails_raw, str):
-                try:
-                    recruiter_emails = json.loads(emails_raw)
-                except:
-                    recruiter_emails = [emails_raw] if emails_raw else []
-            else:
-                recruiter_emails = emails_raw or []
 
-            if recruiter_emails or True:
-                await asyncio.to_thread(
-                    notify_pair_inactive,
-                    jobdiva_id=row["jobdiva_id"] or job_id,
-                    recruiter_emails=recruiter_emails
+        # Atomic claim. Match on job_id only — the poll loop always passes the
+        # PK, and the monitored_jobs indexes are non-unique so `OR jobdiva_id`
+        # could touch stray rows.
+        cur.execute(
+            """
+            UPDATE monitored_jobs
+               SET pair_inactive_notified_at = NOW()
+             WHERE job_id = %s
+               AND pair_inactive_notified_at IS NULL
+            RETURNING recruiter_emails, jobdiva_id
+            """,
+            (job_id,),
+        )
+        row = cur.fetchone()
+        # MANDATORY: pooled conn is autocommit=False and rolls back on close
+        # (core/db.py) — without this commit the claim is never persisted.
+        conn.commit()
+
+        if not row:
+            logger.info(f"Inactive notification already claimed for {job_id}; skipping duplicate.")
+            return
+
+        import json
+        emails_raw = row.get("recruiter_emails", [])
+        if isinstance(emails_raw, str):
+            try:
+                recruiter_emails = json.loads(emails_raw)
+            except Exception:
+                recruiter_emails = [emails_raw] if emails_raw else []
+        else:
+            recruiter_emails = emails_raw or []
+
+        try:
+            await asyncio.to_thread(
+                notify_pair_inactive,
+                jobdiva_id=row["jobdiva_id"] or job_id,
+                recruiter_emails=recruiter_emails,
+                job_id=job_id,  # enables the live JobDiva deep-link
+            )
+        except Exception as send_err:
+            # Send failed after we claimed — release the marker so the next
+            # poll cycle retries instead of silently losing the notification.
+            logger.error(f"❌ Inactive email send failed for {job_id}: {send_err}; releasing marker for retry")
+            try:
+                cur.execute(
+                    "UPDATE monitored_jobs SET pair_inactive_notified_at = NULL WHERE job_id = %s",
+                    (job_id,),
                 )
-            
-        cur.close()
-        conn.close()
+                conn.commit()
+            except Exception:
+                pass
     except Exception as e:
         logger.error(f"❌ Failed to fire Inactive notification for {job_id}: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+async def _clear_pair_inactive_marker(job_id: str):
+    """Reset the inactive-notified marker when a job becomes active again, so a
+    genuine new active->inactive transition later sends one fresh email."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE monitored_jobs SET pair_inactive_notified_at = NULL "
+            "WHERE job_id = %s AND pair_inactive_notified_at IS NOT NULL",
+            (job_id,),
+        )
+        conn.commit()
+    except Exception as e:
+        logger.error(f"Failed to clear inactive marker for {job_id}: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
 
 # =====================================================
 # JOB DRAFTS API ENDPOINTS
