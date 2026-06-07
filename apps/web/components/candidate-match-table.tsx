@@ -598,6 +598,14 @@ export function CandidateMatchTable({
                           Already Launched
                         </span>
                       )}
+                      {["kept_no_resume", "error"].includes(String(candidate.enhanced_info_status || "")) && (
+                        <span
+                          className="px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center border bg-amber-50 text-amber-700 border-amber-200"
+                          title="Detail lookup failed (e.g. JobDiva rate limit) — matched on JobDiva agent skills only. Still launchable."
+                        >
+                          Detail search failed
+                        </span>
+                      )}
                     </div>
                   </TableCell>
                 </TableRow>
