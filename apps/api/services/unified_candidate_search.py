@@ -8,7 +8,7 @@ import time
 from typing import List, Dict, Any, Optional, Tuple
 from pydantic import BaseModel
 
-from services.jobdiva import JobDivaService
+from services.jobdiva import JobDivaService, _is_placeholder_email
 from services.unipile import unipile_service
 from services.vetted import vetted_service
 from services.exa_service import exa_service, _extract_city_from_highlights
@@ -299,12 +299,15 @@ class UnifiedCandidateSearch:
                 logger.warning(f"query-term embedding warm failed: {exc}")
 
         seen_ids = set()
-        # Cross-source dedup keys (email, normalised LinkedIn URL,
-        # normalised name+location). The legacy `seen_ids` set keys on
-        # the source's native candidate_id and so misses the same person
-        # showing up in JobDiva-Applicants AND LinkedIn-Exa with
-        # different ids. Both sets are checked in `emit_candidate`.
-        seen_dedup_keys: set = set()
+        # Cross-source dedup ownership map: dedup key (strong identity —
+        # email, phone+name, normalised LinkedIn URL) -> the already-emitted
+        # "owner" candidate dict that claimed it. The legacy `seen_ids` set
+        # keys on the source's native candidate_id and so misses the same
+        # person showing up in JobDiva-Applicants AND LinkedIn-Exa with
+        # different ids. On a collision we MERGE best-of into one surviving
+        # row (never silently drop a JobDiva row): JobDiva wins the survivor
+        # slot over any non-JobDiva source so it stays Launch-PAIR-actionable.
+        dedup_owner: Dict[str, Dict[str, Any]] = {}
         summary = {
             "total_candidates": 0,
             "job_applicants_count": 0,
@@ -499,12 +502,30 @@ class UnifiedCandidateSearch:
             if cid and cid in seen_ids:
                 return
             cross_keys = self._dedup_keys(cand)
-            if any(k in seen_dedup_keys for k in cross_keys):
+            owner = next((dedup_owner[k] for k in cross_keys if k in dedup_owner), None)
+            if owner is not None:
+                # Same person already shown (from this or another source).
+                # Merge best-of into the surviving row instead of showing a
+                # duplicate — and never emit a second row. If the survivor is
+                # a JobDiva row it absorbs this source's contact info.
+                changed = self._merge_candidate_best_of(owner, cand)
+                owner_id = str(owner.get("candidate_id") or owner.get("id") or "")
+                self._log_stage(
+                    "Dedup",
+                    f"merge-into-owner kept={owner_id}({owner.get('source')}) "
+                    f"dropped={cid}({cand.get('source')}) keys={cross_keys}",
+                )
+                if changed and owner_id:
+                    await queue.put({
+                        "type": "candidate_detail",
+                        "candidate_id": owner_id,
+                        "patch": dict(changed),
+                    })
                 return
             if cid:
                 seen_ids.add(cid)
             for k in cross_keys:
-                seen_dedup_keys.add(k)
+                dedup_owner[k] = cand
             if qualified_counter_key and assessment["passes"]:
                 summary[qualified_counter_key] += 1
             summary["total_candidates"] += 1
@@ -593,19 +614,63 @@ class UnifiedCandidateSearch:
             cand = finalize_candidate(cand)
 
             # Cross-source dedup runs here (not at agent_result) since the
-            # keys depend on email / linkedin URL / location, which are only
-            # reliably populated after enrichment.
+            # keys depend on email / phone / linkedin URL, which are only
+            # reliably populated after enrichment ("the candidate details API").
+            # POLICY: a JobDiva row, once shown, is never the dropped side of a
+            # JobDiva-vs-other collision — it takes over the survivor slot and
+            # absorbs the other source's best fields. Genuine intra-JobDiva
+            # duplicates (Applicants vs Talent) merge into one surviving row.
             cross_keys = self._dedup_keys(cand)
-            if any(k in seen_dedup_keys for k in cross_keys):
-                await queue.put({
-                    "type": "candidate_detail",
-                    "candidate_id": cid,
-                    "stage": "dropped",
-                    "patch": {"_stage": "dropped", "_drop_reason": "cross_source_duplicate"},
-                })
-                return
-            for k in cross_keys:
-                seen_dedup_keys.add(k)
+            owner = next((dedup_owner[k] for k in cross_keys if k in dedup_owner), None)
+            if owner is not None:
+                owner_id = str(owner.get("candidate_id") or owner.get("id") or "")
+                if not self._cand_is_jobdiva(owner):
+                    # JobDiva takes over from the non-JobDiva owner: absorb the
+                    # owner's best fields, remove the (already-shown) owner row,
+                    # and re-point the dedup keys to this JobDiva candidate.
+                    self._merge_candidate_best_of(cand, owner)
+                    for k in [k for k, v in dedup_owner.items() if v is owner]:
+                        del dedup_owner[k]
+                    for k in cross_keys:
+                        dedup_owner[k] = cand
+                    self._log_stage(
+                        "Dedup",
+                        f"cross_source merge: kept={cid}(JobDiva) "
+                        f"dropped={owner_id}({owner.get('source')}) keys={cross_keys}",
+                    )
+                    await queue.put({
+                        "type": "candidate_detail",
+                        "candidate_id": owner_id,
+                        "stage": "dropped",
+                        "patch": {"_stage": "dropped", "_drop_reason": "merged_into_jobdiva"},
+                    })
+                    # fall through: emit this JobDiva candidate's scored patch
+                else:
+                    # Owner is also JobDiva (e.g. Applicants vs Talent for the
+                    # same person): a genuine intra-JobDiva duplicate. Merge
+                    # best-of into the surviving JobDiva row and drop this one.
+                    changed = self._merge_candidate_best_of(owner, cand)
+                    self._log_stage(
+                        "Dedup",
+                        f"cross_source merge: kept={owner_id}(JobDiva) "
+                        f"dropped={cid}(JobDiva) keys={cross_keys}",
+                    )
+                    if changed and owner_id:
+                        await queue.put({
+                            "type": "candidate_detail",
+                            "candidate_id": owner_id,
+                            "patch": dict(changed),
+                        })
+                    await queue.put({
+                        "type": "candidate_detail",
+                        "candidate_id": cid,
+                        "stage": "dropped",
+                        "patch": {"_stage": "dropped", "_drop_reason": "cross_source_duplicate"},
+                    })
+                    return
+            else:
+                for k in cross_keys:
+                    dedup_owner[k] = cand
 
             if qualified_counter_key and assessment["passes"]:
                 summary[qualified_counter_key] += 1
@@ -617,6 +682,10 @@ class UnifiedCandidateSearch:
                 "enhanced_info", "enhanced_info_status", "education",
                 "certifications", "skills", "urls", "experience_years",
                 "name", "title", "location", "email", "phone",
+                # Forward merged identity so a take-over reflects the unioned
+                # sources + absorbed contact/profile on the surviving row.
+                "sources", "profile_url", "linkedin_url", "image_url",
+                "resume_id", "city", "state",
             ):
                 v = cand.get(key)
                 if v is not None:
@@ -1127,15 +1196,19 @@ class UnifiedCandidateSearch:
                         }
                         # Cross-source dedup so a deep-search hit doesn't
                         # duplicate a row that some other producer (Unipile,
-                        # JobDiva) already emitted under a different id.
+                        # JobDiva) already emitted under a different id. On a
+                        # collision, fold this hit's best-of into the owner
+                        # rather than dropping it on the floor.
                         keys = self._dedup_keys(new_cand)
-                        if any(k in seen_dedup_keys for k in keys):
+                        _deep_owner = next((dedup_owner[k] for k in keys if k in dedup_owner), None)
+                        if _deep_owner is not None:
+                            self._merge_candidate_best_of(_deep_owner, new_cand)
                             continue
                         # Route through emit_candidate so the deep-only
                         # candidate gets the same scoring + finalize_candidate
                         # treatment as Pass A — without this its match_score
                         # stayed at 0 and it sorted to the bottom of the list.
-                        # The closure already handles seen_ids / seen_dedup_keys
+                        # The closure already handles seen_ids / dedup_owner
                         # bookkeeping internally; we don't pre-add here.
                         try:
                             assessment = self._filter_assessment(
@@ -1321,10 +1394,18 @@ class UnifiedCandidateSearch:
         """
         try:
             from core import sourcing_config as sc
-            from services.jobdiva import get_field
+            from services.jobdiva import get_field, _select_better_phone
 
             page_size = max(1, int(sc.FAST_PATH_DETAIL_BACKGROUND_PAGE_SIZE))
             page_delay = max(0.0, float(sc.FAST_PATH_DETAIL_BACKGROUND_PAGE_DELAY_S))
+
+            # Snapshot each candidate's current phone so the détail patch can be
+            # upgrade-only (never downgrade a mobile to a home/work number).
+            existing_phone_by_id = {
+                str(c.get("candidate_id") or c.get("id") or ""): str(c.get("phone") or "")
+                for c in candidates
+                if c.get("candidate_id") or c.get("id")
+            }
 
             token = await self.jobdiva_service.authenticate()
             if not token:
@@ -1375,11 +1456,12 @@ class UnifiedCandidateSearch:
                         "email1", "EMAIL1", "email2", "EMAIL2",
                         "alternateEmail", "ALTERNATEEMAIL",
                     ]) or "")
-                    phone = (get_field(detail, [
-                        "phone", "PHONE", "phoneNumber", "PHONENUMBER",
-                        "mobilePhone", "MOBILEPHONE", "phone1", "PHONE1",
-                        "cellPhone", "CELLPHONE",
-                    ]) or "")
+                    # Upgrade-only phone: pick the détail's best (mobile-typed)
+                    # number and only patch it when it beats what we already
+                    # have — never downgrade a JobAgent mobile to a home/work #.
+                    better_phone = _select_better_phone(
+                        existing_phone_by_id.get(str(cand_id), ""), detail
+                    )
                     address1 = (get_field(detail, ["address1", "ADDRESS1", "address", "ADDRESS"]) or "")
                     linkedin = (get_field(detail, ["linkedinUrl", "LINKEDINURL", "linkedin", "LINKEDIN", "linkedIn", "LINKEDIN_URL"]) or "")
                     resume_id = (get_field(detail, ["resumeId", "RESUMEID", "resume_id"]) or "")
@@ -1388,8 +1470,8 @@ class UnifiedCandidateSearch:
                     state = (get_field(detail, ["state", "STATE", "locationState", "LOCATIONSTATE"]) or "")
                     if email:
                         patch["email"] = str(email).strip()
-                    if phone:
-                        patch["phone"] = str(phone).strip()
+                    if better_phone and better_phone != existing_phone_by_id.get(str(cand_id), "").strip():
+                        patch["phone"] = better_phone
                     if address1:
                         patch["address1"] = str(address1).strip()
                     if linkedin:
@@ -1709,14 +1791,26 @@ class UnifiedCandidateSearch:
         evidence of a non-US location are dropped. The radius/state check
         runs only when ``criteria.location`` is set, and soft-keeps any
         candidate whose location can't be resolved.
+
+        POLICY (JOBDIVA_LOCATION_SOFT_KEEP, default True): out-of-radius /
+        state-mismatch JobDiva candidates are NOT dropped here — they are kept
+        and flagged (`location_out_of_radius`, with `distance_miles`) so the
+        location rubric dimension scores them down and the recruiter can narrow
+        via the location chip / MIN MATCH. This mirrors `emit_candidate`'s
+        "soften everything except positive non-US evidence" policy so a JobDiva
+        row is never removed before it renders. Set the flag False to restore
+        the old hard radius filter.
         """
         if not candidates:
             return candidates
 
+        from core import sourcing_config as _sc_loc
+        soft_keep = bool(getattr(_sc_loc, "JOBDIVA_LOCATION_SOFT_KEEP", True))
         enforce_location = self._should_enforce_location(criteria)
 
         kept: List[Dict[str, Any]] = []
         non_us_dropped = 0
+        out_of_radius_kept = 0
         filtered = 0
         geocode_failed = 0
 
@@ -1736,6 +1830,12 @@ class UnifiedCandidateSearch:
                 c["location_match_reason"] = reason
             if is_match:
                 kept.append(c)
+            elif soft_keep:
+                # Outside radius / different state — keep it visible (scored
+                # down on location), never hard-drop a JobDiva candidate here.
+                c["location_out_of_radius"] = True
+                out_of_radius_kept += 1
+                kept.append(c)
             else:
                 filtered += 1
                 if reason in {"candidate_ungeocodable", "target_ungeocodable"}:
@@ -1744,8 +1844,8 @@ class UnifiedCandidateSearch:
         self._log_stage(
             "LocationGate",
             f"pre-filter kept {len(kept)}/{len(candidates)} candidates"
-            f" (non_us_dropped={non_us_dropped}, filtered={filtered},"
-            f" geocode_failures={geocode_failed})",
+            f" (non_us_dropped={non_us_dropped}, out_of_radius_kept={out_of_radius_kept},"
+            f" filtered={filtered}, geocode_failures={geocode_failed})",
         )
         return kept
 
@@ -4697,43 +4797,128 @@ class UnifiedCandidateSearch:
             logger.error(f"Exa search failed: {e}")
             return {"candidates": [], "source_type": "LinkedIn-Exa"}
 
+    def _cand_is_jobdiva(self, candidate: Dict[str, Any]) -> bool:
+        """True when a candidate carries JobDiva provenance — by `source`
+        prefix, by an entry in its merged `sources` list, or by a JobDiva id.
+        Used so cross-source dedup never makes a JobDiva row the dropped side.
+        """
+        if str(candidate.get("source") or "").startswith("JobDiva"):
+            return True
+        srcs = candidate.get("sources")
+        if isinstance(srcs, list) and any(str(s or "").startswith("JobDiva") for s in srcs):
+            return True
+        return bool(
+            str(candidate.get("jobdiva_candidate_id") or candidate.get("jobdiva_id") or "").strip()
+        )
+
+    def _merge_candidate_best_of(
+        self, dst: Dict[str, Any], src: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Fold `src`'s best fields into `dst` (the surviving row) when the two
+        are the same person from different sources/ids. `dst` keeps its own
+        identity and match score; `src` only fills gaps or upgrades weak values
+        (a real email over a synthetic one, a real resume over "unavailable").
+        Returns a dict of the fields that changed, suitable for a UI patch.
+        """
+        changed: Dict[str, Any] = {}
+
+        def _src_list(c: Dict[str, Any]) -> List[str]:
+            out: List[str] = []
+            s = c.get("sources")
+            if isinstance(s, list):
+                out.extend([str(x) for x in s if x])
+            one = c.get("source")
+            if one:
+                out.append(str(one))
+            return out
+
+        merged_sources = list(dict.fromkeys(_src_list(dst) + _src_list(src)))
+        cur_sources = dst.get("sources") if isinstance(dst.get("sources"), list) else None
+        if merged_sources and merged_sources != cur_sources:
+            dst["sources"] = merged_sources
+            changed["sources"] = merged_sources
+
+        # Fill missing scalars (incl. JobDiva identity so the survivor stays
+        # Launch-PAIR-actionable when it absorbs a JobDiva duplicate).
+        for f in (
+            "phone", "location", "city", "state", "title", "headline",
+            "resume_id", "profile_url", "linkedin_url", "image_url",
+            "experience_years", "jobdiva_candidate_id", "jobdiva_id",
+        ):
+            if not dst.get(f) and src.get(f):
+                dst[f] = src[f]
+                changed[f] = src[f]
+
+        # Email: prefer a real address over a missing/synthetic one.
+        d_email = str(dst.get("email") or "").strip()
+        s_email = str(src.get("email") or "").strip()
+        if s_email and s_email != d_email and (
+            not d_email or (_is_placeholder_email(d_email) and not _is_placeholder_email(s_email))
+        ):
+            dst["email"] = s_email
+            changed["email"] = s_email
+
+        # Resume text: prefer a real, longer resume over a missing/placeholder one.
+        def _bad_resume(r: str) -> bool:
+            r = r or ""
+            return (not r.strip()) or ("Resume content unavailable" in r)
+
+        d_resume = dst.get("resume_text") or ""
+        s_resume = src.get("resume_text") or ""
+        if s_resume and not _bad_resume(s_resume) and (_bad_resume(d_resume) or len(s_resume) > len(d_resume)):
+            dst["resume_text"] = s_resume
+            changed["resume_text"] = s_resume
+
+        # Skills: fill only when the survivor has none (avoid noisy unions).
+        d_skills = dst.get("skills") or []
+        s_skills = src.get("skills") or []
+        if isinstance(s_skills, list) and s_skills and not (isinstance(d_skills, list) and d_skills):
+            dst["skills"] = s_skills
+            changed["skills"] = s_skills
+
+        return changed
+
     def _dedup_keys(self, candidate: Dict[str, Any]) -> List[str]:
         """Cross-source dedup keys for one candidate.
 
-        Each key is namespaced (`email:`, `phone:`, `linkedin:`, `name_loc:`) so two
-        candidates only collide when *one* of them genuinely overlaps —
-        sharing a normalised LinkedIn URL is sufficient even if names
-        differ slightly, and an email-with-`@` gates the email key
-        against catastrophic empty-string collisions.
+        Only *strong* identity signals are used so two different people never
+        collide (a false merge is worse than a duplicate row):
+          - `email:` — a real, well-formed, non-synthetic address.
+          - `phone-name:` — a phone (>=7 digits, >=4 distinct, not a shared/
+            placeholder line) paired with a full name.
+          - `linkedin:` — a normalised LinkedIn URL.
+        Name+location alone is intentionally NOT a key — two distinct people
+        sharing a common name and city would otherwise be merged.
         """
         keys: List[str] = []
 
         email = str(candidate.get("email") or "").strip().lower()
-        if email and "@" in email:
+        if email and "@" in email and not _is_placeholder_email(email):
             keys.append(f"email:{email}")
-
-        phone_raw = str(candidate.get("phone") or "")
-        phone_digits = "".join(filter(str.isdigit, phone_raw))
-        if len(phone_digits) >= 7:
-            # Use last 10 digits to normalize away country code prefixes
-            keys.append(f"phone:{phone_digits[-10:]}")
-
-        profile_url = str(candidate.get("profile_url") or "").strip().lower()
-        if profile_url and "linkedin.com" in profile_url:
-            normalized = profile_url.split("?", 1)[0].rstrip("/")
-            keys.append(f"linkedin:{normalized}")
 
         first = str(candidate.get("firstName") or "").strip().lower()
         last = str(candidate.get("lastName") or "").strip().lower()
         full_name = f"{first} {last}".strip()
         if not full_name:
             full_name = str(candidate.get("name") or "").strip().lower()
-        location_raw = (
-            str(candidate.get("city") or "").strip().lower()
-            or str(candidate.get("location") or "").strip().lower()
-        )
-        if full_name and location_raw and " " in full_name:
-            keys.append(f"name_loc:{full_name}|{location_raw}")
+
+        phone_raw = str(candidate.get("phone") or "")
+        phone_digits = "".join(filter(str.isdigit, phone_raw))
+        # Phone is an identity signal only when paired with a name and not an
+        # obviously shared/placeholder line (a single agency number must not
+        # collapse a whole agency's candidates into one).
+        if (
+            len(phone_digits) >= 7
+            and len(set(phone_digits)) >= 4
+            and full_name
+            and " " in full_name
+        ):
+            keys.append(f"phone-name:{phone_digits[-10:]}|{full_name}")
+
+        profile_url = str(candidate.get("profile_url") or "").strip().lower()
+        if profile_url and "linkedin.com" in profile_url:
+            normalized = profile_url.split("?", 1)[0].rstrip("/")
+            keys.append(f"linkedin:{normalized}")
 
         return keys
 

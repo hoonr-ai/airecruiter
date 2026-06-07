@@ -6,7 +6,9 @@ import json
 import httpx as _httpx_module
 import httpx
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
+
+from utils.phone import normalize_phone
 from html import unescape
 import sqlalchemy
 from sqlalchemy import text
@@ -444,21 +446,23 @@ def _get_candidate_email(data: Dict[str, Any]) -> str:
     return values[0].strip()
 
 
-def _get_candidate_phone(data: Dict[str, Any]) -> str:
-    """Return the candidate's best phone, preferring a MOBILE/cell number.
+def _candidate_phone_with_type(data: Dict[str, Any]) -> Tuple[str, bool]:
+    """Return ``(best_phone, is_mobile)`` for a candidate / CandidatesDetail record.
 
     JobDiva returns numbers in slots (CELLPHONE, PHONE1..PHONE4) where each
     PHONE{n} carries a companion PHONE{n}_TYPE ('Mobile Phone', 'Home Phone',
     'Work Phone', 'Home Fax'). PAIR contacts candidates on their mobile, so a
     blank CELLPHONE must not let a Home/Work number in an earlier slot shadow a
     real mobile sitting in a later, type-tagged slot. Preference order:
-      1) explicit mobile/cell fields (CELLPHONE, mobilePhone),
-      2) any PHONE{n} whose PHONE{n}_TYPE says mobile/cell,
-      3) otherwise the first phone slot that actually contains digits.
-    A value without digits (e.g. "Available upon request") is never a phone.
+      1) explicit mobile/cell fields (CELLPHONE, mobilePhone)  -> is_mobile=True
+      2) any PHONE{n} whose PHONE{n}_TYPE says mobile/cell      -> is_mobile=True
+      3) otherwise the first phone slot that actually contains  -> is_mobile=False
+         digits.
+    `is_mobile` lets callers do an upgrade-only merge (never downgrade a mobile
+    to a home/work number). A value without digits is never a phone.
     """
     if not isinstance(data, dict):
-        return ""
+        return "", False
 
     def normalize(s):
         return re.sub(r'[^a-zA-Z0-9]', '', str(s).lower())
@@ -482,20 +486,50 @@ def _get_candidate_phone(data: Dict[str, Any]) -> str:
     for key in ("mobilephone", "cellphone", "mobile", "cell"):
         s = scalar(norm.get(key))
         if has_digits(s):
-            return s
+            return s, True
 
     # 2) Slotted PHONE{n} whose companion PHONE{n}_TYPE indicates mobile/cell.
     for n in range(1, 5):
         s = scalar(norm.get(f"phone{n}"))
         t = scalar(norm.get(f"phone{n}type")).lower()
         if has_digits(s) and ("mobile" in t or "cell" in t):
-            return s
+            return s, True
 
-    # 3) Fallback: first phone value that actually contains digits.
+    # 3) Fallback: first phone value that actually contains digits (non-mobile).
     for v in _collect_field_values(data, _CANDIDATE_PHONE_KEYS):
         if has_digits(v):
-            return v.strip()
-    return ""
+            return v.strip(), False
+    return "", False
+
+
+def _get_candidate_phone(data: Dict[str, Any]) -> str:
+    """Return the candidate's best phone, preferring a MOBILE/cell number.
+
+    Thin wrapper over :func:`_candidate_phone_with_type` (see it for the slot
+    selection rules).
+    """
+    return _candidate_phone_with_type(data)[0]
+
+
+def _select_better_phone(existing: Optional[str], detail: Dict[str, Any]) -> str:
+    """Upgrade-only phone merge from a CandidatesDetail-style record.
+
+    Never downgrades. The détail phone wins ONLY when the existing number is
+    empty/invalid, OR the détail phone is a typed mobile/cell that differs from
+    the existing one. A non-mobile détail phone never replaces a non-empty
+    existing number, and an invalid détail phone never replaces a valid one.
+    Returns the phone string to keep.
+    """
+    existing = (existing or "").strip()
+    new_phone, new_is_mobile = _candidate_phone_with_type(detail)
+    new_phone = (new_phone or "").strip()
+    if not new_phone or normalize_phone(new_phone) is None:
+        return existing  # never replace with an empty/invalid number
+    if not existing or normalize_phone(existing) is None:
+        return new_phone  # fill an empty / unusable existing number
+    if new_is_mobile and normalize_phone(new_phone) != normalize_phone(existing):
+        return new_phone  # upgrade to a (different) typed mobile
+    return existing  # keep existing — no lateral move / downgrade
 
 
 def _is_job_agent_criteria_unconfigured(status_code: int, body: str) -> bool:
@@ -1431,14 +1465,16 @@ class JobDivaService:
                 profile_only_results = [r for r in profile_only_results if r.get("resume_missing")]
                 dropped_no_resume = max(0, dropped_no_resume - len(promoted))
 
-        # core.sourcing_config.INCLUDE_PROFILE_ONLY: mirror the talent-pool
-        # path — always append unrescued profile-only candidates when set.
-        from core import sourcing_config
-        if require_resume and sourcing_config.INCLUDE_PROFILE_ONLY and profile_only_results:
+        # POLICY: a JobDiva candidate is NEVER dropped for a missing résumé.
+        # Always re-add still-resumeless profile-only candidates (flagged
+        # `resume_missing` so the scorer/UI can downweight, never hide) —
+        # unconditionally, so this can't regress on a config flag or on the
+        # détail/résumé rescue still running in the background.
+        if require_resume and profile_only_results:
             jd_results.extend(profile_only_results)
             logger.info(
-                f"sourcing_config.INCLUDE_PROFILE_ONLY: appended "
-                f"{len(profile_only_results)} profile-only candidate(s) (JobAgent)"
+                f"keep-no-resume: appended {len(profile_only_results)} "
+                f"profile-only candidate(s) (JobAgent), flagged resume_missing"
             )
             profile_only_results = []
             dropped_no_resume = 0
@@ -1777,15 +1813,15 @@ class JobDivaService:
                         profile_only_results = [r for r in profile_only_results if r.get("resume_missing")]
                         dropped_no_resume = max(0, dropped_no_resume - len(promoted))
 
-                # core.sourcing_config.INCLUDE_PROFILE_ONLY: when set,
-                # always append still-resumeless profile_only_results so the
-                # downstream scorer can rank them too instead of dropping.
-                from core import sourcing_config
-                if require_resume and sourcing_config.INCLUDE_PROFILE_ONLY and profile_only_results:
+                # POLICY: never drop a JobDiva candidate for a missing résumé.
+                # Always append still-resumeless profile_only_results (flagged
+                # `resume_missing`) so the scorer/UI can downweight them rather
+                # than hide them — unconditional, not gated on a config flag.
+                if require_resume and profile_only_results:
                     jd_results.extend(profile_only_results)
                     logger.info(
-                        f"sourcing_config.INCLUDE_PROFILE_ONLY: appended "
-                        f"{len(profile_only_results)} profile-only candidate(s)"
+                        f"keep-no-resume: appended {len(profile_only_results)} "
+                        f"profile-only candidate(s), flagged resume_missing"
                     )
                     profile_only_results = []
                     dropped_no_resume = 0
@@ -1836,11 +1872,13 @@ class JobDivaService:
                 candidate["email"] = v
                 counters["email"] = counters.get("email", 0) + 1
 
-        if not candidate.get("phone"):
-            v = _get_candidate_phone(detail)
-            if v:
-                candidate["phone"] = v
-                counters["phone"] = counters.get("phone", 0) + 1
+        # Upgrade-only: fill an empty phone, or upgrade to a typed mobile from
+        # the détail record, but never downgrade an existing (possibly-mobile)
+        # number to a home/work one.
+        chosen_phone = _select_better_phone(candidate.get("phone"), detail)
+        if chosen_phone and chosen_phone != (candidate.get("phone") or "").strip():
+            candidate["phone"] = chosen_phone
+            counters["phone"] = counters.get("phone", 0) + 1
 
         addr = take(["address1", "ADDRESS1", "address", "ADDRESS"])
         if addr:
@@ -2178,8 +2216,9 @@ class JobDivaService:
         # requests (observed: 3 of 4 concurrent chunks 429'd), and the old
         # code dropped those records with no retry. See sourcing_config.
         from core import sourcing_config as _sc_det
-        conc = max(1, int(getattr(_sc_det, "CANDIDATES_DETAIL_CONCURRENCY", 2)))
-        backoffs = list(getattr(_sc_det, "CANDIDATES_DETAIL_RETRY_BACKOFF_S", [1.0, 3.0, 6.0]))
+        conc = max(1, int(getattr(_sc_det, "CANDIDATES_DETAIL_CONCURRENCY", 1)))
+        backoffs = list(getattr(_sc_det, "CANDIDATES_DETAIL_RETRY_BACKOFF_S", [2.0, 5.0, 10.0, 20.0]))
+        chunk_delay = float(getattr(_sc_det, "CANDIDATES_DETAIL_CHUNK_DELAY_S", 1.5))
         sem = asyncio.Semaphore(conc)
 
         async def _fetch_chunk(chunk: List[str], idx: int = 0) -> List[Dict[str, Any]]:
@@ -2194,6 +2233,10 @@ class JobDivaService:
                                 headers=headers,
                             )
                         _c_ms = (time.perf_counter() - _c_t0) * 1000.0
+                        # Pace requests while still holding the slot so the
+                        # next chunk can't burst past JobDiva's rate limiter.
+                        if chunk_delay > 0:
+                            await asyncio.sleep(chunk_delay)
                     try:
                         _c_bytes = len(response.content)
                     except Exception:

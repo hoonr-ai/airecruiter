@@ -120,6 +120,18 @@ function isValidLaunchPhone(value: string | null | undefined): boolean {
   return launchPhoneDigits(value).length >= 7;
 }
 
+// Defensive phone guard for streamed patches: the backend already makes
+// CandidatesDetail/hydration phone patches upgrade-only (mobile-preferred), so
+// here we only block the obvious downgrade — replacing a valid number with an
+// empty/invalid one. Mobile-vs-home is decided server-side (slot/type known).
+function betterPhoneUI(current: string | null | undefined, incoming: string | null | undefined): string {
+  const cur = String(current || "").trim();
+  const inc = String(incoming || "").trim();
+  if (!inc) return cur;
+  if (normalizePhone(inc) === null && normalizePhone(cur) !== null) return cur;
+  return inc;
+}
+
 function getCandidateLaunchEmail(candidate: any): string {
   return String(
     candidate?.email ||
@@ -402,90 +414,148 @@ const getCandidateDisplayName = (candidate: {
 };
 
 // Extracted UI dedupe logic using email OR phone
+// Client-side cross-source de-dup. POLICY: a JobDiva row is never the dropped
+// side of a collision — when the same person appears from JobDiva and another
+// source we MERGE the best info into one surviving row and keep JobDiva's
+// identity (so it stays Launch-PAIR-actionable). Matches only on STRONG
+// identity (real email / phone+name / LinkedIn URL) so two different people
+// sharing a common name+city are never falsely merged.
+const isPlaceholderEmailUI = (e?: string) => {
+  const n = String(e || "").trim().toLowerCase();
+  if (!n || !n.includes("@")) return true;
+  const domain = n.split("@").pop() || "";
+  if (domain === "jobdiva.com") return true;
+  if (n.endsWith("@noemail.pair.ai")) return true;
+  return false;
+};
+const candIsJobDivaUI = (c: any) => {
+  const s = String(c?.source || "").toLowerCase();
+  if (s.startsWith("jobdiva")) return true;
+  const srcs = Array.isArray(c?.sources) ? c.sources : [];
+  if (srcs.some((x: any) => String(x || "").toLowerCase().startsWith("jobdiva"))) return true;
+  return Boolean(String(c?.jobdiva_candidate_id || c?.jobdiva_id || c?.data?.jobdiva_candidate_id || "").trim());
+};
 const deduplicateCandidatesUI = (candidatesList: any[]) => {
   const normalizeEmail = (e?: string) => String(e || "").trim().toLowerCase();
   const normalizePhoneValue = (p?: string) => {
     const digits = String(p || "").replace(/\D/g, "");
-    return digits.length >= 7 ? digits.slice(-10) : "";
+    if (digits.length < 7) return "";
+    // A shared/placeholder line (e.g. 000-000-0000, 555-555-5555) must not
+    // collapse a whole agency's candidates into one row.
+    if (new Set(digits.split("")).size < 4) return "";
+    return digits.slice(-10);
+  };
+  const getName = (c: any) => {
+    const f = String(c.firstName || "").toLowerCase().trim();
+    const l = String(c.lastName || "").toLowerCase().trim();
+    const full = `${f} ${l}`.trim();
+    return full || String(c.name || "").toLowerCase().trim();
+  };
+  const getEmail = (c: any) => {
+    const e = normalizeEmail(c.email || c.data?.email || c.enhanced_info?.email);
+    return e && !isPlaceholderEmailUI(e) ? e : "";
+  };
+  const getPhone = (c: any) => normalizePhoneValue(c.phone || c.data?.phone || c.enhanced_info?.phone);
+  const getLinkedin = (c: any) => {
+    const u = String(c.profile_url || c.data?.urls?.linkedin || c.linkedin_url || "").trim().toLowerCase();
+    return u.includes("linkedin.com") ? u.split("?")[0].replace(/\/+$/, "") : "";
   };
 
-  const getEmail = (c: any) => normalizeEmail(c.email || c.data?.email || c.enhanced_info?.email);
-  const getPhone = (c: any) => normalizePhoneValue(c.phone || c.data?.phone || c.enhanced_info?.phone);
-  const getNameLoc = (c: any) => {
-    const name = String(c.firstName || c.name || "").toLowerCase().trim() + "|" + String(c.lastName || "").toLowerCase().trim();
-    const city = String(c.city || c.location || "").toLowerCase().trim();
-    if (name === "|" && !city) return null;
-    return `${name}|${city}`;
+  const keysOf = (c: any): string[] => {
+    const keys: string[] = [];
+    const email = getEmail(c);
+    if (email) keys.push(`email:${email}`);
+    const phone = getPhone(c);
+    const name = getName(c);
+    if (phone && name && name.includes(" ")) keys.push(`phone-name:${phone}|${name}`);
+    const li = getLinkedin(c);
+    if (li) keys.push(`linkedin:${li}`);
+    return keys;
+  };
+
+  const mergeBestOf = (dst: any, src: any) => {
+    const srcList = (c: any) => {
+      const out: string[] = [];
+      if (Array.isArray(c.sources)) out.push(...c.sources.filter(Boolean).map(String));
+      if (c.source) out.push(String(c.source));
+      return out;
+    };
+    const merged = Array.from(new Set([...srcList(dst), ...srcList(src)]));
+    if (merged.length) dst.sources = merged;
+    for (const f of ["phone", "location", "city", "state", "title", "headline",
+      "resume_id", "profile_url", "linkedin_url", "image_url", "experience_years",
+      "jobdiva_candidate_id", "jobdiva_id"]) {
+      if (!dst[f] && src[f]) dst[f] = src[f];
+    }
+    const dEmail = String(dst.email || "");
+    const sEmail = String(src.email || "");
+    if (sEmail && sEmail !== dEmail && (!dEmail || (isPlaceholderEmailUI(dEmail) && !isPlaceholderEmailUI(sEmail)))) {
+      dst.email = sEmail;
+    }
+    const badResume = (r: any) => { const s = String(r || ""); return !s.trim() || s.includes("Resume content unavailable"); };
+    const dR = String(dst.resume_text || "");
+    const sR = String(src.resume_text || "");
+    if (sR && !badResume(sR) && (badResume(dR) || sR.length > dR.length)) dst.resume_text = src.resume_text;
+    return dst;
+  };
+
+  const getPrio = (s?: string) => {
+    const l = String(s || "").toLowerCase();
+    if (l.includes("applicant")) return 1;
+    if (l.includes("talentsearch")) return 2;
+    return 3;
   };
 
   let uniqueResults: any[] = [];
 
   for (const cand of candidatesList) {
-    const cEmail = getEmail(cand);
-    const cPhone = getPhone(cand);
-    const cNameLoc = getNameLoc(cand);
-
-    if (!cEmail && !cPhone && !cNameLoc) {
+    const cKeys = keysOf(cand);
+    if (cKeys.length === 0) {
       uniqueResults.push(cand);
       continue;
     }
 
-    // Find ALL existing candidates that match
+    // Find ALL existing rows that share a strong identity key with cand.
     const matchIndices: number[] = [];
     for (let i = 0; i < uniqueResults.length; i++) {
-      const existing = uniqueResults[i];
-      const eEmail = getEmail(existing);
-      const ePhone = getPhone(existing);
-      
-      let matches = false;
-      if (cEmail && eEmail && cEmail === eEmail) matches = true;
-      else if (cPhone && ePhone && cPhone === ePhone) matches = true;
-      else if (!cEmail && !cPhone && !eEmail && !ePhone && cNameLoc && cNameLoc === getNameLoc(existing)) matches = true;
-
-      if (matches) {
-        matchIndices.push(i);
-      }
+      const eKeys = keysOf(uniqueResults[i]);
+      if (cKeys.some(k => eKeys.includes(k))) matchIndices.push(i);
     }
 
     if (matchIndices.length === 0) {
       uniqueResults.push(cand);
-    } else {
-      // It matched one or more existing items.
-      // E.g. Cand has both email & phone. It matched existing[0] by email, existing[1] by phone.
-      // We must merge them into one winner.
-      const competitors = [cand, ...matchIndices.map(i => uniqueResults[i])];
-      
-      let winner = competitors[0];
-      for (let i = 1; i < competitors.length; i++) {
-        const comp = competitors[i];
-        const wHasBoth = Boolean(getEmail(winner)) && Boolean(getPhone(winner));
-        const cHasBoth = Boolean(getEmail(comp)) && Boolean(getPhone(comp));
-
-        if (cHasBoth && !wHasBoth) {
-          winner = comp;
-        } else if (cHasBoth === wHasBoth) {
-          const getPrio = (s?: string) => {
-            const l = String(s || "").toLowerCase();
-            if (l.includes("applicant")) return 1;
-            if (l.includes("talentsearch")) return 2;
-            return 3;
-          };
-          const wPrio = getPrio(winner.source);
-          const cPrio = getPrio(comp.source);
-          if (cPrio < wPrio) {
-             winner = comp;
-          } else if (cPrio === wPrio) {
-             if (Number(comp.match_score || 0) > Number(winner.match_score || 0)) {
-                winner = comp;
-             }
-          }
-        }
-      }
-
-      // Remove all matched indices from uniqueResults, append winner
-      uniqueResults = uniqueResults.filter((_, idx) => !matchIndices.includes(idx));
-      uniqueResults.push(winner);
+      continue;
     }
+
+    // Same person across rows: pick ONE survivor, then fold everyone else's
+    // best info into it. JobDiva-bearing record always wins the survivor slot
+    // (never dropped); otherwise prefer has-both-contacts, then source
+    // priority, then match_score.
+    const competitors = [cand, ...matchIndices.map(i => uniqueResults[i])];
+    let winner = competitors[0];
+    for (let i = 1; i < competitors.length; i++) {
+      const comp = competitors[i];
+      const wJd = candIsJobDivaUI(winner);
+      const cJd = candIsJobDivaUI(comp);
+      if (cJd !== wJd) { if (cJd) winner = comp; continue; }
+      const wBoth = Boolean(getEmail(winner)) && Boolean(getPhone(winner));
+      const cBoth = Boolean(getEmail(comp)) && Boolean(getPhone(comp));
+      if (cBoth !== wBoth) { if (cBoth) winner = comp; continue; }
+      const wPrio = getPrio(winner.source);
+      const cPrio = getPrio(comp.source);
+      if (cPrio !== wPrio) { if (cPrio < wPrio) winner = comp; continue; }
+      if (Number(comp.match_score || 0) > Number(winner.match_score || 0)) winner = comp;
+    }
+
+    // Clone the survivor so we never mutate an object still held in React state,
+    // then absorb best-of from every other competitor.
+    const survivor = { ...winner };
+    for (const comp of competitors) {
+      if (comp !== winner) mergeBestOf(survivor, comp);
+    }
+
+    uniqueResults = uniqueResults.filter((_, idx) => !matchIndices.includes(idx));
+    uniqueResults.push(survivor);
   }
   return uniqueResults;
 };
@@ -5351,16 +5421,26 @@ function NewJobPageContent() {
               if (["kept_no_resume", "error"].includes(String((patch as any).enhanced_info_status || ""))) {
                 detailFailedIdsRef.current.add(targetId);
               }
+              // Merge a patch into a candidate row, guarding phone against a
+              // downgrade (an incoming patch must never replace a valid number
+              // with an empty/invalid one).
+              const applyPatch = (c: any) => {
+                const merged = { ...c, ...patch };
+                if (Object.prototype.hasOwnProperty.call(patch, "phone")) {
+                  merged.phone = betterPhoneUI(c.phone, (patch as any).phone);
+                }
+                return merged;
+              };
               // Update local runList copy used elsewhere in this run.
-              for (const r of runList) {
-                if (String(r.candidate_id || r.id || "") === targetId) {
-                  Object.assign(r, patch);
+              for (let i = 0; i < runList.length; i++) {
+                if (String(runList[i].candidate_id || runList[i].id || "") === targetId) {
+                  runList[i] = applyPatch(runList[i]);
                   break;
                 }
               }
               setCandidates(prev => deduplicateCandidatesUI(prev.map(c => (
                 String(c.candidate_id || c.jobdiva_candidate_id || c.id || "") === targetId
-                  ? { ...c, ...patch }
+                  ? applyPatch(c)
                   : c
               ))));
             } else if (event.type === "stage") {
@@ -6742,7 +6822,10 @@ function NewJobPageContent() {
         const effectiveEmail = String(overrideEmail || getCandidateLaunchEmail(c)).trim().toLowerCase();
         const phoneOK = isValidLaunchPhone(effectivePhone) && !duplicatePhoneIds.has(id);
         const emailOK = isValidLaunchEmail(effectiveEmail) && !duplicateEmailIds.has(id);
-        if (phoneOK && emailOK) {
+        // PAIR contacts candidates by phone, so a usable phone is REQUIRED;
+        // email is optional (best-effort — enriched in the background but never
+        // blocks launch). A candidate with a phone and no email is launchable.
+        if (phoneOK) {
           readyIds.add(id);
         } else {
           needsInfo.push({
