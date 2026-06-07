@@ -83,6 +83,7 @@ import {
   initialLaunchProgress,
   type LaunchPairProgress,
   type LaunchBatchInfo,
+  type LaunchFailedCandidate,
 } from "@/components/launch-pair-progress-modal";
 import { normalizePhone } from "@/lib/phone";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
@@ -6137,6 +6138,8 @@ function NewJobPageContent() {
       totalSaved: 0,
       totalEngaged: 0,
       totalFailedBatches: 0,
+      failedCandidates: [],
+      jobIdForRelaunch: jobdivaIdForSave ? String(jobdivaIdForSave) : undefined,
     }));
 
     const updateBatch = (idx: number, patch: Partial<LaunchBatchInfo>) => {
@@ -6144,6 +6147,47 @@ function NewJobPageContent() {
         ...prev,
         batches: prev.batches.map(b => (b.index === idx ? { ...b, ...patch } : b)),
       }));
+    };
+
+    // Collect candidates from any batch that fails (save or engage) so the
+    // modal can offer a CSV export for manual re-launch via the API.
+    const failedLaunchCandidates: LaunchFailedCandidate[] = [];
+    const recordFailedBatch = (
+      batch: typeof candidatesPayload[number][],
+      stage: "save" | "engage",
+      errorMessage: string,
+      batchIndex: number,
+    ) => {
+      for (const c of batch) {
+        const skillNames = Array.isArray(c.skills)
+          ? c.skills
+              .map((s: any) =>
+                typeof s === "string" ? s : s?.name || s?.skill || "",
+              )
+              .filter(Boolean)
+              .join("; ")
+          : "";
+        failedLaunchCandidates.push({
+          candidate_id: c.candidate_id,
+          name: c.name,
+          email: c.email,
+          phone: c.phone,
+          source: c.source,
+          headline: c.headline,
+          location: c.location,
+          experience_years: c.experience_years,
+          match_score: c.match_score,
+          skills: skillNames,
+          matched_skills: Array.isArray(c.matched_skills)
+            ? c.matched_skills.join("; ")
+            : "",
+          resume_id: c.resume_id,
+          profile_url: c.profile_url,
+          batch_index: batchIndex,
+          failure_stage: stage,
+          error_message: errorMessage,
+        });
+      }
     };
 
     console.log(`🚀 Launching Hoonr-Curate with ${candidatesPayload.length} candidates in ${batches.length} batch(es) of ${LAUNCH_BATCH_SIZE}`);
@@ -6187,14 +6231,17 @@ function NewJobPageContent() {
             : (result.message || 'Unknown error');
           updateBatch(i, { status: "failed", errorMessage: `Save failed: ${errorMsg}` });
           totalFailedBatches += 1;
+          recordFailedBatch(batch, "save", String(errorMsg), i);
         }
       } catch (e) {
         console.error(`Batch ${i + 1} save threw:`, e);
+        const errMsg = e instanceof Error ? e.message : "Unknown error";
         updateBatch(i, {
           status: "failed",
-          errorMessage: e instanceof Error ? `Save failed: ${e.message}` : "Save failed",
+          errorMessage: `Save failed: ${errMsg}`,
         });
         totalFailedBatches += 1;
+        recordFailedBatch(batch, "save", errMsg, i);
       }
 
       if (!saveOk) {
@@ -6293,6 +6340,7 @@ function NewJobPageContent() {
         });
         totalFailedBatches += 1;
         engageFailureMessage = batchEngageError;
+        recordFailedBatch(batch, "engage", batchEngageError, i);
       } else {
         totalEngaged += batchEngageSent;
         updateBatch(i, {
@@ -6347,6 +6395,7 @@ function NewJobPageContent() {
       totalSaved,
       totalEngaged,
       totalFailedBatches,
+      failedCandidates: failedLaunchCandidates,
       finalMessage: engageFailureMessage ?? undefined,
     }));
 
