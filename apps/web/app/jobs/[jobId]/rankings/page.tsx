@@ -1272,29 +1272,47 @@ export default function CandidateRankingsPage() {
   }, [toast]);
 
   const normalizeCandidateRows = useCallback((rows: any[]): Candidate[] => {
+    // A row is JobDiva when its source says so, an entry in its merged
+    // `sources` list says so, or it carries a JobDiva candidate id. (The API
+    // returns the JobDiva candidate id as `candidate_id` for JobDiva-sourced
+    // rows; `jobdiva_id` is the *job* reference, not the candidate, so it is
+    // NOT used here.) JobDiva rows must never be the dropped side of a dedup.
+    const rowIsJobDiva = (c: any) => {
+      const s = String(c.source || "").toLowerCase();
+      if (s.includes("jobdiva")) return true;
+      const srcs = Array.isArray(c.sources) ? c.sources : [];
+      if (srcs.some((x: any) => String(x || "").toLowerCase().includes("jobdiva"))) return true;
+      return Boolean(String(c.data?.jobdiva_candidate_id || "").trim());
+    };
+    const isPlaceholderEmail = (e?: string) => {
+      const n = String(e || "").trim().toLowerCase();
+      if (!n || !n.includes("@")) return true;
+      const domain = n.split("@").pop() || "";
+      if (domain === "jobdiva.com") return true;
+      if (n.endsWith("@noemail.pair.ai")) return true;
+      return false;
+    };
+
     const getCanonicalCandidateKey = (c: any) => {
-      const jobDivaCandidateId = String(
-        c.jobdiva_candidate_id || c.data?.jobdiva_candidate_id || ""
-      ).trim();
-      const emailKey = String(c.email || c.data?.email || "").trim().toLowerCase();
+      const emailRaw = String(c.email || c.data?.email || "").trim().toLowerCase();
+      const emailKey = emailRaw && !isPlaceholderEmail(emailRaw) ? emailRaw : "";
       const phoneKey = String(c.phone || c.data?.phone || "").replace(/\D/g, "");
       const profileKey = String(c.profile_url || c.data?.urls?.linkedin || "").trim().toLowerCase();
       const sourceCandidateId = String(c.candidate_id || "").trim();
       const nameKey = String(c.name || "").trim().toLowerCase();
 
-      if (jobDivaCandidateId) return `jd:${jobDivaCandidateId}`;
+      // Strong identity first (real email / phone+name / LinkedIn) so the same
+      // person merges across sources; bare name is only a last resort.
       if (emailKey) return `email:${emailKey}`;
-      if (phoneKey && nameKey) return `phone-name:${phoneKey}:${nameKey}`;
-      if (profileKey) return `profile:${profileKey}`;
+      if (phoneKey.length >= 7 && nameKey) return `phone-name:${phoneKey}:${nameKey}`;
+      if (profileKey.includes("linkedin.com")) return `profile:${profileKey}`;
       if (sourceCandidateId) return `cid:${sourceCandidateId}`;
       if (nameKey) return `name:${nameKey}`;
       return `row:${String(c.id || "").trim()}`;
     };
 
     const getCandidateRank = (c: any) => {
-      const hasJobDivaCandidateId = Boolean(
-        String(c.jobdiva_candidate_id || c.data?.jobdiva_candidate_id || "").trim()
-      );
+      const hasJobDivaCandidateId = rowIsJobDiva(c);
       const source = String(c.source || "").toLowerCase();
       const sourcePriority =
         source.includes("linkedin") ? 0 :
@@ -1307,6 +1325,29 @@ export default function CandidateRankingsPage() {
         matchScore,
         createdAt: Date.parse(String(c.created_at || 0)) || 0,
       };
+    };
+
+    // Fold the loser's best info into the surviving row (union sources, fill
+    // gaps, prefer a real email over a synthetic one) so a merge never loses
+    // contact data.
+    const mergeRowBestOf = (dst: any, src: any) => {
+      const srcList = (c: any) => {
+        const out: string[] = [];
+        if (Array.isArray(c.sources)) out.push(...c.sources.filter(Boolean).map(String));
+        if (c.source) out.push(String(c.source));
+        return out;
+      };
+      const merged = Array.from(new Set([...srcList(dst), ...srcList(src)]));
+      if (merged.length) dst.sources = merged;
+      for (const f of ["phone", "location", "headline", "title", "profile_url", "linkedin_url", "image_url"]) {
+        if (!dst[f] && src[f]) dst[f] = src[f];
+      }
+      const dEmail = String(dst.email || "");
+      const sEmail = String(src.email || "");
+      if (sEmail && sEmail !== dEmail && (!dEmail || (isPlaceholderEmail(dEmail) && !isPlaceholderEmail(sEmail)))) {
+        dst.email = sEmail;
+      }
+      return dst;
     };
 
     const dedupedByIdentity = new Map<string, any>();
@@ -1338,8 +1379,17 @@ export default function CandidateRankingsPage() {
           currentRank.createdAt > existingRank.createdAt
         );
 
+      // Keep ONE survivor and absorb the other's best info into it. The
+      // survivor is whichever wins the rank above (JobDiva always beats a
+      // non-JobDiva), so a JobDiva row is never dropped in favour of LinkedIn.
       if (shouldReplace) {
-        dedupedByIdentity.set(dedupKey, candidate);
+        const survivor = { ...candidate };
+        mergeRowBestOf(survivor, existing);
+        dedupedByIdentity.set(dedupKey, survivor);
+      } else {
+        const survivor = { ...existing };
+        mergeRowBestOf(survivor, candidate);
+        dedupedByIdentity.set(dedupKey, survivor);
       }
     });
     const uniqueCandidates = Array.from(dedupedByIdentity.values());
