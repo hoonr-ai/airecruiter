@@ -579,11 +579,6 @@ export default function CandidateEvaluationReportPage() {
                                 status={hf_status === 'passed' ? 'Pass' : 'Fail'} 
                                 type={hf_status === 'passed' ? 'success' : 'danger'} 
                               />
-                              {showEngageScore && score !== undefined && (
-                                <div className="px-3 py-1 bg-slate-100 rounded-lg border border-slate-200">
-                                  <span className="text-[13px] font-bold text-slate-700">{score}/{total}</span>
-                                </div>
-                              )}
                             </div>
                           </div>
                           
