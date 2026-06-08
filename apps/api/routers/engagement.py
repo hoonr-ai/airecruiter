@@ -164,21 +164,30 @@ def _is_placeholder_email(email: str) -> bool:
     return False
 
 
-def _validate_pair_candidate_email(raw: str) -> str:
+def _sanitize_pair_candidate_email(raw: str) -> str:
+    """Return a usable email for PAIR outreach, or "" when missing/placeholder.
+
+    Email is OPTIONAL for launch — PAIR reaches candidates by phone — so a dead
+    or absent address (incl. JobDiva `Auto_<id>@jobdiva.com` placeholders) is
+    blanked rather than blocking the launch. A real, well-formed address is
+    kept so email outreach can still go out when available.
+    """
     cleaned = (raw or "").strip().lower()
-    if not cleaned:
-        raise HTTPException(status_code=400, detail="Candidate email is required before launching PAIR")
-    if not _EMAIL_RE.match(cleaned):
-        raise HTTPException(status_code=400, detail=f"Invalid candidate email address: {cleaned}")
-    if _is_placeholder_email(cleaned):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Placeholder candidate email is not allowed: {cleaned}",
-        )
+    if not cleaned or not _EMAIL_RE.match(cleaned) or _is_placeholder_email(cleaned):
+        return ""
     return cleaned
 
 
-def _validate_pair_payload_emails(payload_obj: Dict[str, Any]) -> None:
+def _pair_phone_digits(raw: Any) -> str:
+    return "".join(ch for ch in str(raw or "") if ch.isdigit())
+
+
+def _validate_pair_payload_contacts(payload_obj: Dict[str, Any]) -> None:
+    """PAIR launch gate: require at least ONE usable contact method per resume —
+    a usable phone (PAIR calls the candidate) OR a real email (PAIR emails them).
+    Either alone is enough. Placeholder/dead emails are blanked, not rejected,
+    and only block launch when there is also no usable phone.
+    """
     resumes = payload_obj.get("resumes")
     if not isinstance(resumes, list):
         raise HTTPException(status_code=400, detail="Payload is missing resumes")
@@ -187,8 +196,22 @@ def _validate_pair_payload_emails(payload_obj: Dict[str, Any]) -> None:
         if not isinstance(resume, dict):
             raise HTTPException(status_code=400, detail=f"Resume {idx} payload is invalid")
 
-        email = _validate_pair_candidate_email(str(resume.get("email") or ""))
-        resume["email"] = email
+        # Sanitize the email (blank dead/placeholder addresses). A real address
+        # that survives sanitizing counts as a usable contact method.
+        clean_email = _sanitize_pair_candidate_email(str(resume.get("email") or ""))
+        resume["email"] = clean_email
+
+        # Need at least one way to reach the candidate: a usable phone (≥7
+        # digits, matching the frontend launch gate) OR a real email. Either
+        # one alone is sufficient to launch.
+        has_phone = len(_pair_phone_digits(resume.get("phone"))) >= 7
+        has_email = bool(clean_email)
+        if not has_phone and not has_email:
+            who = resume.get("name") or resume.get("candidate_name") or f"Resume {idx}"
+            raise HTTPException(
+                status_code=400,
+                detail=f"A usable phone number or email is required before launching PAIR ({who}).",
+            )
 
 # ---------------------------------------------------------------------------
 # Auto-Migration: Ensure audit table exists
@@ -779,7 +802,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid JSON format in payload")
 
-        _validate_pair_payload_emails(payload_obj)
+        _validate_pair_payload_contacts(payload_obj)
 
         # Defense-in-depth: refuse to engage candidates for jobs whose outreach
         # has been stopped. /candidates/save already blocks earlier, but this

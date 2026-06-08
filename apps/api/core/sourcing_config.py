@@ -154,14 +154,31 @@ JOBAGENT_RESUME_COUNT = 150
 # ─────────────────────────────────────────────────────────────────────────
 # JobDiva rate-limits (429) bursts of concurrent CandidatesDetail requests.
 # Measured 2026-06-04: firing 4 chunks at once via asyncio.gather, 3 of 4
-# came back 429 with a 22-byte error body and the records were silently
-# dropped (no retry). Cap how many chunks run at once and retry 429/5xx
-# with backoff so detail records aren't lost under load.
-CANDIDATES_DETAIL_CONCURRENCY = 2
+# came back 429. Re-measured 2026-06-05 (job 26-17171): even 2 concurrent
+# chunks 429'd ALL the time — 0/150 ids returned with concurrency=2 + the
+# [1,3,6]s backoff. JobDiva's limiter only tolerates serialized, spaced
+# requests, so default to 1-at-a-time with an inter-request gap and a longer
+# backoff. This trades a little latency (mostly in background hydration,
+# which is already paced) for actually getting the records back.
+CANDIDATES_DETAIL_CONCURRENCY = 1
 
 # Backoff (seconds) before each CandidatesDetail chunk retry. Length also
 # bounds the retry count (len == max retries after the first attempt).
-CANDIDATES_DETAIL_RETRY_BACKOFF_S = [1.0, 3.0, 6.0]
+CANDIDATES_DETAIL_RETRY_BACKOFF_S = [2.0, 5.0, 10.0, 20.0]
+
+# Pace successive CandidatesDetail requests by holding the concurrency slot
+# for this long after each request, so we don't burst past JobDiva's limiter.
+CANDIDATES_DETAIL_CHUNK_DELAY_S = 1.5
+
+# Policy: a JobDiva candidate is never hidden from Step 5 just for being
+# outside the search radius / in a different state. When True, the JobDiva
+# talent-pool LocationGate (`_filter_by_state`) KEEPS out-of-radius candidates
+# (flagged `location_out_of_radius`, with `distance_miles`) so they surface
+# at a lower location-rubric score and the recruiter can narrow via the
+# location chip / MIN MATCH — instead of dropping them before they render.
+# Only positive non-US evidence is still hard-dropped. Set False to restore
+# the old hard radius filter.
+JOBDIVA_LOCATION_SOFT_KEEP = True
 
 
 # ─────────────────────────────────────────────────────────────────────────

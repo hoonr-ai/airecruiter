@@ -36,7 +36,13 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from core.config import APOLLO_API_KEY as _APOLLO_ENV_KEY
+from core.config import (
+    APOLLO_API_KEY as _APOLLO_ENV_KEY,
+    EXA_API_KEY,
+    EXA_CONTACT_ENRICH_EFFORT,
+    EXA_CONTACT_ENRICH_ENABLED,
+    EXA_CONTACT_ENRICH_TIMEOUT_S,
+)
 from services.zoominfo_auth import (
     ZoomInfoAuthFailed,
     ZoomInfoAuthNotConfigured,
@@ -46,6 +52,31 @@ from services.zoominfo_auth import (
 logger = logging.getLogger(__name__)
 
 APOLLO_ENRICH_URL = "https://api.apollo.io/api/v1/people/enrich"
+
+# ---- Exa Agent API (contact enrichment by LinkedIn URL) ----
+EXA_AGENT_RUNS_URL = "https://api.exa.ai/agent/runs"
+EXA_AGENT_BETA = "agent-2026-05-07"
+_EXA_TERMINAL_STATES = {"completed", "failed", "cancelled"}
+_EXA_POLL_INTERVAL_S = 4  # per Exa docs
+# Structured output we ask the agent to fill. Only the two billable contact
+# fields (email $0.02 / phone $0.07 per run) — richer schemas just cost more.
+_EXA_CONTACT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "contact": {
+            "type": "object",
+            "properties": {
+                "email": {"type": "string", "format": "email"},
+                "phone": {"type": "string", "format": "phone"},
+            },
+        }
+    },
+}
+# Free/consumer mailbox domains → classify the agent's email as personal.
+_PERSONAL_EMAIL_DOMAINS = {
+    "gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com",
+    "aol.com", "proton.me", "protonmail.com", "live.com", "me.com", "msn.com",
+}
 
 # Legacy in-repo Apollo key — kept so deployments without APOLLO_API_KEY in env
 # don't lose enrichment. New deployments should set the env var; the WARN
@@ -299,6 +330,137 @@ async def apollo_enrich_by_linkedin(candidate_id: str, linkedin_url: str) -> Dic
     return {"ok": True, "fields": extracted}
 
 
+def extract_exa_contact_fields(structured: Any) -> Dict[str, Any]:
+    """Parse the Exa Agent structured output into canonical fields + candidates.
+
+    The agent returns at most one email and one phone (see ``_EXA_CONTACT_SCHEMA``).
+    Classify the email as work vs personal by domain; treat the phone as a mobile
+    candidate. Shape matches ``extract_apollo_contact_fields`` so the merge is uniform.
+    """
+    contact: Any = {}
+    if isinstance(structured, dict):
+        inner = structured.get("contact")
+        contact = inner if isinstance(inner, dict) else structured
+
+    email = ""
+    phone_raw = ""
+    if isinstance(contact, dict):
+        email = str(contact.get("email") or "").strip()
+        phone_raw = str(contact.get("phone") or "").strip()
+
+    phone = _normalise_phone(phone_raw)
+    if sum(1 for ch in phone if ch.isdigit()) < 7:
+        phone = ""
+
+    work_email = ""
+    personal_email = ""
+    if email and "@" in email:
+        domain = email.rsplit("@", 1)[-1].lower()
+        if domain in _PERSONAL_EMAIL_DOMAINS:
+            personal_email = email
+        else:
+            work_email = email
+    elif email:
+        work_email = email
+
+    return {
+        "mobilePhone": phone,
+        "workPhone": "",
+        "workEmail": work_email,
+        "personalEmail": personal_email,
+        "phoneCandidates": [phone] if phone else [],
+    }
+
+
+def _build_exa_contact_query(full_name: str, company: str, linkedin_url: str) -> str:
+    """Natural-language query for the Exa Agent contact-enrichment run."""
+    who = (full_name or "").strip() or "this person"
+    parts = [f"Find the work email and phone number for {who}"]
+    company = (company or "").strip()
+    if company:
+        parts.append(f"at {company}")
+    url = (linkedin_url or "").strip()
+    if url:
+        parts.append(f". LinkedIn: {url}")
+    return " ".join(parts).replace(" .", ".")
+
+
+async def exa_enrich_by_linkedin(
+    candidate_id: str,
+    linkedin_url: str,
+    full_name: str = "",
+    company: str = "",
+) -> Dict[str, Any]:
+    """Enrich one person via the Exa Agent API (by LinkedIn URL). Pure async.
+
+    Returns ``{"ok": bool, "fields"|"message": ...}`` mirroring
+    ``apollo_enrich_by_linkedin``. No-op (``ok=False``) when
+    ``EXA_CONTACT_ENRICH_ENABLED`` is off or ``EXA_API_KEY`` is missing. Bounded
+    by ``EXA_CONTACT_ENRICH_TIMEOUT_S``; all failures logged and swallowed.
+    """
+    if not EXA_CONTACT_ENRICH_ENABLED:
+        return {"ok": False, "message": "Exa contact enrichment disabled"}
+    if not EXA_API_KEY:
+        logger.warning("Exa enrichment skipped for %s: EXA_API_KEY not configured", candidate_id)
+        return {"ok": False, "message": "EXA_API_KEY not configured"}
+
+    query = _build_exa_contact_query(full_name, company, linkedin_url)
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": EXA_API_KEY,
+        "Exa-Beta": EXA_AGENT_BETA,
+    }
+    body = {
+        "query": query,
+        "outputSchema": _EXA_CONTACT_SCHEMA,
+        "effort": EXA_CONTACT_ENRICH_EFFORT,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            r = await client.post(EXA_AGENT_RUNS_URL, headers=headers, json=body)
+            if r.status_code >= 400:
+                logger.warning(
+                    "Exa agent create non-2xx for %s: %s %s",
+                    candidate_id, r.status_code, r.text[:200],
+                )
+                return {"ok": False, "message": f"Exa create error ({r.status_code})"}
+
+            run = r.json()
+            run_id = run.get("id")
+            status = run.get("status")
+            final = run if status in _EXA_TERMINAL_STATES else None
+
+            loop = asyncio.get_event_loop()
+            deadline = loop.time() + max(1, EXA_CONTACT_ENRICH_TIMEOUT_S)
+            while final is None and loop.time() < deadline:
+                await asyncio.sleep(_EXA_POLL_INTERVAL_S)
+                g = await client.get(f"{EXA_AGENT_RUNS_URL}/{run_id}", headers=headers)
+                if g.status_code >= 400:
+                    logger.warning("Exa agent poll non-2xx for %s: %s", candidate_id, g.status_code)
+                    return {"ok": False, "message": f"Exa poll error ({g.status_code})"}
+                run = g.json()
+                status = run.get("status")
+                if status in _EXA_TERMINAL_STATES:
+                    final = run
+    except Exception as e:
+        logger.warning("Exa agent request failed for %s: %s", candidate_id, e)
+        return {"ok": False, "message": f"Exa request failed: {e}"}
+
+    if final is None:
+        logger.info("Exa agent run timed out for %s (>%ss)", candidate_id, EXA_CONTACT_ENRICH_TIMEOUT_S)
+        return {"ok": False, "message": "Exa run timed out"}
+    if status != "completed":
+        logger.info("Exa agent run %s for %s: %s", status, candidate_id, final.get("stopReason"))
+        return {"ok": False, "message": f"Exa run {status}"}
+
+    output = final.get("output") or {}
+    extracted = extract_exa_contact_fields(output.get("structured"))
+    if not _has_usable_field(extracted):
+        logger.info("Exa returned no usable contact fields for %s", candidate_id)
+    return {"ok": True, "fields": extracted}
+
+
 ZOOMINFO_NEW_SEARCH_URL = "https://api.zoominfo.com/gtm/data/v1/contacts/search"
 ZOOMINFO_NEW_ENRICH_URL = "https://api.zoominfo.com/gtm/data/v1/contacts/enrich"
 
@@ -467,6 +629,45 @@ async def _zoominfo_enrich_by_person_id(person_id: str) -> Dict[str, str]:
         return {}
 
     return extract_zoominfo_contact_fields(body_json)
+
+
+async def zoominfo_enrich_by_email(candidate_id: str, email: str) -> Dict[str, Any]:
+    """Enrich a contact via the ZoomInfo OAuth Data API, matching by EMAIL.
+
+    ZoomInfo cannot match by LinkedIn URL (externalURL is output-only and
+    entitlement-gated), so this runs only when we already have an email. Reuses
+    ``_zoominfo_authed_post`` (OAuth mint + one 401 retry). Returns
+    ``{"ok": bool, "fields"|"message": ...}`` like the Apollo/Exa helpers; all
+    failures are logged and swallowed so enrichment never raises.
+    """
+    email = (email or "").strip().lower()
+    if not email or "@" not in email:
+        return {"ok": False, "message": "no email to match on"}
+
+    body = {
+        "data": {
+            "type": "ContactEnrich",
+            "attributes": {
+                "matchPersonInput": [{"emailAddress": email}],
+                "outputFields": ["mobilePhone", "phone", "email", "emailAlt"],
+            },
+        }
+    }
+    res = await _zoominfo_authed_post(ZOOMINFO_NEW_ENRICH_URL, body)
+    if res is None:
+        return {"ok": False, "message": "ZoomInfo unavailable (auth not configured / mint failed)"}
+    if res.status_code >= 400:
+        logger.info("ZoomInfo enrich-by-email non-2xx for %s: %s", candidate_id, res.status_code)
+        return {"ok": False, "message": f"ZoomInfo error ({res.status_code})"}
+    try:
+        data = res.json()
+    except ValueError:
+        return {"ok": False, "message": "ZoomInfo non-JSON response"}
+
+    fields = extract_zoominfo_contact_fields(data)
+    if not _has_usable_field(fields):
+        logger.info("ZoomInfo enrich-by-email returned no usable fields for %s", candidate_id)
+    return {"ok": True, "fields": fields}
 
 
 async def _zoominfo_enrich_for_sourcing(full_name: str) -> Dict[str, str]:

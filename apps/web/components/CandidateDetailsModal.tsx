@@ -19,6 +19,7 @@ import {
   DialogTitle,
   DialogDescription
 } from "@/components/ui/dialog";
+import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 
 import { memo } from "react";
 
@@ -158,7 +159,7 @@ function CandidateDetailsModalBase({
   const isLinkedIn = profileUrl?.includes("linkedin.com");
   const showJobDivaLink = !!jobdivaCandidateId && !!source && source.startsWith("JobDiva");
   const jobDivaUrl = showJobDivaLink
-    ? `https://www1.jobdiva.com/employers/myreports/viewcandidate2_real.jsp?docids=-1&candidateid=${encodeURIComponent(jobdivaCandidateId!)}`
+    ? buildJobDivaCandidateUrl(jobdivaCandidateId)
     : null;
 
   const formattedTitle = toTitleCase(jobTitle || "");

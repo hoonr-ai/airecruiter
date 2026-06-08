@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, AlertCircle, Loader2, Rocket } from "lucide-react";
+import { CheckCircle2, AlertCircle, Loader2, Rocket, Download } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -31,6 +31,28 @@ export interface LaunchBatchInfo {
   errorMessage?: string;
 }
 
+// A candidate that could not be launched (its batch failed at save or
+// engage). Captured so support engineers can export a CSV and re-launch
+// PAIR for them manually through the API.
+export interface LaunchFailedCandidate {
+  candidate_id: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  source: string;
+  headline: string;
+  location: string;
+  experience_years: number;
+  match_score: number;
+  skills: string;
+  matched_skills: string;
+  resume_id: string;
+  profile_url: string | null;
+  batch_index: number;
+  failure_stage: BatchStage;
+  error_message: string;
+}
+
 export type LaunchPhase =
   | "idle"
   | "enriching"
@@ -59,6 +81,10 @@ export interface LaunchPairProgress {
   totalSaved: number;
   totalEngaged: number;
   totalFailedBatches: number;
+  // Candidates whose batch failed — exportable as CSV for manual re-launch
+  failedCandidates: LaunchFailedCandidate[];
+  // JobDiva job id these candidates belong to (column in the export CSV)
+  jobIdForRelaunch?: string;
   // Finalization
   finalMessage?: string;
 }
@@ -81,6 +107,7 @@ export const initialLaunchProgress: LaunchPairProgress = {
   totalSaved: 0,
   totalEngaged: 0,
   totalFailedBatches: 0,
+  failedCandidates: [],
 };
 
 interface LaunchPairProgressModalProps {
@@ -139,10 +166,75 @@ export function LaunchPairProgressModal({
     totalSaved,
     totalEngaged,
     totalFailedBatches,
+    failedCandidates,
+    jobIdForRelaunch,
     finalMessage,
   } = progress;
 
   const isDone = phase === "completed" || phase === "failed";
+  const hasFailedCandidates = failedCandidates.length > 0;
+
+  // Export the candidates whose batch failed so a support engineer can
+  // re-launch PAIR for them manually via the API. One row per candidate,
+  // self-contained (includes job id + failure reason).
+  const downloadFailedCandidatesCsv = () => {
+    const escapeCSV = (val: any) => {
+      const str = val === null || val === undefined ? "" : String(val);
+      return str.includes(",") || str.includes('"') || str.includes("\n")
+        ? `"${str.replace(/"/g, '""')}"`
+        : str;
+    };
+    const headers = [
+      "Job ID",
+      "Candidate ID",
+      "Name",
+      "Email",
+      "Phone",
+      "Source",
+      "Headline",
+      "Location",
+      "Experience (yrs)",
+      "Match Score",
+      "Skills",
+      "Matched Skills",
+      "Resume ID",
+      "Profile URL",
+      "Batch",
+      "Failure Stage",
+      "Error",
+    ];
+    const rows = failedCandidates.map((c) =>
+      [
+        escapeCSV(jobIdForRelaunch || ""),
+        escapeCSV(c.candidate_id),
+        escapeCSV(c.name),
+        escapeCSV(c.email),
+        escapeCSV(c.phone),
+        escapeCSV(c.source),
+        escapeCSV(c.headline),
+        escapeCSV(c.location),
+        escapeCSV(c.experience_years),
+        escapeCSV(c.match_score),
+        escapeCSV(c.skills),
+        escapeCSV(c.matched_skills),
+        escapeCSV(c.resume_id),
+        escapeCSV(c.profile_url),
+        escapeCSV(c.batch_index + 1),
+        escapeCSV(c.failure_stage),
+        escapeCSV(c.error_message),
+      ].join(","),
+    );
+    const csv = [headers.join(","), ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `pair_failed_candidates${
+      jobIdForRelaunch ? `_${jobIdForRelaunch}` : ""
+    }.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
   const totalBatches = batches.length;
   const completedBatches = batches.filter(
     (b) => b.status === "completed" || b.status === "failed",
@@ -322,7 +414,21 @@ export function LaunchPairProgressModal({
           </div>
         )}
 
-        <DialogFooter>
+        <DialogFooter className="sm:justify-between gap-2">
+          {isDone && hasFailedCandidates ? (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={downloadFailedCandidatesCsv}
+              className="border-rose-200 text-rose-700 hover:bg-rose-50 hover:text-rose-800"
+            >
+              <Download className="w-4 h-4 mr-2" />
+              Download {failedCandidates.length} failed candidate
+              {failedCandidates.length === 1 ? "" : "s"} (CSV)
+            </Button>
+          ) : (
+            <span />
+          )}
           <Button
             disabled={!isDone}
             onClick={onClose}

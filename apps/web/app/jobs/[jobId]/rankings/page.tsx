@@ -51,6 +51,7 @@ import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
 import { API_BASE } from "@/lib/api";
+import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 
 // Utility function to format dates
@@ -535,7 +536,7 @@ export default function CandidateRankingsPage() {
 
   // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
   // filter updates the table synchronously (no stale state via setFilteredCandidates).
-  type StatusFilter = "all" | "completed" | "pending";
+  type StatusFilter = "all" | "pass" | "fail" | "in_progress" | "pending";
   type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score" | "source" | "engage_status";
   type SortDir = "asc" | "desc";
   type ColumnFilterCondition = "contains" | "not_contains" | "equals" | "starts_with";
@@ -709,7 +710,11 @@ export default function CandidateRankingsPage() {
         if (!hay.includes(q)) return false;
       }
       // Status
-      if (statusFilter !== "all" && deriveStatus(c) !== statusFilter) return false;
+      if (statusFilter !== "all") {
+        const engageLabel = normalizeInterviewStatus(c).label.toLowerCase();
+        const sf = statusFilter === "in_progress" ? "in progress" : statusFilter;
+        if (engageLabel !== sf) return false;
+      }
       // Source
       if (sourceFilter !== "all" && c.source !== sourceFilter) return false;
       // Min score
@@ -912,47 +917,39 @@ export default function CandidateRankingsPage() {
       return;
     }
 
-    // JobDiva candidate: prefer a direct deep link built from the candidate's
-    // JobDiva id. The PROFILEURL-based API fetch below is frequently empty and
-    // can return a stale/dead format, so build the verified-live candidate URL
-    // ourselves (same format CandidateDetailsModal uses).
+    // JobDiva candidate: build a direct deep link from the JobDiva candidate id
+    // (same verified-live format CandidateDetailsModal uses). The PROFILEURL API
+    // fetch is frequently empty and can return a stale/dead format. The
+    // /jobs/{id}/candidates API returns the JobDiva candidate id as
+    // `candidate_id` (not `jobdiva_candidate_id`), so fall back to candidateKey
+    // for JobDiva sources — otherwise the link never resolves.
+    const isJobDivaSource = source.startsWith("jobdiva");
     const jobdivaCandidateId = String(
-      candidate.jobdiva_candidate_id || candidate.data?.jobdiva_candidate_id || ""
+      candidate.jobdiva_candidate_id ||
+      candidate.data?.jobdiva_candidate_id ||
+      (isJobDivaSource ? candidateKey : "")
     ).trim();
     if (jobdivaCandidateId) {
-      const url = `https://www1.jobdiva.com/employers/myreports/viewcandidate2_real.jsp?docids=-1&candidateid=${encodeURIComponent(jobdivaCandidateId)}`;
-      window.open(url, "_blank", "noopener,noreferrer");
-      return;
+      const url = buildJobDivaCandidateUrl(jobdivaCandidateId);
+      if (url) {
+        setCandidateProfileUrls(prev => ({ ...prev, [candidateKey]: url }));
+        window.open(url, "_blank", "noopener,noreferrer");
+        return;
+      }
     }
 
-    const existingJobDivaUrl =
+    // Non-JobDiva source: fall back to an explicit profile URL if present.
+    const existingProfileUrl =
       String(candidate.profile_url || "").trim() ||
       String(candidate.data?.profile_url || "").trim() ||
       String(candidateProfileUrls[candidateKey] || "").trim();
 
-    if (existingJobDivaUrl) {
-      window.open(existingJobDivaUrl, "_blank", "noopener,noreferrer");
+    if (existingProfileUrl) {
+      window.open(existingProfileUrl, "_blank", "noopener,noreferrer");
       return;
     }
 
-    try {
-      const res = await fetch(`${API_BASE}/candidates/${encodeURIComponent(candidateKey)}/profile-url`);
-      if (!res.ok) {
-        pushToast("JobDiva profile URL not available", "info");
-        return;
-      }
-      const payload = await res.json().catch(() => ({}));
-      const url = String(payload?.profile_url || "").trim();
-      if (!url) {
-        pushToast("JobDiva profile URL not available", "info");
-        return;
-      }
-
-      setCandidateProfileUrls(prev => ({ ...prev, [candidateKey]: url }));
-      window.open(url, "_blank", "noopener,noreferrer");
-    } catch {
-      pushToast("Failed to fetch profile URL", "error");
-    }
+    pushToast("Profile URL not available", "info");
   };
 
   const handleEnrichContact = async (candidate: Candidate) => {
@@ -1272,29 +1269,47 @@ export default function CandidateRankingsPage() {
   }, [toast]);
 
   const normalizeCandidateRows = useCallback((rows: any[]): Candidate[] => {
+    // A row is JobDiva when its source says so, an entry in its merged
+    // `sources` list says so, or it carries a JobDiva candidate id. (The API
+    // returns the JobDiva candidate id as `candidate_id` for JobDiva-sourced
+    // rows; `jobdiva_id` is the *job* reference, not the candidate, so it is
+    // NOT used here.) JobDiva rows must never be the dropped side of a dedup.
+    const rowIsJobDiva = (c: any) => {
+      const s = String(c.source || "").toLowerCase();
+      if (s.includes("jobdiva")) return true;
+      const srcs = Array.isArray(c.sources) ? c.sources : [];
+      if (srcs.some((x: any) => String(x || "").toLowerCase().includes("jobdiva"))) return true;
+      return Boolean(String(c.data?.jobdiva_candidate_id || "").trim());
+    };
+    const isPlaceholderEmail = (e?: string) => {
+      const n = String(e || "").trim().toLowerCase();
+      if (!n || !n.includes("@")) return true;
+      const domain = n.split("@").pop() || "";
+      if (domain === "jobdiva.com") return true;
+      if (n.endsWith("@noemail.pair.ai")) return true;
+      return false;
+    };
+
     const getCanonicalCandidateKey = (c: any) => {
-      const jobDivaCandidateId = String(
-        c.jobdiva_candidate_id || c.data?.jobdiva_candidate_id || ""
-      ).trim();
-      const emailKey = String(c.email || c.data?.email || "").trim().toLowerCase();
+      const emailRaw = String(c.email || c.data?.email || "").trim().toLowerCase();
+      const emailKey = emailRaw && !isPlaceholderEmail(emailRaw) ? emailRaw : "";
       const phoneKey = String(c.phone || c.data?.phone || "").replace(/\D/g, "");
       const profileKey = String(c.profile_url || c.data?.urls?.linkedin || "").trim().toLowerCase();
       const sourceCandidateId = String(c.candidate_id || "").trim();
       const nameKey = String(c.name || "").trim().toLowerCase();
 
-      if (jobDivaCandidateId) return `jd:${jobDivaCandidateId}`;
+      // Strong identity first (real email / phone+name / LinkedIn) so the same
+      // person merges across sources; bare name is only a last resort.
       if (emailKey) return `email:${emailKey}`;
-      if (phoneKey && nameKey) return `phone-name:${phoneKey}:${nameKey}`;
-      if (profileKey) return `profile:${profileKey}`;
+      if (phoneKey.length >= 7 && nameKey) return `phone-name:${phoneKey}:${nameKey}`;
+      if (profileKey.includes("linkedin.com")) return `profile:${profileKey}`;
       if (sourceCandidateId) return `cid:${sourceCandidateId}`;
       if (nameKey) return `name:${nameKey}`;
       return `row:${String(c.id || "").trim()}`;
     };
 
     const getCandidateRank = (c: any) => {
-      const hasJobDivaCandidateId = Boolean(
-        String(c.jobdiva_candidate_id || c.data?.jobdiva_candidate_id || "").trim()
-      );
+      const hasJobDivaCandidateId = rowIsJobDiva(c);
       const source = String(c.source || "").toLowerCase();
       const sourcePriority =
         source.includes("linkedin") ? 0 :
@@ -1307,6 +1322,29 @@ export default function CandidateRankingsPage() {
         matchScore,
         createdAt: Date.parse(String(c.created_at || 0)) || 0,
       };
+    };
+
+    // Fold the loser's best info into the surviving row (union sources, fill
+    // gaps, prefer a real email over a synthetic one) so a merge never loses
+    // contact data.
+    const mergeRowBestOf = (dst: any, src: any) => {
+      const srcList = (c: any) => {
+        const out: string[] = [];
+        if (Array.isArray(c.sources)) out.push(...c.sources.filter(Boolean).map(String));
+        if (c.source) out.push(String(c.source));
+        return out;
+      };
+      const merged = Array.from(new Set([...srcList(dst), ...srcList(src)]));
+      if (merged.length) dst.sources = merged;
+      for (const f of ["phone", "location", "headline", "title", "profile_url", "linkedin_url", "image_url"]) {
+        if (!dst[f] && src[f]) dst[f] = src[f];
+      }
+      const dEmail = String(dst.email || "");
+      const sEmail = String(src.email || "");
+      if (sEmail && sEmail !== dEmail && (!dEmail || (isPlaceholderEmail(dEmail) && !isPlaceholderEmail(sEmail)))) {
+        dst.email = sEmail;
+      }
+      return dst;
     };
 
     const dedupedByIdentity = new Map<string, any>();
@@ -1338,8 +1376,17 @@ export default function CandidateRankingsPage() {
           currentRank.createdAt > existingRank.createdAt
         );
 
+      // Keep ONE survivor and absorb the other's best info into it. The
+      // survivor is whichever wins the rank above (JobDiva always beats a
+      // non-JobDiva), so a JobDiva row is never dropped in favour of LinkedIn.
       if (shouldReplace) {
-        dedupedByIdentity.set(dedupKey, candidate);
+        const survivor = { ...candidate };
+        mergeRowBestOf(survivor, existing);
+        dedupedByIdentity.set(dedupKey, survivor);
+      } else {
+        const survivor = { ...existing };
+        mergeRowBestOf(survivor, candidate);
+        dedupedByIdentity.set(dedupKey, survivor);
       }
     });
     const uniqueCandidates = Array.from(dedupedByIdentity.values());
@@ -1815,7 +1862,9 @@ export default function CandidateRankingsPage() {
               className="text-[13px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer py-2 pr-2"
             >
               <option value="all">All</option>
-              <option value="completed">Completed</option>
+              <option value="pass">Pass</option>
+              <option value="fail">Fail</option>
+              <option value="in_progress">In Progress</option>
               <option value="pending">Pending</option>
             </select>
           </div>
