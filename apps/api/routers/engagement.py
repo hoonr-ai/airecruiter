@@ -183,9 +183,10 @@ def _pair_phone_digits(raw: Any) -> str:
 
 
 def _validate_pair_payload_contacts(payload_obj: Dict[str, Any]) -> None:
-    """PAIR launch gate: require a usable PHONE per resume (PAIR contacts the
-    candidate by phone); email is optional. Real emails are kept for outreach;
-    placeholder/missing ones are blanked, not rejected.
+    """PAIR launch gate: require at least ONE usable contact method per resume —
+    a usable phone (PAIR calls the candidate) OR a real email (PAIR emails them).
+    Either alone is enough. Placeholder/dead emails are blanked, not rejected,
+    and only block launch when there is also no usable phone.
     """
     resumes = payload_obj.get("resumes")
     if not isinstance(resumes, list):
@@ -195,16 +196,21 @@ def _validate_pair_payload_contacts(payload_obj: Dict[str, Any]) -> None:
         if not isinstance(resume, dict):
             raise HTTPException(status_code=400, detail=f"Resume {idx} payload is invalid")
 
-        # Email optional — sanitize (blank dead/placeholder addresses).
-        resume["email"] = _sanitize_pair_candidate_email(str(resume.get("email") or ""))
+        # Sanitize the email (blank dead/placeholder addresses). A real address
+        # that survives sanitizing counts as a usable contact method.
+        clean_email = _sanitize_pair_candidate_email(str(resume.get("email") or ""))
+        resume["email"] = clean_email
 
-        # Phone required — it's how PAIR reaches the candidate (≥7 digits,
-        # matching the frontend launch gate).
-        if len(_pair_phone_digits(resume.get("phone"))) < 7:
+        # Need at least one way to reach the candidate: a usable phone (≥7
+        # digits, matching the frontend launch gate) OR a real email. Either
+        # one alone is sufficient to launch.
+        has_phone = len(_pair_phone_digits(resume.get("phone"))) >= 7
+        has_email = bool(clean_email)
+        if not has_phone and not has_email:
             who = resume.get("name") or resume.get("candidate_name") or f"Resume {idx}"
             raise HTTPException(
                 status_code=400,
-                detail=f"A usable phone number is required before launching PAIR ({who}).",
+                detail=f"A usable phone number or email is required before launching PAIR ({who}).",
             )
 
 # ---------------------------------------------------------------------------
