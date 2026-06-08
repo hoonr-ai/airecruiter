@@ -84,7 +84,7 @@ export function MissingContactsModal({
   onClose,
   onAllProvided,
   title = "Missing contact details",
-  description = "PAIR needs a unique real phone number and email for each candidate. Add or correct the details below and we'll launch for them too.",
+  description = "PAIR needs a unique real phone number or email for each candidate — either one is enough. Add or correct the details below and we'll launch for them too.",
   primaryLabel = "Launch PAIR for remaining",
   jobId,
   jobDivaId,
@@ -154,6 +154,10 @@ export function MissingContactsModal({
     return dupes;
   })();
 
+  // A candidate is launchable with EITHER a usable phone OR a real email, so a
+  // row is valid once at least one unique, well-formed contact method is in
+  // place — a field the candidate already had (not flagged as needed) counts.
+  // (Duplicate values don't count — PAIR needs each one to be unique.)
   const isRowValid = (c: MissingContactCandidate) => {
     const phoneOk =
       !c.needsPhone ||
@@ -161,7 +165,7 @@ export function MissingContactsModal({
     const emailOk =
       !c.needsEmail ||
       (isValidEmail(emails[c.candidate_id] || "") && !duplicateEmailIds.has(c.candidate_id));
-    return phoneOk && emailOk;
+    return phoneOk || emailOk;
   };
 
   const allValid = candidates.length > 0 && candidates.every(isRowValid);
@@ -249,50 +253,56 @@ export function MissingContactsModal({
   async function handleSubmit() {
     setPhoneErrors({});
     setEmailErrors({});
-    
-    const updates = [];
+
+    // Either a usable phone OR a real email is enough to launch a candidate.
+    // Gather whichever unique, well-formed contact methods are filled in, and
+    // only block a candidate when neither is provided. We collect the saved
+    // values up front so the same set drives the PATCH and the launch overrides.
+    const updates: any[] = [];
+    const provided: Record<string, { phone?: string; email?: string }> = {};
     for (const c of candidates) {
-      let needsUpdate = false;
+      const phone = (phones[c.candidate_id] || "").trim();
+      const email = (emails[c.candidate_id] || "").trim();
+      const phoneUsable =
+        c.needsPhone && countDigits(phone) >= 7 && !duplicatePhoneIds.has(c.candidate_id);
+      const emailUsable =
+        c.needsEmail && isValidEmail(email) && !duplicateEmailIds.has(c.candidate_id);
+
+      if (!phoneUsable && !emailUsable) {
+        setPhoneErrors(prev => ({
+          ...prev,
+          [c.candidate_id]: "Add a phone number or email",
+        }));
+        return;
+      }
+
       const item: any = { candidate_id: c.candidate_id, jobdiva_id: c.jobdiva_id };
-      
-      if (c.needsPhone) {
-        const phone = (phones[c.candidate_id] || "").trim();
-        if (countDigits(phone) < 7) {
-          setPhoneErrors(prev => ({ ...prev, [c.candidate_id]: "At least 7 digits required" }));
-          return;
-        }
+      const entry: { phone?: string; email?: string } = {};
+      if (phoneUsable) {
         item.phone = phone;
-        needsUpdate = true;
+        entry.phone = phone;
       }
-      
-      if (c.needsEmail) {
-        const email = (emails[c.candidate_id] || "").trim();
-        if (!isValidEmail(email)) {
-          setEmailErrors(prev => ({ ...prev, [c.candidate_id]: "Enter a valid email address" }));
-          return;
-        }
+      if (emailUsable) {
         item.email = email;
-        needsUpdate = true;
+        entry.email = email.toLowerCase();
       }
-      
-      if (needsUpdate) {
-        updates.push(item);
-      }
+      updates.push(item);
+      provided[c.candidate_id] = entry;
     }
-    
-    // Set all saving states to true
-    for (const c of candidates) {
-      if (c.needsPhone) setSavingPhone(prev => ({ ...prev, [c.candidate_id]: true }));
-      if (c.needsEmail) setSavingEmail(prev => ({ ...prev, [c.candidate_id]: true }));
+
+    // Reflect saving state only for the fields actually being saved.
+    for (const item of updates) {
+      if (item.phone) setSavingPhone(prev => ({ ...prev, [item.candidate_id]: true }));
+      if (item.email) setSavingEmail(prev => ({ ...prev, [item.candidate_id]: true }));
     }
-    
+
     try {
       const res = await fetch(`${API_BASE}/candidates/bulk-contacts`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ updates })
       });
-      
+
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         const msg = body?.detail || `Bulk save failed (${res.status})`;
@@ -301,18 +311,12 @@ export function MissingContactsModal({
         }
         return;
       }
-      
-      const out: Record<string, { phone?: string; email?: string }> = {};
-      for (const c of candidates) {
-        if (c.needsPhone) setPhoneSavedAt(prev => ({ ...prev, [c.candidate_id]: Date.now() }));
-        if (c.needsEmail) setEmailSavedAt(prev => ({ ...prev, [c.candidate_id]: Date.now() }));
-        
-        const entry: { phone?: string; email?: string } = {};
-        if (c.needsPhone) entry.phone = (phones[c.candidate_id] || "").trim();
-        if (c.needsEmail) entry.email = (emails[c.candidate_id] || "").trim().toLowerCase();
-        out[c.candidate_id] = entry;
+
+      for (const item of updates) {
+        if (item.phone) setPhoneSavedAt(prev => ({ ...prev, [item.candidate_id]: Date.now() }));
+        if (item.email) setEmailSavedAt(prev => ({ ...prev, [item.candidate_id]: Date.now() }));
       }
-      onAllProvided(out);
+      onAllProvided(provided);
     } catch (e: any) {
       logger.error("missing_contacts.bulk.save.error", { message: e?.message });
       if (candidates.length > 0) {

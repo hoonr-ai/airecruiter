@@ -6730,11 +6730,13 @@ function NewJobPageContent() {
         const cid = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
         const overridePhone = contactOverrides[cid]?.phone || getCandidateLaunchPhone(c);
         const overrideEmail = contactOverrides[cid]?.email || getCandidateLaunchEmail(c);
-        return !isValidLaunchPhone(overridePhone) || !isValidLaunchEmail(overrideEmail);
+        // Launchable with EITHER a phone or an email — only count candidates
+        // left with neither after enrichment.
+        return !isValidLaunchPhone(overridePhone) && !isValidLaunchEmail(overrideEmail);
       }).length;
 
       if (unresolvedMissing > 0) {
-        showToast(`${unresolvedMissing} selected candidate${unresolvedMissing === 1 ? "" : "s"} still missing phone or email after enrichment.`, "info");
+        showToast(`${unresolvedMissing} selected candidate${unresolvedMissing === 1 ? "" : "s"} still missing both phone and email after enrichment.`, "info");
       }
 
       if (missingLinkedInCount > 0 || enrichFailedCount > 0 || noContactFoundCount > 0) {
@@ -6775,10 +6777,10 @@ function NewJobPageContent() {
         }
       }
 
-      // Partition selected candidates into Ready (has phone + real email) and
-      // Needs-info (missing either). Ready candidates launch immediately; the
-      // Needs-info group opens MissingContactsModal so the recruiter can fill
-      // in details and launch them in a second pass.
+      // Partition selected candidates into Ready (has a usable phone OR a real
+      // email) and Needs-info (missing both). Ready candidates launch
+      // immediately; the Needs-info group opens MissingContactsModal so the
+      // recruiter can fill in details and launch them in a second pass.
       const readyIds = new Set<string>();
       const needsInfo: MissingContactCandidate[] = [];
       const launchJobdivaId = jobdivaId || jobData?.jobdiva_id || numericJobId || undefined;
@@ -6822,10 +6824,10 @@ function NewJobPageContent() {
         const effectiveEmail = String(overrideEmail || getCandidateLaunchEmail(c)).trim().toLowerCase();
         const phoneOK = isValidLaunchPhone(effectivePhone) && !duplicatePhoneIds.has(id);
         const emailOK = isValidLaunchEmail(effectiveEmail) && !duplicateEmailIds.has(id);
-        // PAIR contacts candidates by phone, so a usable phone is REQUIRED;
-        // email is optional (best-effort — enriched in the background but never
-        // blocks launch). A candidate with a phone and no email is launchable.
-        if (phoneOK) {
+        // PAIR can reach a candidate by phone OR email, so EITHER one is enough
+        // to launch. A candidate with just a phone, or just an email, is
+        // launchable; only those missing both get routed to the contact modal.
+        if (phoneOK || emailOK) {
           readyIds.add(id);
         } else {
           needsInfo.push({
