@@ -213,6 +213,70 @@ def _validate_pair_payload_contacts(payload_obj: Dict[str, Any]) -> None:
                 detail=f"A usable phone number or email is required before launching PAIR ({who}).",
             )
 
+
+def _sanitize_pre_screen_questions_for_pair(
+    questions: List[Dict[str, Any]],
+    *,
+    fallback_job_title: str = "the role",
+) -> List[Dict[str, Any]]:
+    """Normalize pre-screen questions to PAIR schema constraints."""
+    sanitized: List[Dict[str, Any]] = []
+    for q in questions:
+        text = " ".join(str(q.get("question_text") or "").split()).strip()
+        if not text:
+            continue
+
+        if len(text) < 10:
+            text = f"Please explain: {text}"
+        if len(text) > 1000:
+            text = text[:1000].rstrip()
+
+        pass_criteria = str(q.get("pass_criteria") or "").strip()
+        if len(pass_criteria) > 500:
+            pass_criteria = pass_criteria[:500].rstrip()
+
+        category = str(q.get("category") or "default").strip() or "default"
+        if len(category) > 50:
+            category = category[:50].rstrip()
+
+        sanitized.append({
+            "question_text": text,
+            "pass_criteria": pass_criteria,
+            "is_default": bool(q.get("is_default", True)),
+            "category": category,
+        })
+
+    return sanitized
+
+
+def _extract_pair_error_message(response_data: Dict[str, Any], status_code: int) -> str:
+    """Return the most useful PAIR error text for UI surfacing."""
+    if not isinstance(response_data, dict):
+        return f"PAIR API returned status {status_code}"
+
+    message = str(response_data.get("message") or "").strip()
+    if message:
+        return message
+
+    detail = response_data.get("detail")
+    if isinstance(detail, str) and detail.strip():
+        return detail.strip()
+
+    if isinstance(detail, list) and detail:
+        parts: List[str] = []
+        for item in detail[:3]:
+            if isinstance(item, dict):
+                loc = item.get("loc")
+                where = ".".join(str(p) for p in loc if p != "body") if isinstance(loc, list) else ""
+                msg = str(item.get("msg") or "validation error").strip()
+                parts.append(f"{where}: {msg}" if where else msg)
+            elif isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+        if parts:
+            return "; ".join(parts)
+
+    return f"PAIR API returned status {status_code}"
+
 # ---------------------------------------------------------------------------
 # Auto-Migration: Ensure audit table exists
 # ---------------------------------------------------------------------------
@@ -346,9 +410,16 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 parts = name.split(" ", 1)
                 first_name = parts[0] if parts else name
                 last_name = parts[1] if len(parts) > 1 else ""
-                phone = row.get("phone", "") or ""
+                # Sanitize phone: keep only digits + leading '+'. Pairbot enforces
+                # max_length=20 on phone; values like 'Available upon request'
+                # stored in sourced_candidates cause 422 validation errors.
+                raw_phone = row.get("phone", "") or ""
+                plus = "+" if raw_phone.strip().startswith("+") else ""
+                digits = "".join(ch for ch in raw_phone if ch.isdigit())
+                phone = f"{plus}{digits}" if digits else ""
                 email = row.get("email", "") or ""
-                resume_text = row.get("resume_text", "") or ""
+                # Truncate resume to pairbot max_length=100000 chars.
+                resume_text = (row.get("resume_text", "") or "")[:100000]
 
                 if not candidate_phone and phone:
                     candidate_phone = phone
@@ -366,7 +437,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                     "source_candidate_id": row.get("candidate_id") or cid,
                     "name": name,
                     "email": email,
-                    "phone": phone,
+                    "phone": phone,  # already sanitized to digits only above
                     # pairbotqa expects experience / summary / skills — map raw resume
                     "experience": resume_text,
                     "summary": headline,
@@ -411,7 +482,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
             """, (jobdiva_id_for_lookup, job_id_for_lookup))
             rows = cur.fetchall()
             from routers.voice_agent import _humanize_question_text
-            pre_screen_questions = [
+            pre_screen_questions_raw = [
                 {
                     "question_text": _humanize_question_text(r["question_text"]),
                     "pass_criteria": r["pass_criteria"],
@@ -420,6 +491,10 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 }
                 for r in rows
             ]
+            pre_screen_questions = _sanitize_pre_screen_questions_for_pair(
+                pre_screen_questions_raw,
+                fallback_job_title=(job_row.get("enhanced_title") or job_row.get("title") or request.job_id),
+            )
 
         cur.close()
         conn.close()
@@ -459,7 +534,10 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 "jobdiva_id": "",
                 "context": {},
                 "rubric": {},
-                "pre_screen_questions": []
+                "pre_screen_questions": _sanitize_pre_screen_questions_for_pair(
+                    [],
+                    fallback_job_title=request.job_id,
+                )
             }
 
         # Build resumes list using raw_resume_text
@@ -1187,7 +1265,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
         else:
             return {
                 "success": False,
-                "message": response_data.get("message", f"PAIR API returned status {response.status_code}"),
+                "message": _extract_pair_error_message(response_data, response.status_code),
                 "data": [],
                 "skipped_already_sent": skipped_already_sent,
                 "raw_response": response_data
