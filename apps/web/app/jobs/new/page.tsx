@@ -1154,6 +1154,15 @@ function NewJobPageContent() {
     return Number.isFinite(score) ? score : 0;
   };
 
+  // A *genuine* hard-filter fail is a numeric 0% (hard-veto / exclusion rule).
+  // Candidates we simply couldn't score — JobDiva detail/résumé lookup failed
+  // (detail_failed) or the row never finished scoring — have NO numeric score
+  // and render as "N/A". They must NOT be treated as a 0% drop at Launch PAIR;
+  // only a real numeric 0 is skipped. (getCandidateMatchScore coerces a missing
+  // score to 0, so it can't be used for the launch gate.)
+  const isHardFilterZero = (c: any): boolean =>
+    typeof c?.match_score === "number" && c.match_score === 0;
+
   const sortedCandidates = useMemo(() => {
     const trimmedQuery = candidateSearchQuery.trim().toLowerCase();
     const sourcePriority = (c: any) => {
@@ -1179,7 +1188,9 @@ function NewJobPageContent() {
       const stage = String(c?._stage || "");
       const awaitingScore = stage === "agent_result" || stage === "details_loaded";
       const awaitingDetails = stage === "agent_result";
-      if (minScore > 0 && !awaitingScore) {
+      // Candidates we couldn't score (detail_failed → N/A) are exempt from the
+      // min-score filter — a failed detail lookup must not hide a JobDiva row.
+      if (minScore > 0 && !awaitingScore && !c?.detail_failed) {
         const score = getCandidateMatchScore(c);
         if (score < minScore) return false;
       }
@@ -5423,7 +5434,10 @@ function NewJobPageContent() {
               // Detail-lookup failures (JobDiva 429 / no resume) are kept and
               // scored from the JobAgent skills; track them for one summary toast
               // when the run completes.
-              if (["kept_no_resume", "error"].includes(String((patch as any).enhanced_info_status || ""))) {
+              if (
+                (patch as any).detail_failed === true ||
+                ["kept_no_resume", "error"].includes(String((patch as any).enhanced_info_status || ""))
+              ) {
                 detailFailedIdsRef.current.add(targetId);
               }
               // Merge a patch into a candidate row, guarding phone against a
@@ -5667,7 +5681,7 @@ function NewJobPageContent() {
       const detailFailedCount = detailFailedIdsRef.current.size;
       if (detailFailedCount > 0) {
         showToast(
-          `Detail lookup failed for ${detailFailedCount} candidate${detailFailedCount === 1 ? "" : "s"} (e.g. JobDiva rate limit) — matched on JobDiva agent skills only. They're still launchable.`,
+          `Couldn't score ${detailFailedCount} candidate${detailFailedCount === 1 ? "" : "s"} — JobDiva details were unavailable (e.g. rate limit / no résumé). They're shown as N/A and remain launchable.`,
           "info",
         );
       }
@@ -6158,9 +6172,11 @@ function NewJobPageContent() {
     // this check at /candidates/save — defense in depth.
     const candidatesPayload = effective
       .filter(c => launchIds.has(c.candidate_id || c.jobdiva_candidate_id || c.id))
-      // Hard filter fail safety net: a 0% candidate must never reach
-      // /candidates/save, even via the second MissingContactsModal pass.
-      .filter(c => getCandidateMatchScore(c) !== 0)
+      // Hard filter fail safety net: a *genuine* 0% candidate (hard-veto /
+      // exclusion) must never reach /candidates/save, even via the second
+      // MissingContactsModal pass. Candidates we couldn't score (detail_failed
+      // / unscored → N/A) have no numeric score and are kept launchable.
+      .filter(c => !isHardFilterZero(c))
       .filter(c => {
         if (dncPhones.size === 0) return true;
         const np = normalizePhone(c.phone);
@@ -6198,7 +6214,10 @@ function NewJobPageContent() {
           certifications: Array.isArray(c.certifications || c.candidate_certification) ? (c.certifications || c.candidate_certification) : [],
           company_experience: Array.isArray(c.company_experience || c.enhanced_info?.company_experience) ? (c.company_experience || c.enhanced_info?.company_experience) : [],
           urls: (c.urls && typeof c.urls === 'object' && !Array.isArray(c.urls)) ? c.urls : (c.enhanced_info?.urls || {}),
-          match_score: typeof c.match_score === 'number' ? c.match_score : 0,
+          // Send null (not 0) when unscored so the backend re-scores at save
+          // instead of locking a placeholder 0% into the rank list.
+          match_score: typeof c.match_score === 'number' ? c.match_score : null,
+          detail_failed: !!c.detail_failed,
           matched_skills: Array.isArray(c.matched_skills) ? c.matched_skills : [],
           missing_skills: Array.isArray(c.missing_skills) ? c.missing_skills : [],
           match_score_details: (c.match_score_details && typeof c.match_score_details === 'object' && !Array.isArray(c.match_score_details)) ? c.match_score_details : {},
@@ -6533,16 +6552,18 @@ function NewJobPageContent() {
       return;
     }
 
-    // Hard filter fail: candidates scored exactly 0% are never launched, even
-    // when selected. Compute the skip set once and thread it through the flow
-    // below WITHOUT touching the table selection — they are simply excluded
-    // from the launch payload and reported on the completion screen.
+    // Hard filter fail: candidates with a genuine numeric 0% (hard-veto /
+    // exclusion) are never launched, even when selected. Candidates we couldn't
+    // score (detail_failed / unscored → N/A) are NOT skipped here. Compute the
+    // skip set once and thread it through the flow below WITHOUT touching the
+    // table selection — they are simply excluded from the launch payload and
+    // reported on the completion screen.
     const hardFilterSkipIds = new Set<string>();
     const hardFilterSkippedNames: string[] = [];
     for (const c of candidates) {
       const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
       if (!id || !selectedCandidates.has(id)) continue;
-      if (getCandidateMatchScore(c) === 0) {
+      if (isHardFilterZero(c)) {
         hardFilterSkipIds.add(id);
         hardFilterSkippedNames.push(getCandidateDisplayName(c) || c.name || "Unnamed");
       }

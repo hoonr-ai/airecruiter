@@ -170,6 +170,10 @@ class CandidateSaveRecord(BaseModel):
     experience_years: Any = 0
     source: str = "JobDiva"
     match_score: Any = 0.0
+    # True when JobDiva candidate-details (résumé / detail API) failed, so the
+    # candidate could not be scored. match_score is null/N/A in that case; the
+    # save path re-scores rather than locking a placeholder 0%.
+    detail_failed: Optional[bool] = None
     matched_skills: Optional[Any] = None
     missing_skills: Optional[Any] = None
     match_score_details: Optional[Any] = None
