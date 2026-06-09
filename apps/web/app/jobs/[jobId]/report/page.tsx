@@ -539,11 +539,24 @@ export default function CandidateEvaluationReportPage() {
                 {(() => {
                   const auditResponse = pair.audit_response || {};
                   const transcriptions = auditResponse.transcriptions || pair.transcriptions || [];
+                  const evaluationQuestions = pair.evaluation?.questions || [];
                   
                   // 1. Filter for items that are EXPLICITLY hard filters
-                  const hardFilterItems = transcriptions.filter((t: any) => 
-                    t.hard_filter_status === 'passed' || t.hard_filter_status === 'failed'
-                  );
+                  let hardFilterItems = evaluationQuestions.filter((q: any) => 
+                    q.is_hard_filter === true || (q.pass_fail && ['PASS', 'FAIL'].includes(q.pass_fail.toUpperCase()))
+                  ).map((q: any) => ({
+                    question: q.question_text || q.question,
+                    answer: q.answer_text || q.answer,
+                    candidate_score: q.score,
+                    hard_filter_status: q.pass_fail ? (q.pass_fail.toUpperCase() === 'PASS' ? 'passed' : 'failed') : 'pending',
+                    reason: q.evaluation_reason || q.reason
+                  }));
+
+                  if (hardFilterItems.length === 0) {
+                    hardFilterItems = transcriptions.filter((t: any) => 
+                      t.hard_filter_status === 'passed' || t.hard_filter_status === 'failed'
+                    );
+                  }
 
                   if (hardFilterItems.length > 0) {
                     return hardFilterItems.map((item: any, i: number) => {
@@ -566,11 +579,6 @@ export default function CandidateEvaluationReportPage() {
                                 status={hf_status === 'passed' ? 'Pass' : 'Fail'} 
                                 type={hf_status === 'passed' ? 'success' : 'danger'} 
                               />
-                              {showEngageScore && score !== undefined && (
-                                <div className="px-3 py-1 bg-slate-100 rounded-lg border border-slate-200">
-                                  <span className="text-[13px] font-bold text-slate-700">{score}/{total}</span>
-                                </div>
-                              )}
                             </div>
                           </div>
                           

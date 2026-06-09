@@ -410,6 +410,17 @@ class UnifiedCandidateSearch:
                     cand["match_score"] = min(100, prev_score + title_boost)
                     cand["match_score_details"]["title_boost"] = title_boost
 
+            # Candidate-details failure: when the JobDiva detail/résumé fetch or
+            # LLM extraction yielded no real data (detail_failed), we can't fairly
+            # score the candidate. Surface "N/A" (match_score=None) instead of a
+            # misleading 0% / floored score so they aren't dropped at Launch PAIR.
+            # A genuine hard-veto (exclusion rule / out-of-radius) always takes
+            # precedence — those keep their 0% and are skipped at launch.
+            if cand.get("detail_failed"):
+                hard_veto = (cand.get("match_score_details") or {}).get("hard_veto") or {}
+                if not hard_veto.get("triggered"):
+                    cand["match_score"] = None
+
             return cand
 
         # JobDiva is split into two explicit sources:
@@ -686,6 +697,9 @@ class UnifiedCandidateSearch:
                 # sources + absorbed contact/profile on the surviving row.
                 "sources", "profile_url", "linkedin_url", "image_url",
                 "resume_id", "city", "state",
+                # Candidate-details failure flag → UI renders "N/A" + keeps the
+                # row launchable (vs. a 0% drop).
+                "detail_failed",
             ):
                 v = cand.get(key)
                 if v is not None:
@@ -4213,14 +4227,21 @@ class UnifiedCandidateSearch:
                 if not cid:
                     return
 
-                async def _keep(status: str):
+                async def _keep(status: str, *, detail_failed: bool = False):
                     # Policy: JobDiva (agentsearch) candidates are never removed
                     # from Step 5. Instead of dropping on a gate failure, skip
                     # the expensive LLM step (these score low/0 anyway via the
                     # hard-veto path) and emit so the caller scores + shows them.
                     # 0% hard-filter-fails are excluded only at Launch PAIR.
+                    #
+                    # detail_failed=True marks a *candidate-details* failure (no
+                    # résumé / detail-API error) — not a genuine policy fail. Those
+                    # are surfaced as "N/A" (no score) instead of a misleading 0%
+                    # and stay launchable; see finalize_candidate.
                     candidate["enhanced_info"] = candidate.get("enhanced_info") or {}
                     candidate["enhanced_info_status"] = status
+                    if detail_failed:
+                        candidate["detail_failed"] = True
                     counters["screened"] += 1
                     await out_queue.put({
                         "type": "candidate_enriched",
@@ -4252,9 +4273,9 @@ class UnifiedCandidateSearch:
                             )
 
                     if not candidate.get("resume_text") and not pre_enriched:
-                        self._log_stage("ResumeScreen", f"kept candidate_id={cid}; no resume text available (scored without LLM)")
+                        self._log_stage("ResumeScreen", f"kept candidate_id={cid}; no resume text available (N/A — detail lookup failed)")
                         counters["no_resume"] += 1
-                        await _keep("kept_no_resume")
+                        await _keep("kept_no_resume", detail_failed=True)
                         return
 
                     # Emit the jobdiva_details patch as soon as resume + profile
@@ -4390,9 +4411,16 @@ class UnifiedCandidateSearch:
                         enhanced.get("_extraction_error")
                         if isinstance(enhanced, dict) else None
                     )
+                    # process_jobdiva_candidate returns skipped=True when the
+                    # résumé is missing or a synthetic placeholder ("available
+                    # upon request" etc., caught by _has_real_resume_text) — i.e.
+                    # the candidate-details API gave us nothing real to extract.
+                    extraction_skipped = (
+                        bool(enhanced.get("skipped")) if isinstance(enhanced, dict) else False
+                    )
                     if extraction_error:
                         logger.warning(
-                            "LLM extraction degraded for candidate_id=%s (%s); scoring from resume_text + source-native fields only",
+                            "LLM extraction degraded for candidate_id=%s (%s); marking N/A (detail failed)",
                             cid, extraction_error,
                         )
                         counters["llm_extraction_errors"] += 1
@@ -4402,6 +4430,13 @@ class UnifiedCandidateSearch:
                         candidate["enhanced_info"] = {}
                     if extraction_error and isinstance(candidate.get("enhanced_info"), dict):
                         candidate["enhanced_info"]["_extraction_error"] = extraction_error
+
+                    # Candidate-details failure: a skipped/placeholder résumé or a
+                    # degraded LLM extraction means there's no real data to score.
+                    # Flag so the row shows "N/A" (not a misleading 0% / floored
+                    # score) and stays launchable instead of being dropped.
+                    if extraction_skipped or extraction_error:
+                        candidate["detail_failed"] = True
 
                     candidate["enhanced_info_status"] = "completed"
                     candidate["name"] = candidate["enhanced_info"].get("candidate_name") or candidate.get("name")
@@ -4424,11 +4459,11 @@ class UnifiedCandidateSearch:
                     })
                 except Exception as e:
                     logger.error(
-                        f"❌ Progressive JobDiva enrichment FAILED for {cid}: {e}; keeping candidate (scored without LLM)",
+                        f"❌ Progressive JobDiva enrichment FAILED for {cid}: {e}; keeping candidate (N/A — detail lookup failed)",
                         exc_info=True,
                     )
                     counters["llm_extraction_errors"] += 1
-                    await _keep("error")
+                    await _keep("error", detail_failed=True)
 
         tasks = [asyncio.create_task(_process(c)) for c in jobdiva_candidates]
 

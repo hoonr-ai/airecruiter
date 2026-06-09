@@ -895,6 +895,11 @@ function NewJobPageContent() {
   const [missingContactCandidates, setMissingContactCandidates] = useState<MissingContactCandidate[]>([]);
   const [missingContactsReviewMode, setMissingContactsReviewMode] = useState(false);
   const [pendingLaunchOverrides, setPendingLaunchOverrides] = useState<Record<string, { phone?: string; email?: string }>>({});
+  // QA-only safety toggle. When ON (default), Launch PAIR opens the manual
+  // mobile/email override modal for every candidate (current QA behavior).
+  // When OFF, Launch PAIR behaves exactly like production (auto-enrich +
+  // launch for everyone). Has no effect outside QA (gated by IS_QA_CURATE).
+  const [qaOverrideEnabled, setQaOverrideEnabled] = useState(true);
   const [readyLaunchedPendingRedirect, setReadyLaunchedPendingRedirect] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
   const [booleanStringOpen, setBooleanStringOpen] = useState(false);
@@ -1149,6 +1154,15 @@ function NewJobPageContent() {
     return Number.isFinite(score) ? score : 0;
   };
 
+  // A *genuine* hard-filter fail is a numeric 0% (hard-veto / exclusion rule).
+  // Candidates we simply couldn't score — JobDiva detail/résumé lookup failed
+  // (detail_failed) or the row never finished scoring — have NO numeric score
+  // and render as "N/A". They must NOT be treated as a 0% drop at Launch PAIR;
+  // only a real numeric 0 is skipped. (getCandidateMatchScore coerces a missing
+  // score to 0, so it can't be used for the launch gate.)
+  const isHardFilterZero = (c: any): boolean =>
+    typeof c?.match_score === "number" && c.match_score === 0;
+
   const sortedCandidates = useMemo(() => {
     const trimmedQuery = candidateSearchQuery.trim().toLowerCase();
     const sourcePriority = (c: any) => {
@@ -1174,7 +1188,9 @@ function NewJobPageContent() {
       const stage = String(c?._stage || "");
       const awaitingScore = stage === "agent_result" || stage === "details_loaded";
       const awaitingDetails = stage === "agent_result";
-      if (minScore > 0 && !awaitingScore) {
+      // Candidates we couldn't score (detail_failed → N/A) are exempt from the
+      // min-score filter — a failed detail lookup must not hide a JobDiva row.
+      if (minScore > 0 && !awaitingScore && !c?.detail_failed) {
         const score = getCandidateMatchScore(c);
         if (score < minScore) return false;
       }
@@ -5418,7 +5434,10 @@ function NewJobPageContent() {
               // Detail-lookup failures (JobDiva 429 / no resume) are kept and
               // scored from the JobAgent skills; track them for one summary toast
               // when the run completes.
-              if (["kept_no_resume", "error"].includes(String((patch as any).enhanced_info_status || ""))) {
+              if (
+                (patch as any).detail_failed === true ||
+                ["kept_no_resume", "error"].includes(String((patch as any).enhanced_info_status || ""))
+              ) {
                 detailFailedIdsRef.current.add(targetId);
               }
               // Merge a patch into a candidate row, guarding phone against a
@@ -5662,7 +5681,7 @@ function NewJobPageContent() {
       const detailFailedCount = detailFailedIdsRef.current.size;
       if (detailFailedCount > 0) {
         showToast(
-          `Detail lookup failed for ${detailFailedCount} candidate${detailFailedCount === 1 ? "" : "s"} (e.g. JobDiva rate limit) — matched on JobDiva agent skills only. They're still launchable.`,
+          `Couldn't score ${detailFailedCount} candidate${detailFailedCount === 1 ? "" : "s"} — JobDiva details were unavailable (e.g. rate limit / no résumé). They're shown as N/A and remain launchable.`,
           "info",
         );
       }
@@ -6153,9 +6172,11 @@ function NewJobPageContent() {
     // this check at /candidates/save — defense in depth.
     const candidatesPayload = effective
       .filter(c => launchIds.has(c.candidate_id || c.jobdiva_candidate_id || c.id))
-      // Hard filter fail safety net: a 0% candidate must never reach
-      // /candidates/save, even via the second MissingContactsModal pass.
-      .filter(c => getCandidateMatchScore(c) !== 0)
+      // Hard filter fail safety net: a *genuine* 0% candidate (hard-veto /
+      // exclusion) must never reach /candidates/save, even via the second
+      // MissingContactsModal pass. Candidates we couldn't score (detail_failed
+      // / unscored → N/A) have no numeric score and are kept launchable.
+      .filter(c => !isHardFilterZero(c))
       .filter(c => {
         if (dncPhones.size === 0) return true;
         const np = normalizePhone(c.phone);
@@ -6193,7 +6214,10 @@ function NewJobPageContent() {
           certifications: Array.isArray(c.certifications || c.candidate_certification) ? (c.certifications || c.candidate_certification) : [],
           company_experience: Array.isArray(c.company_experience || c.enhanced_info?.company_experience) ? (c.company_experience || c.enhanced_info?.company_experience) : [],
           urls: (c.urls && typeof c.urls === 'object' && !Array.isArray(c.urls)) ? c.urls : (c.enhanced_info?.urls || {}),
-          match_score: typeof c.match_score === 'number' ? c.match_score : 0,
+          // Send null (not 0) when unscored so the backend re-scores at save
+          // instead of locking a placeholder 0% into the rank list.
+          match_score: typeof c.match_score === 'number' ? c.match_score : null,
+          detail_failed: !!c.detail_failed,
           matched_skills: Array.isArray(c.matched_skills) ? c.matched_skills : [],
           missing_skills: Array.isArray(c.missing_skills) ? c.missing_skills : [],
           match_score_details: (c.match_score_details && typeof c.match_score_details === 'object' && !Array.isArray(c.match_score_details)) ? c.match_score_details : {},
@@ -6528,16 +6552,18 @@ function NewJobPageContent() {
       return;
     }
 
-    // Hard filter fail: candidates scored exactly 0% are never launched, even
-    // when selected. Compute the skip set once and thread it through the flow
-    // below WITHOUT touching the table selection — they are simply excluded
-    // from the launch payload and reported on the completion screen.
+    // Hard filter fail: candidates with a genuine numeric 0% (hard-veto /
+    // exclusion) are never launched, even when selected. Candidates we couldn't
+    // score (detail_failed / unscored → N/A) are NOT skipped here. Compute the
+    // skip set once and thread it through the flow below WITHOUT touching the
+    // table selection — they are simply excluded from the launch payload and
+    // reported on the completion screen.
     const hardFilterSkipIds = new Set<string>();
     const hardFilterSkippedNames: string[] = [];
     for (const c of candidates) {
       const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
       if (!id || !selectedCandidates.has(id)) continue;
-      if (getCandidateMatchScore(c) === 0) {
+      if (isHardFilterZero(c)) {
         hardFilterSkipIds.add(id);
         hardFilterSkippedNames.push(getCandidateDisplayName(c) || c.name || "Unnamed");
       }
@@ -6555,10 +6581,12 @@ function NewJobPageContent() {
 
     setIsEnrichingContacts(true);
     try {
-      if (IS_QA_CURATE) {
-        // QA mode: skip ZoomInfo auto-enrichment and the immediate launch path.
-        // Open the contact modal for EVERY selected candidate so QA can review
-        // and override mobile / email before anything fires.
+      if (IS_QA_CURATE && qaOverrideEnabled) {
+        // QA mode with Override toggle ON: skip ZoomInfo auto-enrichment and
+        // the immediate launch path. Open the contact modal for EVERY selected
+        // candidate so QA can review and override mobile / email before
+        // anything fires. With Override OFF, fall through to the production
+        // path below (auto-enrich + launch for everyone).
         const reviewList: MissingContactCandidate[] = [];
         const launchJobdivaId = jobdivaId || jobData?.jobdiva_id || numericJobId || undefined;
         for (const c of candidates) {
@@ -8454,19 +8482,43 @@ function NewJobPageContent() {
               <span className="text-[13px] font-medium text-slate-400">
                 {hasSearched && !isSearching ? `${selectedCandidates.size} candidates selected` : ''}
               </span>
-              <Button
-                className="h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98] disabled:bg-slate-300 disabled:cursor-not-allowed disabled:hover:translate-y-0"
-                onClick={handleLaunchPairClick}
-                disabled={isSearching || isEnrichingContacts || isViewOnly || launchProgress.open}
-                title={isViewOnly ? "Job activity has been stopped" : undefined}
-              >
-                {isEnrichingContacts ? (
-                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                ) : (
-                  <Rocket className="w-4 h-4 fill-white" />
+              <div className="flex flex-col items-end gap-2">
+                {IS_QA_CURATE && (
+                  <button
+                    type="button"
+                    onClick={() => setQaOverrideEnabled(v => !v)}
+                    className="flex items-center gap-2 select-none"
+                    title={qaOverrideEnabled
+                      ? "Override ON — manual mobile/email entry modal for every candidate (QA behavior)"
+                      : "Override OFF — launches for everyone like production"}
+                  >
+                    <span className="text-[12px] font-semibold text-slate-600">Override</span>
+                    <span
+                      className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${qaOverrideEnabled ? "bg-[#6366f1]" : "bg-slate-300"}`}
+                    >
+                      <span
+                        className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${qaOverrideEnabled ? "translate-x-[18px]" : "translate-x-0.5"}`}
+                      />
+                    </span>
+                    <span className={`text-[11px] font-bold ${qaOverrideEnabled ? "text-[#6366f1]" : "text-slate-400"}`}>
+                      {qaOverrideEnabled ? "ON" : "OFF"}
+                    </span>
+                  </button>
                 )}
-                {isEnrichingContacts ? "Enriching Contacts..." : "Launch PAIR"}
-              </Button>
+                <Button
+                  className="h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98] disabled:bg-slate-300 disabled:cursor-not-allowed disabled:hover:translate-y-0"
+                  onClick={handleLaunchPairClick}
+                  disabled={isSearching || isEnrichingContacts || isViewOnly || launchProgress.open}
+                  title={isViewOnly ? "Job activity has been stopped" : undefined}
+                >
+                  {isEnrichingContacts ? (
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  ) : (
+                    <Rocket className="w-4 h-4 fill-white" />
+                  )}
+                  {isEnrichingContacts ? "Enriching Contacts..." : "Launch PAIR"}
+                </Button>
+              </div>
             </div>
           </div>
         </div>

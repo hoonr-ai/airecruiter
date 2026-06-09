@@ -475,6 +475,16 @@ export function CandidateMatchTable({
                       >
                         {matchScore}%
                       </button>
+                    ) : candidate.detail_failed ? (
+                      // Candidate-details (résumé / detail API) failed, so we
+                      // couldn't score this person. Show a neutral grey "N/A"
+                      // rather than a misleading red 0% — they stay launchable.
+                      <span
+                        className="inline-flex items-center justify-center w-12 h-12 rounded-full font-bold text-[12px] bg-slate-100 text-slate-500 border-2 border-slate-200"
+                        title="Couldn't score — JobDiva candidate details were unavailable (e.g. rate limit / no résumé). Still launchable."
+                      >
+                        N/A
+                      </span>
                     ) : awaitingScore(candidate) ? (
                       <Skeleton
                         className="inline-block w-12 h-12 rounded-full"
@@ -598,12 +608,13 @@ export function CandidateMatchTable({
                           Already Launched
                         </span>
                       )}
-                      {["kept_no_resume", "error"].includes(String(candidate.enhanced_info_status || "")) && (
+                      {(candidate.detail_failed === true ||
+                        ["kept_no_resume", "error"].includes(String(candidate.enhanced_info_status || ""))) && (
                         <span
                           className="px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center border bg-amber-50 text-amber-700 border-amber-200"
-                          title="Detail lookup failed (e.g. JobDiva rate limit) — matched on JobDiva agent skills only. Still launchable."
+                          title="JobDiva candidate details were unavailable (e.g. rate limit / no résumé), so this candidate couldn't be scored. Shown as N/A — still launchable."
                         >
-                          Detail search failed
+                          Limited data
                         </span>
                       )}
                     </div>
