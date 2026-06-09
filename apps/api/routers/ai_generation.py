@@ -1,5 +1,6 @@
 import asyncio
 import os
+import random
 import time
 import logging
 from typing import Any, Dict, List, Optional
@@ -97,6 +98,18 @@ async def sync_to_jobdiva(req: JobDivaSyncRequest):
         "message": "Sync complete" if (jobdiva_ok and local_ok) else
                    ("Local OK, JobDiva failed (check credentials)" if local_ok else "Both failed"),
     }
+
+# Opening seed words — each forces a different first token so the model can't
+# default to its learned job-description openers like "Join a dynamic team".
+_HOOK_STARTERS = [
+    "Building", "Imagine", "Every", "Behind", "Few", "The",
+    "What", "This", "Here", "Solving", "At", "Driving",
+    "When", "Great", "If", "Real", "Some", "Deep",
+]
+
+def _hook_seed() -> str:
+    return random.choice(_HOOK_STARTERS)
+
 
 # Rate limiting variables (Less strict for OpenAI)
 RATE_LIMIT = 20  # Maximum requests per minute
@@ -289,7 +302,7 @@ async def generate_job_description(job_id: str, req: JobDescriptionRequest, back
         "- PAY RATE FORMAT: When extracting the pay rate, you MUST preserve the EXACT range from the source. If a range is given (e.g., $62 - $62.80/hour or $60 - $80/hour), use the full range — do NOT reduce it to a single value. Only use a single value if the source explicitly provides just one fixed rate.\n"
         "- STRICT REMOVAL: You MUST NOT include the following internal fields in the final output, regardless of whether they appear in the Job Notes or the original Job Description: Bill Rate, Hiring Manager, Customer Name, and Option Ref No.\n"
         "- DO NOT use any emojis anywhere in the text.\n"
-        "- START with a catchy 'Hook' or summary that highlights why someone should join.\n"
+        f"- START with a catchy, unique 2–3 sentence opening tailored to this specific role and domain. The very first word of the opening MUST be '{_hook_seed()}' — build the hook naturally from there. Draw from the job's actual requirements, industry, or challenge. Make it compelling and specific, not generic.\n"
         "- INCLUDE sections in this EXACT order: **The Role**, **Pay Rate Transparency**, **What You'll Do**, **What You Bring**, and **Why Work With Us**.\n"
         "- SECTION CONTENT: Use the following for the Pay Rate Transparency section:\n\n"
         "**Pay Rate Transparency**\n"
