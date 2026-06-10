@@ -656,8 +656,8 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job
             app_base_url=app_base_url,
         )
 
-        # ── Email #2: Job Posting Request (skipped on re-launch) ────────────
-        if send_job_posting:
+        # ── Email #2: Job Posting Request (skipped on re-launch or no boards) ──
+        if send_job_posting and job_boards:
             await asyncio.to_thread(
                 notify_job_posting,
                 jobdiva_id=jobdiva_id,
@@ -670,7 +670,7 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job
             )
         else:
             logger.info(
-                "📧 Skipping job-posting email for job %s (re-launch — already sent on initial launch)",
+                "📧 Skipping job-posting email for job %s (not requested or no job boards selected)",
                 jobdiva_id or job_id,
             )
 
