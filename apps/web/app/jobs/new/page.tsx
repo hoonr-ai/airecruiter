@@ -6393,6 +6393,7 @@ function NewJobPageContent() {
             realCandidateIds: batchIds,
             isInitialLaunch: wizardMode !== 'source',
             notifyRecruiters: true,
+            sendJobPostingEmail: i === batches.length - 1 && totalFailedBatches === 0,
           });
           if (engageRes.success) {
             batchEngageSent = Array.isArray(engageRes.data) ? engageRes.data.length : batchIds.length;
