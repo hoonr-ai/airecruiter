@@ -428,19 +428,12 @@ function HardFilterHoverCard({
               </span>
             </div>
             <div className="flex flex-col gap-2">
-              <div className="flex items-center justify-between text-[11px]">
-                <span className="text-slate-500">
-                  Candidate Score:{" "}
-                  <strong className="text-slate-900 font-bold ml-1 px-1.5 py-0.5 rounded bg-white border border-slate-200">
-                    {item.score !== undefined && item.score !== null
-                      ? `${item.score}/${item.total_score ?? 10}`
-                      : "—"}
-                  </strong>
-                </span>
-              </div>
               {item.reason ? (
-                <div className="bg-white/50 rounded-lg p-2.5 border border-slate-100 text-[11px] leading-relaxed text-slate-600 italic break-words whitespace-normal">
-                  {item.reason}
+                <div className="bg-white/50 rounded-lg p-2.5 border border-slate-100">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">AI Analysis</span>
+                  <p className="mt-1 text-[11px] leading-relaxed text-slate-600 italic break-words whitespace-normal">
+                    {item.reason}
+                  </p>
                 </div>
               ) : null}
             </div>
