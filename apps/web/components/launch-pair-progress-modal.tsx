@@ -69,6 +69,11 @@ export interface LaunchPairProgress {
   enrichTotal: number;
   enrichDone: number;
   enrichSucceeded: number;
+  // Candidates who were already launchable on existing contact (phone OR email)
+  // — enrichment ran but added nothing new, or was skipped (no LinkedIn). NOT a
+  // miss: PAIR can still reach them. Tracked separately so they never inflate
+  // the "no contact found" / "missing LinkedIn" counts.
+  enrichAlreadyReachable: number;
   enrichMissingLinkedIn: number;
   enrichNoContact: number;
   enrichFailed: number;
@@ -97,6 +102,7 @@ export const initialLaunchProgress: LaunchPairProgress = {
   enrichTotal: 0,
   enrichDone: 0,
   enrichSucceeded: 0,
+  enrichAlreadyReachable: 0,
   enrichMissingLinkedIn: 0,
   enrichNoContact: 0,
   enrichFailed: 0,
@@ -157,6 +163,7 @@ export function LaunchPairProgressModal({
     enrichTotal,
     enrichDone,
     enrichSucceeded,
+    enrichAlreadyReachable,
     enrichMissingLinkedIn,
     enrichNoContact,
     enrichFailed,
@@ -334,6 +341,7 @@ export function LaunchPairProgressModal({
               />
             </div>
             {(enrichSucceeded > 0 ||
+              enrichAlreadyReachable > 0 ||
               enrichMissingLinkedIn > 0 ||
               enrichNoContact > 0 ||
               enrichFailed > 0) && (
@@ -343,11 +351,16 @@ export function LaunchPairProgressModal({
                     ✓ {enrichSucceeded} enriched
                   </span>
                 )}
+                {enrichAlreadyReachable > 0 && (
+                  <span className="text-emerald-700">
+                    {enrichAlreadyReachable} already reachable
+                  </span>
+                )}
                 {enrichMissingLinkedIn > 0 && (
                   <span>{enrichMissingLinkedIn} missing LinkedIn</span>
                 )}
                 {enrichNoContact > 0 && (
-                  <span>{enrichNoContact} no contact found</span>
+                  <span>{enrichNoContact} no phone/email</span>
                 )}
                 {enrichFailed > 0 && (
                   <span className="text-rose-600">{enrichFailed} failed</span>
