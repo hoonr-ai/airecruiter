@@ -806,8 +806,9 @@ def notify_candidate_passed(
             f'{answer_text}'
             '</div>'
             + (
-                '<div style="margin-top:4px;font-size:12px;color:#475569;line-height:1.5;word-break:break-word;overflow-wrap:anywhere;">'
-                f'<strong>Reason:</strong> {reason_text}'
+                '<div style="margin-top:6px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px 10px;">'
+                '<span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#94a3b8;">AI Analysis</span>'
+                f'<div style="margin-top:3px;font-size:12px;color:#475569;line-height:1.5;font-style:italic;word-break:break-word;overflow-wrap:anywhere;">{reason_text}</div>'
                 '</div>'
                 if reason_text else ""
             ) +
