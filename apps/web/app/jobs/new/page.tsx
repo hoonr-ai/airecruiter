@@ -109,6 +109,12 @@ function isValidLaunchEmail(value: string | null | undefined): boolean {
   if (PLACEHOLDER_LAUNCH_EMAILS.has(email)) return false;
   if (email.endsWith("@example.com")) return false;
   if (email.endsWith("@noemail.pair.ai")) return false;
+  // JobDiva auto-generates Auto_<id>@jobdiva.com for candidates with no real
+  // email — dead addresses the backend blanks (engagement.py _is_placeholder_email).
+  // Treat them as no-email here too so the launch gate matches the backend: a
+  // synthetic-email-only candidate then routes to enrichment / manual entry
+  // instead of slipping into the payload and failing the whole batch with a 400.
+  if (email.endsWith("@jobdiva.com")) return false;
   return true;
 }
 
@@ -891,6 +897,11 @@ function NewJobPageContent() {
   // backend; the modal surfaces per-batch status so the recruiter can see
   // what's happening on long runs.
   const LAUNCH_BATCH_SIZE = 5;
+  // Bounded concurrency for the Launch PAIR contact-enrichment pass. Each
+  // candidate's enrich-contact call runs the ZoomInfo→Apollo→Exa chain
+  // server-side; doing them one-at-a-time made the modal crawl for minutes, so
+  // we overlap up to N at once. Keep modest to stay under provider rate limits.
+  const LAUNCH_ENRICH_CONCURRENCY = 6;
   const [launchProgress, setLaunchProgress] = useState<LaunchPairProgress>(initialLaunchProgress);
   const [missingContactCandidates, setMissingContactCandidates] = useState<MissingContactCandidate[]>([]);
   const [missingContactsReviewMode, setMissingContactsReviewMode] = useState(false);
@@ -6184,6 +6195,15 @@ function NewJobPageContent() {
       })
       .map(c => {
         const displayName = getCandidateDisplayName(c);
+        // Send the SAME contact the launch gate used to mark this candidate
+        // launchable. getCandidateLaunchEmail/Phone read nested fields
+        // (workEmail/personalEmail/enhanced_info.*/data.*/zoominfo_contact_enrichment.*);
+        // sending only top-level c.email/c.phone dropped nested-only contact to
+        // null, which the backend then rejected — failing the whole batch with a
+        // 400. Guard with the same validity checks so we never persist a
+        // synthetic/placeholder address.
+        const launchEmail = getCandidateLaunchEmail(c);
+        const launchPhone = getCandidateLaunchPhone(c);
         let skillList: any[] = [];
         if (Array.isArray(c.skills)) {
           skillList = c.skills;
@@ -6198,8 +6218,8 @@ function NewJobPageContent() {
         return {
           candidate_id: String(c.candidate_id || c.jobdiva_candidate_id || c.id || "unknown"),
           name: displayName || "Unnamed Candidate",
-          email: c.email || null,
-          phone: c.phone || null,
+          email: isValidLaunchEmail(launchEmail) ? launchEmail : null,
+          phone: isValidLaunchPhone(launchPhone) ? launchPhone : null,
           skills: skillList,
           experience_years: c.yearsExtracted || c.experience_years || 0,
           source: c.source || "JobDiva-Applicants",
@@ -6650,9 +6670,9 @@ function NewJobPageContent() {
       let enrichFailedCount = 0;
       let noContactFoundCount = 0;
 
-      for (const c of candidatesMissingContact) {
+      const enrichOne = async (c: (typeof candidatesMissingContact)[number]) => {
         const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-        if (!id) continue;
+        if (!id) return;
 
         const linkedinUrlCandidates = [
           c.profile_url,
@@ -6666,14 +6686,30 @@ function NewJobPageContent() {
 
         const linkedinUrl = linkedinUrlCandidates.find((u: string) => looksLikeLinkedInProfile(u)) || "";
 
+        // Is the candidate ALREADY reachable on their existing contact? PAIR
+        // launches on phone OR email, so a candidate who already has one is
+        // launchable even if enrichment adds nothing new — count them as
+        // "already reachable", never as a "missing LinkedIn"/"no contact" miss.
+        const launchableNow =
+          isValidLaunchPhone(getCandidateLaunchPhone(c)) ||
+          isValidLaunchEmail(getCandidateLaunchEmail(c));
+
         if (!linkedinUrl) {
-          missingLinkedInCount += 1;
-          setLaunchProgress(prev => ({
-            ...prev,
-            enrichDone: prev.enrichDone + 1,
-            enrichMissingLinkedIn: prev.enrichMissingLinkedIn + 1,
-          }));
-          continue;
+          if (launchableNow) {
+            setLaunchProgress(prev => ({
+              ...prev,
+              enrichDone: prev.enrichDone + 1,
+              enrichAlreadyReachable: prev.enrichAlreadyReachable + 1,
+            }));
+          } else {
+            missingLinkedInCount += 1;
+            setLaunchProgress(prev => ({
+              ...prev,
+              enrichDone: prev.enrichDone + 1,
+              enrichMissingLinkedIn: prev.enrichMissingLinkedIn + 1,
+            }));
+          }
+          return;
         }
 
         try {
@@ -6695,7 +6731,7 @@ function NewJobPageContent() {
               enrichDone: prev.enrichDone + 1,
               enrichFailed: prev.enrichFailed + 1,
             }));
-            continue;
+            return;
           }
           const enriched = await res.json();
           const nextPhone = enriched?.phone || enriched?.mobilePhone || enriched?.workPhone || "";
@@ -6717,6 +6753,14 @@ function NewJobPageContent() {
               enrichDone: prev.enrichDone + 1,
               enrichSucceeded: prev.enrichSucceeded + 1,
             }));
+          } else if (launchableNow) {
+            // Enrichment found nothing new, but the candidate already has a
+            // usable phone or email — still launchable, not a miss.
+            setLaunchProgress(prev => ({
+              ...prev,
+              enrichDone: prev.enrichDone + 1,
+              enrichAlreadyReachable: prev.enrichAlreadyReachable + 1,
+            }));
           } else {
             noContactFoundCount += 1;
             setLaunchProgress(prev => ({
@@ -6734,7 +6778,25 @@ function NewJobPageContent() {
             enrichFailed: prev.enrichFailed + 1,
           }));
         }
-      }
+      };
+
+      // Bounded concurrency pool instead of one-at-a-time. "Missing LinkedIn"
+      // candidates resolve instantly; the win is overlapping the network-bound
+      // calls. Counters/contactOverrides mutate synchronously between awaits
+      // (atomic in single-threaded JS) and setLaunchProgress uses the functional
+      // updater, so concurrent updates are safe. Pool drains via a shared cursor.
+      let enrichCursor = 0;
+      const enrichWorker = async () => {
+        while (enrichCursor < candidatesMissingContact.length) {
+          await enrichOne(candidatesMissingContact[enrichCursor++]);
+        }
+      };
+      await Promise.all(
+        Array.from(
+          { length: Math.min(LAUNCH_ENRICH_CONCURRENCY, candidatesMissingContact.length) },
+          enrichWorker,
+        ),
+      );
 
       if (enrichedCount > 0) {
         setCandidates(prev => prev.map(c => {
@@ -6771,7 +6833,7 @@ function NewJobPageContent() {
       if (missingLinkedInCount > 0 || enrichFailedCount > 0 || noContactFoundCount > 0) {
         const bits = [
           missingLinkedInCount > 0 ? `${missingLinkedInCount} missing LinkedIn URL` : "",
-          noContactFoundCount > 0 ? `${noContactFoundCount} no ZoomInfo contact found` : "",
+          noContactFoundCount > 0 ? `${noContactFoundCount} still missing phone & email` : "",
           enrichFailedCount > 0 ? `${enrichFailedCount} enrichment call failed` : "",
         ].filter(Boolean);
         showToast(`Enrichment summary: ${bits.join(" · ")}`, "info");
@@ -8954,7 +9016,9 @@ return (
       primaryLabel={
         missingContactsReviewMode ? "Confirm & launch PAIR" : undefined
       }
-
+      // Normal flow: let the recruiter launch whoever now has a phone/email and
+      // skip the rest. QA review-gate mode keeps confirm-all (no partial).
+      allowPartial={!missingContactsReviewMode}
       jobId={numericJobId || jobData?.jobdiva_id?.toString() || undefined}
       jobDivaId={jobdivaId || jobData?.jobdiva_id?.toString() || undefined}
     />
