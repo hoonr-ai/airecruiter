@@ -27,6 +27,8 @@ export type SendBulkInterviewInput = {
   // Manual rankings Engage clicks leave it false (the recruiter is already
   // looking at the screen — no need to notify themselves).
   notifyRecruiters?: boolean;
+  // Fire job posting email once (typically on final successful batch).
+  sendJobPostingEmail?: boolean;
   appBaseUrl?: string;
 };
 
@@ -83,6 +85,7 @@ export function useEngagementFlow() {
         is_initial_launch: input.isInitialLaunch ?? false,
         dry_run: input.dryRun ?? false,
         notify_recruiters: input.notifyRecruiters ?? false,
+        send_job_posting_email: input.sendJobPostingEmail,
         app_base_url: input.appBaseUrl || (typeof window !== "undefined" ? window.location.origin : ""),
       }),
     });

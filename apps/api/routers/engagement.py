@@ -354,6 +354,10 @@ class SendBulkInterviewRequest(BaseModel):
     # Previously, dry_run did double duty (skip pairbot + fire email), which
     # silently caused bulk launches to never reach pairbot.
     notify_recruiters: bool = False
+    # When provided by the caller, controls Email #2 (job posting request)
+    # explicitly so batched launches can fire it once on the final successful
+    # batch only.
+    send_job_posting_email: Optional[bool] = None
     app_base_url: str = ""
 
 
@@ -1246,11 +1250,16 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             # pairbot call, so wizard launches never actually created
             # interviews.)
             if request.is_initial_launch or request.notify_recruiters:
+                send_job_posting = (
+                    request.send_job_posting_email
+                    if request.send_job_posting_email is not None
+                    else request.is_initial_launch
+                )
                 asyncio.create_task(
                     _send_pair_launch_email(
                         job_id=job_id_from_payload,
                         candidate_count=len(interview_results),
-                        send_job_posting=request.is_initial_launch,
+                        send_job_posting=send_job_posting,
                         app_base_url=request.app_base_url,
                     )
                 )
