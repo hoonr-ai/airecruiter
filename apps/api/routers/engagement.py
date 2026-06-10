@@ -1760,6 +1760,7 @@ async def _check_and_fire_candidate_passed_notification(
                 total = item.get("total_score", 10.0)
                 reason = item.get("reason")
                 hf_status_item = item.get("hard_filter_status")
+                q_order_raw = item.get("question_order", 0)
 
                 hf_norm = str(hf_status_item or "").strip().lower().replace(" ", "_")
                 is_hard_filter = hf_norm not in ("", "not_hard_filter", "na", "n/a", "none")
@@ -1772,7 +1773,19 @@ async def _check_and_fire_candidate_passed_notification(
                     score_value = float(score) if score is not None else None
                 except (TypeError, ValueError):
                     score_value = None
-                is_info_only = (not is_hard_filter) and (score_value is None or score_value < 0)
+
+                try:
+                    q_order = int(q_order_raw)
+                except (TypeError, ValueError):
+                    q_order = 0
+
+                # Pairbot contract:
+                # Q1/Q4 hard filters (already excluded above), Q2,3,5-9 info-only, Q10+ scored.
+                if q_order > 0:
+                    is_info_only = (not is_hard_filter) and (q_order <= 9)
+                else:
+                    # Legacy fallback when question_order is missing
+                    is_info_only = (not is_hard_filter) and (score_value is None or score_value < 0)
                 is_scored_question = (not is_hard_filter) and (not is_info_only)
 
                 screening_summary.append({
@@ -1781,6 +1794,7 @@ async def _check_and_fire_candidate_passed_notification(
                     "score": score,
                     "total_score": total,
                     "reason": reason,
+                    "question_order": q_order,
                     "hard_filter_status": hf_status_item,
                     "is_hard_filter": is_hard_filter,
                     "is_info_only": is_info_only,
