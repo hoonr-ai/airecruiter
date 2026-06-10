@@ -1692,8 +1692,8 @@ async def _check_and_fire_candidate_passed_notification(
         cand_score = interview_block.get("candidate_score")
         total_possible = interview_block.get("total_score")
         
-        # Pass logic: Must have 'passed' status (no score ratio check)
-        meets_criteria = (hf_status == HARD_FILTER_PASS_STATUS)
+        # Send pass email only when all hard filters are explicitly passed.
+        meets_criteria = hf_status in (HARD_FILTER_PASS_STATUS, "pass")
         
         normalized_score_display = "Passed"
         if meets_criteria and cand_score is not None and total_possible:
@@ -1751,18 +1751,31 @@ async def _check_and_fire_candidate_passed_notification(
                 total = item.get("total_score", 10.0)
                 reason = item.get("reason")
                 hf_status_item = item.get("hard_filter_status")
-                
-                value_str = a_text
-                if score is not None:
-                    value_str += f" (Score: {score}/{total})"
-                if hf_status_item:
-                    value_str += f" [HF: {hf_status_item.capitalize()}]"
-                if reason:
-                    value_str += f"\nReason: {reason}"
-                
+
+                hf_norm = str(hf_status_item or "").strip().lower().replace(" ", "_")
+                is_hard_filter = hf_norm not in ("", "not_hard_filter", "na", "n/a", "none")
+                # Keep email behavior aligned with Pairbot UI:
+                # - no score for hard-filter questions
+                # - no score for info-only questions
+                # - score only for truly scored evaluation questions
+                score_value = None
+                try:
+                    score_value = float(score) if score is not None else None
+                except (TypeError, ValueError):
+                    score_value = None
+                is_info_only = (not is_hard_filter) and (score_value is None or score_value < 0)
+                is_scored_question = (not is_hard_filter) and (not is_info_only)
+
                 screening_summary.append({
-                    "field": q_text,
-                    "value": value_str
+                    "question": q_text,
+                    "answer": a_text,
+                    "score": score,
+                    "total_score": total,
+                    "reason": reason,
+                    "hard_filter_status": hf_status_item,
+                    "is_hard_filter": is_hard_filter,
+                    "is_info_only": is_info_only,
+                    "is_scored_question": is_scored_question,
                 })
         elif hf_status != "":
             # Fallback for simple status-based payload
