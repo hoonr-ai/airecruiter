@@ -1888,14 +1888,18 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             "updated_rows": 0,
         }
 
-    # --- Contact enrichment by reliable identifiers only (no name guessing).
-    # Order, stopping as soon as we have BOTH an email and a phone so we never
-    # spend Exa/Apollo credits needlessly:
-    #   1. ZoomInfo by EMAIL  - only when we already have an email (ZoomInfo
-    #      cannot match by LinkedIn URL on our entitlement).
-    #   2. Apollo by URL      - fast/cheap URL-keyed enricher; runs before Exa
-    #      so most candidates short-circuit before the slow, paid Exa path.
-    #   3. Exa Agent by URL   - slow (polls to timeout) + paid; last resort.
+    # --- Contact enrichment by reliable identifiers only (no name guessing
+    # beyond ZoomInfo's accuracy-gated ContactSearch). Order, stopping as soon
+    # as we have BOTH an email and a phone so we never spend Exa/Apollo credits
+    # needlessly:
+    #   1.  ZoomInfo by EMAIL - only when we already have an email (ZoomInfo
+    #       cannot match by LinkedIn URL on our entitlement).
+    #   1b. ZoomInfo by NAME  - for URL-only candidates with no seed email
+    #       (e.g. Exa-sourced), which the by-email/by-URL steps can't reach;
+    #       accuracy-gated so it never enriches the wrong person.
+    #   2.  Apollo by URL     - fast/cheap URL-keyed enricher; runs before Exa
+    #       so most candidates short-circuit before the slow, paid Exa path.
+    #   3.  Exa Agent by URL  - slow (polls to timeout) + paid; last resort.
     provider_used = "none"
     extracted: Dict[str, Any] = {}
     exa_contributed = False
@@ -1947,6 +1951,21 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
         _zi = await contact_enrichment.zoominfo_enrich_by_email(candidate_id, seed_email)
         if _zi.get("ok") and _merge_primary(_zi.get("fields") or {}):
             zoominfo_contributed = True
+
+    # 1b. ZoomInfo by NAME - the by-email step never fires for URL-only
+    # candidates (no seed email), and ZoomInfo can't match by LinkedIn URL, so
+    # name-based ContactSearch is the only ZoomInfo entry point for them. Runs
+    # only while we still lack email+phone; accuracy-gated inside the helper.
+    if not _have_email_and_phone():
+        _zi_name = (
+            request.full_name
+            or (existing_rows[0].get("name") if existing_rows and isinstance(existing_rows[0], dict) else "")
+            or ""
+        ).strip()
+        if _zi_name:
+            _zi_by_name = await contact_enrichment.zoominfo_enrich_by_name(candidate_id, _zi_name)
+            if _zi_by_name.get("ok") and _merge_primary(_zi_by_name.get("fields") or {}):
+                zoominfo_contributed = True
 
     # 2. Apollo by LinkedIn URL - fast/cheap; runs before Exa so candidates that
     #    get both email+phone here short-circuit and never reach the slow, paid
