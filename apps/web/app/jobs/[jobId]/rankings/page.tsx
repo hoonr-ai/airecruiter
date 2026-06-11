@@ -529,7 +529,7 @@ export default function CandidateRankingsPage() {
 
   // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
   // filter updates the table synchronously (no stale state via setFilteredCandidates).
-  type StatusFilter = "all" | "pass" | "fail" | "in_progress" | "pending";
+  type StatusFilter = "all" | "pass" | "fail" | "in_progress" | "pending" | "n/a";
   type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score" | "source" | "engage_status";
   type SortDir = "asc" | "desc";
   type ColumnFilterCondition = "contains" | "not_contains" | "equals" | "starts_with";
@@ -539,6 +539,7 @@ export default function CandidateRankingsPage() {
   }
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [activityFilter, setActivityFilter] = useState<"all" | "has_activity">("all");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
   const [minScore, setMinScore] = useState<number>(0);
   // Default the rank list to fit-score descending so it actually ranks by
@@ -708,6 +709,8 @@ export default function CandidateRankingsPage() {
         const sf = statusFilter === "in_progress" ? "in progress" : statusFilter;
         if (engageLabel !== sf) return false;
       }
+      // Activity History
+      if (activityFilter === "has_activity" && !deriveInterviewId(c)) return false;
       // Source
       if (sourceFilter !== "all" && c.source !== sourceFilter) return false;
       // Min score
@@ -819,6 +822,7 @@ export default function CandidateRankingsPage() {
   const clearFilters = () => {
     setSearchQuery("");
     setStatusFilter("all");
+    setActivityFilter("all");
     setSourceFilter("all");
     setMinScore(0);
     setColumnFilters({});
@@ -1833,42 +1837,43 @@ export default function CandidateRankingsPage() {
       <div className="space-y-4">
         {/* Filter bar: search + status + source + min-score. All filter state
             feeds into the `filteredCandidates` useMemo above. */}
-        <div className="flex flex-wrap items-center gap-3 bg-white p-3 rounded-xl border border-slate-200 shadow-sm mb-6">
-          <div className="relative w-[350px] shrink-0">
-            <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none">
-              <Search className="h-5 w-5 text-slate-400" />
+        <div className="flex flex-wrap items-center gap-2 bg-white px-3 py-2 rounded-xl border border-slate-200 shadow-sm mb-6">
+          <div className="relative shrink-0 min-w-[260px] flex-1 max-w-[380px]">
+            <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
+              <Search className="h-4 w-4 text-slate-400" />
             </div>
             <Input
               placeholder="Search name, email, or location..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="h-12 pl-12 pr-6 w-full bg-slate-50 border-transparent focus:bg-white rounded-lg text-[13px] focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
+              className="h-9 pl-9 pr-3 w-full bg-slate-50 border-transparent focus:bg-white rounded-lg text-[12px] focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
             />
           </div>
 
-          <div className="flex items-center gap-2 bg-slate-50 rounded-lg px-3 h-12 border border-transparent focus-within:bg-white focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all">
-            <Filter className="w-4 h-4 text-slate-400" />
-            <label className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Status</label>
+          <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
+            <Filter className="w-3.5 h-3.5 text-slate-400" />
+            <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Status</label>
             <select
               value={statusFilter}
               onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-              className="text-[13px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer py-2 pr-2"
+              className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[90px]"
             >
               <option value="all">All</option>
               <option value="pass">Pass</option>
               <option value="fail">Fail</option>
               <option value="in_progress">In Progress</option>
               <option value="pending">Pending</option>
+              <option value="n/a">N/A</option>
             </select>
           </div>
 
-          <div className="flex items-center gap-2 bg-slate-50 rounded-lg px-3 h-12 border border-transparent focus-within:bg-white focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all">
-            <Filter className="w-4 h-4 text-slate-400" />
-            <label className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Source</label>
+          <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
+            <Filter className="w-3.5 h-3.5 text-slate-400" />
+            <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Source</label>
             <select
               value={sourceFilter}
               onChange={(e) => setSourceFilter(e.target.value)}
-              className="text-[13px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer py-2 pr-2 max-w-[100px]"
+              className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[110px]"
             >
               <option value="all">All</option>
               {availableSources.map(s => (
@@ -1877,8 +1882,16 @@ export default function CandidateRankingsPage() {
             </select>
           </div>
 
-          <div className="flex items-center gap-2 bg-slate-50 rounded-lg px-3 h-12 border border-transparent focus-within:bg-white focus-within:border-indigo-500 focus-within:ring-2 focus-within:ring-indigo-500/20 transition-all">
-            <label className="text-[12px] font-semibold text-slate-500 uppercase tracking-wider">Min score</label>
+          <div className={`flex items-center gap-1.5 rounded-lg px-3 h-9 border transition-all cursor-pointer select-none shrink-0 ${activityFilter === "has_activity" ? "bg-indigo-50 border-indigo-400 text-indigo-700" : "bg-slate-50 border-transparent hover:bg-slate-100 text-slate-500"}`}
+            onClick={() => setActivityFilter(activityFilter === "has_activity" ? "all" : "has_activity")}
+            title="Show only candidates with activity history"
+          >
+            <Activity className="w-3.5 h-3.5" />
+            <label className="text-[11px] font-semibold uppercase tracking-wider cursor-pointer whitespace-nowrap">Activity History</label>
+          </div>
+
+          <div className="flex items-center gap-1.5 bg-slate-50 rounded-lg px-3 h-9 border border-transparent focus-within:bg-white focus-within:border-indigo-500 shrink-0">
+            <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wider whitespace-nowrap">Min score</label>
             <Input
               type="number"
               min={0}
@@ -1888,22 +1901,22 @@ export default function CandidateRankingsPage() {
                 const n = Number.parseInt(e.target.value, 10);
                 setMinScore(Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : 0);
               }}
-              className="h-8 w-16 text-[13px] font-bold bg-white border-slate-200 rounded px-2 text-center"
+              className="h-7 w-14 text-[12px] font-bold bg-white border-slate-200 rounded px-2 text-center"
             />
           </div>
 
-          {(searchQuery || statusFilter !== "all" || sourceFilter !== "all" || minScore > 0) && (
+          {(searchQuery || statusFilter !== "all" || activityFilter !== "all" || sourceFilter !== "all" || minScore > 0) && (
             <button
               onClick={clearFilters}
-              className="h-12 px-4 text-[13px] font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg flex items-center gap-2 transition-colors"
+              className="h-9 px-3 text-[12px] font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg flex items-center gap-1.5 transition-colors shrink-0"
             >
-              <X className="w-4 h-4" /> Clear
+              <X className="w-3.5 h-3.5" /> Clear
             </button>
           )}
 
-          <div className="ml-auto text-[13px] font-bold text-slate-500 px-2 text-right">
+          <div className="ml-auto text-[12px] font-bold text-slate-500 px-2 text-right shrink-0 whitespace-nowrap">
             Showing <span className="text-slate-900">{filteredCandidates.length}</span> of <span className="text-slate-900">{candidateTotalCount || candidates.length}</span>
-            <span className="text-slate-400"> visible candidates</span>
+            <span className="text-slate-400"> visible</span>
             {(hasMoreCandidates || candidates.length < (candidateTotalCount || 0)) && (
               <div className="text-[11px] font-medium text-slate-400">Loaded {candidates.length} so far</div>
             )}
