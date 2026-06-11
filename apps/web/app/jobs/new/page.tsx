@@ -109,6 +109,12 @@ function isValidLaunchEmail(value: string | null | undefined): boolean {
   if (PLACEHOLDER_LAUNCH_EMAILS.has(email)) return false;
   if (email.endsWith("@example.com")) return false;
   if (email.endsWith("@noemail.pair.ai")) return false;
+  // JobDiva auto-generates Auto_<id>@jobdiva.com for candidates with no real
+  // email — dead addresses the backend blanks (engagement.py _is_placeholder_email).
+  // Treat them as no-email here too so the launch gate matches the backend: a
+  // synthetic-email-only candidate then routes to enrichment / manual entry
+  // instead of slipping into the payload and failing the whole batch with a 400.
+  if (email.endsWith("@jobdiva.com")) return false;
   return true;
 }
 
@@ -891,6 +897,11 @@ function NewJobPageContent() {
   // backend; the modal surfaces per-batch status so the recruiter can see
   // what's happening on long runs.
   const LAUNCH_BATCH_SIZE = 5;
+  // Bounded concurrency for the Launch PAIR contact-enrichment pass. Each
+  // candidate's enrich-contact call runs the ZoomInfo→Apollo→Exa chain
+  // server-side; doing them one-at-a-time made the modal crawl for minutes, so
+  // we overlap up to N at once. Keep modest to stay under provider rate limits.
+  const LAUNCH_ENRICH_CONCURRENCY = 6;
   const [launchProgress, setLaunchProgress] = useState<LaunchPairProgress>(initialLaunchProgress);
   const [missingContactCandidates, setMissingContactCandidates] = useState<MissingContactCandidate[]>([]);
   const [missingContactsReviewMode, setMissingContactsReviewMode] = useState(false);
@@ -1154,14 +1165,54 @@ function NewJobPageContent() {
     return Number.isFinite(score) ? score : 0;
   };
 
-  // A *genuine* hard-filter fail is a numeric 0% (hard-veto / exclusion rule).
-  // Candidates we simply couldn't score — JobDiva detail/résumé lookup failed
-  // (detail_failed) or the row never finished scoring — have NO numeric score
-  // and render as "N/A". They must NOT be treated as a 0% drop at Launch PAIR;
-  // only a real numeric 0 is skipped. (getCandidateMatchScore coerces a missing
-  // score to 0, so it can't be used for the launch gate.)
-  const isHardFilterZero = (c: any): boolean =>
-    typeof c?.match_score === "number" && c.match_score === 0;
+  // Launch-PAIR skip policy: the ONLY reason to skip a selected candidate is
+  // that they CURRENTLY work at the hiring client company — we don't poach from
+  // the client. Everyone else launches, regardless of match score, location, or
+  // how little we could extract about them. ("Not enough info" is no longer a
+  // failing criterion — a thin/empty profile is launchable, not skipped.)
+  //
+  // Normalize a company name for comparison: lowercase, strip punctuation and
+  // common legal/filler suffixes so "Bank of America, N.A." ~ "Bank of America".
+  const normalizeCompanyName = (s: any): string =>
+    String(s || "")
+      .toLowerCase()
+      .replace(/[.,]/g, " ")
+      .replace(/\b(inc|llc|ltd|corp|corporation|co|company|plc|gmbh|na|pvt|private|limited|technologies|technology|solutions|consulting|services|group|holdings)\b/g, " ")
+      .replace(/[^a-z0-9 ]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  // The candidate's CURRENT employer only (present role). Past employers must
+  // NOT count — we only skip people who literally work at the client today.
+  const getCandidateCurrentCompany = (c: any): string => {
+    const ei = c?.enhanced_info || c?.data?.enhanced_info || {};
+    const direct = c?.current_company || ei?.current_company || c?.company || c?.company_name || ei?.company;
+    if (direct) return String(direct);
+    const exp =
+      (Array.isArray(c?.company_experience) && c.company_experience) ||
+      (Array.isArray(ei?.company_experience) && ei.company_experience) ||
+      [];
+    for (const e of exp) {
+      if (!e || typeof e !== "object") continue;
+      const endRaw = String(e.end_date ?? e.endDate ?? e.to ?? "").trim();
+      const isCurrent = e.is_current === true || e.current === true || !endRaw || /present|current/i.test(endRaw);
+      if (isCurrent) return String(e.company || e.company_name || e.employer || e.name || "");
+    }
+    return "";
+  };
+
+  const isEmployedByClient = (c: any): boolean => {
+    const client = normalizeCompanyName(jobData?.customer_name || jobData?.customer || "");
+    // "external" is the placeholder for non-JobDiva reqs — never a real client.
+    if (!client || client === "external") return false;
+    const cand = normalizeCompanyName(getCandidateCurrentCompany(c));
+    if (!cand) return false;
+    if (cand === client) return true;
+    // Substring match only when the shorter name is specific enough (>= 4 chars)
+    // to avoid false hits on generic tokens left after normalization.
+    const shorter = cand.length <= client.length ? cand : client;
+    return shorter.length >= 4 && (cand.includes(client) || client.includes(cand));
+  };
 
   const sortedCandidates = useMemo(() => {
     const trimmedQuery = candidateSearchQuery.trim().toLowerCase();
@@ -3118,6 +3169,11 @@ function NewJobPageContent() {
                 Job posting team will receive your request to post after you Launch Hoonr-Curate.
               </p>
             </div>
+            {selectedJobBoards.length === 0 && (
+              <p className="text-[12px] text-red-500 font-medium mt-2 px-1">
+                Select at least one job board to continue.
+              </p>
+            )}
           </div>
         </div>
       </div>
@@ -6172,11 +6228,11 @@ function NewJobPageContent() {
     // this check at /candidates/save — defense in depth.
     const candidatesPayload = effective
       .filter(c => launchIds.has(c.candidate_id || c.jobdiva_candidate_id || c.id))
-      // Hard filter fail safety net: a *genuine* 0% candidate (hard-veto /
-      // exclusion) must never reach /candidates/save, even via the second
-      // MissingContactsModal pass. Candidates we couldn't score (detail_failed
-      // / unscored → N/A) have no numeric score and are kept launchable.
-      .filter(c => !isHardFilterZero(c))
+      // Launch-PAIR skip safety net: only candidates who currently work at the
+      // hiring client company are withheld from /candidates/save (even via the
+      // second MissingContactsModal pass). Low score / thin profile / location
+      // are NOT skip reasons — everyone else stays launchable.
+      .filter(c => !isEmployedByClient(c))
       .filter(c => {
         if (dncPhones.size === 0) return true;
         const np = normalizePhone(c.phone);
@@ -6184,6 +6240,15 @@ function NewJobPageContent() {
       })
       .map(c => {
         const displayName = getCandidateDisplayName(c);
+        // Send the SAME contact the launch gate used to mark this candidate
+        // launchable. getCandidateLaunchEmail/Phone read nested fields
+        // (workEmail/personalEmail/enhanced_info.*/data.*/zoominfo_contact_enrichment.*);
+        // sending only top-level c.email/c.phone dropped nested-only contact to
+        // null, which the backend then rejected — failing the whole batch with a
+        // 400. Guard with the same validity checks so we never persist a
+        // synthetic/placeholder address.
+        const launchEmail = getCandidateLaunchEmail(c);
+        const launchPhone = getCandidateLaunchPhone(c);
         let skillList: any[] = [];
         if (Array.isArray(c.skills)) {
           skillList = c.skills;
@@ -6198,8 +6263,8 @@ function NewJobPageContent() {
         return {
           candidate_id: String(c.candidate_id || c.jobdiva_candidate_id || c.id || "unknown"),
           name: displayName || "Unnamed Candidate",
-          email: c.email || null,
-          phone: c.phone || null,
+          email: isValidLaunchEmail(launchEmail) ? launchEmail : null,
+          phone: isValidLaunchPhone(launchPhone) ? launchPhone : null,
           skills: skillList,
           experience_years: c.yearsExtracted || c.experience_years || 0,
           source: c.source || "JobDiva-Applicants",
@@ -6393,6 +6458,7 @@ function NewJobPageContent() {
             realCandidateIds: batchIds,
             isInitialLaunch: wizardMode !== 'source',
             notifyRecruiters: true,
+            sendJobPostingEmail: i === batches.length - 1 && totalFailedBatches === 0,
           });
           if (engageRes.success) {
             batchEngageSent = Array.isArray(engageRes.data) ? engageRes.data.length : batchIds.length;
@@ -6552,18 +6618,18 @@ function NewJobPageContent() {
       return;
     }
 
-    // Hard filter fail: candidates with a genuine numeric 0% (hard-veto /
-    // exclusion) are never launched, even when selected. Candidates we couldn't
-    // score (detail_failed / unscored → N/A) are NOT skipped here. Compute the
-    // skip set once and thread it through the flow below WITHOUT touching the
-    // table selection — they are simply excluded from the launch payload and
-    // reported on the completion screen.
+    // Launch-PAIR skip: the only candidates withheld from launch are those who
+    // currently work at the hiring client company (no poaching the client).
+    // Everyone else launches — low score, thin/empty profile, and out-of-radius
+    // are NOT skip reasons. Compute the skip set once and thread it through the
+    // flow below WITHOUT touching the table selection — they are simply excluded
+    // from the launch payload and reported on the completion screen.
     const hardFilterSkipIds = new Set<string>();
     const hardFilterSkippedNames: string[] = [];
     for (const c of candidates) {
       const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
       if (!id || !selectedCandidates.has(id)) continue;
-      if (isHardFilterZero(c)) {
+      if (isEmployedByClient(c)) {
         hardFilterSkipIds.add(id);
         hardFilterSkippedNames.push(getCandidateDisplayName(c) || c.name || "Unnamed");
       }
@@ -6649,9 +6715,9 @@ function NewJobPageContent() {
       let enrichFailedCount = 0;
       let noContactFoundCount = 0;
 
-      for (const c of candidatesMissingContact) {
+      const enrichOne = async (c: (typeof candidatesMissingContact)[number]) => {
         const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
-        if (!id) continue;
+        if (!id) return;
 
         const linkedinUrlCandidates = [
           c.profile_url,
@@ -6665,14 +6731,30 @@ function NewJobPageContent() {
 
         const linkedinUrl = linkedinUrlCandidates.find((u: string) => looksLikeLinkedInProfile(u)) || "";
 
+        // Is the candidate ALREADY reachable on their existing contact? PAIR
+        // launches on phone OR email, so a candidate who already has one is
+        // launchable even if enrichment adds nothing new — count them as
+        // "already reachable", never as a "missing LinkedIn"/"no contact" miss.
+        const launchableNow =
+          isValidLaunchPhone(getCandidateLaunchPhone(c)) ||
+          isValidLaunchEmail(getCandidateLaunchEmail(c));
+
         if (!linkedinUrl) {
-          missingLinkedInCount += 1;
-          setLaunchProgress(prev => ({
-            ...prev,
-            enrichDone: prev.enrichDone + 1,
-            enrichMissingLinkedIn: prev.enrichMissingLinkedIn + 1,
-          }));
-          continue;
+          if (launchableNow) {
+            setLaunchProgress(prev => ({
+              ...prev,
+              enrichDone: prev.enrichDone + 1,
+              enrichAlreadyReachable: prev.enrichAlreadyReachable + 1,
+            }));
+          } else {
+            missingLinkedInCount += 1;
+            setLaunchProgress(prev => ({
+              ...prev,
+              enrichDone: prev.enrichDone + 1,
+              enrichMissingLinkedIn: prev.enrichMissingLinkedIn + 1,
+            }));
+          }
+          return;
         }
 
         try {
@@ -6694,7 +6776,7 @@ function NewJobPageContent() {
               enrichDone: prev.enrichDone + 1,
               enrichFailed: prev.enrichFailed + 1,
             }));
-            continue;
+            return;
           }
           const enriched = await res.json();
           const nextPhone = enriched?.phone || enriched?.mobilePhone || enriched?.workPhone || "";
@@ -6716,6 +6798,14 @@ function NewJobPageContent() {
               enrichDone: prev.enrichDone + 1,
               enrichSucceeded: prev.enrichSucceeded + 1,
             }));
+          } else if (launchableNow) {
+            // Enrichment found nothing new, but the candidate already has a
+            // usable phone or email — still launchable, not a miss.
+            setLaunchProgress(prev => ({
+              ...prev,
+              enrichDone: prev.enrichDone + 1,
+              enrichAlreadyReachable: prev.enrichAlreadyReachable + 1,
+            }));
           } else {
             noContactFoundCount += 1;
             setLaunchProgress(prev => ({
@@ -6733,7 +6823,25 @@ function NewJobPageContent() {
             enrichFailed: prev.enrichFailed + 1,
           }));
         }
-      }
+      };
+
+      // Bounded concurrency pool instead of one-at-a-time. "Missing LinkedIn"
+      // candidates resolve instantly; the win is overlapping the network-bound
+      // calls. Counters/contactOverrides mutate synchronously between awaits
+      // (atomic in single-threaded JS) and setLaunchProgress uses the functional
+      // updater, so concurrent updates are safe. Pool drains via a shared cursor.
+      let enrichCursor = 0;
+      const enrichWorker = async () => {
+        while (enrichCursor < candidatesMissingContact.length) {
+          await enrichOne(candidatesMissingContact[enrichCursor++]);
+        }
+      };
+      await Promise.all(
+        Array.from(
+          { length: Math.min(LAUNCH_ENRICH_CONCURRENCY, candidatesMissingContact.length) },
+          enrichWorker,
+        ),
+      );
 
       if (enrichedCount > 0) {
         setCandidates(prev => prev.map(c => {
@@ -6770,7 +6878,7 @@ function NewJobPageContent() {
       if (missingLinkedInCount > 0 || enrichFailedCount > 0 || noContactFoundCount > 0) {
         const bits = [
           missingLinkedInCount > 0 ? `${missingLinkedInCount} missing LinkedIn URL` : "",
-          noContactFoundCount > 0 ? `${noContactFoundCount} no ZoomInfo contact found` : "",
+          noContactFoundCount > 0 ? `${noContactFoundCount} still missing phone & email` : "",
           enrichFailedCount > 0 ? `${enrichFailedCount} enrichment call failed` : "",
         ].filter(Boolean);
         showToast(`Enrichment summary: ${bits.join(" · ")}`, "info");
@@ -6913,7 +7021,7 @@ function NewJobPageContent() {
           totalCandidates: 0,
           enrichTotal: 0,
           batches: [],
-          finalMessage: "No candidates launched — all selected candidates failed the hard filter (0% match).",
+          finalMessage: "No candidates launched — all selected candidates currently work at the client company.",
         }));
       } else {
         setReadyLaunchedPendingRedirect(false);
@@ -6929,7 +7037,7 @@ function NewJobPageContent() {
         setMissingContactsOpen(true);
       } else if (!hasReady && hardFilterSkipIds.size > 0) {
         showToast(
-          `${hardFilterSkipIds.size} candidate${hardFilterSkipIds.size === 1 ? "" : "s"} skipped — hard filter failed (0% match).`,
+          `${hardFilterSkipIds.size} candidate${hardFilterSkipIds.size === 1 ? "" : "s"} skipped — currently employed by the client company.`,
           "info",
         );
       } else if (!hasReady) {
@@ -8679,6 +8787,10 @@ return (
                   setCurrentStep(3);
                   return;
                 }
+                if (selectedJobBoards.length === 0) {
+                  showToast("Please select at least one job board to publish to before proceeding.", "error");
+                  return;
+                }
                 setIsAdvancingStep(true);
                 try {
                   const saved = await saveJobDraft({ currentStep: 3, skipToast: true });
@@ -8953,7 +9065,9 @@ return (
       primaryLabel={
         missingContactsReviewMode ? "Confirm & launch PAIR" : undefined
       }
-
+      // Normal flow: let the recruiter launch whoever now has a phone/email and
+      // skip the rest. QA review-gate mode keeps confirm-all (no partial).
+      allowPartial={!missingContactsReviewMode}
       jobId={numericJobId || jobData?.jobdiva_id?.toString() || undefined}
       jobDivaId={jobdivaId || jobData?.jobdiva_id?.toString() || undefined}
     />

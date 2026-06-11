@@ -354,6 +354,10 @@ class SendBulkInterviewRequest(BaseModel):
     # Previously, dry_run did double duty (skip pairbot + fire email), which
     # silently caused bulk launches to never reach pairbot.
     notify_recruiters: bool = False
+    # When provided by the caller, controls Email #2 (job posting request)
+    # explicitly so batched launches can fire it once on the final successful
+    # batch only.
+    send_job_posting_email: Optional[bool] = None
     app_base_url: str = ""
 
 
@@ -652,8 +656,8 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job
             app_base_url=app_base_url,
         )
 
-        # ── Email #2: Job Posting Request (skipped on re-launch) ────────────
-        if send_job_posting:
+        # ── Email #2: Job Posting Request (skipped on re-launch or no boards) ──
+        if send_job_posting and job_boards:
             await asyncio.to_thread(
                 notify_job_posting,
                 jobdiva_id=jobdiva_id,
@@ -666,7 +670,7 @@ async def _send_pair_launch_email(*, job_id: str, candidate_count: int, send_job
             )
         else:
             logger.info(
-                "📧 Skipping job-posting email for job %s (re-launch — already sent on initial launch)",
+                "📧 Skipping job-posting email for job %s (not requested or no job boards selected)",
                 jobdiva_id or job_id,
             )
 
@@ -1246,11 +1250,16 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             # pairbot call, so wizard launches never actually created
             # interviews.)
             if request.is_initial_launch or request.notify_recruiters:
+                send_job_posting = (
+                    request.send_job_posting_email
+                    if request.send_job_posting_email is not None
+                    else request.is_initial_launch
+                )
                 asyncio.create_task(
                     _send_pair_launch_email(
                         job_id=job_id_from_payload,
                         candidate_count=len(interview_results),
-                        send_job_posting=request.is_initial_launch,
+                        send_job_posting=send_job_posting,
                         app_base_url=request.app_base_url,
                     )
                 )
@@ -1692,8 +1701,8 @@ async def _check_and_fire_candidate_passed_notification(
         cand_score = interview_block.get("candidate_score")
         total_possible = interview_block.get("total_score")
         
-        # Pass logic: Must have 'passed' status (no score ratio check)
-        meets_criteria = (hf_status == HARD_FILTER_PASS_STATUS)
+        # Send pass email only when all hard filters are explicitly passed.
+        meets_criteria = hf_status in (HARD_FILTER_PASS_STATUS, "pass")
         
         normalized_score_display = "Passed"
         if meets_criteria and cand_score is not None and total_possible:
@@ -1751,18 +1760,45 @@ async def _check_and_fire_candidate_passed_notification(
                 total = item.get("total_score", 10.0)
                 reason = item.get("reason")
                 hf_status_item = item.get("hard_filter_status")
-                
-                value_str = a_text
-                if score is not None:
-                    value_str += f" (Score: {score}/{total})"
-                if hf_status_item:
-                    value_str += f" [HF: {hf_status_item.capitalize()}]"
-                if reason:
-                    value_str += f"\nReason: {reason}"
-                
+                q_order_raw = item.get("question_order", 0)
+
+                hf_norm = str(hf_status_item or "").strip().lower().replace(" ", "_")
+                is_hard_filter = hf_norm not in ("", "not_hard_filter", "na", "n/a", "none")
+                # Keep email behavior aligned with Pairbot UI:
+                # - no score for hard-filter questions
+                # - no score for info-only questions
+                # - score only for truly scored evaluation questions
+                score_value = None
+                try:
+                    score_value = float(score) if score is not None else None
+                except (TypeError, ValueError):
+                    score_value = None
+
+                try:
+                    q_order = int(q_order_raw)
+                except (TypeError, ValueError):
+                    q_order = 0
+
+                # Pairbot contract:
+                # Q1/Q4 hard filters (already excluded above), Q2,3,5-9 info-only, Q10+ scored.
+                if q_order > 0:
+                    is_info_only = (not is_hard_filter) and (q_order <= 9)
+                else:
+                    # Legacy fallback when question_order is missing
+                    is_info_only = (not is_hard_filter) and (score_value is None or score_value < 0)
+                is_scored_question = (not is_hard_filter) and (not is_info_only)
+
                 screening_summary.append({
-                    "field": q_text,
-                    "value": value_str
+                    "question": q_text,
+                    "answer": a_text,
+                    "score": score,
+                    "total_score": total,
+                    "reason": reason,
+                    "question_order": q_order,
+                    "hard_filter_status": hf_status_item,
+                    "is_hard_filter": is_hard_filter,
+                    "is_info_only": is_info_only,
+                    "is_scored_question": is_scored_question,
                 })
         elif hf_status != "":
             # Fallback for simple status-based payload

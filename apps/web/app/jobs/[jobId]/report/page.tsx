@@ -589,7 +589,7 @@ export default function CandidateEvaluationReportPage() {
                             </div>
                             {reason && (
                               <div className="space-y-1 pt-2 border-t border-slate-200/60">
-                                <span className="text-[11px] font-bold text-[#6366f1] uppercase tracking-widest">AI Evaluation</span>
+                                <span className="text-[11px] font-bold text-[#94a3b8] uppercase tracking-widest">AI Analysis</span>
                                 <p className="text-[13px] text-[#475569] leading-relaxed font-medium">{reason}</p>
                               </div>
                             )}

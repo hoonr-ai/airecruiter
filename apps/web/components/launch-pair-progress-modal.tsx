@@ -69,6 +69,11 @@ export interface LaunchPairProgress {
   enrichTotal: number;
   enrichDone: number;
   enrichSucceeded: number;
+  // Candidates who were already launchable on existing contact (phone OR email)
+  // — enrichment ran but added nothing new, or was skipped (no LinkedIn). NOT a
+  // miss: PAIR can still reach them. Tracked separately so they never inflate
+  // the "no contact found" / "missing LinkedIn" counts.
+  enrichAlreadyReachable: number;
   enrichMissingLinkedIn: number;
   enrichNoContact: number;
   enrichFailed: number;
@@ -97,6 +102,7 @@ export const initialLaunchProgress: LaunchPairProgress = {
   enrichTotal: 0,
   enrichDone: 0,
   enrichSucceeded: 0,
+  enrichAlreadyReachable: 0,
   enrichMissingLinkedIn: 0,
   enrichNoContact: 0,
   enrichFailed: 0,
@@ -157,6 +163,7 @@ export function LaunchPairProgressModal({
     enrichTotal,
     enrichDone,
     enrichSucceeded,
+    enrichAlreadyReachable,
     enrichMissingLinkedIn,
     enrichNoContact,
     enrichFailed,
@@ -334,6 +341,7 @@ export function LaunchPairProgressModal({
               />
             </div>
             {(enrichSucceeded > 0 ||
+              enrichAlreadyReachable > 0 ||
               enrichMissingLinkedIn > 0 ||
               enrichNoContact > 0 ||
               enrichFailed > 0) && (
@@ -343,11 +351,16 @@ export function LaunchPairProgressModal({
                     ✓ {enrichSucceeded} enriched
                   </span>
                 )}
+                {enrichAlreadyReachable > 0 && (
+                  <span className="text-emerald-700">
+                    {enrichAlreadyReachable} already reachable
+                  </span>
+                )}
                 {enrichMissingLinkedIn > 0 && (
                   <span>{enrichMissingLinkedIn} missing LinkedIn</span>
                 )}
                 {enrichNoContact > 0 && (
-                  <span>{enrichNoContact} no contact found</span>
+                  <span>{enrichNoContact} no phone/email</span>
                 )}
                 {enrichFailed > 0 && (
                   <span className="text-rose-600">{enrichFailed} failed</span>
@@ -357,12 +370,12 @@ export function LaunchPairProgressModal({
           </div>
         )}
 
-        {/* Hard-filter (0% match) skips */}
+        {/* Skipped: currently employed by the client company */}
         {hardFilterSkipped > 0 && (
           <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-3 space-y-2">
             <div className="flex items-center gap-2 text-[13px] font-semibold text-amber-800">
               <AlertCircle className="w-4 h-4 text-amber-600" />
-              {hardFilterSkipped} candidate{hardFilterSkipped === 1 ? "" : "s"} skipped — hard filter failed (0% match)
+              {hardFilterSkipped} candidate{hardFilterSkipped === 1 ? "" : "s"} skipped — currently employed by the client company
             </div>
             {hardFilterSkippedNames.length > 0 && (
               <div className="text-[12px] text-amber-700">

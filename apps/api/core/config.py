@@ -114,8 +114,10 @@ EXA_API_KEY = get_env_with_default("EXA_API_KEY", "")
 # ON by default. Billed per run (~$0.02 email + $0.07 phone + agent compute,
 # observed ~$0.115 total). Set EXA_CONTACT_ENRICH_ENABLED=false to disable.
 EXA_CONTACT_ENRICH_ENABLED = get_env_bool("EXA_CONTACT_ENRICH_ENABLED", True)
-# Bounded poll budget for one agent run (~10s observed at low effort).
-EXA_CONTACT_ENRICH_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_ENRICH_TIMEOUT_S", "60"))
+# Bounded poll budget for one agent run (~10s observed at low effort), so 25s
+# leaves real completions headroom while capping the worst-case miss; this is
+# the per-candidate slow path, so keeping it tight matters. Env-overridable.
+EXA_CONTACT_ENRICH_TIMEOUT_S = int(get_env_with_default("EXA_CONTACT_ENRICH_TIMEOUT_S", "25"))
 # Agent effort (low|medium|high|xhigh|auto); low is fastest/cheapest.
 EXA_CONTACT_ENRICH_EFFORT = get_env_with_default("EXA_CONTACT_ENRICH_EFFORT", "low")
 

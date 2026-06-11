@@ -29,7 +29,7 @@ from email import encoders
 from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -648,7 +648,7 @@ def notify_candidate_passed(
     candidate_phone: str,
     screen_score: str,
     summary: str,
-    screening_summary: List[Dict[str, str]],
+    screening_summary: List[Dict[str, Any]],
     jobdiva_id: str,
     job_title: str,
     location: str,
@@ -685,30 +685,133 @@ def notify_candidate_passed(
         f'{job_title or "PAIR Rank List"}</a>'
     )
 
+    def _badge(text: str, bg: str, border: str, fg: str) -> str:
+        return (
+            f'<span style="display:inline-block;padding:2px 8px;border-radius:999px;'
+            f'font-size:11px;font-weight:700;line-height:1.5;background:{bg};'
+            f'border:1px solid {border};color:{fg};margin-left:6px;vertical-align:middle;">{text}</span>'
+        )
+
+    def _fmt_score_display(raw_score: Any, raw_total: Any) -> str:
+        """Return score display like '8.0/10' for badge consistency."""
+        try:
+            score_num = float(raw_score)
+            score_part = f"{score_num:.1f}"
+        except (TypeError, ValueError):
+            score_part = str(raw_score)
+
+        try:
+            total_num = float(raw_total)
+            if total_num.is_integer():
+                total_part = str(int(total_num))
+            else:
+                total_part = f"{total_num:.1f}"
+        except (TypeError, ValueError):
+            total_part = str(raw_total)
+
+        return f"{score_part}/{total_part}"
+
     # Screening Summary rows rendered as stacked cards for readability.
     summary_rows_html = ""
     for item in screening_summary:
-        f = item.get("field") or "—"
-        v = item.get("value") or "—"
-        field_text = html.escape(str(f))
-        value_text = html.escape(str(v)).replace("\n", "<br>")
+        q = item.get("question") or item.get("field") or "-"
+        answer = item.get("answer")
+        if answer is None:
+            answer = item.get("value") or "-"
+        reason = item.get("reason")
+        score = item.get("score", item.get("candidate_score"))
+        total_score = item.get("total_score", item.get("total", 10))
 
-        # Color code Pass/Fail in the summary table
-        val_styled = value_text
-        v_low = str(v).lower()
-        if "pass" in v_low:
-            val_styled = f'<span style="color:#059669;font-weight:600;">{value_text}</span>'
-        elif "fail" in v_low:
-            val_styled = f'<span style="color:#dc2626;font-weight:600;">{value_text}</span>'
+        hf_status_raw = item.get("hard_filter_status") or ""
+        hf_status = str(hf_status_raw).strip().lower().replace(" ", "_")
+        status_raw = item.get("status") or ""
+        status = str(status_raw).strip().lower()
+
+        is_hard_filter = bool(item.get("is_hard_filter"))
+        if not is_hard_filter and hf_status:
+            is_hard_filter = hf_status not in ("not_hard_filter", "na", "n/a", "none")
+
+        # Pairbot-consistent visibility:
+        # - no score badge for hard filters
+        # - no score badge for info-only questions
+        is_info_only = bool(item.get("is_info_only"))
+        if not is_info_only:
+            score_value = None
+            try:
+                score_value = float(score) if score is not None else None
+            except (TypeError, ValueError):
+                score_value = None
+            is_info_only = (not is_hard_filter) and (score_value is None or score_value < 0)
+
+        is_scored_question = bool(item.get("is_scored_question"))
+        if not is_scored_question:
+            is_scored_question = (not is_hard_filter) and (not is_info_only)
+
+        score_num: Optional[float] = None
+        try:
+            score_num = float(score) if score is not None else None
+        except (TypeError, ValueError):
+            score_num = None
+
+        badges: List[str] = []
+        if is_hard_filter:
+            badges.append(_badge("Hard Filter", "#fef2f2", "#fecaca", "#b91c1c"))
+        elif is_info_only:
+            badges.append(_badge("Info Only", "#eff6ff", "#bfdbfe", "#1d4ed8"))
+
+        if is_scored_question and score is not None:
+            if score_num is not None and score_num >= 7:
+                score_bg, score_border, score_fg = "#ecfdf5", "#bbf7d0", "#15803d"
+            else:
+                score_bg, score_border, score_fg = "#fff7ed", "#fed7aa", "#c2410c"
+
+            badges.append(
+                _badge(
+                    _fmt_score_display(score, total_score),
+                    score_bg,
+                    score_border,
+                    score_fg,
+                )
+            )
+
+        pass_fail = ""
+        if hf_status in ("pass", "passed", "true") or status in ("pass", "passed"):
+            pass_fail = "PASS"
+        elif hf_status in ("fail", "failed", "false") or status in ("fail", "failed"):
+            pass_fail = "FAIL"
+
+        if pass_fail == "PASS":
+            badges.append(_badge("Pass", "#dcfce7", "#bbf7d0", "#166534"))
+        elif pass_fail == "FAIL":
+            badges.append(_badge("Fail", "#fee2e2", "#fecaca", "#991b1b"))
+
+        field_text = html.escape(str(q))
+        answer_text = html.escape(str(answer or "-")).replace("\n", "<br>")
+        reason_text = html.escape(str(reason)).replace("\n", "<br>") if reason else ""
+        badges_html = "".join(badges)
 
         summary_rows_html += (
             '<tr><td style="padding:10px 12px;border-bottom:1px solid #e2e8f0;vertical-align:top;">'
-            '<div style="font-size:12px;font-weight:700;color:#475569;margin-bottom:6px;line-height:1.4;">'
+            '<table width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 6px 0;">'
+            '<tr>'
+            '<td style="font-size:12px;font-weight:700;color:#0f172a;line-height:1.4;padding:0 10px 0 0;vertical-align:top;">'
             f'{field_text}'
-            '</div>'
+            '</td>'
+            '<td style="font-size:12px;font-weight:700;color:#0f172a;line-height:1.4;text-align:right;white-space:nowrap;vertical-align:top;">'
+            f'{badges_html}'
+            '</td>'
+            '</tr>'
+            '</table>'
             '<div style="font-size:13px;color:#1e293b;line-height:1.55;word-break:break-word;overflow-wrap:anywhere;">'
-            f'{val_styled}'
+            f'{answer_text}'
             '</div>'
+            + (
+                '<div style="margin-top:6px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:6px 10px;">'
+                '<span style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:#94a3b8;">AI Analysis</span>'
+                f'<div style="margin-top:3px;font-size:12px;color:#475569;line-height:1.5;font-style:italic;word-break:break-word;overflow-wrap:anywhere;">{reason_text}</div>'
+                '</div>'
+                if reason_text else ""
+            ) +
             '</td></tr>'
         )
 

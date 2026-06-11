@@ -686,6 +686,33 @@ def _has_usable_field(fields: Dict[str, Any]) -> bool:
     return any(str(fields.get(k) or "").strip() for k in ("mobilePhone", "workPhone", "workEmail", "personalEmail"))
 
 
+async def zoominfo_enrich_by_name(candidate_id: str, full_name: str) -> Dict[str, Any]:
+    """Enrich a contact via the ZoomInfo OAuth Data API, matching by NAME.
+
+    ZoomInfo cannot match by LinkedIn URL, and URL-only candidates (e.g.
+    Exa-sourced) arrive with no seed email, so neither the by-URL nor the
+    by-email path can reach them. Name-based ContactSearch -> personId ->
+    ContactEnrich is the only ZoomInfo entry point for these. Requires both a
+    first and last name and is accuracy-gated inside ``_zoominfo_resolve_person_id``
+    (``_MIN_CONTACT_ACCURACY_SCORE``) so a name collision never enriches the
+    wrong person. Returns ``{"ok": bool, "fields"|"message": ...}`` like the
+    other provider helpers; all failures are logged and swallowed.
+    """
+    parts = _split_name(full_name)
+    if not parts["first"] or not parts["last"]:
+        return {"ok": False, "message": "need first + last name to match"}
+
+    try:
+        fields = await _zoominfo_enrich_for_sourcing((full_name or "").strip())
+    except Exception as e:
+        logger.warning("ZoomInfo enrich-by-name raised for %s: %s", candidate_id, e)
+        return {"ok": False, "message": f"ZoomInfo by-name failed: {e}"}
+
+    if not _has_usable_field(fields):
+        logger.info("ZoomInfo enrich-by-name returned no usable fields for %s", candidate_id)
+    return {"ok": True, "fields": fields}
+
+
 def reset_job_counter(jobdiva_id: str) -> None:
     """Tests / explicit job-restart can clear the per-job cap counter."""
     _JOB_ENRICH_COUNTERS.pop(jobdiva_id, None)

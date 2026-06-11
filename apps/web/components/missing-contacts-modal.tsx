@@ -48,6 +48,10 @@ interface MissingContactsModalProps {
   title?: string;
   description?: string;
   primaryLabel?: string;
+  // When true, allow launching the subset of candidates that have a usable
+  // phone/email and silently skip the rest (instead of requiring EVERY row to be
+  // valid). The QA review-gate mode passes false to keep confirm-all semantics.
+  allowPartial?: boolean;
   jobId?: string;
   jobDivaId?: string;
 }
@@ -75,6 +79,10 @@ function isValidEmail(s: string) {
   if (PLACEHOLDER_EMAILS.has(v)) return false;
   if (v.endsWith("@example.com")) return false;
   if (v.endsWith("@noemail.pair.ai")) return false;
+  // Reject JobDiva synthetic Auto_<id>@jobdiva.com placeholders, consistent with
+  // the launch gate (page isValidLaunchEmail) + backend — otherwise a manually
+  // entered dead address counts as valid here but gets nulled at launch.
+  if (v.endsWith("@jobdiva.com")) return false;
   return true;
 }
 
@@ -86,6 +94,7 @@ export function MissingContactsModal({
   title = "Missing contact details",
   description = "PAIR needs a unique real phone number or email for each candidate — either one is enough. Add or correct the details below and we'll launch for them too.",
   primaryLabel = "Launch PAIR for remaining",
+  allowPartial = false,
   jobId,
   jobDivaId,
 }: MissingContactsModalProps) {
@@ -169,6 +178,13 @@ export function MissingContactsModal({
   };
 
   const allValid = candidates.length > 0 && candidates.every(isRowValid);
+  // Partial-launch support: how many rows are launchable right now, and how many
+  // would be skipped. canSubmit gates the primary button — all rows in QA review
+  // mode (allValid), or just one launchable row in the normal flow (allowPartial).
+  const validCount = candidates.filter(isRowValid).length;
+  const anyValid = validCount > 0;
+  const skipCount = candidates.length - validCount;
+  const canSubmit = allowPartial ? anyValid : allValid;
   const anySaving =
     Object.values(savingPhone).some(Boolean) || Object.values(savingEmail).some(Boolean);
 
@@ -269,6 +285,9 @@ export function MissingContactsModal({
         c.needsEmail && isValidEmail(email) && !duplicateEmailIds.has(c.candidate_id);
 
       if (!phoneUsable && !emailUsable) {
+        // Partial launch: a candidate we can't reach is skipped, not a blocker —
+        // launch everyone who has a usable contact and leave the rest behind.
+        if (allowPartial) continue;
         setPhoneErrors(prev => ({
           ...prev,
           [c.candidate_id]: "Add a phone number or email",
@@ -288,6 +307,12 @@ export function MissingContactsModal({
       }
       updates.push(item);
       provided[c.candidate_id] = entry;
+    }
+
+    if (updates.length === 0) {
+      // Nothing launchable (the button is gated on canSubmit, so this is a
+      // defensive guard) — never POST an empty batch.
+      return;
     }
 
     // Reflect saving state only for the fields actually being saved.
@@ -445,6 +470,13 @@ export function MissingContactsModal({
           )}
         </div>
 
+        {allowPartial && skipCount > 0 && (
+          <p className="px-6 pt-3 text-[12px] text-slate-500">
+            {skipCount} candidate{skipCount === 1 ? "" : "s"} still missing contact will be skipped
+            {anyValid ? `; the ${validCount} with a phone or email will launch.` : "."}
+          </p>
+        )}
+
         <DialogFooter className="px-6 py-4 border-t border-slate-100 shrink-0 flex justify-between sm:justify-between gap-2">
           <Button
             variant="outline"
@@ -471,10 +503,12 @@ export function MissingContactsModal({
           </Button>
           <Button
             onClick={handleSubmit}
-            disabled={!allValid || anySaving}
+            disabled={!canSubmit || anySaving}
             className="bg-indigo-600 hover:bg-indigo-700 text-white"
           >
-            {primaryLabel}
+            {allowPartial && anyValid && skipCount > 0
+              ? `Launch PAIR for ${validCount} ready`
+              : primaryLabel}
           </Button>
         </DialogFooter>
       </DialogContent>
