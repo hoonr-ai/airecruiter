@@ -808,7 +808,7 @@ export default function CandidateRankingsPage() {
       });
     }
     return rows;
-  }, [candidates, searchQuery, statusFilter, sourceFilter, minScore, sortField, sortDir]);
+  }, [candidates, searchQuery, statusFilter, activityFilter, sourceFilter, minScore, sortField, sortDir, columnFilters]);
 
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
