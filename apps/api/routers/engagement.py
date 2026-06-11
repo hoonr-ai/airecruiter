@@ -1175,9 +1175,6 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 # Extract job_id from payload (prefer reference jobdiva_id for UI consistency)
                 job_id_resolved = payload_obj.get("jd", {}).get("jobdiva_id") or payload_obj.get("jd", {}).get("job_id", "")
 
-                audit_status = "Initiated" if interview_id else "failed"
-                engage_status = "sent" if interview_id else "failed"
-
                 cur.execute("""
                     INSERT INTO engage_interview_audit
                         (candidate_id, jobdiva_id, interview_id, candidate_name, candidate_email, payload, response, status)
@@ -1190,12 +1187,12 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                     candidate_email,
                     json.dumps(payload_obj),
                     json.dumps(interview_info),
-                    audit_status
+                    "Initiated"
                 ))
 
                 _write_candidate_engage_status(
                     candidate_id=candidate_id,
-                    status_value=engage_status,
+                    status_value="sent",
                     job_id_value=job_id_resolved,
                     interview_id_value=interview_id,
                     response_fragment=interview_info,
