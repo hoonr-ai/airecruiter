@@ -370,12 +370,12 @@ export function LaunchPairProgressModal({
           </div>
         )}
 
-        {/* Hard-filter (0% match) skips */}
+        {/* Skipped: currently employed by the client company */}
         {hardFilterSkipped > 0 && (
           <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-3 space-y-2">
             <div className="flex items-center gap-2 text-[13px] font-semibold text-amber-800">
               <AlertCircle className="w-4 h-4 text-amber-600" />
-              {hardFilterSkipped} candidate{hardFilterSkipped === 1 ? "" : "s"} skipped — hard filter failed (0% match)
+              {hardFilterSkipped} candidate{hardFilterSkipped === 1 ? "" : "s"} skipped — currently employed by the client company
             </div>
             {hardFilterSkippedNames.length > 0 && (
               <div className="text-[12px] text-amber-700">
