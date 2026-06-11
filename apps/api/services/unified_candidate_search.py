@@ -752,18 +752,22 @@ class UnifiedCandidateSearch:
                 # skill match — recency is the next-best signal we have.
                 from core import sourcing_config as _sc_cap
                 _applicant_cap = _sc_cap.JOBDIVA_SOURCE_CAP
-                if applicants and _applicant_cap and len(applicants) > _applicant_cap:
+                _applicant_page = max(0, getattr(criteria, "page_number", 0) or 0)
+                _applicant_skip = _applicant_cap * _applicant_page
+                if applicants and (_applicant_skip > 0 or len(applicants) > _applicant_cap):
                     def _applicant_recency_key(a: Dict[str, Any]) -> str:
                         # JobApplicantsDetail.RECEIVED is an ISO-ish date string;
                         # lexicographic sort on the ISO form is reverse-chronological
                         # when reversed. Missing dates sort last.
                         return str(a.get("received") or "")
                     applicants.sort(key=_applicant_recency_key, reverse=True)
+                    _applicant_before = len(applicants)
+                    applicants = applicants[_applicant_skip : _applicant_skip + _applicant_cap]
                     self._log_stage(
                         "Applicants",
-                        f"Capping {len(applicants)} applicants to top-{_applicant_cap} by recency.",
+                        f"Page {_applicant_page}: windowed {_applicant_before} applicants to "
+                        f"{len(applicants)} by recency (skip {_applicant_skip}).",
                     )
-                    applicants = applicants[:_applicant_cap]
 
                 if not applicants:
                     self._log_stage("Applicants", "No applicants found.")
@@ -848,18 +852,24 @@ class UnifiedCandidateSearch:
                 if talent_res.get("jobdiva_criteria_unconfigured"):
                     summary["jobdiva_criteria_unconfigured"] = True
 
-                # Source cap (JOBDIVA_SOURCE_CAP) — see Applicants stage above.
-                # JobAgent results arrive in JobDiva's API rank order
-                # (preserved end-to-end via `api_rank`); this slice keeps the
-                # top-N by JobDiva's own ranking.
+                # Paginated window: emit only this page's rank-slice. JobAgent
+                # results arrive in JobDiva's API rank order (preserved
+                # end-to-end via `api_rank`). Page 0 → [0:batch] (unchanged
+                # first-paint behavior); each "Search more" page emits the next
+                # `batch` ranks. The grown resume_count above ensures the pool is
+                # deep enough to reach this window.
                 from core import sourcing_config as _sc_cap
-                _talent_cap = _sc_cap.JOBDIVA_SOURCE_CAP
-                if talent_pool and _talent_cap and len(talent_pool) > _talent_cap:
+                _talent_batch = _sc_cap.JOBAGENT_RESUME_COUNT
+                _talent_page = max(0, getattr(criteria, "page_number", 0) or 0)
+                _talent_skip = _talent_batch * _talent_page
+                if talent_pool and (_talent_skip > 0 or len(talent_pool) > _talent_batch):
+                    _talent_before = len(talent_pool)
+                    talent_pool = talent_pool[_talent_skip : _talent_skip + _talent_batch]
                     self._log_stage(
                         "TalentSearch",
-                        f"Capping {len(talent_pool)} talent profiles to top-{_talent_cap} by JobAgent rank.",
+                        f"Page {_talent_page}: windowed {_talent_before} talent profiles to "
+                        f"ranks {_talent_skip + 1}-{_talent_skip + len(talent_pool)} by JobAgent rank.",
                     )
-                    talent_pool = talent_pool[:_talent_cap]
 
                 if not talent_pool:
                     self._log_stage("TalentSearch", "No talent-pool candidates returned.")
@@ -910,22 +920,26 @@ class UnifiedCandidateSearch:
                 source_type = res.get("source_type", name)
                 summary[f"{source_type.lower()}_count"] = len(ext_candidates)
 
-                # HOTFIX: Hard cap at 100 — see Applicants stage above.
-                # F5: pre-rank by cheap title/skill keyword match before
-                # slicing. External sources (Exa/Dice/Unipile) ship enough
-                # signal in `title` + highlight text to rank meaningfully,
-                # and an unranked FIFO slice can discard the best matches
-                # if Exa returns ordered by its own relevance and we ask
-                # for 50 results but the cap fires elsewhere.
-                if ext_candidates and len(ext_candidates) > 100:
+                # Paginated window (batch 100). Pre-rank by cheap title/skill
+                # keyword match, then emit only this page's slice. External
+                # sources (Exa/Dice/Unipile) don't paginate server-side, so the
+                # _search_* methods over-request by (page+1) and we skip the
+                # already-shown prefix here. Page 0 → top-100 (unchanged). These
+                # sources don't return deep result sets, so "Search more" pages
+                # past page 1 may run dry — the frontend handles the empty page.
+                _ext_batch = 100
+                _ext_page = max(0, getattr(criteria, "page_number", 0) or 0)
+                _ext_skip = _ext_batch * _ext_page
+                if ext_candidates and (_ext_skip > 0 or len(ext_candidates) > _ext_batch):
                     before_rank = len(ext_candidates)
                     ext_candidates = self._rank_candidates_by_skill(
-                        ext_candidates, criteria, keep_top=100
+                        ext_candidates, criteria, keep_top=_ext_skip + _ext_batch
                     )
+                    ext_candidates = ext_candidates[_ext_skip:]
                     self._log_stage(
                         source_type,
-                        f"Capping {before_rank} {source_type} profiles to "
-                        f"top-{len(ext_candidates)} by skill+title rank.",
+                        f"Page {_ext_page}: windowed {before_rank} {source_type} profiles to "
+                        f"{len(ext_candidates)} by skill+title rank (skip {_ext_skip}).",
                     )
 
                 self._log_stage(source_type, f"Found {len(ext_candidates)} profiles; starting streaming enrichment...")
@@ -1555,7 +1569,14 @@ class UnifiedCandidateSearch:
                 # top-100 for display + hydration anyway, so over-requesting
                 # just slows the call. See sourcing_config.JOBAGENT_RESUME_COUNT.
                 from core import sourcing_config as _sc_rc
-                resume_count = _sc_rc.JOBAGENT_RESUME_COUNT
+                # Paginated Talent Search: page N (0-based criteria.page_number)
+                # requests rc = batch×(N+1) so JobDiva ranks deep enough to
+                # expose the next window; produce_jobdiva_talent then emits only
+                # [skip:skip+batch]. Capped at JOBDIVA_SOURCE_CAP to bound
+                # JobAgentSearch latency on deep pages (rc scales with latency).
+                _ja_batch = _sc_rc.JOBAGENT_RESUME_COUNT
+                _ja_page = max(0, getattr(criteria, "page_number", 0) or 0)
+                resume_count = min(_ja_batch * (_ja_page + 1), _sc_rc.JOBDIVA_SOURCE_CAP)
                 # Wall-clock as the orchestrator sees it. Comparing this to the
                 # service's "JobAgent TIMING total_ms" reveals event-loop
                 # contention: if this is much larger, the coroutine was starved
@@ -4621,7 +4642,8 @@ class UnifiedCandidateSearch:
                 skills=skills,
                 location=self._scope_location_to_us(criteria.location),
                 open_to_work=criteria.open_to_work,
-                limit=criteria.page_size,
+                # Over-request by page for "Search more" windowing.
+                limit=criteria.page_size * (max(0, getattr(criteria, "page_number", 0) or 0) + 1),
                 boolean_string=self._scope_boolean_to_us(
                     criteria.boolean_string or self._build_boolean_string(criteria)
                 ),
@@ -4769,7 +4791,8 @@ class UnifiedCandidateSearch:
             candidates = await self.exa_service.search_dice_candidates(
                 skills=skills_values,
                 location=self._scope_location_to_us(criteria.location),
-                limit=min(criteria.page_size, 50),
+                # Over-request by page for "Search more" windowing (capped 150).
+                limit=min(min(criteria.page_size, 50) * (max(0, getattr(criteria, "page_number", 0) or 0) + 1), 150),
                 boolean_string=self._scope_boolean_to_us(boolean_string),
                 role_hint=self._role_hint_from_criteria(criteria),
             )
@@ -4800,7 +4823,11 @@ class UnifiedCandidateSearch:
             # falls off). Without the floor, page_size=10 → only 10 LinkedIn
             # candidates surface and the deep-search pass discovers little.
             requested = criteria.page_size or 30
-            exa_limit = min(50, max(30, requested))
+            # Over-request by page so produce_external can window past the
+            # already-shown prefix on "Search more". Exa relevance falls off
+            # past ~50/call, so cap growth at 150.
+            _exa_page = max(0, getattr(criteria, "page_number", 0) or 0)
+            exa_limit = min(min(50, max(30, requested)) * (_exa_page + 1), 150)
             candidates = await self.exa_service.search_candidates(
                 skills=skills_values,
                 location=self._scope_location_to_us(criteria.location),
