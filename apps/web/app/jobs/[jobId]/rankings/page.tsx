@@ -1585,6 +1585,16 @@ export default function CandidateRankingsPage() {
 
   const isInitialLoading = isLoading && !job && candidates.length === 0;
   const isRefreshing = isLoading && !isInitialLoading;
+  const hasActiveFilters = Boolean(
+    searchQuery.trim() ||
+    statusFilter !== "all" ||
+    activityFilter !== "all" ||
+    sourceFilter !== "all" ||
+    minScore > 0
+  );
+  const totalCandidates = candidateTotalCount || candidates.length;
+  const isPartiallyLoaded = hasMoreCandidates || candidateOffset < totalCandidates;
+  const displayedCount = hasActiveFilters ? filteredCandidates.length : candidates.length;
 
   return (
     <div className="max-w-[1600px] mx-auto px-2 space-y-4 pb-10">
@@ -1905,7 +1915,7 @@ export default function CandidateRankingsPage() {
             />
           </div>
 
-          {(searchQuery || statusFilter !== "all" || activityFilter !== "all" || sourceFilter !== "all" || minScore > 0) && (
+          {hasActiveFilters && (
             <button
               onClick={clearFilters}
               className="h-9 px-3 text-[12px] font-bold text-slate-500 hover:text-slate-800 hover:bg-slate-100 rounded-lg flex items-center gap-1.5 transition-colors shrink-0"
@@ -1915,9 +1925,18 @@ export default function CandidateRankingsPage() {
           )}
 
           <div className="ml-auto text-[12px] font-bold text-slate-500 px-2 text-right shrink-0 whitespace-nowrap">
-            Showing <span className="text-slate-900">{filteredCandidates.length}</span> of <span className="text-slate-900">{candidateTotalCount || candidates.length}</span>
-            <span className="text-slate-400"> visible</span>
-            {(hasMoreCandidates || candidates.length < (candidateTotalCount || 0)) && (
+            {(hasActiveFilters || isPartiallyLoaded) ? (
+              <>
+                {hasActiveFilters ? "Matching" : "Showing"} <span className="text-slate-900">{displayedCount}</span> of <span className="text-slate-900">{totalCandidates}</span>
+                <span className="text-slate-500"> total candidates</span>
+              </>
+            ) : (
+              <>
+                Showing <span className="text-slate-900">{totalCandidates}</span>
+                <span className="text-slate-500"> total candidates</span>
+              </>
+            )}
+            {isPartiallyLoaded && (
               <div className="text-[11px] font-medium text-slate-400">Loaded {candidates.length} so far</div>
             )}
           </div>
