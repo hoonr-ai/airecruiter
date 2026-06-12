@@ -250,17 +250,19 @@ def _backfill_monitored_jobs_counters_sync() -> None:
                         pass_submissions     = COALESCE(sub.ps, 0)
                     FROM (
                         SELECT
-                            sc.jobdiva_id,
+                            m.job_id,
+                            m.jobdiva_id,
                             COUNT(DISTINCT sc.candidate_id) AS cs,
                             COUNT(DISTINCT CASE
-                                WHEN sc.data->>'engage_status' IS NOT NULL AND sc.data->>'engage_status' != ''
-                                 AND (
-                                     sc.data->>'engage_interview_id' IS NOT NULL AND sc.data->>'engage_interview_id' != ''
-                                     OR EXISTS (
-                                         SELECT 1 FROM engage_interview_audit ea
-                                         WHERE ea.candidate_id = sc.candidate_id
-                                     )
-                                 )
+                                WHEN (
+                                    COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''
+                                    OR EXISTS (
+                                        SELECT 1 FROM engage_interview_audit ea
+                                        WHERE ea.candidate_id = sc.candidate_id
+                                          AND (ea.jobdiva_id = m.jobdiva_id OR ea.jobdiva_id = m.job_id::text)
+                                          AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
+                                    )
+                                )
                                 THEN sc.candidate_id
                             END) AS cl,
                             COUNT(DISTINCT CASE
@@ -272,11 +274,13 @@ def _backfill_monitored_jobs_counters_sync() -> None:
                                 WHEN LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed')
                                 THEN sc.candidate_id
                             END) AS ps
-                        FROM sourced_candidates sc
-                        GROUP BY sc.jobdiva_id
+                        FROM monitored_jobs m
+                        LEFT JOIN sourced_candidates sc
+                          ON (sc.jobdiva_id = m.jobdiva_id OR sc.jobdiva_id = m.job_id::text)
+                        GROUP BY m.job_id, m.jobdiva_id
                     ) sub
-                    WHERE mj.jobdiva_id = sub.jobdiva_id
-                       OR mj.job_id::text = sub.jobdiva_id
+                    WHERE mj.job_id = sub.job_id
+                      AND mj.jobdiva_id = sub.jobdiva_id
                     """
                 )
                 conn.commit()
