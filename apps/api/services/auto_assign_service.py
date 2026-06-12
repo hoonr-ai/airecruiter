@@ -963,17 +963,17 @@ class AutoAssignService:
                         """
                         SELECT
                             COUNT(DISTINCT sc.candidate_id)                                 AS candidates_sourced,
-                            COUNT(DISTINCT CASE 
-                                WHEN sc.data->>'engage_status' IS NOT NULL AND sc.data->>'engage_status' != '' 
-                                 AND (
-                                     sc.data->>'engage_interview_id' IS NOT NULL AND sc.data->>'engage_interview_id' != ''
-                                     OR EXISTS (
-                                         SELECT 1 FROM engage_interview_audit ea
-                                         WHERE ea.candidate_id = sc.candidate_id
-                                           AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
-                                     )
-                                 )
-                                THEN sc.candidate_id 
+                            COUNT(DISTINCT CASE
+                                WHEN (
+                                    COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''
+                                    OR EXISTS (
+                                        SELECT 1 FROM engage_interview_audit ea
+                                        WHERE ea.candidate_id = sc.candidate_id
+                                          AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
+                                          AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
+                                    )
+                                )
+                                THEN sc.candidate_id
                             END) AS candidates_launched,
                             COUNT(DISTINCT CASE
                                 WHEN sc.data->>'engage_status' IN
