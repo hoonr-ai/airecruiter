@@ -987,7 +987,7 @@ class AutoAssignService:
                         FROM sourced_candidates sc
                         WHERE (sc.jobdiva_id = %s OR sc.jobdiva_id = %s)
                         """,
-                        (ref_id, num_id, ref_id, num_id, ref_id, num_id),
+                        (ref_id, num_id, ref_id, num_id),
                     )
                     row = cur.fetchone()
                     if not row:
