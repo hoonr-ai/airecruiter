@@ -888,13 +888,11 @@ async def get_job_candidates(
                         COUNT(DISTINCT sc.candidate_id) FILTER (
                             WHERE (
                                 COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''
-                                AND COALESCE(sc.data->>'engage_status', '') <> 'failed'
                             ) OR EXISTS (
                                 SELECT 1 FROM engage_interview_audit ea
                                 WHERE ea.candidate_id = sc.candidate_id
                                   AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
                                   AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
-                                  AND ea.status <> 'failed'
                             )
                         ) AS launched_count
                     FROM sourced_candidates sc
