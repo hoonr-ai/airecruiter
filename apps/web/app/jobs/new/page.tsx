@@ -3169,11 +3169,7 @@ function NewJobPageContent() {
                 Job posting team will receive your request to post after you Launch Hoonr-Curate.
               </p>
             </div>
-            {selectedJobBoards.length === 0 && (
-              <p className="text-[12px] text-red-500 font-medium mt-2 px-1">
-                Select at least one job board to continue.
-              </p>
-            )}
+
           </div>
         </div>
       </div>
@@ -6458,7 +6454,7 @@ function NewJobPageContent() {
             realCandidateIds: batchIds,
             isInitialLaunch: wizardMode !== 'source',
             notifyRecruiters: true,
-            sendJobPostingEmail: i === batches.length - 1 && totalFailedBatches === 0,
+            sendJobPostingEmail: i === batches.length - 1 && totalFailedBatches === 0 && selectedJobBoards.length > 0,
           });
           if (engageRes.success) {
             batchEngageSent = Array.isArray(engageRes.data) ? engageRes.data.length : batchIds.length;
@@ -8785,10 +8781,6 @@ return (
                 if (isReadOnly) {
                   trackStepAdvance(2, 3, { via: "next_button", read_only: true });
                   setCurrentStep(3);
-                  return;
-                }
-                if (selectedJobBoards.length === 0) {
-                  showToast("Please select at least one job board to publish to before proceeding.", "error");
                   return;
                 }
                 setIsAdvancingStep(true);
