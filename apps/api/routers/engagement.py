@@ -519,6 +519,11 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
             jd = {
                 "job_id": job_row.get("job_id") or request.job_id,
                 "jobdiva_id": job_row.get("jobdiva_id") or "",
+                "title": job_row.get("enhanced_title") or job_row.get("title", ""),
+                "customer_name": job_row.get("customer_name") or "Unknown",
+                "city": job_row.get("city") or "TBD",
+                "state": job_row.get("state") or "",
+                "location_type": job_row.get("location_type") or "Onsite",
                 "context": {
                     "title": job_row.get("enhanced_title") or job_row.get("title", ""),
                     "customer_name": job_row.get("customer_name") or "Unknown",
