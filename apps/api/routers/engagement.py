@@ -802,6 +802,7 @@ async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_int
             cand_data = json.loads(cand_data)
 
         email = row.get("email")
+        phone = row.get("phone") or ""
         existing_jd_id = cand_data.get("jobdiva_candidate_id")
         if not existing_jd_id and str(candidate_id_internal).isdigit():
             existing_jd_id = int(candidate_id_internal)
@@ -810,12 +811,26 @@ async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_int
         if numeric_job_id:
             logger.info(f"🔍 [Provisioning] Fetching live applicants for Job {numeric_job_id} from JobDiva...")
             applicants = await jobdiva_service.get_job_applicants_detail(int(numeric_job_id))
+            existing_phone_norm = "".join(ch for ch in str(phone) if ch.isdigit())
 
             for app in applicants:
                 app_cid = app.get("candidateId") or app.get("CANDIDATEID")
                 app_email = str(app.get("EMAIL") or app.get("email") or "").lower()
+                app_phone = "".join(ch for ch in str(app.get("PHONE") or app.get("phone") or "") if ch.isdigit())
 
-                if (existing_jd_id and app_cid and int(app_cid) == int(existing_jd_id)) or (email and app_email == email.lower()):
+                jcid_match = bool(existing_jd_id and app_cid and int(app_cid) == int(existing_jd_id))
+                email_match = bool(
+                    email and app_email
+                    and not email.lower().startswith("auto_")
+                    and not app_email.startswith("auto_")
+                    and app_email == email.lower()
+                )
+                phone_match = bool(
+                    existing_phone_norm and len(existing_phone_norm) >= 7
+                    and app_phone == existing_phone_norm
+                )
+
+                if jcid_match or email_match or phone_match:
                     logger.info(f"✅ [Provisioning] Match found! Candidate {candidate_id_internal} is already an applicant (JobDiva ID: {app_cid})")
                     if not cand_data.get("jobdiva_candidate_id"):
                         cand_data["jobdiva_candidate_id"] = app_cid
@@ -833,7 +848,7 @@ async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_int
         first_name = name_parts[0]
         last_name = name_parts[1] if len(name_parts) > 1 else ""
         safe_name = (candidate_name or "Candidate").replace(" ", "_")
-        phone = row.get("phone") or ""
+        # phone already read above for dedup — reuse it here
 
         actual_resume = row.get("resume_text") or ""
         resume_text = (
@@ -849,7 +864,8 @@ async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_int
             filename=f"{safe_name}_Resume.txt",
             first_name=first_name,
             last_name=last_name,
-            email=email or ""
+            email=email or "",
+            phone=phone or ""
         )
 
         if success:
