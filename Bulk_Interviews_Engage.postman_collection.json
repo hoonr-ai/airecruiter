@@ -1,0 +1,446 @@
+{
+  "info": {
+    "name": "Bulk Interviews - Engage API",
+    "description": "Postman collection for launching bulk interviews through the PAIR engagement API.\n\nRecommended flow:\n0. Run either '0A) Search Candidates (Curate API)' or '0B) Get Candidate IDs By Job'\n1. Run '1) Generate Engage Payload'\n2. Run '2) Send Bulk Interview (From Generated Payload)'\n\nOptional:\n- Use request 3 if you want to paste/edit a fully custom payload manually.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "job_id",
+      "value": "26-06183",
+      "type": "string",
+      "description": "Internal job_id or jobdiva_id supported by generate-payload"
+    },
+    {
+      "key": "candidate_ids_json",
+      "value": "[\"123456\",\"123457\"]",
+      "type": "string",
+      "description": "JSON array string of candidate IDs"
+    },
+    {
+      "key": "candidate_search_payload",
+      "value": "{\n  \"job_id\": \"26-17164\",\n  \"title_criteria\": [\n    {\n      \"value\": \"Application Architect\",\n      \"match_type\": \"can\",\n      \"years\": 0,\n      \"recent\": false,\n      \"similar_terms\": [\n        \"Application Architecture\",\n        \"Application Director\",\n        \"ERP Application Architect\",\n        \"Cloud Solutions Architect\"\n      ]\n    },\n    {\n      \"value\": \"Application Architect III\",\n      \"match_type\": \"can\",\n      \"years\": 0,\n      \"recent\": false,\n      \"similar_terms\": []\n    },\n    {\n      \"value\": \"Cloud ERP Consultant\",\n      \"match_type\": \"can\",\n      \"years\": 0,\n      \"recent\": false,\n      \"similar_terms\": []\n    },\n    {\n      \"value\": \"ERP Architect\",\n      \"match_type\": \"can\",\n      \"years\": 0,\n      \"recent\": false,\n      \"similar_terms\": []\n    },\n    {\n      \"value\": \"Oracle Cloud\",\n      \"match_type\": \"can\",\n      \"years\": 0,\n      \"recent\": false,\n      \"similar_terms\": []\n    },\n    {\n      \"value\": \"Oracle Cloud Architect\",\n      \"match_type\": \"can\",\n      \"years\": 0,\n      \"recent\": false,\n      \"similar_terms\": []\n    },\n    {\n      \"value\": \"Oracle ERP Architect\",\n      \"match_type\": \"can\",\n      \"years\": 0,\n      \"recent\": false,\n      \"similar_terms\": []\n    },\n    {\n      \"value\": \"Oracle Consultant\",\n      \"match_type\": \"can\",\n      \"years\": 0,\n      \"recent\": false,\n      \"similar_terms\": []\n    }\n  ],\n  \"skill_criteria\": [\n    {\n      \"value\": \"Financial Reporting Solutions\",\n      \"match_type\": \"can\",\n      \"years\": 0,\n      \"recent\": false,\n      \"similar_terms\": []\n    },\n    {\n      \"value\": \"Oracle Cloud ERP Applications\",\n      \"match_type\": \"can\",\n      \"years\": 0,\n      \"recent\": false,\n      \"similar_terms\": []\n    },\n    {\n      \"value\": \"Oracle Fusion Cloud ERP\",\n      \"match_type\": \"can\",\n      \"years\": 0,\n      \"recent\": false,\n      \"similar_terms\": []\n    },\n    {\n      \"value\": \"Oracle Accounts Payable\",\n      \"match_type\": \"must\",\n      \"years\": 0,\n      \"recent\": false,\n      \"similar_terms\": []\n    },\n    {\n      \"value\": \"Business Process Workflows\",\n      \"match_type\": \"must\",\n      \"years\": 0,\n      \"recent\": false,\n      \"similar_terms\": []\n    },\n    {\n      \"value\": \"Subledger Accounting\",\n      \"match_type\": \"can\",\n      \"years\": 0,\n      \"recent\": false,\n      \"similar_terms\": []\n    },\n    {\n      \"value\": \"Taxations\",\n      \"match_type\": \"can\",\n      \"years\": 0,\n      \"recent\": false,\n      \"similar_terms\": []\n    }\n  ],\n  \"keywords\": [],\n  \"companies\": [],\n  \"resume_match_filters\": [\n    {\n      \"category\": \"Preferred Title\",\n      \"value\": \"Application Architect - 5+ yrs, Similar match\",\n      \"active\": true,\n      \"weight\": 1\n    },\n    {\n      \"category\": \"Required Title\",\n      \"value\": \"Application Architect III - 5+ yrs, Similar match\",\n      \"active\": true,\n      \"weight\": 1\n    },\n    {\n      \"category\": \"Preferred Title\",\n      \"value\": \"ERP Architect - 5+ yrs, Similar match\",\n      \"active\": true,\n      \"weight\": 1\n    },\n    {\n      \"category\": \"Preferred Title\",\n      \"value\": \"Cloud ERP Consultant - 5+ yrs, Similar match\",\n      \"active\": true,\n      \"weight\": 1\n    },\n    {\n      \"category\": \"Preferred Title\",\n      \"value\": \"Oracle Cloud - 5+ yrs, Similar match\",\n      \"active\": true,\n      \"weight\": 1\n    },\n    {\n      \"category\": \"Required Skill\",\n      \"value\": \"Financial Reporting Solutions - 15+ yrs, Similar match\",\n      \"active\": true,\n      \"weight\": 1\n    },\n    {\n      \"category\": \"Required Skill\",\n      \"value\": \"Oracle Cloud ERP Applications - 5+ yrs, Similar match\",\n      \"active\": true,\n      \"weight\": 1\n    },\n    {\n      \"category\": \"Required Skill\",\n      \"value\": \"Oracle Fusion Cloud ERP - 5+ yrs, Similar match\",\n      \"active\": true,\n      \"weight\": 1\n    },\n    {\n      \"category\": \"Required Skill\",\n      \"value\": \"Oracle Accounts Payable - 5+ yrs, Similar match\",\n      \"active\": true,\n      \"weight\": 1\n    },\n    {\n      \"category\": \"Required Skill\",\n      \"value\": \"Business Process Workflows - 5+ yrs, Similar match\",\n      \"active\": true,\n      \"weight\": 1\n    },\n    {\n      \"category\": \"Customer Req.\",\n      \"value\": \"Must not be employed by: Bank Of America\",\n      \"active\": true,\n      \"weight\": 1\n    },\n    {\n      \"category\": \"Requirement\",\n      \"value\": \"Location: Jersey City, NJ.\",\n      \"active\": true,\n      \"weight\": 1\n    }\n  ],\n  \"location\": \"Jersey City, NJ 07302\",\n  \"within_miles\": 25,\n  \"sources\": [\n    \"JobDiva\"\n  ],\n  \"boolean_string\": \"((\\\"FINANCIAL REPORTING SOLUTIONS\\\") OR (\\\"ORACLE CLOUD ERP APPLICATIONS\\\") OR (\\\"ORACLE FUSION CLOUD ERP\\\") OR (\\\"ORACLE ACCOUNTS PAYABLE\\\") OR (\\\"BUSINESS PROCESS WORKFLOWS\\\") OR ((\\\"APPLICATION ARCHITECT\\\" OR \\\"APPLICATION ARCHITECTURE\\\" OR \\\"APPLICATION DIRECTOR\\\" OR \\\"ERP APPLICATION ARCHITECT\\\" OR \\\"CLOUD SOLUTIONS ARCHITECT\\\") OR (\\\"APPLICATION ARCHITECT III\\\") OR (\\\"SUBLEDGER ACCOUNTING\\\") OR (\\\"TAXATIONS\\\"))) AND \\\"JERSEY CITY, NJ 07302\\\" within 25 mi\",\n  \"recent_days\": 90,\n  \"require_resume\": true,\n  \"client_name\": \"Bank Of America\",\n  \"page\": 1,\n  \"page_size\": 100\n}",
+      "type": "string",
+      "description": "Raw JSON payload for https://curate.hoonr.ai/candidates/search"
+    },
+    {
+      "key": "engage_payload",
+      "value": "",
+      "type": "string",
+      "description": "Auto-populated by request 1"
+    },
+    {
+      "key": "engage_payload_stringified",
+      "value": "\"\"",
+      "type": "string",
+      "description": "Auto-generated escaped JSON string used by request 2"
+    },
+    {
+      "key": "custom_payload",
+      "value": "{\n  \"resumes\": [],\n  \"jd\": {\n    \"job_id\": \"26-06183\",\n    \"jobdiva_id\": \"26-06183\",\n    \"context\": {},\n    \"rubric\": {},\n    \"pre_screen_questions\": []\n  },\n  \"company_intro\": \"\",\n  \"interview_duration\": \"20-25\"\n}",
+      "type": "string",
+      "description": "Optional manually edited payload for request 3"
+    },
+    {
+      "key": "custom_payload_stringified",
+      "value": "\"\"",
+      "type": "string",
+      "description": "Auto-generated escaped JSON string used by request 3"
+    },
+    {
+      "key": "is_initial_launch",
+      "value": "false",
+      "type": "string"
+    },
+    {
+      "key": "dry_run",
+      "value": "false",
+      "type": "string",
+      "description": "Set true to skip external pairbot call and test local logic"
+    },
+    {
+      "key": "notify_recruiters",
+      "value": "false",
+      "type": "string"
+    },
+    {
+      "key": "app_base_url",
+      "value": "http://localhost:3000",
+      "type": "string"
+    },
+    {
+      "key": "last_interview_id",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "0A) Search Candidates (Curate API)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const raw = pm.collectionVariables.get('candidate_search_payload');",
+              "if (!raw || !raw.trim()) {",
+              "  throw new Error('candidate_search_payload is empty. Fill it first.');",
+              "}",
+              "try {",
+              "  JSON.parse(raw);",
+              "} catch (e) {",
+              "  throw new Error('candidate_search_payload is not valid JSON: ' + e.message);",
+              "}"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "let body = {};",
+              "try {",
+              "  body = pm.response.json();",
+              "} catch (e) {",
+              "  console.error('Response is not JSON:', pm.response.text());",
+              "}",
+              "",
+              "pm.test('Status code is 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "",
+              "const rows = Array.isArray(body?.candidates) ? body.candidates",
+              "  : Array.isArray(body?.data) ? body.data",
+              "  : Array.isArray(body?.results) ? body.results",
+              "  : [];",
+              "",
+              "const ids = rows",
+              "  .map((c) => {",
+              "    const v = c?.candidate_id ?? c?.id ?? c?.jobdiva_candidate_id ?? c?.candidateId ?? c?.candidate?.id;",
+              "    return (v === undefined || v === null) ? '' : String(v).trim();",
+              "  })",
+              "  .filter(Boolean);",
+              "",
+              "const uniqueIds = [...new Set(ids)];",
+              "const top50Ids = uniqueIds.slice(0, 50);",
+              "pm.collectionVariables.set('candidate_ids_json', JSON.stringify(top50Ids));",
+              "",
+              "console.log('Saved candidate_ids_json with', top50Ids.length, 'candidate IDs (top 50) from Curate search.');",
+              "if (uniqueIds.length > 50) {",
+              "  console.log('Curate returned', uniqueIds.length, 'unique IDs. Using first 50 for bulk launch.');",
+              "}",
+              "if (top50Ids.length === 0) {",
+              "  console.warn('No candidate IDs found in search response.');",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "https://curate.hoonr.ai/candidates/search",
+          "protocol": "https",
+          "host": [
+            "curate",
+            "hoonr",
+            "ai"
+          ],
+          "path": [
+            "candidates",
+            "search"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{{candidate_search_payload}}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "description": "Runs Curate candidate search using candidate_search_payload and stores top 50 candidate IDs into candidate_ids_json for bulk engage flow."
+      },
+      "response": []
+    },
+    {
+      "name": "0B) Get Candidate IDs By Job",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "let body = {};",
+              "try {",
+              "  body = pm.response.json();",
+              "} catch (e) {",
+              "  console.error('Response is not JSON:', pm.response.text());",
+              "}",
+              "",
+              "pm.test('Status code is 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "",
+              "const candidates = Array.isArray(body?.candidates) ? body.candidates : [];",
+              "const ids = candidates",
+              "  .map(c => (c && c.candidate_id !== undefined && c.candidate_id !== null) ? String(c.candidate_id).trim() : '')",
+              "  .filter(Boolean);",
+              "",
+              "const uniqueIds = [...new Set(ids)];",
+              "pm.collectionVariables.set('candidate_ids_json', JSON.stringify(uniqueIds));",
+              "",
+              "if (uniqueIds.length > 0) {",
+              "  console.log('Saved candidate_ids_json with', uniqueIds.length, 'candidate IDs.');",
+              "} else {",
+              "  console.warn('No candidate IDs found for this job. candidate_ids_json set to [].');",
+              "}",
+              "",
+              "if (body?.pagination?.total !== undefined) {",
+              "  console.log('Total candidates for job:', body.pagination.total);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/jobs/{{job_id}}/candidates?limit=500",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "jobs",
+            "{{job_id}}",
+            "candidates"
+          ],
+          "query": [
+            {
+              "key": "limit",
+              "value": "500"
+            }
+          ]
+        },
+        "description": "Fetches candidates for the given job and auto-populates candidate_ids_json from response.candidates[].candidate_id."
+      },
+      "response": []
+    },
+    {
+      "name": "1) Generate Engage Payload",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "let body = {};",
+              "try {",
+              "  body = pm.response.json();",
+              "} catch (e) {",
+              "  console.error('Response is not JSON:', pm.response.text());",
+              "}",
+              "",
+              "pm.test('Status code is 200', function () {",
+              "  pm.response.to.have.status(200);",
+              "});",
+              "",
+              "if (body && body.success && body.payload) {",
+              "  pm.collectionVariables.set('engage_payload', body.payload);",
+              "  console.log('Saved engage_payload. Candidate count:', body.candidate_count);",
+              "  if (Array.isArray(body.dnc_blocked_ids) && body.dnc_blocked_ids.length > 0) {",
+              "    console.warn('DNC-blocked candidates:', body.dnc_blocked_ids.join(','));",
+              "  }",
+              "} else {",
+              "  console.warn('No payload saved. Check response:', body);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/engagement/engage/generate-payload",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "engagement",
+            "engage",
+            "generate-payload"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"candidate_ids\": {{candidate_ids_json}},\n  \"job_id\": \"{{job_id}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "description": "Generates the editable payload used for PAIR bulk interview launch. This saves response.payload into collection variable engage_payload."
+      },
+      "response": []
+    },
+    {
+      "name": "2) Send Bulk Interview (From Generated Payload)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const payload = pm.collectionVariables.get('engage_payload');",
+              "if (!payload || !payload.trim()) {",
+              "  throw new Error('engage_payload is empty. Run request 1 first.');",
+              "}",
+              "pm.collectionVariables.set('engage_payload_stringified', JSON.stringify(payload));"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "let body = {};",
+              "try {",
+              "  body = pm.response.json();",
+              "} catch (e) {",
+              "  console.error('Response is not JSON:', pm.response.text());",
+              "}",
+              "",
+              "pm.test('Response has success field', function () {",
+              "  pm.expect(body).to.have.property('success');",
+              "});",
+              "",
+              "if (body && body.success && Array.isArray(body.data) && body.data.length > 0) {",
+              "  const first = body.data[0] || {};",
+              "  if (first.interview_id) {",
+              "    pm.collectionVariables.set('last_interview_id', String(first.interview_id));",
+              "    console.log('Saved last_interview_id:', first.interview_id);",
+              "  }",
+              "} else {",
+              "  console.warn('Bulk send was not successful or had no data:', body);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/engagement/engage/send-bulk-interview",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "engagement",
+            "engage",
+            "send-bulk-interview"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"payload\": {{engage_payload_stringified}},\n  \"real_candidate_ids\": {{candidate_ids_json}},\n  \"is_initial_launch\": {{is_initial_launch}},\n  \"dry_run\": {{dry_run}},\n  \"notify_recruiters\": {{notify_recruiters}},\n  \"app_base_url\": \"{{app_base_url}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "description": "Sends interviews to external pairbot through local API and writes engage_interview_audit rows. Uses payload saved in request 1."
+      },
+      "response": []
+    },
+    {
+      "name": "3) Send Bulk Interview (Manual custom_payload)",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const custom = pm.collectionVariables.get('custom_payload');",
+              "if (!custom || !custom.trim()) {",
+              "  throw new Error('custom_payload is empty. Fill custom_payload variable first.');",
+              "}",
+              "pm.collectionVariables.set('custom_payload_stringified', JSON.stringify(custom));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/engagement/engage/send-bulk-interview",
+          "host": [
+            "{{base_url}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "engagement",
+            "engage",
+            "send-bulk-interview"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"payload\": {{custom_payload_stringified}},\n  \"real_candidate_ids\": {{candidate_ids_json}},\n  \"is_initial_launch\": {{is_initial_launch}},\n  \"dry_run\": {{dry_run}},\n  \"notify_recruiters\": {{notify_recruiters}},\n  \"app_base_url\": \"{{app_base_url}}\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "description": "Use this when you want to manually paste and edit the entire bulk interview payload in custom_payload variable."
+      },
+      "response": []
+    }
+  ]
+}
