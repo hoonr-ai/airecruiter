@@ -690,6 +690,27 @@ def calculate_date_duration(start_date_str: str, end_date_str: str) -> str:
     except Exception:
         return ""
 
+_VERSION_SUFFIX_RE = re.compile(r"-v\d+$")
+
+
+def strip_job_version_suffix(ref: Any) -> Optional[str]:
+    """Reduce an internal versioned job reference to its root JobDiva reference.
+
+    Versioned refs (e.g. ``26-06182-v2``) are LOCAL clones created by "Edit Job
+    Setup" after launch — JobDiva itself only knows the root ref ``26-06182``.
+    The ``-vN`` suffix is a display / internal-relations concept (it keeps each
+    version's candidate bucket separate); it must NEVER be sent to JobDiva.
+
+    Use this ONLY when a value is about to become a JobDiva HTTP payload
+    (jobdivaref / jobOrderId / updateJob). Do NOT use it for local DB row
+    resolution (``WHERE job_id = ...`` / ``WHERE jobdiva_id = ...``) — there the
+    full versioned ref is the real key and stripping it would clobber v1.
+    """
+    if ref is None:
+        return None
+    return _VERSION_SUFFIX_RE.sub("", str(ref).strip())
+
+
 def normalize_jobdiva_date(date_val: Any) -> str:
     """
     Format JobDiva date/timestamp into a readable YYYY-MM-DD format.
@@ -1128,7 +1149,7 @@ class JobDivaService:
         # Versioned jobs are local clones used for re-editing after launch; they
         # share the original JobDiva job, so sourcing must resolve against the
         # un-versioned reference.
-        s = re.sub(r"-v\d+$", "", s)
+        s = strip_job_version_suffix(s)
         if "-" not in s:
             try:
                 return int(s)
@@ -2512,6 +2533,11 @@ class JobDivaService:
 
     async def get_job_by_id(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a specific job by ID from JobDiva, including AI UDFs."""
+        # Versioned refs (26-06182-v2) are local clones that share the original
+        # JobDiva job — strip the -vN suffix so the external SearchJob lookup
+        # uses the root ref and doesn't 404 / trip the strict ref-match guard.
+        # The caller keeps the versioned ref for any local DB identity it needs.
+        job_id = strip_job_version_suffix(job_id)
         logger.info(f"Fetching Job ID: {job_id}")
         token = await self.authenticate()
         if not token: return None
@@ -3835,10 +3861,11 @@ class JobDivaService:
         jdiva_job_id = await self._resolve_jobdiva_job_id(job_id)
         if not jdiva_job_id:
             logger.warning(f"Could not resolve JobDiva Job ID for {job_id}")
-            # Try to use it directly if it's numeric
+            # Try to use it directly if it's numeric. Strip any -vN suffix first
+            # so "26-06182-v2" doesn't digit-mash into a bogus 26061822.
             try:
-                jdiva_job_id = int("".join(filter(str.isdigit, str(job_id)))) if job_id else 0
-            except:
+                jdiva_job_id = int("".join(filter(str.isdigit, str(strip_job_version_suffix(job_id))))) if job_id else 0
+            except (TypeError, ValueError):
                 pass
 
         # JobDiva v2 action date format: yyyy-MM-dd'T'HH:mm:ss
@@ -4215,11 +4242,21 @@ class JobDivaService:
         resume_date = datetime.now().strftime("%m/%d/%Y 12:00:00")
 
         url = f"{self.api_url}/apiv2/jobdiva/CreateJobApplicationWithResume"
+        # Resolve to the real numeric JobDiva job id. This correctly handles a
+        # numeric id, a reference string (26-06182) AND a versioned ref
+        # (26-06182-v2 -> root job), instead of digit-mashing the ref into a
+        # bogus number. Fall back to digit extraction only if resolution fails.
+        resolved_job_id = await self._resolve_jobdiva_job_id(job_id)
+        if not resolved_job_id:
+            try:
+                resolved_job_id = int("".join(filter(str.isdigit, str(strip_job_version_suffix(job_id))))) if job_id else 0
+            except (TypeError, ValueError):
+                resolved_job_id = 0
         json_payload = {
             "filename": filename,
             "textfile": resume_text,
             "filecontent": "",
-            "jobid": int("".join(filter(str.isdigit, str(job_id)))) if job_id else 0,
+            "jobid": int(resolved_job_id or 0),
             "recruiterid": int(JOBDIVA_PAIR_RECRUITER_ID or 0),
             "resumeDate": resume_date,
             "resumesource": 0

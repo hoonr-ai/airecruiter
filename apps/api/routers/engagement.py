@@ -810,7 +810,12 @@ async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_int
         # ── Phase 2: external JobDiva calls — NO pool slot held here.
         if numeric_job_id:
             logger.info(f"🔍 [Provisioning] Fetching live applicants for Job {numeric_job_id} from JobDiva...")
-            applicants = await jobdiva_service.get_job_applicants_detail(int(numeric_job_id))
+            # Pass the ref/id as-is — get_job_applicants_detail resolves it via
+            # _resolve_jobdiva_job_id (which strips a -vN version suffix to the
+            # root JobDiva job). For a v2 job numeric_job_id is the versioned PK
+            # string "26-06182-v2", so int() here would raise ValueError and
+            # silently skip provisioning. Do NOT int() it at the call site.
+            applicants = await jobdiva_service.get_job_applicants_detail(numeric_job_id)
             existing_phone_norm = "".join(ch for ch in str(phone) if ch.isdigit())
 
             for app in applicants:
