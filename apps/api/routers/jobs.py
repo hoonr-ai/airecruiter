@@ -196,6 +196,11 @@ def _ensure_monitored_jobs_schema() -> None:
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS user_session TEXT",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS ai_enhanced BOOLEAN DEFAULT FALSE",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS processing_stage TEXT",
+            # Merge job_tables migration (March 2026) — guard for fresh DBs
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS recruiter_emails TEXT",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS selected_employment_types TEXT",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS screening_level TEXT",
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS pair_enabled BOOLEAN DEFAULT FALSE",
 
             # v28: hot-path read optimizations for GET /jobs/monitored
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_active_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS NOT TRUE",
@@ -250,17 +255,19 @@ def _backfill_monitored_jobs_counters_sync() -> None:
                         pass_submissions     = COALESCE(sub.ps, 0)
                     FROM (
                         SELECT
-                            sc.jobdiva_id,
+                            m.job_id,
+                            m.jobdiva_id,
                             COUNT(DISTINCT sc.candidate_id) AS cs,
                             COUNT(DISTINCT CASE
-                                WHEN sc.data->>'engage_status' IS NOT NULL AND sc.data->>'engage_status' != ''
-                                 AND (
-                                     sc.data->>'engage_interview_id' IS NOT NULL AND sc.data->>'engage_interview_id' != ''
-                                     OR EXISTS (
-                                         SELECT 1 FROM engage_interview_audit ea
-                                         WHERE ea.candidate_id = sc.candidate_id
-                                     )
-                                 )
+                                WHEN (
+                                    COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''
+                                    OR EXISTS (
+                                        SELECT 1 FROM engage_interview_audit ea
+                                        WHERE ea.candidate_id = sc.candidate_id
+                                          AND (ea.jobdiva_id = m.jobdiva_id OR ea.jobdiva_id = m.job_id::text)
+                                          AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
+                                    )
+                                )
                                 THEN sc.candidate_id
                             END) AS cl,
                             COUNT(DISTINCT CASE
@@ -272,11 +279,13 @@ def _backfill_monitored_jobs_counters_sync() -> None:
                                 WHEN LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed')
                                 THEN sc.candidate_id
                             END) AS ps
-                        FROM sourced_candidates sc
-                        GROUP BY sc.jobdiva_id
+                        FROM monitored_jobs m
+                        LEFT JOIN sourced_candidates sc
+                          ON (sc.jobdiva_id = m.jobdiva_id OR sc.jobdiva_id = m.job_id::text)
+                        GROUP BY m.job_id, m.jobdiva_id
                     ) sub
-                    WHERE mj.jobdiva_id = sub.jobdiva_id
-                       OR mj.job_id::text = sub.jobdiva_id
+                    WHERE mj.job_id = sub.job_id
+                      AND mj.jobdiva_id = sub.jobdiva_id
                     """
                 )
                 conn.commit()
@@ -2131,7 +2140,7 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
             # every auto-sync cycle. Dashboard reads are now a single
             # indexed SELECT — no JOIN, no aggregate, no JSONB extraction.
             select_sql = (
-                "SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name, mj.status, "
+                "SELECT mj.job_id, mj.jobdiva_id, mj.title, mj.enhanced_title, mj.customer_name, mj.recruiter_emails, mj.status, "
                 "mj.city, mj.state, mj.zip_code, mj.location_type, mj.priority, mj.program_duration, mj.max_allowed_submittals, "
                 "mj.processing_status, mj.is_archived, "
                 "mj.resumes_shortlisted, "
@@ -2172,6 +2181,18 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
                 job_data["updated_at"] = job_data["updated_at"].isoformat()
             if job_data.get("outreach_stopped_at") and hasattr(job_data["outreach_stopped_at"], "isoformat"):
                 job_data["outreach_stopped_at"] = job_data["outreach_stopped_at"].isoformat()
+            if job_data.get("pair_launched_at") and hasattr(job_data["pair_launched_at"], "isoformat"):
+                job_data["pair_launched_at"] = job_data["pair_launched_at"].isoformat()
+            # recruiter_emails is stored as a JSON string — parse it so the
+            # frontend receives a proper list, not a raw string.
+            raw_emails = job_data.get("recruiter_emails")
+            if isinstance(raw_emails, str):
+                try:
+                    job_data["recruiter_emails"] = json.loads(raw_emails)
+                except Exception:
+                    job_data["recruiter_emails"] = [raw_emails] if raw_emails else []
+            elif raw_emails is None:
+                job_data["recruiter_emails"] = []
 
             # PAIR Status Logic:
             # - Unpublished: Job has not been launched (pair_launched_at is NULL)

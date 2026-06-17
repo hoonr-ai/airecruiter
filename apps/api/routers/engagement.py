@@ -519,6 +519,11 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
             jd = {
                 "job_id": job_row.get("job_id") or request.job_id,
                 "jobdiva_id": job_row.get("jobdiva_id") or "",
+                "title": job_row.get("enhanced_title") or job_row.get("title", ""),
+                "customer_name": job_row.get("customer_name") or "Unknown",
+                "city": job_row.get("city") or "TBD",
+                "state": job_row.get("state") or "",
+                "location_type": job_row.get("location_type") or "Onsite",
                 "context": {
                     "title": job_row.get("enhanced_title") or job_row.get("title", ""),
                     "customer_name": job_row.get("customer_name") or "Unknown",
@@ -797,6 +802,7 @@ async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_int
             cand_data = json.loads(cand_data)
 
         email = row.get("email")
+        phone = row.get("phone") or ""
         existing_jd_id = cand_data.get("jobdiva_candidate_id")
         if not existing_jd_id and str(candidate_id_internal).isdigit():
             existing_jd_id = int(candidate_id_internal)
@@ -810,12 +816,26 @@ async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_int
             # string "26-06182-v2", so int() here would raise ValueError and
             # silently skip provisioning. Do NOT int() it at the call site.
             applicants = await jobdiva_service.get_job_applicants_detail(numeric_job_id)
+            existing_phone_norm = "".join(ch for ch in str(phone) if ch.isdigit())
 
             for app in applicants:
                 app_cid = app.get("candidateId") or app.get("CANDIDATEID")
                 app_email = str(app.get("EMAIL") or app.get("email") or "").lower()
+                app_phone = "".join(ch for ch in str(app.get("PHONE") or app.get("phone") or "") if ch.isdigit())
 
-                if (existing_jd_id and app_cid and int(app_cid) == int(existing_jd_id)) or (email and app_email == email.lower()):
+                jcid_match = bool(existing_jd_id and app_cid and int(app_cid) == int(existing_jd_id))
+                email_match = bool(
+                    email and app_email
+                    and not email.lower().startswith("auto_")
+                    and not app_email.startswith("auto_")
+                    and app_email == email.lower()
+                )
+                phone_match = bool(
+                    existing_phone_norm and len(existing_phone_norm) >= 7
+                    and app_phone == existing_phone_norm
+                )
+
+                if jcid_match or email_match or phone_match:
                     logger.info(f"✅ [Provisioning] Match found! Candidate {candidate_id_internal} is already an applicant (JobDiva ID: {app_cid})")
                     if not cand_data.get("jobdiva_candidate_id"):
                         cand_data["jobdiva_candidate_id"] = app_cid
@@ -833,7 +853,7 @@ async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_int
         first_name = name_parts[0]
         last_name = name_parts[1] if len(name_parts) > 1 else ""
         safe_name = (candidate_name or "Candidate").replace(" ", "_")
-        phone = row.get("phone") or ""
+        # phone already read above for dedup — reuse it here
 
         actual_resume = row.get("resume_text") or ""
         resume_text = (
@@ -849,7 +869,8 @@ async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_int
             filename=f"{safe_name}_Resume.txt",
             first_name=first_name,
             last_name=last_name,
-            email=email or ""
+            email=email or "",
+            phone=phone or ""
         )
 
         if success:
@@ -1164,7 +1185,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                     # without a candidate_email field.
                     interview_info = data_list[idx]
 
-                interview_id = str(interview_info.get("interview_id", ""))
+                interview_id = str(interview_info.get("interview_id") or "")
                 candidate_name = interview_info.get("candidate_name", "")
                 candidate_email = interview_info.get("candidate_email", submitted_email)
 
@@ -1180,6 +1201,9 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 # Extract job_id from payload (prefer reference jobdiva_id for UI consistency)
                 job_id_resolved = payload_obj.get("jd", {}).get("jobdiva_id") or payload_obj.get("jd", {}).get("job_id", "")
 
+                audit_status = "Initiated" if interview_id else "failed"
+                engage_status = "sent" if interview_id else "failed"
+
                 cur.execute("""
                     INSERT INTO engage_interview_audit
                         (candidate_id, jobdiva_id, interview_id, candidate_name, candidate_email, payload, response, status)
@@ -1192,12 +1216,12 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                     candidate_email,
                     json.dumps(payload_obj),
                     json.dumps(interview_info),
-                    "Initiated"
+                    audit_status
                 ))
 
                 _write_candidate_engage_status(
                     candidate_id=candidate_id,
-                    status_value="sent",
+                    status_value=engage_status,
                     job_id_value=job_id_resolved,
                     interview_id_value=interview_id,
                     response_fragment=interview_info,

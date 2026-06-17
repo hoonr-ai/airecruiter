@@ -4224,13 +4224,14 @@ class JobDivaService:
         filename: str = "candidate_resume.txt",
         first_name: str = "",
         last_name: str = "",
-        email: str = ""
+        email: str = "",
+        phone: str = ""
     ) -> tuple:
         """
         Creates a job application via JSON (application/json).
-        After creation, updates the candidate's name since the JSON endpoint
-        cannot parse names from textfile (that only works with multipart which is
-        blocked by a proxy adding charset=UTF-8).
+        After creation, updates the candidate's name, email, and phone since
+        the JSON endpoint creates 'Unknown Unknown' with an Auto_ placeholder
+        email. We fix name + real contact info immediately via updateCandidateProfile.
         Returns (success: bool, new_candidateId: int|None).
         """
         token = await self.authenticate()
@@ -4278,14 +4279,23 @@ class JobDivaService:
                 try:
                     new_cid = int(res_body.strip())
                 except (ValueError, TypeError):
-                    new_cid = None
+                    # JobDiva may return JSON instead of a bare integer
+                    try:
+                        import json as _json
+                        parsed = _json.loads(res_body)
+                        if isinstance(parsed, dict):
+                            new_cid = parsed.get("candidateId") or parsed.get("id") or parsed.get("CANDIDATEID")
+                        else:
+                            new_cid = None
+                    except Exception:
+                        new_cid = None
 
                 logger.info(f"✅ JobDiva application created → candidateId={new_cid}, job={job_id}")
 
-                # The JSON endpoint creates "Unknown Unknown" since it can't parse names
-                # from textfile. Fix the name immediately using editCandidate.
-                if new_cid and (first_name or last_name):
-                    await self._update_candidate_name(token, new_cid, first_name, last_name, email)
+                # The JSON endpoint creates 'Unknown Unknown' with an Auto_ placeholder
+                # email. Fix name + real contact info immediately.
+                if new_cid and (first_name or last_name or email or phone):
+                    await self._update_candidate_name(token, new_cid, first_name, last_name, email, phone)
 
                 return True, new_cid
             else:
@@ -4294,10 +4304,11 @@ class JobDivaService:
             logger.error(f"❌ CreateJobApplicationWithResume exception: {e}")
         return False, None
 
-    async def _update_candidate_name(self, token: str, candidate_id: int, first_name: str, last_name: str, email: str = "") -> bool:
+    async def _update_candidate_name(self, token: str, candidate_id: int, first_name: str, last_name: str, email: str = "", phone: str = "") -> bool:
         """
-        Updates a JobDiva candidate's first/last name after creation.
-        Used to fix 'Unknown Unknown' created by CreateJobApplicationWithResume JSON mode.
+        Updates a JobDiva candidate's name, email, and phone after creation.
+        Used to fix 'Unknown Unknown' + Auto_ placeholder email created by
+        CreateJobApplicationWithResume JSON mode.
         Endpoint: POST /apiv2/jobdiva/updateCandidateProfile
         """
         url = f"{self.api_url}/apiv2/jobdiva/updateCandidateProfile"
@@ -4306,6 +4317,11 @@ class JobDivaService:
             "firstName": first_name,
             "lastName": last_name,
         }
+        # Set real email so JobDiva doesn't keep the Auto_ placeholder
+        if email and not email.lower().startswith("auto_"):
+            payload["email"] = email
+        if phone:
+            payload["phone"] = phone
             
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -4319,7 +4335,7 @@ class JobDivaService:
                 )
             logger.info(f"🔎 updateCandidateProfile response: {response.status_code} — {response.text[:300]}")
             if response.status_code in [200, 201]:
-                logger.info(f"✅ Name updated for candidateId={candidate_id}: {first_name} {last_name}")
+                logger.info(f"✅ Profile updated for candidateId={candidate_id}: {first_name} {last_name}, email={bool(email)}, phone={bool(phone)}")
                 return True
             else:
                 logger.warning(f"⚠️ updateCandidateProfile failed: {response.status_code} - {response.text[:300]}")
