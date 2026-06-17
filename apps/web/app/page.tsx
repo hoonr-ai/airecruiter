@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Search, Plus, FileText, ArrowUpDown, MoreVertical, Link as LinkIcon, AlertTriangle, Archive, Edit3 } from "lucide-react";
+import { Search, Plus, FileText, ArrowUpDown, ArrowUp, ArrowDown, MoreVertical, Link as LinkIcon, AlertTriangle, Archive, Edit3 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -29,12 +29,15 @@ interface Job {
   jobdiva_id?: string;
   title: string;
   customer_name: string;
+  recruiterEmails: string[];
   status: string;
   location: string;
   priority: string;
   programDuration: string;
   maxAllowedSubmittals: string;
   pairStatus: string;
+  pairLaunchedAt: string | null;
+  createdAt: string;
   candidatesLaunched: number;
   completeSubmissions: number;
   passSubmissions: number;
@@ -49,8 +52,8 @@ type SortDirection = "asc" | "desc";
 export default function DashboardPage() {
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState("");
-  const [sortField, setSortField] = useState<keyof Job>("id");
-  const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
+  const [sortField, setSortField] = useState<keyof Job>("createdAt");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [allJobs, setAllJobs] = useState<Job[]>([]);
   const [filteredJobs, setFilteredJobs] = useState<Job[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -123,6 +126,10 @@ export default function DashboardPage() {
       }
       const data = await response.json();
 
+      // Sort explicitly by createdAt DESC after mapping — do not rely on
+      // Object.entries order, since JS engines iterate numeric-string keys
+      // in ascending numeric order (not insertion order), which would break
+      // the backend's created_at DESC ordering for numeric jobdiva IDs.
       const jobs: Job[] = Object.entries(data.jobs || {}).map(([id, details]: [string, any]) => {
         const status = details.status || "Open";
         const procStatus = details.processing_status || "pending";
@@ -134,6 +141,7 @@ export default function DashboardPage() {
           jobdiva_id: details.jobdiva_id || "",
           title: details.enhanced_title || details.title || "—",
           customer_name: details.customer_name || "—",
+          recruiterEmails: Array.isArray(details.recruiter_emails) ? details.recruiter_emails : [],
           status: status || "—",
           location: [
             details.city ? `${details.city}, ${details.state || ""}`.trim() : "",
@@ -147,6 +155,8 @@ export default function DashboardPage() {
             ? "—"
             : Number.parseInt(details.max_allowed_submittals, 10).toString(),
           pairStatus: pairStatus,
+          pairLaunchedAt: details.pair_launched_at || null,
+          createdAt: details.created_at || "",
           candidatesLaunched: details.candidates_launched || 0,
           completeSubmissions: details.complete_submissions || 0,
           passSubmissions: details.pass_submissions || 0,
@@ -154,7 +164,7 @@ export default function DashboardPage() {
           feedbackCompleted: details.feedback_completed || 0,
           timeToFirstPass: details.time_to_first_pass || 0,
         };
-      });
+      }).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
       setAllJobs(jobs);
       setFilteredJobs(jobs);
@@ -179,6 +189,17 @@ export default function DashboardPage() {
   };
 
   const handleSort = (field: SortField) => {
+    // 3rd click on same column (currently DESC) → reset to default newest-first
+    if (sortField === field && sortDirection === "desc") {
+      setSortField("createdAt");
+      setSortDirection("desc");
+      const base = [...allJobs].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      setFilteredJobs(searchQuery
+        ? base.filter(job => Object.values(job).some(v => (v?.toString() || "").toLowerCase().includes(searchQuery.toLowerCase())))
+        : base
+      );
+      return;
+    }
     const newDirection = sortField === field && sortDirection === "asc" ? "desc" : "asc";
     setSortField(field);
     setSortDirection(newDirection);
@@ -187,8 +208,17 @@ export default function DashboardPage() {
       const aVal = a[field as keyof Job];
       const bVal = b[field as keyof Job];
 
-      if (typeof aVal === "string" && typeof bVal === "string") {
-        return newDirection === "asc" ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+      // Handle null values and "—" placeholders — always sort to the bottom regardless of direction
+      if (aVal === null && bVal === null) return 0;
+      if (aVal === null || aVal === "—") return 1;
+      if (bVal === null || bVal === "—") return -1;
+
+      // Arrays (recruiterEmails) — sort by first element alphabetically
+      const aStr = Array.isArray(aVal) ? (aVal[0] || "") : aVal;
+      const bStr = Array.isArray(bVal) ? (bVal[0] || "") : bVal;
+
+      if (typeof aStr === "string" && typeof bStr === "string") {
+        return newDirection === "asc" ? aStr.localeCompare(bStr) : bStr.localeCompare(aStr);
       }
 
       if (typeof aVal === "number" && typeof bVal === "number") {
@@ -216,12 +246,14 @@ export default function DashboardPage() {
       "JobDiva ID",
       "Job Title",
       "Customer Name",
+      "Recruiter Emails",
       "Location / Zip",
       "Priority",
       "Program Duration",
       "Max Allowed Submittals",
       "Job Status",
       "Hoonr-Curate Status",
+      "First PAIR Launch",
       "Candidates Launched",
       "Complete Submissions",
       "Pass Submissions",
@@ -239,12 +271,14 @@ export default function DashboardPage() {
       escapeCSV(job.jobdiva_id || job.id),
       escapeCSV(job.title),
       escapeCSV(job.customer_name),
+      escapeCSV((job.recruiterEmails || []).join("; ")),
       escapeCSV(job.location),
       escapeCSV(job.priority),
       escapeCSV(job.programDuration),
       escapeCSV(job.maxAllowedSubmittals),
       escapeCSV(job.status),
       escapeCSV(job.pairStatus),
+      escapeCSV(job.pairLaunchedAt ? new Date(job.pairLaunchedAt).toLocaleString("en-US", { timeZone: "America/New_York", timeZoneName: "short" }) : "—"),
       escapeCSV(job.candidatesLaunched),
       escapeCSV(job.completeSubmissions),
       escapeCSV(job.passSubmissions),
@@ -279,20 +313,49 @@ export default function DashboardPage() {
     return 'bg-slate-100 text-slate-700';
   };
 
-  const SortableHeader = ({ field, children, className = "" }: { field: keyof Job; children: React.ReactNode; className?: string }) => (
-    <th className={`px-6 py-4 text-left text-[12.5px] font-bold text-slate-500 uppercase tracking-wide border-b border-slate-100 whitespace-nowrap ${className}`}>
-      <div className="flex items-center gap-1.5 cursor-pointer hover:text-slate-800 transition-colors" onClick={() => handleSort(field)}>
-        {children}
-        <ArrowUpDown className="h-3.5 w-3.5 text-slate-400" />
-      </div>
-    </th>
-  );
+  const highlight = (text: string | number | null | undefined): React.ReactNode => {
+    if (!searchQuery || text === null || text === undefined) return text ?? "";
+    const str = String(text);
+    const idx = str.toLowerCase().indexOf(searchQuery.toLowerCase());
+    if (idx === -1) return str;
+    return (
+      <>
+        {str.slice(0, idx)}
+        <mark className="bg-yellow-200 text-yellow-900 rounded-[3px] px-0.5 not-italic">{str.slice(idx, idx + searchQuery.length)}</mark>
+        {str.slice(idx + searchQuery.length)}
+      </>
+    );
+  };
+
+  const SortableHeader = ({ field, children, className = "" }: { field: keyof Job; children: React.ReactNode; className?: string }) => {
+    const isActive = sortField === field;
+    return (
+      <th className={`px-6 py-4 text-center text-[12.5px] font-bold uppercase tracking-wide border-b border-slate-100 whitespace-nowrap transition-colors ${isActive ? "text-[#4f46e5] bg-indigo-50" : "text-slate-500 bg-[#fcfdfd]"} ${className}`}>
+        <div className="flex items-center justify-center gap-1.5 cursor-pointer hover:text-[#4f46e5] transition-colors" onClick={() => handleSort(field)}>
+          {children}
+          {isActive
+            ? sortDirection === "asc"
+              ? <ArrowUp className="h-3.5 w-3.5" />
+              : <ArrowDown className="h-3.5 w-3.5" />
+            : <ArrowUpDown className="h-3.5 w-3.5 text-slate-400" />
+          }
+        </div>
+      </th>
+    );
+  };
 
   return (
     <div className="space-y-6 max-w-[1240px] mx-auto pb-10">
       {/* Page Header */}
       <div className="flex items-center justify-between mt-2">
-        <h1 className="text-[28px] font-bold text-slate-900 tracking-tight">Jobs Portfolio</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-[28px] font-bold text-slate-900 tracking-tight">Jobs Portfolio</h1>
+          <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-[12px] font-semibold text-slate-500 ring-1 ring-inset ring-slate-200">
+            {filteredJobs.length === allJobs.length
+              ? `${allJobs.length} jobs`
+              : `${filteredJobs.length} of ${allJobs.length} jobs`}
+          </span>
+        </div>
 
         {/* Tabs */}
         <div className="flex bg-slate-100 p-1 rounded-lg">
@@ -391,14 +454,16 @@ export default function DashboardPage() {
             <thead className="bg-[#fcfdfd] sticky top-0 z-20 shadow-sm">
               <tr>
                 <SortableHeader field="id">JOBDIVA ID</SortableHeader>
-                <SortableHeader field="title" className="sticky left-0 bg-[#fcfdfd] z-30 shadow-[5px_0_15px_-5px_rgba(0,0,0,0.03)] border-r border-slate-100/50">JOB TITLE</SortableHeader>
+                <SortableHeader field="title" className="sticky left-0 bg-[#fcfdfd] z-30 shadow-[5px_0_15px_-5px_rgba(0,0,0,0.03)] border-r border-slate-100/50 min-w-[220px]">JOB TITLE</SortableHeader>
                 <SortableHeader field="customer_name">CUSTOMER NAME</SortableHeader>
+                <SortableHeader field="recruiterEmails">RECRUITER EMAILS</SortableHeader>
                 <SortableHeader field="location">LOCATION / ZIP</SortableHeader>
                 <SortableHeader field="priority">PRIORITY</SortableHeader>
                 <SortableHeader field="programDuration">PROGRAM DURATION</SortableHeader>
                 <SortableHeader field="maxAllowedSubmittals">MAX ALLOWED SUBMITTALS</SortableHeader>
                 <SortableHeader field="status">JOB STATUS</SortableHeader>
                 <SortableHeader field="pairStatus">HOONR-CURATE STATUS</SortableHeader>
+                <SortableHeader field="pairLaunchedAt">FIRST PAIR LAUNCH</SortableHeader>
                 <SortableHeader field="candidatesLaunched">CANDIDATES LAUNCHED</SortableHeader>
                 <SortableHeader field="completeSubmissions">COMPLETE SUBMISSIONS</SortableHeader>
                 <SortableHeader field="passSubmissions">PASS SUBMISSIONS</SortableHeader>
@@ -413,65 +478,86 @@ export default function DashboardPage() {
             <tbody className="bg-white divide-y divide-slate-100">
               {filteredJobs.length > 0 ? filteredJobs.map((job) => (
                 <tr key={job.id} className="hover:bg-slate-50/70 transition-colors group">
-                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-[#4f46e5]">
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-[#4f46e5] text-center">
                     <Link
                       prefetch={false}
                       href={`/jobs/${job.jobdiva_id || job.id}/rankings`}
-                      className="flex items-center gap-1.5 hover:underline decoration-[#4f46e5]/40 underline-offset-4"
+                      className="flex items-center justify-center gap-1.5 hover:underline decoration-[#4f46e5]/40 underline-offset-4"
                     >
                       {job.jobdiva_id || job.id}
                       {job.pairStatus !== 'Unpublished' && <LinkIcon className="h-3 w-3 text-[#4f46e5]/70" />}
                     </Link>
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap sticky left-0 bg-white group-hover:bg-[#f6f8fb] transition-colors border-r border-slate-100/50 z-10 shadow-[5px_0_15px_-5px_rgba(0,0,0,0.03)]">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[13.5px] font-semibold text-slate-900">{job.title}</span>
+                  <td className="px-6 py-4 whitespace-nowrap sticky left-0 bg-white group-hover:bg-[#f6f8fb] transition-colors border-r border-slate-100/50 z-10 shadow-[5px_0_15px_-5px_rgba(0,0,0,0.03)] text-center min-w-[220px]">
+                    <div className="flex items-center justify-center gap-2">
+                      <span className="text-[13.5px] font-semibold text-slate-900">{highlight(job.title)}</span>
                       {job.pairStatus === 'Unpublished' && (
                         <span className="text-[11px] text-slate-400 font-medium">(draft)</span>
                       )}
                     </div>
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
-                    {job.customer_name}
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700 text-center">
+                    {highlight(job.customer_name)}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
-                    {job.location}
+                  <td className="px-6 py-4 text-[13.5px] font-medium text-slate-700 text-center">
+                    {(job.recruiterEmails || []).length === 0 ? (
+                      "—"
+                    ) : (
+                      <div className="flex flex-col gap-1 items-center">
+                        {job.recruiterEmails.map((email, i) => (
+                          <span key={i}>{highlight(email)}</span>
+                        ))}
+                      </div>
+                    )}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
-                    {job.priority}
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700 text-center">
+                    {highlight(job.location)}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
-                    {job.programDuration}
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700 text-center">
+                    {highlight(job.priority)}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700 text-center">
+                    {highlight(job.programDuration)}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700 text-center">
                     {job.maxAllowedSubmittals}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
+                  <td className="px-6 py-4 whitespace-nowrap text-center">
                     <div className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11.5px] font-bold tracking-wide ${getStatusColor(job.status)}`}>
-                      {job.status}
+                      {highlight(job.status)}
                     </div>
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap">
+                  <td className="px-6 py-4 whitespace-nowrap text-center">
                     <div className={`inline-flex items-center px-2.5 py-1 rounded-full text-[11.5px] font-bold tracking-wide ${getPairStatusColor(job.pairStatus)}`}>
-                      {job.pairStatus}
+                      {highlight(job.pairStatus)}
                     </div>
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700 text-center">
+                    {job.pairLaunchedAt ? (
+                      <div className="flex flex-col gap-0.5 items-center" title={new Date(job.pairLaunchedAt).toLocaleString("en-US", { timeZone: "America/New_York", timeZoneName: "short" })}>
+                        <span>{new Date(job.pairLaunchedAt).toLocaleDateString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric" })}</span>
+                        <span className="text-[12px]">{new Date(job.pairLaunchedAt).toLocaleTimeString("en-US", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit", timeZoneName: "short" })}</span>
+                      </div>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700 text-center">
                     {job.candidatesLaunched}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700 text-center">
                     {job.completeSubmissions}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700 text-center">
                     {job.passSubmissions}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700 text-center">
                     {job.pairExternalSubs}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700 text-center">
                     {job.feedbackCompleted}
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700">
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700 text-center">
                     {job.timeToFirstPass ? `${job.timeToFirstPass} mins` : "—"}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-center text-slate-400 sticky right-0 bg-white group-hover:bg-[#f6f8fb] transition-colors border-l border-slate-100/50 z-10 shadow-[-10px_0_15px_-5px_rgba(0,0,0,0.03)]">
