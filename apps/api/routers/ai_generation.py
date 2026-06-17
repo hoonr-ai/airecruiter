@@ -10,7 +10,7 @@ import hashlib
 from dataclasses import asdict
 from datetime import datetime
 
-from services.jobdiva import jobdiva_service
+from services.jobdiva import jobdiva_service, strip_job_version_suffix
 from services.job_skills_extractor import JobSkillsExtractor, ExtractedSkill
 from services.job_skills_db import JobSkillsDB
 from services.job_rubric_db import JobRubricDB
@@ -495,8 +495,18 @@ async def generate_rubric(req: RubricGenerationRequest):
                 # We need the correct jobdiva_id (ref code) for cross-referencing
                 # Use provided jobdivaId or try to resolve from background service
                 ref_id = req.jobdivaId
-                
-                if not ref_id or "-" not in str(ref_id):
+
+                # A versioned ref (26-06182-v2) is a local clone identity — its
+                # rubric lives in the v2 bucket. Use it verbatim and NEVER resolve
+                # it through JobDiva (get_job_by_id strips -vN to the root, which
+                # would write v2's rubric into v1's bucket).
+                versioned_ref = next(
+                    (r for r in (req.jobdivaId, req.jobId) if r and strip_job_version_suffix(r) != r),
+                    None,
+                )
+                if versioned_ref:
+                    ref_id = versioned_ref
+                elif not ref_id or "-" not in str(ref_id):
                     logger.info(f"🔍 Resolving ref_id for numeric jobId: {req.jobId}")
                     job_context = await jobdiva_service.get_job_by_id(req.jobId)
                     if job_context and job_context.get('jobdiva_id'):
@@ -645,7 +655,11 @@ async def get_job_rubric(job_id: str):
         # First resolve the jobdiva_id (ref code) if only numeric ID is provided
         # The rubric tables use jobdiva_id (e.g. 26-06182)
         ref_id = job_id
-        if "-" not in job_id:
+        if strip_job_version_suffix(job_id) != job_id:
+            # Versioned clone (26-06182-v2): its rubric is stored under the
+            # versioned ref. Use it directly — do not resolve through JobDiva.
+            ref_id = job_id
+        elif "-" not in job_id:
             job_context = await jobdiva_service.get_job_by_id(job_id)
             if job_context:
                 ref_id = job_context.get('jobdiva_id', job_id)

@@ -1161,7 +1161,13 @@ async def refresh_candidate_resume_match(
     try:
         from psycopg2.extras import RealDictCursor
 
+        # Both keys default to the incoming ref so the sourced_candidates lookup
+        # below works even if the job row isn't found. For a v2 job both columns
+        # equal the versioned ref "26-06182-v2", keeping the lookup in the v2
+        # candidate bucket. (resolved_numeric_job_id was previously referenced
+        # but never defined here — a hard NameError → 500 on every call.)
         resolved_jobdiva_id = job_id_or_ref
+        resolved_numeric_job_id = job_id_or_ref
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
@@ -1177,6 +1183,7 @@ async def refresh_candidate_resume_match(
                 job_row = cur.fetchone()
                 if job_row:
                     resolved_jobdiva_id = job_row[0] or job_row[1] or job_id_or_ref
+                    resolved_numeric_job_id = job_row[1] or job_row[0] or job_id_or_ref
         finally:
             conn.close()
 

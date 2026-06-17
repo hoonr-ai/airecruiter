@@ -1615,7 +1615,7 @@ export default function CandidateRankingsPage() {
                     ({job?.jobdiva_id || job?.job_id || jobId})
                     {(job?.jobdiva_numeric_id || job?.jobdiva_id) && (
                       <a
-                        href={`https://www1.jobdiva.com/employers/myjobs/vieweditjobform.jsp?lstjobs=1&jobid=${encodeURIComponent(job.jobdiva_numeric_id || job.jobdiva_id || "")}`}
+                        href={`https://www1.jobdiva.com/employers/myjobs/vieweditjobform.jsp?lstjobs=1&jobid=${encodeURIComponent((job.jobdiva_numeric_id || job.jobdiva_id || "").replace(/-v\d+$/, ""))}`}
                         target="_blank"
                         rel="noopener noreferrer"
                         title="Open job in JobDiva"
