@@ -262,6 +262,8 @@ def _build_prompt(
     target_count: int,
     family: str = "it",
     domain: str = "generic_it",
+    leniency_mode: bool = False,
+    difficulty_mode: str = "medium",
 ) -> str:
     def _fmt_skills(skills: List[Dict[str, Any]]) -> str:
         if not skills:
@@ -282,17 +284,32 @@ def _build_prompt(
     ) or _IT_DOMAIN_SHOTS["generic_it"]
     artifacts = _FAMILY_ARTIFACTS.get(shot_key) or _FAMILY_ARTIFACTS["generic_it"]
 
+    difficulty = (difficulty_mode or "medium").strip().lower()
+    if difficulty not in ("easy", "medium", "hard"):
+        difficulty = "medium"
+
     intro = (
         "You are a senior technical recruiter and AI interview screener specializing in\n"
         f"engineering hiring for a {seniority} {job_title} role.\n\n"
         "This is a 10–20 minute first-round AUDIO screening — NOT a deep technical interview,\n"
         "NOT a behavioral interview, NOT a coding exercise. Your job:\n"
-        "  - Verify the candidate genuinely possesses the rubric skills (no keyword stuffing)\n"
-        "  - Detect fake or surface-level experience\n"
-        "  - Validate practical understanding through verbal discussion\n"
-        "  - Surface depth, production exposure, and problem-solving maturity"
-        if is_it
-        else "You are an experienced recruiter writing screening questions for a live phone screen."
+        "  - Verify the candidate has relevant experience with the rubric skills\n"
+        "  - Detect genuine understanding through practical discussion\n"
+        "  - Validate real-world application and problem-solving ability\n"
+        "  - Surface practical knowledge and communication clarity"
+        if (is_it and difficulty == "easy")
+        else (
+            "You are a senior technical recruiter and AI interview screener specializing in\n"
+            f"engineering hiring for a {seniority} {job_title} role.\n\n"
+            "This is a 10–20 minute first-round AUDIO screening — NOT a deep technical interview,\n"
+            "NOT a behavioral interview, NOT a coding exercise. Your job:\n"
+            "  - Verify the candidate genuinely possesses the rubric skills (no keyword stuffing)\n"
+            "  - Detect fake or surface-level experience\n"
+            "  - Validate practical understanding through verbal discussion\n"
+            "  - Surface depth, production exposure, and problem-solving maturity"
+            if is_it
+            else "You are an experienced recruiter writing screening questions for a live phone screen."
+        )
     )
     rule3 = (
         "Questions must be PRACTICAL and SCENARIO-DRIVEN. Anchor each question on a concrete\n"
@@ -352,6 +369,22 @@ def _build_prompt(
         "   each question in one of them and set `related_skill` to the matching rubric value."
     )
 
+    task_objective = (
+        "Produce exactly {target_count} role-specific screening questions that are job-relevant and\n"
+        "beginner-friendly: practical and clear, focused on fundamentals and day-to-day usage.\n"
+        "Avoid advanced edge cases or deep architecture forensics."
+        if difficulty == "easy"
+        else (
+            "Produce exactly {target_count} role-specific screening questions that are job-relevant and\n"
+            "intermediate: practical and specific, requiring hands-on understanding without overly\n"
+            "advanced expert-only depth."
+            if difficulty == "medium"
+            else "Produce exactly {target_count} role-specific screening questions that are job-relevant and\n"
+            "expert-level: depth-probing and technically rigorous, capable of differentiating senior\n"
+            "practitioners from surface-level familiarity."
+        )
+    )
+
     return f"""{intro}
 
 ROLE CONTEXT
@@ -370,9 +403,7 @@ RUBRIC — Nice-to-have skills:
 {_fmt_skills(preferred_skills)}
 
 TASK
-Produce exactly {target_count} role-specific screening questions that would
-genuinely differentiate a candidate who has DONE this work from one who has only read about
-it or glanced at a tutorial.
+{task_objective.format(target_count=target_count)}
 
 STRICT RULES — FOLLOW EVERY ONE:
 1. Do NOT write "Can you describe your experience with <skill>?" — that is the boilerplate
@@ -415,6 +446,7 @@ STRICT RULES — FOLLOW EVERY ONE:
     current job-search status. The front-matter already covers those — your
     questions would be duplicates and will be rejected. Every question MUST
     probe a rubric skill or role competence.
+12. {"DIFFICULTY = EASY (beginner): focus on fundamentals and common day-to-day tasks." if difficulty == "easy" else ("DIFFICULTY = MEDIUM (intermediate): require practical implementation understanding and clear decision rationale." if difficulty == "medium" else "DIFFICULTY = HARD (expert): include deeper troubleshooting, trade-offs, architecture reasoning, and production-scale judgment.")}
 
 OUTPUT FORMAT — return a STRICT JSON object like this:
 {{
@@ -561,6 +593,8 @@ async def generate_screening_questions(
     city: str = "",
     address: str = "",
     total_years: int = 0,
+    leniency_mode: bool = False,
+    difficulty_mode: str = "",
 ) -> List[Dict[str, Any]]:
     """
     Generate a full screening-question set for a job.
@@ -577,6 +611,18 @@ async def generate_screening_questions(
     """
     seniority = detect_seniority(job_title)
     target_count = _question_count_for_level(screening_level)
+    difficulty_mode_normalized = (difficulty_mode or "").strip().lower()
+    if difficulty_mode_normalized not in ("easy", "medium", "hard"):
+        if leniency_mode:
+            difficulty_mode_normalized = "easy"
+        else:
+            level = (screening_level or "").strip().lower()
+            if level in ("light", "low", "basic", "quick"):
+                difficulty_mode_normalized = "easy"
+            elif level in ("intensive", "deep", "extensive", "high"):
+                difficulty_mode_normalized = "hard"
+            else:
+                difficulty_mode_normalized = "medium"
 
     # Split rubric skills by required/preferred.
     all_skills: List[Dict[str, Any]] = []
@@ -678,23 +724,40 @@ async def generate_screening_questions(
         target_count=target_count,
         family=family,
         domain=domain,
+        leniency_mode=leniency_mode,
+        difficulty_mode=difficulty_mode_normalized,
     )
 
     is_it_role = family == "it"
+    difficulty = difficulty_mode_normalized
     system_message = (
         "You are a senior technical recruiter and AI interview screener for engineering hiring. "
-        "You write 4–6 question first-round audio screens that verify a candidate genuinely "
-        "possesses the rubric skills, detect keyword stuffing, and validate practical "
-        "understanding through verbal discussion. NOT a deep technical interview. NOT a "
-        "behavioral interview. NOT a coding exercise. Questions are practical, scenario-driven, "
-        "anchored to real production work, and answerable in 60–90 seconds on a phone call. "
-        "Each question pairs a pass signal (what to expect from a real practitioner) with a red "
-        "flag (phrasing that indicates fake or surface-level experience). Output strict JSON only."
+        "Write 4–6 first-round audio screening questions at BEGINNER level: practical, clear, "
+        "day-to-day fundamentals tied to rubric skills. Avoid advanced edge cases. NOT a deep "
+        "technical interview. NOT a behavioral interview. NOT a coding exercise. Output strict JSON only."
+        if difficulty == "easy"
+        else (
+            "You are a senior technical recruiter and AI interview screener for engineering hiring. "
+            "Write 4–6 first-round audio screening questions at INTERMEDIATE level: practical and "
+            "specific, requiring hands-on understanding and clear implementation reasoning. NOT a deep "
+            "technical interview. NOT a behavioral interview. NOT a coding exercise. Output strict JSON only."
+            if difficulty == "medium"
+            else "You are a senior technical recruiter and AI interview screener for engineering hiring. "
+            "Write 4–6 first-round audio screening questions at EXPERT level: depth-probing and "
+            "technically rigorous, with concrete trade-offs, debugging, and system-level judgment. "
+            "NOT a behavioral interview. NOT a coding exercise. Output strict JSON only."
+        )
     ) if is_it_role else (
-        "You write sharp, role-relevant screening questions for non-technical roles. "
-        "You avoid software-delivery jargon (CI/CD, deployment, rollback, architecture, "
-        "production systems, release pipelines) and ground questions in stakeholder, "
-        "process, and outcome language. You always return strict JSON."
+        "You write role-relevant screening questions for non-technical roles at BEGINNER level: "
+        "fundamentals and day-to-day execution checks. Avoid software-delivery jargon. Output strict JSON."
+        if difficulty == "easy"
+        else (
+            "You write role-relevant screening questions for non-technical roles at INTERMEDIATE level: "
+            "practical scenario and stakeholder execution checks. Avoid software-delivery jargon. Output strict JSON."
+            if difficulty == "medium"
+            else "You write role-relevant screening questions for non-technical roles at EXPERT level: "
+            "deeper decision-making, trade-offs, and measurable-outcome ownership checks. Avoid software-delivery jargon. Output strict JSON."
+        )
     )
 
     role_specific: List[Dict[str, Any]] = []
@@ -707,7 +770,7 @@ async def generate_screening_questions(
     # LLM failure.
     from core import llm_cache as _llm_cache
     _screening_cache_key = _llm_cache.make_key(
-        "screening", 1, system_message, prompt, screening_level
+        "screening", 1, system_message, prompt, screening_level, leniency_mode, difficulty_mode_normalized
     )
     try:
         _cached = await _llm_cache.get_json(_screening_cache_key)
@@ -741,6 +804,14 @@ async def generate_screening_questions(
             focus_skills = [{"value": "core role responsibilities"}]
 
         level = (screening_level or "").strip().lower()
+        # Difficulty selection from Step 4 regenerate overrides fallback
+        # template depth so easy/medium/hard stays consistent even if LLM fails.
+        if difficulty_mode_normalized == "easy":
+            level = "light"
+        elif difficulty_mode_normalized == "medium":
+            level = "medium"
+        elif difficulty_mode_normalized == "hard":
+            level = "intensive"
         for idx in range(target_count):
             skill = focus_skills[idx % len(focus_skills)]
             name = skill.get("value") or skill.get("name") or (
@@ -749,33 +820,49 @@ async def generate_screening_questions(
             if is_it_role:
                 if level in ("intensive", "deep", "extensive", "high"):
                     q_text = (
-                        f"In a production system using {name}, what specific failure-mode signal "
+                        f"In a system using {name}, if errors increased, what would you check first "
+                        "and what practical step would you take next?"
+                        if leniency_mode
+                        else f"In a production system using {name}, what specific failure-mode signal "
                         "(metric, log line, or error class) led you to root cause, and which exact "
                         "configuration or code change prevented recurrence?"
                     )
                     criteria = (
-                        f"Candidate names a concrete {name} signal, root cause, and the precise "
+                        f"Candidate demonstrates understanding of how to troubleshoot issues in {name}. "
+                        f"They can identify a debugging approach and explain a {name} configuration or code change."
+                        if leniency_mode
+                        else f"Candidate names a concrete {name} signal, root cause, and the precise "
                         "configuration knob, code path, or design change that fixed it."
                     )
                     category = "debugging"
                 elif level in ("light", "low", "basic", "quick"):
                     q_text = (
-                        f"Name one specific configuration, syntax detail, or API in {name} that "
+                        f"What is one {name} feature, API, or configuration you have used directly, "
+                        "and what changed because of it?"
+                        if leniency_mode
+                        else f"Name one specific configuration, syntax detail, or API in {name} that "
                         "you've tuned or used directly, and what observable behavior changed."
                     )
                     criteria = (
-                        f"Candidate names a real {name} flag/API/syntax detail and ties it to a "
+                        f"Candidate demonstrates familiarity with {name}. They can describe a feature or configuration they've worked with and how it affects behavior."
+                        if leniency_mode
+                        else f"Candidate names a real {name} flag/API/syntax detail and ties it to a "
                         "concrete, verifiable behavior change — not a generic 'we used it for X'."
                     )
                     category = "technical-depth"
                 else:
                     q_text = (
-                        f"Walk through one concrete implementation choice you made with {name} — "
+                        f"Describe one implementation choice you made with {name}, and one trade-off "
+                        "you considered while making that decision."
+                        if leniency_mode
+                        else f"Walk through one concrete implementation choice you made with {name} — "
                         "what specific alternative did you reject, and what technical trade-off "
                         "(latency, consistency, throughput, cost) drove the decision?"
                     )
                     criteria = (
-                        f"Candidate identifies a specific {name} implementation choice, names the "
+                        f"Candidate can explain a {name} implementation decision they made and articulate a trade-off or consideration involved."
+                        if leniency_mode
+                        else f"Candidate identifies a specific {name} implementation choice, names the "
                         "rejected alternative, and articulates a concrete technical trade-off."
                     )
                     category = "technical-depth"
@@ -784,29 +871,44 @@ async def generate_screening_questions(
                 # no production/architecture jargon.
                 if level in ("intensive", "deep", "extensive", "high"):
                     q_text = (
-                        f"Describe a real situation where {name} drove a measurable outcome. "
+                        f"Describe a situation where {name} influenced an outcome. "
+                        "What decision did you make and who did you coordinate with?"
+                        if leniency_mode
+                        else f"Describe a real situation where {name} drove a measurable outcome. "
                         "What was the decision, who were the stakeholders, and what trade-off did you make?"
                     )
                     criteria = (
-                        f"Candidate names specific stakeholders, a concrete decision, and a measurable result tied to {name}."
+                        f"Candidate can discuss a situation involving {name} with some stakeholders and outcome."
+                        if leniency_mode
+                        else f"Candidate names specific stakeholders, a concrete decision, and a measurable result tied to {name}."
                     )
                     category = "scenario"
                 elif level in ("light", "low", "basic", "quick"):
                     q_text = (
-                        f"What's one recent task involving {name} where you owned the outcome? "
+                        f"What's one recent task involving {name} where you contributed directly, "
+                        "and what changed because of your work?"
+                        if leniency_mode
+                        else f"What's one recent task involving {name} where you owned the outcome? "
                         "What changed because of your work?"
                     )
                     criteria = (
-                        f"Candidate gives a specific {name} example with clear ownership and a concrete change in outcome."
+                        f"Candidate can describe involvement with {name} and a change or outcome they contributed to."
+                        if leniency_mode
+                        else f"Candidate gives a specific {name} example with clear ownership and a concrete change in outcome."
                     )
                     category = "process"
                 else:
                     q_text = (
-                        f"Walk me through a recent piece of work involving {name}: who did you coordinate with, "
+                        f"Walk me through a recent piece of work involving {name}: who did you coordinate "
+                        "with, and what result did your work support?"
+                        if leniency_mode
+                        else f"Walk me through a recent piece of work involving {name}: who did you coordinate with, "
                         "what trade-off did you make, and what was the result?"
                     )
                     criteria = (
-                        f"Candidate explains a concrete {name} situation with stakeholders, a trade-off, and a measurable outcome."
+                        f"Candidate can describe a {name} situation with coordination and outcome involvement."
+                        if leniency_mode
+                        else f"Candidate explains a concrete {name} situation with stakeholders, a trade-off, and a measurable outcome."
                     )
                     category = "stakeholder"
 
@@ -843,22 +945,32 @@ async def generate_screening_questions(
             )
             if is_it_role:
                 q_text = (
-                    f"Name one specific configuration, syntax detail, API, or version-pinned "
+                    f"What is one {name} configuration, API, or behavior you have used directly, "
+                    "and what changed as a result?"
+                    if leniency_mode
+                    else f"Name one specific configuration, syntax detail, API, or version-pinned "
                     f"behavior in {name} that you have personally tuned, and what observable "
                     "system behavior changed as a result."
                 )
                 criteria = (
-                    f"Candidate names a real {name} flag/API/syntax detail and ties it to a "
+                    f"Candidate demonstrates familiarity with {name} and can describe a feature or behavior they've worked with."
+                    if leniency_mode
+                    else f"Candidate names a real {name} flag/API/syntax detail and ties it to a "
                     "concrete, verifiable behavior change — not a generic 'we used it for X'."
                 )
                 category = "technical-depth"
             else:
                 q_text = (
-                    f"Walk through a recent piece of work involving {name}: who did you "
+                    f"Walk through a recent piece of work involving {name}: who did you coordinate "
+                    "with, and what result did your work support?"
+                    if leniency_mode
+                    else f"Walk through a recent piece of work involving {name}: who did you "
                     "coordinate with, what trade-off did you make, and what was the result?"
                 )
                 criteria = (
-                    f"Candidate explains a concrete {name} situation with stakeholders, a "
+                    f"Candidate can describe a {name} situation with coordination and outcome involvement."
+                    if leniency_mode
+                    else f"Candidate explains a concrete {name} situation with stakeholders, a "
                     "trade-off, and a measurable outcome."
                 )
                 category = "scenario"

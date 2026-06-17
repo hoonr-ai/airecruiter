@@ -584,7 +584,15 @@ class AutoAssignService:
                                         location    = COALESCE(NULLIF(sc.location, ''), v.location),
                                         profile_url = COALESCE(NULLIF(sc.profile_url, ''), v.profile_url),
                                         resume_text = COALESCE(NULLIF(sc.resume_text, ''), v.resume_text),
-                                        data        = v.data,
+                                        data        = COALESCE(v.data, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
+                                            'engage_status',       sc.data->>'engage_status',
+                                            'engage_interview_id', sc.data->>'engage_interview_id',
+                                            'engage_score',        sc.data->'engage_score',
+                                            'engage_updated_at',   sc.data->>'engage_updated_at',
+                                            'engage_last_response',sc.data->'engage_last_response',
+                                            'engage_hard_filter_status', sc.data->>'engage_hard_filter_status',
+                                            'engage_hard_filter_reason', sc.data->>'engage_hard_filter_reason'
+                                        )),
                                         updated_at  = CURRENT_TIMESTAMP
                                     FROM (VALUES %s) AS v (
                                         id, email, phone, headline, location,
@@ -623,7 +631,15 @@ class AutoAssignService:
                                         location    = EXCLUDED.location,
                                         profile_url = EXCLUDED.profile_url,
                                         resume_text = EXCLUDED.resume_text,
-                                        data        = EXCLUDED.data,
+                                        data        = COALESCE(EXCLUDED.data, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
+                                            'engage_status',       sourced_candidates.data->>'engage_status',
+                                            'engage_interview_id', sourced_candidates.data->>'engage_interview_id',
+                                            'engage_score',        sourced_candidates.data->'engage_score',
+                                            'engage_updated_at',   sourced_candidates.data->>'engage_updated_at',
+                                            'engage_last_response',sourced_candidates.data->'engage_last_response',
+                                            'engage_hard_filter_status', sourced_candidates.data->>'engage_hard_filter_status',
+                                            'engage_hard_filter_reason', sourced_candidates.data->>'engage_hard_filter_reason'
+                                        )),
                                         status      = EXCLUDED.status,
                                         resume_match_percentage = EXCLUDED.resume_match_percentage,
                                         updated_at  = CURRENT_TIMESTAMP
@@ -947,17 +963,17 @@ class AutoAssignService:
                         """
                         SELECT
                             COUNT(DISTINCT sc.candidate_id)                                 AS candidates_sourced,
-                            COUNT(DISTINCT CASE 
-                                WHEN sc.data->>'engage_status' IS NOT NULL AND sc.data->>'engage_status' != '' 
-                                 AND (
-                                     sc.data->>'engage_interview_id' IS NOT NULL AND sc.data->>'engage_interview_id' != ''
-                                     OR EXISTS (
-                                         SELECT 1 FROM engage_interview_audit ea
-                                         WHERE ea.candidate_id = sc.candidate_id
-                                           AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
-                                     )
-                                 )
-                                THEN sc.candidate_id 
+                            COUNT(DISTINCT CASE
+                                WHEN (
+                                    COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''
+                                    OR EXISTS (
+                                        SELECT 1 FROM engage_interview_audit ea
+                                        WHERE ea.candidate_id = sc.candidate_id
+                                          AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
+                                          AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
+                                    )
+                                )
+                                THEN sc.candidate_id
                             END) AS candidates_launched,
                             COUNT(DISTINCT CASE
                                 WHEN sc.data->>'engage_status' IN
@@ -971,7 +987,7 @@ class AutoAssignService:
                         FROM sourced_candidates sc
                         WHERE (sc.jobdiva_id = %s OR sc.jobdiva_id = %s)
                         """,
-                        (ref_id, num_id, ref_id, num_id, ref_id, num_id),
+                        (ref_id, num_id, ref_id, num_id),
                     )
                     row = cur.fetchone()
                     if not row:

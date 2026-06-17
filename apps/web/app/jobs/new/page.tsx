@@ -56,7 +56,8 @@ import {
   Briefcase,
   Clock,
   Phone,
-  Calendar
+  Calendar,
+  RotateCw
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -231,6 +232,7 @@ function isRecruiterSource(source: string | null | undefined): boolean {
 
 type Step = 1 | 2 | 3 | 4 | 5;
 type ScreeningLevel = "L1" | "L1.5" | "L2";
+type RegenerateDifficulty = "easy" | "medium" | "hard";
 type EmploymentType = "W2" | "1099" | "C2C" | "Full-Time";
 type ScreenQuestion = {
   id: number;
@@ -3169,11 +3171,7 @@ function NewJobPageContent() {
                 Job posting team will receive your request to post after you Launch Hoonr-Curate.
               </p>
             </div>
-            {selectedJobBoards.length === 0 && (
-              <p className="text-[12px] text-red-500 font-medium mt-2 px-1">
-                Select at least one job board to continue.
-              </p>
-            )}
+
           </div>
         </div>
       </div>
@@ -4170,7 +4168,13 @@ function NewJobPageContent() {
   // `customQuestions` pass-through below preserves hand-crafted entries.
   const lastGeneratedLevelRef = useRef<string | null>(null);
 
-  const initializeScreenQuestionsFromRubric = async (opts: { force?: boolean } = {}) => {
+  // Track regenerate button loading state
+  const isRegeneratingRef = useRef(false);
+  const [isRegenerating, setIsRegenerating] = useState(false);
+  const [regenerateDifficulty, setRegenerateDifficulty] = useState<RegenerateDifficulty | "">("");
+  const [regenerateDifficultyError, setRegenerateDifficultyError] = useState("");
+
+  const initializeScreenQuestionsFromRubric = async (opts: { force?: boolean, leniency?: boolean, difficultyMode?: RegenerateDifficulty } = {}) => {
     if (!jobData) return;
     // Source / view mode: Steps 1-4 are frozen and the saved question set is
     // the audit trail of what Alex actually asked. Never recompute defaults
@@ -4194,8 +4198,15 @@ function NewJobPageContent() {
 
     let idCounter = 1;
     const questions: ScreenQuestion[] = [];
+    const existingRoleSpecificCount = screenQuestions.filter(
+      question => question.category === "role-specific"
+    ).length;
     const targetRoleSpecificCount =
-      screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5;
+      opts.force && !!opts.difficultyMode
+        ? (existingRoleSpecificCount > 0
+            ? existingRoleSpecificCount
+            : (screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5))
+        : (screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5);
     const customQuestions = screenQuestions.filter(
       question => question.category !== "default" && question.category !== "role-specific"
     );
@@ -4257,22 +4268,30 @@ function NewJobPageContent() {
       const apiUrl = API_BASE;
       const jobRef = numericJobId || jobdivaId || "new";
       const levelForApi = screeningLevel === "L1" ? "light" : screeningLevel === "L2" ? "intensive" : "medium";
+      const requestBody: any = {
+        jobTitle: (enhancedTitle || jobTitle || "").trim(),
+        rubric: rubricData || {},
+        screeningLevel: levelForApi,
+        customerName: jobData?.customer_name || "",
+        workArrangement: jobData?.location_type || "",
+        // Plumbed so the backend can detect the JobDiva-import quirk where
+        // city is literally "REMOTE" with location_type empty, and skip the
+        // onsite work-arrangement question accordingly.
+        city: jobData?.city || "",
+        address: addressStr,
+        totalYears: rubricData?.total_years ?? 0,
+      };
+      // Add leniency mode if regenerating with lenient flag
+      if (opts.leniency) {
+        requestBody.leniency_mode = true;
+      }
+      if (opts.difficultyMode) {
+        requestBody.difficulty_mode = opts.difficultyMode;
+      }
       const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobRef}/screening-questions/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jobTitle: (enhancedTitle || jobTitle || "").trim(),
-          rubric: rubricData || {},
-          screeningLevel: levelForApi,
-          customerName: jobData?.customer_name || "",
-          workArrangement: jobData?.location_type || "",
-          // Plumbed so the backend can detect the JobDiva-import quirk where
-          // city is literally "REMOTE" with location_type empty, and skip the
-          // onsite work-arrangement question accordingly.
-          city: jobData?.city || "",
-          address: addressStr,
-          totalYears: rubricData?.total_years ?? 0,
-        }),
+        body: JSON.stringify(requestBody),
       });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
@@ -4396,6 +4415,27 @@ function NewJobPageContent() {
         order_index: questions.length + roleSpecific.length,
         is_hard_filter: false,
       });
+    }
+
+    // Lenient regenerate should preserve recruiter-facing order exactly:
+    // replace only role-specific content in-place and keep ids/order_index.
+    if (opts.force && !!opts.difficultyMode && screenQuestions.length > 0) {
+      let roleIdx = 0;
+      const updatedQuestions = screenQuestions.map((existing) => {
+        if (existing.category !== "role-specific") return existing;
+        const nextRoleQuestion = roleSpecific[roleIdx++];
+        if (!nextRoleQuestion) return existing;
+        return {
+          ...existing,
+          question_text: nextRoleQuestion.question_text,
+          pass_criteria: nextRoleQuestion.pass_criteria,
+        };
+      });
+
+      setScreenQuestions(updatedQuestions);
+      setQuestionIdCounter(Math.max(0, ...updatedQuestions.map(q => q.id)) + 1);
+      lastGeneratedLevelRef.current = screeningLevel;
+      return;
     }
 
     roleSpecific.forEach(q => questions.push(q));
@@ -5819,6 +5859,41 @@ function NewJobPageContent() {
     }
   };
 
+  const regenerateRoleSpecificQuestions = async () => {
+    if (isRegeneratingRef.current) return; // Prevent duplicate clicks
+    if (!regenerateDifficulty) {
+      setRegenerateDifficultyError("Select a difficulty before regenerating.");
+      return;
+    }
+    setRegenerateDifficultyError("");
+    isRegeneratingRef.current = true;
+    setIsRegenerating(true);
+    try {
+      // Regenerate role-specific questions with selected difficulty while
+      // preserving default/custom questions and original question ordering.
+      await initializeScreenQuestionsFromRubric({
+        force: true,
+        leniency: regenerateDifficulty === "easy",
+        difficultyMode: regenerateDifficulty,
+      });
+      trackEvent("job_wizard_step4_regenerate_role_specific", {
+        step: 4,
+        total_questions: screenQuestions.length,
+        leniency_mode: regenerateDifficulty === "easy",
+        difficulty_mode: regenerateDifficulty,
+      });
+    } catch (e) {
+      console.error("Regenerate role-specific questions failed", e);
+      trackEvent("job_wizard_step4_regenerate_failed", {
+        step: 4,
+        error: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      isRegeneratingRef.current = false;
+      setIsRegenerating(false);
+    }
+  };
+
   const addScreenQuestion = () => {
     const newQuestion: ScreenQuestion = {
       id: questionIdCounter,
@@ -6173,16 +6248,58 @@ function NewJobPageContent() {
             );
           })}
 
-          {/* Add Question Button */}
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={addScreenQuestion}
-            className="mt-3 border-slate-200 text-slate-600 bg-white hover:bg-slate-50 font-medium text-[13px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
-          >
-            <Plus className="w-3.5 h-3.5 mr-1.5" />
-            Add Question
-          </Button>
+          {/* Add Question and Regenerate Buttons */}
+          <div className="flex gap-2 mt-3 items-start flex-wrap">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={addScreenQuestion}
+              className="border-slate-200 text-slate-600 bg-white hover:bg-slate-50 font-medium text-[13px] rounded-lg shadow-none h-[34px] px-3 border transition-all"
+            >
+              <Plus className="w-3.5 h-3.5 mr-1.5" />
+              Add Question
+            </Button>
+            <div className="min-w-[170px]">
+              <select
+                value={regenerateDifficulty}
+                onChange={(e) => {
+                  setRegenerateDifficulty(e.target.value as RegenerateDifficulty | "");
+                  if (e.target.value) setRegenerateDifficultyError("");
+                }}
+                disabled={isRegenerating || isReadOnly}
+                className="h-[34px] w-full rounded-lg border border-slate-200 bg-white px-2.5 text-[13px] font-medium text-slate-700 outline-none focus:ring-2 focus:ring-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                aria-label="Select regenerate difficulty"
+              >
+                <option value="">Select difficulty</option>
+                <option value="easy">Easy (Beginner)</option>
+                <option value="medium">Medium (Intermediate)</option>
+                <option value="hard">Hard (Expert)</option>
+              </select>
+              {regenerateDifficultyError && (
+                <p className="mt-1 text-[11px] text-red-500">{regenerateDifficultyError}</p>
+              )}
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={regenerateRoleSpecificQuestions}
+              disabled={isRegenerating || isReadOnly || !regenerateDifficulty}
+              className="border-slate-200 text-slate-600 bg-white hover:bg-slate-50 font-medium text-[13px] rounded-lg shadow-none h-[34px] px-3 border transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Regenerate role-specific questions with selected difficulty"
+            >
+              {isRegenerating ? (
+                <>
+                  <div className="w-3.5 h-3.5 mr-1.5 border-2 border-slate-400 border-t-slate-600 rounded-full animate-spin" />
+                  Regenerating...
+                </>
+              ) : (
+                <>
+                  <RotateCw className="w-3.5 h-3.5 mr-1.5" />
+                  Regenerate
+                </>
+              )}
+            </Button>
+          </div>
         </section>
       </div>
     </div>
@@ -6458,7 +6575,7 @@ function NewJobPageContent() {
             realCandidateIds: batchIds,
             isInitialLaunch: wizardMode !== 'source',
             notifyRecruiters: true,
-            sendJobPostingEmail: i === batches.length - 1 && totalFailedBatches === 0,
+            sendJobPostingEmail: i === batches.length - 1 && totalFailedBatches === 0 && selectedJobBoards.length > 0,
           });
           if (engageRes.success) {
             batchEngageSent = Array.isArray(engageRes.data) ? engageRes.data.length : batchIds.length;
@@ -8785,10 +8902,6 @@ return (
                 if (isReadOnly) {
                   trackStepAdvance(2, 3, { via: "next_button", read_only: true });
                   setCurrentStep(3);
-                  return;
-                }
-                if (selectedJobBoards.length === 0) {
-                  showToast("Please select at least one job board to publish to before proceeding.", "error");
                   return;
                 }
                 setIsAdvancingStep(true);
