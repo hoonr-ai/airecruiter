@@ -587,6 +587,8 @@ class ScreeningQuestionsRequest(BaseModel):
     city: str = ""
     address: str = ""
     totalYears: Optional[int] = 0
+    leniency_mode: bool = False         # lenient regeneration softens criteria
+    difficulty_mode: str = ""          # easy | medium | hard
 
 
 @router.post("/jobs/{job_id}/screening-questions/generate")
@@ -617,6 +619,8 @@ async def generate_screening_questions_endpoint(job_id: str, req: ScreeningQuest
             city=req.city,
             address=req.address,
             total_years=req.totalYears or 0,
+            leniency_mode=req.leniency_mode,
+            difficulty_mode=req.difficulty_mode,
         )
         role_specific_count = len([
             q for q in (questions or [])
