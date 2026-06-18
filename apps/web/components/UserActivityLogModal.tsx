@@ -64,8 +64,48 @@ export function UserActivityLogModal({
   candidateName,
 }: UserActivityLogModalProps) {
   const [logs, setLogs] = useState<ActivityLog[]>([]);
+  const [resolvedQuestionsCompleted, setResolvedQuestionsCompleted] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const extractQuestionsCompleted = (payload: any): number | null => {
+    const data = payload?.data ?? payload;
+    const candidateValues = [
+      data?.summary?.questions_completed,
+      data?.questions_completed,
+      data?.interview?.questions_completed,
+    ];
+    for (const value of candidateValues) {
+      if (typeof value === "number" && Number.isFinite(value)) {
+        return value;
+      }
+    }
+    return null;
+  };
+
+  const loadResolvedQuestionsCompleted = async (): Promise<number | null> => {
+    try {
+      const evaluation = await api.engagement.getInterviewEvaluation(interviewId);
+      const fromEvaluation = extractQuestionsCompleted(evaluation);
+      if (typeof fromEvaluation === "number") {
+        return fromEvaluation;
+      }
+    } catch {
+      // Fallback to score-summary below.
+    }
+
+    try {
+      const scoreSummary = await api.engagement.getInterviewScoreSummary(interviewId);
+      const fromScoreSummary = extractQuestionsCompleted(scoreSummary);
+      if (typeof fromScoreSummary === "number") {
+        return fromScoreSummary;
+      }
+    } catch {
+      // Keep null to preserve existing activity-log value.
+    }
+
+    return null;
+  };
 
   useEffect(() => {
     if (isOpen && interviewId) {
@@ -77,11 +117,34 @@ export function UserActivityLogModal({
     try {
       setLoading(true);
       setError(null);
-      const response = await api.engagement.getActivityLogs(interviewId);
-      if (response.success) {
-        setLogs(response.data.activities || []);
+      const [activityResult, evaluationResult, scoreSummaryResult] = await Promise.allSettled([
+        api.engagement.getActivityLogs(interviewId),
+        api.engagement.getInterviewEvaluation(interviewId),
+        api.engagement.getInterviewScoreSummary(interviewId),
+      ]);
+
+      const fromEvaluation =
+        evaluationResult.status === "fulfilled"
+          ? extractQuestionsCompleted(evaluationResult.value)
+          : null;
+      const fromScoreSummary =
+        scoreSummaryResult.status === "fulfilled"
+          ? extractQuestionsCompleted(scoreSummaryResult.value)
+          : null;
+      setResolvedQuestionsCompleted(
+        typeof fromEvaluation === "number"
+          ? fromEvaluation
+          : (typeof fromScoreSummary === "number" ? fromScoreSummary : null)
+      );
+
+      if (activityResult.status === "fulfilled" && activityResult.value.success) {
+        setLogs(activityResult.value.data.activities || []);
       } else {
-        setError(response.message || "Failed to load activity logs");
+        const activityError =
+          activityResult.status === "fulfilled"
+            ? activityResult.value.message
+            : null;
+        setError(activityError || "Failed to load activity logs");
       }
     } catch (err: any) {
       setError(err.message || "An error occurred while fetching activity logs");
@@ -287,9 +350,13 @@ export function UserActivityLogModal({
                                 Candidate completed the interview successfully.
                               </p>
                             )}
-                            {typeof log.details.questions_completed === "number" && (
+                            {typeof (log.activity_type === "interview_completed" && typeof resolvedQuestionsCompleted === "number"
+                              ? resolvedQuestionsCompleted
+                              : log.details.questions_completed) === "number" && (
                               <p className="text-slate-700">
-                                Questions completed: {log.details.questions_completed}
+                                Questions completed: {log.activity_type === "interview_completed" && typeof resolvedQuestionsCompleted === "number"
+                                  ? resolvedQuestionsCompleted
+                                  : log.details.questions_completed}
                               </p>
                             )}
                             {log.details.session_started_at && (

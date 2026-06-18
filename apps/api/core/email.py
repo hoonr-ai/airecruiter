@@ -721,6 +721,8 @@ def notify_candidate_passed(
         reason = item.get("reason")
         score = item.get("score", item.get("candidate_score"))
         total_score = item.get("total_score", item.get("total", 10))
+        q_order_raw = item.get("question_order", 0)
+        reason_norm = str(reason or "").strip().lower()
 
         hf_status_raw = item.get("hard_filter_status") or ""
         hf_status = str(hf_status_raw).strip().lower().replace(" ", "_")
@@ -736,12 +738,29 @@ def notify_candidate_passed(
         # - no score badge for info-only questions
         is_info_only = bool(item.get("is_info_only"))
         if not is_info_only:
+            try:
+                q_order = int(q_order_raw)
+            except (TypeError, ValueError):
+                q_order = 0
+
             score_value = None
             try:
                 score_value = float(score) if score is not None else None
             except (TypeError, ValueError):
                 score_value = None
-            is_info_only = (not is_hard_filter) and (score_value is None or score_value < 0)
+
+            if q_order > 0:
+                # Pairbot contract: non-hard-filter Q1-9 are informational.
+                is_info_only = (not is_hard_filter) and (q_order <= 9)
+            else:
+                looks_informational = (
+                    "informational answer captured" in reason_norm
+                    or "info-only" in reason_norm
+                    or "information only" in reason_norm
+                )
+                is_info_only = (not is_hard_filter) and (
+                    looks_informational or score_value is None or score_value < 0
+                )
 
         is_scored_question = bool(item.get("is_scored_question"))
         if not is_scored_question:
@@ -757,7 +776,7 @@ def notify_candidate_passed(
         if is_hard_filter:
             badges.append(_badge("Hard Filter", "#fef2f2", "#fecaca", "#b91c1c"))
         elif is_info_only:
-            badges.append(_badge("Info Only", "#eff6ff", "#bfdbfe", "#1d4ed8"))
+            badges.append(_badge("Info-Only", "#eff6ff", "#bfdbfe", "#1d4ed8"))
 
         if is_scored_question and score is not None:
             if score_num is not None and score_num >= 7:
