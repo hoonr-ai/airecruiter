@@ -475,8 +475,8 @@ export default function DashboardPage() {
             <div className="flex items-center gap-3">
               {avg !== null ? (
                 <>
-                  <span className="text-[20px] font-bold text-indigo-700">{avg.toFixed(1)} min</span>
-                  <span className="text-[12.5px] text-slate-400 font-medium">({(avg / 60).toFixed(2)} hrs)</span>
+                  <span className="text-[15px] font-bold text-indigo-700">{avg.toFixed(1)} mins</span>
+                  <span className="text-[12.5px] text-slate-500 font-medium">({(avg / 60).toFixed(2)} hrs)</span>
                   <span className="inline-flex items-center rounded-full bg-indigo-100 px-2.5 py-0.5 text-[12px] font-semibold text-indigo-600">
                     {sinceMondayJobs.length} job{sinceMondayJobs.length !== 1 ? "s" : ""} with a first pass
                   </span>
