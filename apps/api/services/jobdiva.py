@@ -2820,6 +2820,11 @@ class JobDivaService:
                     loc_type = "Onsite"
                 elif has_remote:
                     loc_type = "Remote"
+                elif _remote_negated and api_loc == "Remote":
+                    # JD explicitly says "not remote" / "no WFH" but API says Remote.
+                    # The JD overrides the API — the job is clearly NOT remote.
+                    # Default to Onsite since the JD is denying remote without naming an alternative.
+                    loc_type = "Onsite"
                 else:
                     # JD is silent about location keywords, trust the API field
                     loc_type = api_loc
