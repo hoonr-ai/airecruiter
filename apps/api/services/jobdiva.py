@@ -2748,9 +2748,58 @@ class JobDivaService:
                 # JobDiva API often incorrectly defaults to "Remote" when JD says Hybrid/Onsite.
                 desc_lower = description.lower()
                 
-                has_hybrid = "hybrid" in desc_lower
+                has_hybrid = False
+                # Only treat "hybrid" as a work-arrangement signal when it appears
+                # near work-context words. Avoid false positives from tech JDs that
+                # say "hybrid cloud", "hybrid architecture", "hybrid environment" etc.
+                _hybrid_work_phrases = [
+                    "hybrid role", "hybrid position", "hybrid work", "hybrid schedule",
+                    "hybrid model", "hybrid arrangement", "hybrid option",
+                    "hybrid setting", "hybrid basis", "hybrid format",
+                    "hybrid working", "hybrid opportunity", "hybrid flexibility",
+                ]
+                _hybrid_tech_phrases = [
+                    "hybrid cloud", "hybrid environment", "hybrid architecture",
+                    "hybrid infrastructure", "hybrid network", "hybrid system",
+                    "hybrid solution", "hybrid deployment", "hybrid setup",
+                    "hybrid approach", "hybrid technology", "hybrid platform",
+                    "hybrid data", "hybrid storage",
+                ]
+                if "hybrid" in desc_lower:
+                    # Has a work-context phrase → definitely hybrid work arrangement
+                    if any(phrase in desc_lower for phrase in _hybrid_work_phrases):
+                        has_hybrid = True
+                    # Only has tech phrases → NOT a work arrangement signal
+                    elif any(phrase in desc_lower for phrase in _hybrid_tech_phrases):
+                        has_hybrid = False
+                    else:
+                        # Ambiguous standalone "hybrid" mention — trust the API field
+                        has_hybrid = ("hybrid" in val_lower)
                 has_onsite = "onsite" in desc_lower or "on-site" in desc_lower or "on site" in desc_lower
-                has_remote = "remote" in desc_lower and "not remote" not in desc_lower and "no remote" not in desc_lower
+
+                # Check for "remote" but carefully exclude negative phrases.
+                # e.g. "not a WFH/remote role", "not remote", "no remote", "non-remote"
+                # all indicate the role is NOT remote.
+                # IMPORTANT: Be precise — "wfh/remote" alone is NOT negative
+                # (e.g. "supports WFH/remote work"). Only "not...wfh/remote" is.
+                # Similarly, "in-person" alone is NOT a remote-negation — a hybrid
+                # JD may say "in-person collaboration required" while still being remote
+                # some days.
+                _remote_negative_phrases = [
+                    "not remote",          # "this is not remote"
+                    "no remote",           # "no remote work"
+                    "non-remote",          # "non-remote position"
+                    "non remote",
+                    "not a remote",        # "not a remote role"
+                    "not wfh",             # "not wfh eligible"
+                    "not a wfh",           # "not a wfh role"
+                    "no wfh",              # "no wfh available"
+                    "not a wfh/remote",    # "not a WFH/remote role" (26-18278 pattern)
+                    "not wfh/remote",      # alternate phrasing
+                ]
+                _remote_mention = "remote" in desc_lower
+                _remote_negated = any(phrase in desc_lower for phrase in _remote_negative_phrases)
+                has_remote = _remote_mention and not _remote_negated
                 
                 # Determine what the API explicitly said
                 api_loc = ""
@@ -2758,7 +2807,11 @@ class JobDivaService:
                 elif "remote" in val_lower: api_loc = "Remote"
                 elif "onsite" in val_lower or "on-site" in val_lower: api_loc = "Onsite"
                 
-                if has_hybrid:
+                # If API and JD both agree on Onsite, trust it — even if "remote" appears
+                # negatively in the JD (e.g. "This is not a WFH/remote role").
+                if api_loc == "Onsite" and has_onsite and not has_hybrid:
+                    loc_type = "Onsite"
+                elif has_hybrid:
                     loc_type = "Hybrid"
                 elif has_onsite and has_remote:
                     # Mentions both Onsite and Remote -> usually implies a Hybrid arrangement
@@ -2767,6 +2820,11 @@ class JobDivaService:
                     loc_type = "Onsite"
                 elif has_remote:
                     loc_type = "Remote"
+                elif _remote_negated and api_loc == "Remote":
+                    # JD explicitly says "not remote" / "no WFH" but API says Remote.
+                    # The JD overrides the API — the job is clearly NOT remote.
+                    # Default to Onsite since the JD is denying remote without naming an alternative.
+                    loc_type = "Onsite"
                 else:
                     # JD is silent about location keywords, trust the API field
                     loc_type = api_loc
