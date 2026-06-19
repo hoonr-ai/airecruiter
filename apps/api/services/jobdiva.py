@@ -2750,16 +2750,26 @@ class JobDivaService:
                 
                 has_hybrid = "hybrid" in desc_lower
                 has_onsite = "onsite" in desc_lower or "on-site" in desc_lower or "on site" in desc_lower
-                
+
                 # Check for "remote" but carefully exclude negative phrases.
-                # e.g. "not a WFH/remote role", "not remote", "no remote", "non-remote",
-                # "not wfh", "no wfh" all indicate the role is NOT remote.
+                # e.g. "not a WFH/remote role", "not remote", "no remote", "non-remote"
+                # all indicate the role is NOT remote.
+                # IMPORTANT: Be precise — "wfh/remote" alone is NOT negative
+                # (e.g. "supports WFH/remote work"). Only "not...wfh/remote" is.
+                # Similarly, "in-person" alone is NOT a remote-negation — a hybrid
+                # JD may say "in-person collaboration required" while still being remote
+                # some days.
                 _remote_negative_phrases = [
-                    "not remote", "no remote", "non-remote", "non remote",
-                    "not a remote", "not an remote",
-                    "wfh/remote", "wfh / remote",      # "not a WFH/remote role"
-                    "no wfh", "not wfh", "not a wfh",
-                    "in-person", "in person only",
+                    "not remote",          # "this is not remote"
+                    "no remote",           # "no remote work"
+                    "non-remote",          # "non-remote position"
+                    "non remote",
+                    "not a remote",        # "not a remote role"
+                    "not wfh",             # "not wfh eligible"
+                    "not a wfh",           # "not a wfh role"
+                    "no wfh",              # "no wfh available"
+                    "not a wfh/remote",    # "not a WFH/remote role" (26-18278 pattern)
+                    "not wfh/remote",      # alternate phrasing
                 ]
                 _remote_mention = "remote" in desc_lower
                 _remote_negated = any(phrase in desc_lower for phrase in _remote_negative_phrases)
