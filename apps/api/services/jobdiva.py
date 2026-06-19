@@ -2750,7 +2750,20 @@ class JobDivaService:
                 
                 has_hybrid = "hybrid" in desc_lower
                 has_onsite = "onsite" in desc_lower or "on-site" in desc_lower or "on site" in desc_lower
-                has_remote = "remote" in desc_lower and "not remote" not in desc_lower and "no remote" not in desc_lower
+                
+                # Check for "remote" but carefully exclude negative phrases.
+                # e.g. "not a WFH/remote role", "not remote", "no remote", "non-remote",
+                # "not wfh", "no wfh" all indicate the role is NOT remote.
+                _remote_negative_phrases = [
+                    "not remote", "no remote", "non-remote", "non remote",
+                    "not a remote", "not an remote",
+                    "wfh/remote", "wfh / remote",      # "not a WFH/remote role"
+                    "no wfh", "not wfh", "not a wfh",
+                    "in-person", "in person only",
+                ]
+                _remote_mention = "remote" in desc_lower
+                _remote_negated = any(phrase in desc_lower for phrase in _remote_negative_phrases)
+                has_remote = _remote_mention and not _remote_negated
                 
                 # Determine what the API explicitly said
                 api_loc = ""
@@ -2758,7 +2771,11 @@ class JobDivaService:
                 elif "remote" in val_lower: api_loc = "Remote"
                 elif "onsite" in val_lower or "on-site" in val_lower: api_loc = "Onsite"
                 
-                if has_hybrid:
+                # If API and JD both agree on Onsite, trust it — even if "remote" appears
+                # negatively in the JD (e.g. "This is not a WFH/remote role").
+                if api_loc == "Onsite" and has_onsite and not has_hybrid:
+                    loc_type = "Onsite"
+                elif has_hybrid:
                     loc_type = "Hybrid"
                 elif has_onsite and has_remote:
                     # Mentions both Onsite and Remote -> usually implies a Hybrid arrangement
