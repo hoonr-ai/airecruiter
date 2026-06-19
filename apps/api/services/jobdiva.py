@@ -2748,7 +2748,33 @@ class JobDivaService:
                 # JobDiva API often incorrectly defaults to "Remote" when JD says Hybrid/Onsite.
                 desc_lower = description.lower()
                 
-                has_hybrid = "hybrid" in desc_lower
+                has_hybrid = False
+                # Only treat "hybrid" as a work-arrangement signal when it appears
+                # near work-context words. Avoid false positives from tech JDs that
+                # say "hybrid cloud", "hybrid architecture", "hybrid environment" etc.
+                _hybrid_work_phrases = [
+                    "hybrid role", "hybrid position", "hybrid work", "hybrid schedule",
+                    "hybrid model", "hybrid arrangement", "hybrid option",
+                    "hybrid setting", "hybrid basis", "hybrid format",
+                    "hybrid working", "hybrid opportunity", "hybrid flexibility",
+                ]
+                _hybrid_tech_phrases = [
+                    "hybrid cloud", "hybrid environment", "hybrid architecture",
+                    "hybrid infrastructure", "hybrid network", "hybrid system",
+                    "hybrid solution", "hybrid deployment", "hybrid setup",
+                    "hybrid approach", "hybrid technology", "hybrid platform",
+                    "hybrid data", "hybrid storage",
+                ]
+                if "hybrid" in desc_lower:
+                    # Has a work-context phrase → definitely hybrid work arrangement
+                    if any(phrase in desc_lower for phrase in _hybrid_work_phrases):
+                        has_hybrid = True
+                    # Only has tech phrases → NOT a work arrangement signal
+                    elif any(phrase in desc_lower for phrase in _hybrid_tech_phrases):
+                        has_hybrid = False
+                    else:
+                        # Ambiguous standalone "hybrid" mention — trust the API field
+                        has_hybrid = ("hybrid" in val_lower)
                 has_onsite = "onsite" in desc_lower or "on-site" in desc_lower or "on site" in desc_lower
 
                 # Check for "remote" but carefully exclude negative phrases.
