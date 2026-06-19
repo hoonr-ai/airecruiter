@@ -4270,6 +4270,7 @@ function NewJobPageContent() {
       const levelForApi = screeningLevel === "L1" ? "light" : screeningLevel === "L2" ? "intensive" : "medium";
       const requestBody: any = {
         jobTitle: (enhancedTitle || jobTitle || "").trim(),
+        jobDescription: (jobPosting || jobData?.description || "").trim(),
         rubric: rubricData || {},
         screeningLevel: levelForApi,
         customerName: jobData?.customer_name || "",

@@ -1684,6 +1684,14 @@ async def trigger_phase2(interview_id: str):
 async def get_transcriptions(interview_id: str):
     return await _proxy_get(f"/api/interviews/{interview_id}/transcriptions")
 
+@router.get("/interviews/{interview_id}/evaluation")
+async def get_interview_evaluation(interview_id: str):
+    return await _proxy_get(f"/api/interviews/{interview_id}/evaluation")
+
+@router.get("/interviews/{interview_id}/score-summary")
+async def get_interview_score_summary(interview_id: str):
+    return await _proxy_get(f"/api/interviews/{interview_id}/score-summary")
+
 @router.get("/interviews/{interview_id}/activity-logs")
 async def get_activity_logs(interview_id: str):
     return await _proxy_get(f"/api/interviews/{interview_id}/activity-logs")
@@ -1785,6 +1793,7 @@ async def _check_and_fire_candidate_passed_notification(
                 reason = item.get("reason")
                 hf_status_item = item.get("hard_filter_status")
                 q_order_raw = item.get("question_order", 0)
+                reason_norm = str(reason or "").strip().lower()
 
                 hf_norm = str(hf_status_item or "").strip().lower().replace(" ", "_")
                 is_hard_filter = hf_norm not in ("", "not_hard_filter", "na", "n/a", "none")
@@ -1809,7 +1818,16 @@ async def _check_and_fire_candidate_passed_notification(
                     is_info_only = (not is_hard_filter) and (q_order <= 9)
                 else:
                     # Legacy fallback when question_order is missing
-                    is_info_only = (not is_hard_filter) and (score_value is None or score_value < 0)
+                    # Treat explicit informational analysis as info-only even if
+                    # partner API sends a placeholder score like 0.0.
+                    looks_informational = (
+                        "informational answer captured" in reason_norm
+                        or "info-only" in reason_norm
+                        or "information only" in reason_norm
+                    )
+                    is_info_only = (not is_hard_filter) and (
+                        looks_informational or score_value is None or score_value < 0
+                    )
                 is_scored_question = (not is_hard_filter) and (not is_info_only)
 
                 screening_summary.append({

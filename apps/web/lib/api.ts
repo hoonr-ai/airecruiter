@@ -106,6 +106,10 @@ export const api = {
   engagement: {
     getActivityLogs: (interviewId: string) =>
       req<any>(`/api/v1/engagement/interviews/${interviewId}/activity-logs`),
+    getInterviewEvaluation: (interviewId: string) =>
+      req<any>(`/api/v1/engagement/interviews/${interviewId}/evaluation`),
+    getInterviewScoreSummary: (interviewId: string) =>
+      req<any>(`/api/v1/engagement/interviews/${interviewId}/score-summary`),
     getAssessmentData: (interviewId: string) =>
       req<any>(`/api/v1/engagement/assess/${interviewId}`),
   },

@@ -580,6 +580,7 @@ class ScreeningQuestionsRequest(BaseModel):
     rubric: dict
     screeningLevel: str = "medium"      # light | medium | intensive
     customerName: str = ""
+    jobDescription: str = ""
     workArrangement: str = "on-site"    # on-site | onsite | hybrid | remote
     # JobDiva imports occasionally leave location_type empty and stuff "REMOTE"
     # into the city field. The screening generator falls back to this when
@@ -615,6 +616,7 @@ async def generate_screening_questions_endpoint(job_id: str, req: ScreeningQuest
             rubric=req.rubric or {},
             screening_level=req.screeningLevel,
             customer_name=req.customerName,
+            job_description=req.jobDescription,
             work_arrangement=req.workArrangement,
             city=req.city,
             address=req.address,
