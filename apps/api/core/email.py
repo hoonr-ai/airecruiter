@@ -361,7 +361,7 @@ def notify_pair_launched(
     """
     base_url = resolve_app_base_url(app_base_url)
     jobdiva_link   = jobdiva_job_link(job_id, jobdiva_id)
-    rankings_link  = f"{base_url}/jobs/{job_id}/rankings"
+    rankings_link  = f"{base_url}/jobs/{jobdiva_id}/rankings"
 
     jd_hyperlink = (
         f'<a href="{jobdiva_link}" target="_blank" '
@@ -670,9 +670,9 @@ def notify_candidate_passed(
     """
     base_url = resolve_app_base_url(app_base_url)
     jobdiva_link   = jobdiva_job_link(job_id, jobdiva_id)
-    rankings_link  = f"{base_url}/jobs/{job_id}/rankings"
+    rankings_link  = f"{base_url}/jobs/{jobdiva_id}/rankings"
     # Deep link to the candidate evaluation report
-    report_link    = f"{base_url}/jobs/{job_id}/report?candidateId={candidate_id}"
+    report_link    = f"{base_url}/jobs/{jobdiva_id}/report?candidateId={candidate_id}"
 
     jd_hyperlink = (
         f'<a href="{jobdiva_link}" target="_blank" '
