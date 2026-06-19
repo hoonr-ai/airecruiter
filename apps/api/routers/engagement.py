@@ -1914,7 +1914,7 @@ async def _check_and_fire_candidate_passed_notification(
         # Note: We use the job title from job_row for the message
         base_url = resolve_app_base_url(request.app_base_url if 'request' in locals() else "")
         pair_job_title = job_row.get("enhanced_title") or job_row.get("title") or "the"
-        report_link = f"{base_url}/jobs/{app_job_id}/report?candidateId={candidate_id}"
+        report_link = f"{base_url}/jobs/{jd_job_id}/report?candidateId={candidate_id}"
         note_text = f"Candidate completed Phone Screen for {pair_job_title} position. <a href=\"{report_link}\" target=\"_blank\">Click Here</a> to view the report."
         
         async def create_and_pin_note():

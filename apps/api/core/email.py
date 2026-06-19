@@ -57,7 +57,7 @@ MS_GRAPH_SENDER_EMAIL = _cfg("MS_GRAPH_SENDER_EMAIL") or SMTP_FROM
 # PAIR-specific (not SMTP credentials)
 PAIR_TEAM_EMAIL    = _cfg("PAIR_TEAM_EMAIL",    "pair-recruiting@pyramidci.com")
 JOB_POSTING_EMAIL  = _cfg("JOB_POSTING_EMAIL",  "Jobposting@pyramidci.com")
-APP_BASE_URL       = _cfg("APP_BASE_URL",        "https://qacurate.hoonr.ai")
+APP_BASE_URL       = _cfg("APP_BASE_URL",        "")
 JOBDIVA_URL        = _cfg("JOBDIVA_URL",         "https://www1.jobdiva.com")
 
 
@@ -361,7 +361,7 @@ def notify_pair_launched(
     """
     base_url = resolve_app_base_url(app_base_url)
     jobdiva_link   = jobdiva_job_link(job_id, jobdiva_id)
-    rankings_link  = f"{base_url}/jobs/{job_id}/rankings"
+    rankings_link  = f"{base_url}/jobs/{jobdiva_id}/rankings"
 
     jd_hyperlink = (
         f'<a href="{jobdiva_link}" target="_blank" '
@@ -670,9 +670,9 @@ def notify_candidate_passed(
     """
     base_url = resolve_app_base_url(app_base_url)
     jobdiva_link   = jobdiva_job_link(job_id, jobdiva_id)
-    rankings_link  = f"{base_url}/jobs/{job_id}/rankings"
+    rankings_link  = f"{base_url}/jobs/{jobdiva_id}/rankings"
     # Deep link to the candidate evaluation report
-    report_link    = f"{base_url}/jobs/{job_id}/report?candidateId={candidate_id}"
+    report_link    = f"{base_url}/jobs/{jobdiva_id}/report?candidateId={candidate_id}"
 
     jd_hyperlink = (
         f'<a href="{jobdiva_link}" target="_blank" '
