@@ -2722,44 +2722,57 @@ class JobDivaService:
                     p_range = ""
                 
                 # Improved Location Type detection - Only use actual location fields, not employment fields
-                loc_type_raw = get_field(j, ["location type", "location_type"]) or ""
+                loc_type_raw = get_field(j, ["location type", "location_type", "onsite_remote", "onsiteremote", "onsite remote", "onSiteRemote"]) or ""
+                val_lower = str(loc_type_raw).lower().strip()
                 
-                # Clean the raw value to remove employment type contamination
-                def clean_location_type(value):
-                    if not value:
-                        return ""
-                    val_lower = str(value).lower().strip()
+                loc_type = ""
+                
+                # 1. Look for explicit keywords in the raw location field
+                if "remote" in val_lower:
+                    loc_type = "Remote"
+                elif "hybrid" in val_lower:
+                    loc_type = "Hybrid"
+                elif "onsite" in val_lower or "on-site" in val_lower:
+                    loc_type = "Onsite"
+                elif val_lower:
+                    # 2. Check for employment type contamination if no explicit location word found
                     employment_terms = [
                         "direct placement", "contract", "full-time", "part-time", 
                         "w2", "1099", "c2c", "corp to corp", "open", "pending",
                         "temporary", "permanent", "temp to perm", "fulltime", "parttime"
                     ]
-                    if any(term in val_lower for term in employment_terms):
-                        return ""
-                    return str(value).strip()
+                    if not any(term in val_lower for term in employment_terms):
+                        loc_type = str(loc_type_raw).strip()
                 
-                cleaned_loc_type = clean_location_type(loc_type_raw)
+                # 3. Prioritize Job Description over JobDiva API field
+                # JobDiva API often incorrectly defaults to "Remote" when JD says Hybrid/Onsite.
+                desc_lower = description.lower()
                 
-                loc_type = "Onsite" # Default
-                if cleaned_loc_type:
-                    if "remote" in cleaned_loc_type.lower():
-                        loc_type = "Remote"
-                    elif "hybrid" in cleaned_loc_type.lower():
-                        loc_type = "Hybrid"
-                    elif "onsite" in cleaned_loc_type.lower() or "on-site" in cleaned_loc_type.lower():
-                        loc_type = "Onsite"
-                    else:
-                        # Only use the cleaned value if it's not empty and looks like a valid location type
-                        loc_type = cleaned_loc_type
+                has_hybrid = "hybrid" in desc_lower
+                has_onsite = "onsite" in desc_lower or "on-site" in desc_lower or "on site" in desc_lower
+                has_remote = "remote" in desc_lower and "not remote" not in desc_lower and "no remote" not in desc_lower
                 
-                # Fallback: check description for location keywords if no valid location type found
-                if not cleaned_loc_type or loc_type == "Onsite":
-                    if "remote" in description.lower():
-                        loc_type = "Remote"
-                    elif "hybrid" in description.lower():
-                        loc_type = "Hybrid"
-                    elif "on-site" in description.lower() or "onsite" in description.lower():
-                        loc_type = "Onsite"
+                # Determine what the API explicitly said
+                api_loc = ""
+                if "hybrid" in val_lower: api_loc = "Hybrid"
+                elif "remote" in val_lower: api_loc = "Remote"
+                elif "onsite" in val_lower or "on-site" in val_lower: api_loc = "Onsite"
+                
+                if has_hybrid:
+                    loc_type = "Hybrid"
+                elif has_onsite and has_remote:
+                    # Mentions both Onsite and Remote -> usually implies a Hybrid arrangement
+                    loc_type = "Hybrid"
+                elif has_onsite:
+                    loc_type = "Onsite"
+                elif has_remote:
+                    loc_type = "Remote"
+                else:
+                    # JD is silent about location keywords, trust the API field
+                    loc_type = api_loc
+                        
+                if not loc_type:
+                    loc_type = "Onsite"
                 
                 result = {
                     "id": get_field(j, ["id", "jobId"]),
@@ -4310,6 +4323,7 @@ class JobDivaService:
         Used to fix 'Unknown Unknown' + Auto_ placeholder email created by
         CreateJobApplicationWithResume JSON mode.
         Endpoint: POST /apiv2/jobdiva/updateCandidateProfile
+
         """
         url = f"{self.api_url}/apiv2/jobdiva/updateCandidateProfile"
         payload = {
