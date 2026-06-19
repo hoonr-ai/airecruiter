@@ -57,7 +57,7 @@ MS_GRAPH_SENDER_EMAIL = _cfg("MS_GRAPH_SENDER_EMAIL") or SMTP_FROM
 # PAIR-specific (not SMTP credentials)
 PAIR_TEAM_EMAIL    = _cfg("PAIR_TEAM_EMAIL",    "pair-recruiting@pyramidci.com")
 JOB_POSTING_EMAIL  = _cfg("JOB_POSTING_EMAIL",  "Jobposting@pyramidci.com")
-APP_BASE_URL       = _cfg("APP_BASE_URL",        "https://qacurate.hoonr.ai")
+APP_BASE_URL       = _cfg("APP_BASE_URL",        "")
 JOBDIVA_URL        = _cfg("JOBDIVA_URL",         "https://www1.jobdiva.com")
 
 
