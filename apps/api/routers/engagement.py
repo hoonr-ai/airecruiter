@@ -866,6 +866,12 @@ async def _provision_batch_to_jobdiva(
                     existing_jd_id = str(cand_id)
 
                 phone_norm = "".join(ch for ch in phone if ch.isdigit())
+                
+                # JobDiva parser absolutely requires an email address.
+                # If none is provided, generate a dummy one so the profile creates successfully.
+                if not email:
+                    email = f"pair-{phone_norm or cand_id}@no-email.jobdiva.local"
+
                 email_lower = email.lower()
 
                 # Check against pre-fetched applicant sets (no extra API call)
