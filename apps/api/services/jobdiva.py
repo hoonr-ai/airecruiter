@@ -4374,8 +4374,11 @@ class JobDivaService:
                 logger.info(f"✅ JobDiva application created → candidateId={new_cid}, job={job_id}")
 
                 # The JSON endpoint creates 'Unknown Unknown' with an Auto_ placeholder
-                # email. Fix name + real contact info immediately.
+                # email. JobDiva's internal ATS parser runs asynchronously and might
+                # overwrite our update if we fire it instantly. Sleep to let it finish.
                 if new_cid and (first_name or last_name or email or phone):
+                    import asyncio
+                    await asyncio.sleep(4)
                     await self._update_candidate_name(token, new_cid, first_name, last_name, email, phone)
 
                 return True, new_cid
