@@ -746,145 +746,223 @@ def _persist_jobdiva_candidate_id(candidate_id_internal: str, cand_data: Dict[st
         conn.close()
 
 
-async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_internal: str):
-    """Ensures a candidate exists in JobDiva as an applicant for the specified job.
-
-    Pool-discipline: this function is fired N-wide from send_bulk_interview's
-    asyncio.gather, so any DB connection held across the JobDiva awaits would
-    multiply pool demand by the candidate count. Each DB phase below borrows a
-    pool slot for its own statements and releases before the next external call.
+async def _resolve_provisioning_job_ids(job_id_internal: str):
+    """Resolve (numeric_job_id, ref_job_id) from either form of the job identifier.
+    Returns (None, None) if the job is not found.
     """
+    numeric_job_id = None
+    ref_job_id = None
+    conn = get_db_connection()
     try:
-        # ── Phase 1: short DB read — resolve IDs, load candidate row, release.
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        if str(job_id_internal).isdigit():
+            numeric_job_id = str(job_id_internal)
+            cur.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s LIMIT 1", (numeric_job_id,))
+            row_j = cur.fetchone()
+            if row_j:
+                ref_job_id = row_j["jobdiva_id"]
+        else:
+            ref_job_id = job_id_internal
+            cur.execute("SELECT job_id FROM monitored_jobs WHERE jobdiva_id = %s LIMIT 1", (ref_job_id,))
+            row_j = cur.fetchone()
+            if row_j:
+                numeric_job_id = row_j["job_id"]
+        cur.close()
+    finally:
+        conn.close()
+    return numeric_job_id, ref_job_id
+
+
+async def _provision_batch_to_jobdiva(
+    candidate_ids: List[str],
+    job_id_internal: str,
+    *,
+    label: str = "Batch Provisioning",
+) -> Dict[str, Any]:
+    """
+    Efficiently provisions all candidates as JobDiva applicants for a job.
+
+    KEY IMPROVEMENT over the old per-candidate approach:
+    - Resolves job IDs ONCE (not N times)
+    - Fetches the applicants list from JobDiva ONCE (not N times)
+    - Loads all candidate rows in a SINGLE DB query
+    - Processes candidates concurrently, bounded by _PROVISION_CONCURRENCY
+
+    Returns a dict with 'success', 'skipped', 'failed' counts.
+    """
+    results: Dict[str, int] = {"success": 0, "skipped": 0, "failed": 0}
+    if not candidate_ids:
+        return results
+
+    try:
+        # ── Phase 1: Resolve job IDs (one DB round-trip)
+        numeric_job_id, ref_job_id = await _resolve_provisioning_job_ids(job_id_internal)
+        if not numeric_job_id and not ref_job_id:
+            logger.warning(f"⚠️ [{label}] Cannot resolve job IDs for '{job_id_internal}'. Skipping all.")
+            results["failed"] = len(candidate_ids)
+            return results
+
+        # ── Phase 2: Load ALL candidate rows in ONE query
         conn = get_db_connection()
         try:
             cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-            numeric_job_id = None
-            ref_job_id = None
-
-            if str(job_id_internal).isdigit():
-                numeric_job_id = str(job_id_internal)
-                cur.execute("SELECT jobdiva_id FROM monitored_jobs WHERE job_id = %s LIMIT 1", (numeric_job_id,))
-                row_j = cur.fetchone()
-                if row_j:
-                    ref_job_id = row_j["jobdiva_id"]
-            else:
-                ref_job_id = job_id_internal
-                cur.execute("SELECT job_id FROM monitored_jobs WHERE jobdiva_id = %s LIMIT 1", (ref_job_id,))
-                row_j = cur.fetchone()
-                if row_j:
-                    numeric_job_id = row_j["job_id"]
-
             cur.execute("""
-                SELECT name, email, phone, resume_text, data, jobdiva_id, source
+                SELECT candidate_id, name, email, phone, resume_text, data, jobdiva_id, source
                 FROM sourced_candidates
-                WHERE candidate_id = %s
-                  AND (jobdiva_id = %s OR jobdiva_id = %s OR jobdiva_id = %s OR jobdiva_id = %s OR jobdiva_id = 'unknown')
-                LIMIT 1
-            """, (candidate_id_internal, job_id_internal, numeric_job_id, ref_job_id, "unknown"))
-            row = cur.fetchone()
+                WHERE candidate_id = ANY(%s)
+                  AND (jobdiva_id = %s OR jobdiva_id = %s OR jobdiva_id = %s OR jobdiva_id = 'unknown')
+            """, (list(candidate_ids), job_id_internal, numeric_job_id, ref_job_id))
+            candidate_rows: Dict[str, Any] = {str(r["candidate_id"]): r for r in cur.fetchall()}
+            cur.close()
         finally:
-            try:
-                cur.close()
-            except Exception:
-                pass
             conn.close()
 
-        if not row:
-            logger.warning(f"⚠️ [Provisioning] Candidate {candidate_id_internal} not found in sourced_candidates. Cannot provision.")
-            return None
+        missing = len(candidate_ids) - len(candidate_rows)
+        if missing:
+            logger.warning(f"⚠️ [{label}] {missing}/{len(candidate_ids)} candidate IDs not found in sourced_candidates for job {ref_job_id}")
 
-        logger.info(f"🔍 [Provisioning] Checking JobDiva for Job {ref_job_id} ({numeric_job_id})")
+        # ── Phase 3: Fetch existing applicants from JobDiva ONCE
+        jd_job_id = numeric_job_id or ref_job_id
+        existing_applicants: List[Dict[str, Any]] = []
+        if jd_job_id:
+            logger.info(f"🔍 [{label}] Fetching existing applicants for job {jd_job_id} (single call)...")
+            existing_applicants = await jobdiva_service.get_job_applicants_detail(jd_job_id)
+            logger.info(f"✅ [{label}] Found {len(existing_applicants)} existing applicants in JobDiva")
 
-        cand_data = row.get("data") or {}
-        if isinstance(cand_data, str):
-            cand_data = json.loads(cand_data)
+        # Build fast-lookup sets for dedup — keyed on normalised email, phone, and JD candidate ID
+        existing_jd_ids: set = {
+            str(a.get("candidateId") or a.get("CANDIDATEID") or "")
+            for a in existing_applicants
+        }
+        existing_emails: set = {
+            str(a.get("EMAIL") or a.get("email") or "").lower().strip()
+            for a in existing_applicants
+            if not str(a.get("EMAIL") or a.get("email") or "").lower().startswith("auto_")
+        }
+        existing_phones: set = {
+            "".join(ch for ch in str(a.get("PHONE") or a.get("phone") or "") if ch.isdigit())
+            for a in existing_applicants
+        }
 
-        email = row.get("email")
-        phone = row.get("phone") or ""
-        existing_jd_id = cand_data.get("jobdiva_candidate_id")
-        if not existing_jd_id and str(candidate_id_internal).isdigit():
-            existing_jd_id = int(candidate_id_internal)
+        # ── Phase 4: Provision each candidate (concurrent, semaphore-bounded)
+        async def _provision_one(cand_id: str) -> str:
+            async with _PROVISION_CONCURRENCY:
+                row = candidate_rows.get(str(cand_id))
+                if not row:
+                    logger.warning(f"⚠️ [{label}] Candidate {cand_id} missing from DB — skipping.")
+                    return "failed"
 
-        # ── Phase 2: external JobDiva calls — NO pool slot held here.
-        if numeric_job_id:
-            logger.info(f"🔍 [Provisioning] Fetching live applicants for Job {numeric_job_id} from JobDiva...")
-            # Pass the ref/id as-is — get_job_applicants_detail resolves it via
-            # _resolve_jobdiva_job_id (which strips a -vN version suffix to the
-            # root JobDiva job). For a v2 job numeric_job_id is the versioned PK
-            # string "26-06182-v2", so int() here would raise ValueError and
-            # silently skip provisioning. Do NOT int() it at the call site.
-            applicants = await jobdiva_service.get_job_applicants_detail(numeric_job_id)
-            existing_phone_norm = "".join(ch for ch in str(phone) if ch.isdigit())
+                cand_data = row.get("data") or {}
+                if isinstance(cand_data, str):
+                    try:
+                        cand_data = json.loads(cand_data)
+                    except Exception:
+                        cand_data = {}
 
-            for app in applicants:
-                app_cid = app.get("candidateId") or app.get("CANDIDATEID")
-                app_email = str(app.get("EMAIL") or app.get("email") or "").lower()
-                app_phone = "".join(ch for ch in str(app.get("PHONE") or app.get("phone") or "") if ch.isdigit())
+                email = (row.get("email") or "").strip()
+                phone = (row.get("phone") or "").strip()
+                existing_jd_id = str(cand_data.get("jobdiva_candidate_id") or "")
+                if not existing_jd_id and str(cand_id).isdigit():
+                    existing_jd_id = str(cand_id)
 
-                jcid_match = bool(existing_jd_id and app_cid and int(app_cid) == int(existing_jd_id))
+                phone_norm = "".join(ch for ch in phone if ch.isdigit())
+                email_lower = email.lower()
+
+                # Check against pre-fetched applicant sets (no extra API call)
+                jcid_match = bool(existing_jd_id and existing_jd_id in existing_jd_ids)
                 email_match = bool(
-                    email and app_email
-                    and not email.lower().startswith("auto_")
-                    and not app_email.startswith("auto_")
-                    and app_email == email.lower()
+                    email_lower
+                    and not email_lower.startswith("auto_")
+                    and email_lower in existing_emails
                 )
                 phone_match = bool(
-                    existing_phone_norm and len(existing_phone_norm) >= 7
-                    and app_phone == existing_phone_norm
+                    phone_norm and len(phone_norm) >= 7 and phone_norm in existing_phones
                 )
 
                 if jcid_match or email_match or phone_match:
-                    logger.info(f"✅ [Provisioning] Match found! Candidate {candidate_id_internal} is already an applicant (JobDiva ID: {app_cid})")
-                    if not cand_data.get("jobdiva_candidate_id"):
-                        cand_data["jobdiva_candidate_id"] = app_cid
-                        # ── Phase 3a: brief write to stamp matched JobDiva ID.
-                        _persist_jobdiva_candidate_id(candidate_id_internal, cand_data)
-                    return app_cid
+                    logger.info(
+                        f"✅ [{label}] Candidate {cand_id} already in JobDiva "
+                        f"(jcid={jcid_match} email={email_match} phone={phone_match})"
+                    )
+                    # Stamp the JD id if it wasn't persisted yet
+                    if not cand_data.get("jobdiva_candidate_id") and existing_jd_id:
+                        cand_data["jobdiva_candidate_id"] = existing_jd_id
+                        _persist_jobdiva_candidate_id(cand_id, cand_data)
+                    return "skipped"
 
-            logger.info(f"❓ [Provisioning] Candidate {candidate_id_internal} not found in JobDiva applicants list.")
+                # ── Not found → create a new JobDiva application
+                candidate_name = (row.get("name") or "").strip()
+                name_parts = candidate_name.split(" ", 1) if candidate_name else ["", ""]
+                first_name = name_parts[0]
+                last_name = name_parts[1] if len(name_parts) > 1 else ""
+                safe_name = (candidate_name or "Candidate").replace(" ", "_")
 
-        # NOTE: CreateJobApplicationWithResume ALWAYS creates a new candidate
-        # from the textfile — passing ?candidateId is ignored. Prepend
-        # "FIRSTNAME LASTNAME" as the first line so JobDiva's parser picks it up.
-        candidate_name = row.get("name") or ""
-        name_parts = candidate_name.strip().split(" ", 1) if candidate_name else ["", ""]
-        first_name = name_parts[0]
-        last_name = name_parts[1] if len(name_parts) > 1 else ""
-        safe_name = (candidate_name or "Candidate").replace(" ", "_")
-        # phone already read above for dedup — reuse it here
+                actual_resume = (row.get("resume_text") or "").strip()
+                resume_text = (
+                    f"{candidate_name.upper()}\n"
+                    f"Email: {email or 'N/A'} | Phone: {phone or 'N/A'}\n\n"
+                    + (actual_resume or "(Profile sourced via PAIR)")
+                )
 
-        actual_resume = row.get("resume_text") or ""
-        resume_text = (
-            f"{candidate_name.upper()}\n"
-            f"Email: {email or 'N/A'} | Phone: {phone or 'N/A'}\n\n"
-            + (actual_resume if actual_resume else "(Profile sourced via PAIR)")
-        )
+                try:
+                    success, new_jd_id = await jobdiva_service.create_job_application_with_resume(
+                        candidate_id=None,
+                        job_id=jd_job_id,
+                        resume_text=resume_text,
+                        filename=f"{safe_name}_Resume.txt",
+                        first_name=first_name,
+                        last_name=last_name,
+                        email=email or "",
+                        phone=phone or "",
+                    )
+                except Exception as exc:
+                    logger.error(f"❌ [{label}] Exception for {cand_id}: {exc}", exc_info=True)
+                    return "failed"
 
-        success, new_jd_id = await jobdiva_service.create_job_application_with_resume(
-            candidate_id=None,
-            job_id=numeric_job_id or job_id_internal,
-            resume_text=resume_text,
-            filename=f"{safe_name}_Resume.txt",
-            first_name=first_name,
-            last_name=last_name,
-            email=email or "",
-            phone=phone or ""
-        )
+                if success and new_jd_id:
+                    logger.info(f"🎉 [{label}] Candidate {cand_id} → JobDiva ID: {new_jd_id}")
+                    cand_data["jobdiva_candidate_id"] = new_jd_id
+                    _persist_jobdiva_candidate_id(cand_id, cand_data)
+                    # Add to in-memory set so concurrent siblings don't re-create the same person
+                    existing_jd_ids.add(str(new_jd_id))
+                    if email_lower and not email_lower.startswith("auto_"):
+                        existing_emails.add(email_lower)
+                    if phone_norm and len(phone_norm) >= 7:
+                        existing_phones.add(phone_norm)
+                    return "success"
+                elif success:
+                    # Created but JD returned no ID (rare — log and treat as partial success)
+                    logger.warning(f"⚠️ [{label}] Created for {cand_id} but got no new_jd_id")
+                    return "success"
+                else:
+                    logger.error(f"❌ [{label}] create_job_application_with_resume returned False for {cand_id}")
+                    return "failed"
 
-        if success:
-            logger.info(f"🎉 [Provisioning] Success! Candidate {candidate_id_internal} → JobDiva ID: {new_jd_id}")
-            if new_jd_id:
-                cand_data["jobdiva_candidate_id"] = new_jd_id
-                # ── Phase 3b: brief write to stamp newly-created JobDiva ID.
-                _persist_jobdiva_candidate_id(candidate_id_internal, cand_data)
+        tasks = [_provision_one(cid) for cid in candidate_ids]
+        statuses = await asyncio.gather(*tasks, return_exceptions=True)
+        for s in statuses:
+            if isinstance(s, Exception):
+                results["failed"] += 1
+            elif s == "success":
+                results["success"] += 1
+            elif s == "skipped":
+                results["skipped"] += 1
+            else:
+                results["failed"] += 1
 
-        return new_jd_id
+        logger.info(f"📊 [{label}] Done for job {ref_job_id}: {results}")
+        return results
 
     except Exception as e:
-        logger.error(f"❌ [Provisioning] Error for {candidate_id_internal}: {e}", exc_info=True)
-        return None
+        logger.error(f"❌ [{label}] Outer error: {e}", exc_info=True)
+        results["failed"] = len(candidate_ids)
+        return results
+
+
+async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_internal: str):
+    """Single-candidate shim kept for backward-compat. Delegates to the batch function."""
+    result = await _provision_batch_to_jobdiva([candidate_id_internal], job_id_internal)
+    return result.get("success", 0) > 0 or result.get("skipped", 0) > 0
 
 
 @router.post("/engage/send-bulk-interview")
@@ -1142,23 +1220,19 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             ]
 
             # ── TRIGGER PROVISIONING (JobDiva Application) ─────────────
-            # Background-fire so JobDiva provisioning doesn't block the
-            # response. return_exceptions keeps a single failure from
-            # canceling siblings. _PROVISION_CONCURRENCY caps in-flight
-            # provisioning so a 50-candidate launch can't grab 50 pool
-            # slots / 50 JobDiva sockets at once.
-            async def _provision_bounded(cand_id: str):
-                async with _PROVISION_CONCURRENCY:
-                    return await _provision_candidate_to_jobdiva(cand_id, job_id_from_payload)
+            # Background-fire batch provisioning so it doesn't block the
+            # HTTP response. The batch function fetches the applicants list
+            # ONCE and creates all missing candidates concurrently under
+            # _PROVISION_CONCURRENCY, which is far more efficient than the
+            # old per-candidate approach (N JobDiva round-trips → 1).
+            if request.real_candidate_ids:
+                _batch_cids = list(request.real_candidate_ids)
+                _batch_job_id = job_id_from_payload
 
-            provision_tasks = [
-                _provision_bounded(cand_id)
-                for cand_id in request.real_candidate_ids
-            ]
-            if provision_tasks:
-                async def _run_provisioning() -> None:
-                    await asyncio.gather(*provision_tasks, return_exceptions=True)
-                asyncio.create_task(_run_provisioning())
+                async def _run_batch_provisioning() -> None:
+                    await _provision_batch_to_jobdiva(_batch_cids, _batch_job_id)
+
+                asyncio.create_task(_run_batch_provisioning())
 
             for idx, candidate_id in enumerate(request.real_candidate_ids):
                 submitted_source_id = (
@@ -1770,12 +1844,30 @@ async def _check_and_fire_candidate_passed_notification(
             conn.close()
             return
 
-        # Deduplication: Check if we already sent the passed email
-        cand_data = cand_row.get("data") or {}
-        if cand_data.get("engage_passed_email_sent"):
+        # Deduplication: Atomically set engage_passed_email_sent=True and check old value.
+        # This prevents a race condition where two concurrent webhook calls both read the
+        # flag as False before either has written True, resulting in duplicate emails.
+        jobdiva_id_for_dedup = job_row["jobdiva_id"] if job_row else job_id
+        cur.execute("""
+            UPDATE sourced_candidates
+            SET data = COALESCE(data, '{}'::jsonb) || '{"engage_passed_email_sent": true}'::jsonb,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE candidate_id = %s
+              AND jobdiva_id = %s
+              AND (data IS NULL OR (data->>'engage_passed_email_sent')::boolean IS NOT TRUE)
+            RETURNING id
+        """, (candidate_id, jobdiva_id_for_dedup))
+        updated = cur.fetchone()
+        conn.commit()
+
+        if not updated:
+            # Another concurrent request already set the flag — skip to avoid duplicate
+            logger.info(f"⏭️ Passed email already sent for candidate {candidate_id} / job {job_id}. Skipping duplicate.")
             cur.close()
             conn.close()
             return
+
+        cand_data = cand_row.get("data") or {}
 
         # 5. Build screening summary (all items in evaluation/transcriptions)
         screening_summary = []
@@ -1952,17 +2044,8 @@ async def _check_and_fire_candidate_passed_notification(
         )
 
         if success:
-            # Mark as sent
-            cand_data["engage_passed_email_sent"] = True
-            cur.execute("""
-                UPDATE sourced_candidates
-                SET data = %s
-                WHERE candidate_id = %s AND jobdiva_id = %s
-            """, (json.dumps(cand_data), candidate_id, job_row["jobdiva_id"]))
-            conn.commit()
-
-            # 6. Refresh Performance Metrics for this job (e.g. Time to First Pass)
-            # We fire this asynchronously so it doesn't block the webhook response
+            # Flag was already set atomically before sending (race-condition-safe).
+            # Refresh Performance Metrics for this job (e.g. Time to First Pass)
             asyncio.create_task(auto_assign_service.refresh_job_performance_metrics(job_id))
 
         cur.close()
@@ -1970,3 +2053,131 @@ async def _check_and_fire_candidate_passed_notification(
 
     except Exception as e:
         logger.error(f"❌ Failed to process Candidate Passed notification: {e}", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Re-Provision endpoint
+# Backfills all launched (engage_status='sent') candidates for a job that do
+# not yet have a jobdiva_candidate_id.  Call this after a bulk launch to
+# ensure all candidates are registered as JobDiva applicants so Reject/Submit
+# and action-notes work correctly.
+# ---------------------------------------------------------------------------
+class ReProvisionRequest(BaseModel):
+    job_id: str
+    # If True, provisions ALL launched candidates (even those already provisioned).
+    # Defaults to False = only candidates missing a jobdiva_candidate_id.
+    force_all: bool = False
+
+
+@router.post("/engage/re-provision")
+async def re_provision_candidates(request: ReProvisionRequest):
+    """
+    Re-runs JobDiva provisioning for all launched candidates for a job.
+
+    By default only candidates that are missing a jobdiva_candidate_id in
+    their data blob are processed (the ones that were silently dropped by the
+    old fire-and-forget approach).  Pass force_all=true to re-run for every
+    launched candidate (useful to fix 'Unknown Unknown' names).
+
+    Returns counts of { success, skipped, failed, total }.
+    """
+    job_id = (request.job_id or "").strip()
+    if not job_id:
+        raise HTTPException(status_code=400, detail="job_id is required")
+
+    try:
+        conn = _get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        # Resolve both forms of the job ID so we can match audit records
+        numeric_job_id, ref_job_id = await _resolve_provisioning_job_ids(job_id)
+        j1 = job_id
+        j2 = numeric_job_id or job_id
+        j3 = ref_job_id or job_id
+
+        if request.force_all:
+            # All launched candidates for this job
+            cur.execute("""
+                SELECT DISTINCT sc.candidate_id
+                FROM sourced_candidates sc
+                JOIN engage_interview_audit eia ON eia.candidate_id = sc.candidate_id
+                WHERE eia.jobdiva_id IN (%s, %s, %s)
+                  AND sc.jobdiva_id IN (%s, %s, %s)
+            """, (j1, j2, j3, j1, j2, j3))
+        else:
+            # Only those missing a jobdiva_candidate_id
+            cur.execute("""
+                SELECT DISTINCT sc.candidate_id
+                FROM sourced_candidates sc
+                JOIN engage_interview_audit eia ON eia.candidate_id = sc.candidate_id
+                WHERE eia.jobdiva_id IN (%s, %s, %s)
+                  AND sc.jobdiva_id IN (%s, %s, %s)
+                  AND (
+                    sc.data->>'jobdiva_candidate_id' IS NULL
+                    OR sc.data->>'jobdiva_candidate_id' = ''
+                  )
+            """, (j1, j2, j3, j1, j2, j3))
+
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        candidate_ids = [str(r["candidate_id"]) for r in rows]
+        total = len(candidate_ids)
+        logger.info(
+            f"🔄 [Re-Provision] job={job_id} force_all={request.force_all} "
+            f"candidates_to_process={total}"
+        )
+
+        if not candidate_ids:
+            return {
+                "success": True,
+                "message": "No candidates require provisioning.",
+                "total": 0,
+                "success_count": 0,
+                "skipped": 0,
+                "failed": 0,
+            }
+
+        # Run batch provisioning (awaited so the HTTP response carries the result)
+        results = await _provision_batch_to_jobdiva(
+            candidate_ids,
+            job_id,
+            label="Re-Provision",
+        )
+
+        return {
+            "success": True,
+            "job_id": job_id,
+            "total": total,
+            "success_count": results.get("success", 0),
+            "skipped": results.get("skipped", 0),
+            "failed": results.get("failed", 0),
+            "message": (
+                f"Re-provisioning complete. "
+                f"{results.get('success', 0)} created, "
+                f"{results.get('skipped', 0)} already existed, "
+                f"{results.get('failed', 0)} failed."
+            ),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ [Re-Provision] error for job {job_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+            "skipped": results.get("skipped", 0),
+            "failed": results.get("failed", 0),
+            "message": (
+                f"Re-provisioning complete. "
+                f"{results.get('success', 0)} created, "
+                f"{results.get('skipped', 0)} already existed, "
+                f"{results.get('failed', 0)} failed."
+            ),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ [Re-Provision] error for job {job_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))

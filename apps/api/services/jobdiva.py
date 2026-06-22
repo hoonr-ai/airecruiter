@@ -4334,17 +4334,27 @@ class JobDivaService:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    url,
-                    json=json_payload,
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Accept": "application/json",
-                    }
-                )
-            status, res_body = response.status_code, response.text
-            logger.info(f"🔎 CreateJobApplicationWithResume: {status} — {res_body[:200]}")
+            for attempt in range(2):
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(
+                        url,
+                        json=json_payload,
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Accept": "application/json",
+                        }
+                    )
+                status, res_body = response.status_code, response.text
+                
+                if status == 401 and attempt == 0:
+                    logger.warning(f"⚠️ CreateJobApplicationWithResume got 401. Refreshing token...")
+                    token = await self.authenticate(force_refresh=True)
+                    if not token:
+                        return False, None
+                    continue
+
+                logger.info(f"🔎 CreateJobApplicationWithResume: {status} — {res_body[:200]}")
+                break
 
             if status in [200, 201]:
                 try:
@@ -4396,16 +4406,26 @@ class JobDivaService:
             payload["phone"] = phone
             
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    url,
-                    json=payload,
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Accept": "application/json"
-                    }
-                )
-            logger.info(f"🔎 updateCandidateProfile response: {response.status_code} — {response.text[:300]}")
+            for attempt in range(2):
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(
+                        url,
+                        json=payload,
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Accept": "application/json"
+                        }
+                    )
+                
+                if response.status_code == 401 and attempt == 0:
+                    logger.warning(f"⚠️ updateCandidateProfile got 401. Refreshing token...")
+                    token = await self.authenticate(force_refresh=True)
+                    if not token:
+                        return False
+                    continue
+
+                logger.info(f"🔎 updateCandidateProfile response: {response.status_code} — {response.text[:300]}")
+                break
             if response.status_code in [200, 201]:
                 logger.info(f"✅ Profile updated for candidateId={candidate_id}: {first_name} {last_name}, email={bool(email)}, phone={bool(phone)}")
                 return True
