@@ -2166,18 +2166,3 @@ async def re_provision_candidates(request: ReProvisionRequest):
     except Exception as e:
         logger.error(f"❌ [Re-Provision] error for job {job_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
-            "skipped": results.get("skipped", 0),
-            "failed": results.get("failed", 0),
-            "message": (
-                f"Re-provisioning complete. "
-                f"{results.get('success', 0)} created, "
-                f"{results.get('skipped', 0)} already existed, "
-                f"{results.get('failed', 0)} failed."
-            ),
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ [Re-Provision] error for job {job_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=str(e))
