@@ -142,11 +142,20 @@ FAST_PATH_DETAIL_BACKGROUND_PAGE_DELAY_S = 1.0
 # to the top-100 for display AND background hydration
 # (FAST_PATH_DETAIL_BACKGROUND_MAX_CANDIDATES) regardless, so the old
 # max(200, page_size*4)=400 just made JobDiva rank ~300 candidates we
-# immediately discard. 150 = the 100 display cap + headroom to absorb the
-# client-side state filter and cross-source dedup, while keeping the call
-# fast. Bump if a search's state filter is dropping enough to starve the
-# top-100; lower toward 100 for the fastest first paint.
-JOBAGENT_RESUME_COUNT = 150
+# immediately discard. 100 = the base BATCH size for Step-5's paginated
+# Talent Search (2026-06-10): deliberately aligned to JobDiva's CandidatesDetail
+# per-call limit so the three numbers agree —
+#   batch == FAST_PATH_DETAIL_BACKGROUND_PAGE_SIZE == FAST_PATH_DETAIL_BACKGROUND_MAX_CANDIDATES == 100.
+# The first search requests rc=100 (fast first paint, fully hydrated in ONE
+# CandidatesDetail call, no thin tail); each "Search more candidates" click
+# requests rc=100×page and emits only the next 100-rank window (see
+# SearchCriteria.page_number / produce_jobdiva_talent), again exactly one
+# detail call. On a manual Step-5 search only Talent feeds hydration
+# (applicants_selected is False, externals don't use CandidatesDetail), so the
+# 100-id detail budget is never shared. Bounds JobAgentSearch latency (it
+# scales with resumeCount — see the rc=100≈13s vs rc=400≈110s above) while
+# letting recruiters page deeper on demand up to JOBDIVA_SOURCE_CAP.
+JOBAGENT_RESUME_COUNT = 100
 
 
 # ─────────────────────────────────────────────────────────────────────────

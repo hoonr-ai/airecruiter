@@ -400,6 +400,11 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             within_miles=within_miles,
             companies=companies,
             page_size=effective_limit,
+            # 0-based batch index for Step-5's "Search more candidates"
+            # pagination. page=1 (default) → page_number=0 → unchanged first
+            # batch; each subsequent click increments it so every source emits
+            # the next window. See produce_jobdiva_talent / produce_external.
+            page_number=max(0, int(request.page or 1) - 1),
             sources=request.sources or ["JobDiva"],
             open_to_work=request.open_to_work,
             boolean_string=request.boolean_string or "",

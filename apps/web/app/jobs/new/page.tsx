@@ -924,6 +924,13 @@ function NewJobPageContent() {
   const QUALIFIED_SCORE_THRESHOLD = 70;
   const QUALIFIED_TARGET_COUNT = 50;
   const [candidates, setCandidates] = useState<any[]>([]);
+  // "Search more candidates" pagination. `searchBatch` is the 1-based batch
+  // index sent to the backend as `page`; each click increments it so every
+  // source emits its next window (JobDiva Talent: next 100 ranks). Reset to 1
+  // on every fresh search. `noMoreCandidates` latches when a "Search more"
+  // run returns zero new rows so the button can disable itself.
+  const [searchBatch, setSearchBatch] = useState(1);
+  const [noMoreCandidates, setNoMoreCandidates] = useState(false);
   // `true` when the current `candidates` list was restored from localStorage
   // rather than a fresh stream. Used to surface a small "Restored from last
   // run" caption so recruiters know results are stale until re-run.
@@ -5306,6 +5313,8 @@ function NewJobPageContent() {
       titleCriteriaOverride?: typeof sourceTitles;
       skillCriteriaOverride?: typeof sourceSkills;
       companiesOverride?: typeof sourceCompanies;
+      // 1-based batch index for "Search more candidates". Defaults to 1.
+      pageOverride?: number;
     }
   ) => {
     const effectiveTitles = overrides?.titleCriteriaOverride ?? sourceTitles;
@@ -5390,7 +5399,7 @@ function NewJobPageContent() {
       // backend falls back to monitored_jobs.customer_name when this is
       // omitted, and filters placeholder values ("External"/"Unknown").
       client_name: (jobData?.customer_name || jobData?.customer || "").trim() || undefined,
-      page: 1,
+      page: overrides?.pageOverride ?? 1,
       page_size: 100
     };
   };
@@ -5403,6 +5412,8 @@ function NewJobPageContent() {
       titleCriteriaOverride?: typeof sourceTitles;
       skillCriteriaOverride?: typeof sourceSkills;
       companiesOverride?: typeof sourceCompanies;
+      // 1-based batch index for "Search more candidates". Defaults to 1.
+      pageOverride?: number;
     }
   ): Promise<any[]> => {
     const apiUrl = API_BASE;
@@ -5702,6 +5713,9 @@ function NewJobPageContent() {
     setIsSearching(true);
     setHasSearched(true);
     setRestoredFromCache(false);
+    // Fresh search → reset pagination so the first batch is page 1 again.
+    setSearchBatch(1);
+    setNoMoreCandidates(false);
     detailFailedIdsRef.current = new Set<string>();
     trackEvent("job_wizard_step5_candidate_search_started", {
       step: 5,
@@ -5799,6 +5813,50 @@ function NewJobPageContent() {
         })),
         quality: overallQuality,
         ...buildStep5FilterContext(),
+      });
+    }
+  };
+
+  // "Search more candidates": fetch the NEXT batch from every selected source
+  // and append it below the current list. Mirrors handleExtendBoolean's append
+  // flow, but instead of relaxing the boolean it increments the batch index
+  // (sent to the backend as `page`) so each source emits its next window
+  // (JobDiva Talent: the next 100 ranks). Dedup is handled inside
+  // runSearchStream via seenCandidateIdsRef, so already-shown candidates are
+  // never duplicated; the new batch's JobDiva rows get background detail
+  // hydration just like the first batch.
+  const handleSearchMore = async () => {
+    if (isSearching) return;
+    const nextBatch = searchBatch + 1;
+    setSearchBatch(nextBatch);
+    setIsSearching(true);
+    setHasSearched(true);
+    const runStartMs = Date.now();
+    let runResults: any[] = [];
+    trackEvent("job_wizard_step5_search_more", {
+      step: 5,
+      page: nextBatch,
+      sources: Object.keys(searchSources).filter(k => (searchSources as any)[k]),
+    });
+    try {
+      setSearchStatus(`Fetching the next batch of candidates (batch ${nextBatch})...`);
+      runResults = await runSearchStream(resolvedGeneratedBoolean, "append", { pageOverride: nextBatch });
+      if (runResults.length === 0) {
+        setNoMoreCandidates(true);
+        showToast("No more candidates to load from the configured sources.", "info");
+      }
+    } catch (error) {
+      console.error("Search more failed:", error);
+    } finally {
+      setIsSearching(false);
+      const runtimeSeconds = Number(((Date.now() - runStartMs) / 1000).toFixed(2));
+      setLastSearchRuntimeSec(runtimeSeconds);
+      setLastSearchRunsExecuted(1);
+      trackEvent("job_wizard_step5_search_more_finished", {
+        step: 5,
+        page: nextBatch,
+        new_candidates: runResults.length,
+        runtime_seconds: runtimeSeconds,
       });
     }
   };
@@ -8341,6 +8399,16 @@ function NewJobPageContent() {
                         return allSelected ? 'Deselect All' : 'Select All';
                       })()
                       }
+                    </Button>
+                    <Button
+                      variant="outline"
+                      className="h-8 px-4 text-[13px] font-bold border-[#6366f1] text-[#6366f1] bg-white shadow-sm flex items-center gap-2 hover:bg-[#f5f3ff] disabled:opacity-50 disabled:cursor-not-allowed"
+                      onClick={handleSearchMore}
+                      disabled={isSearching || noMoreCandidates}
+                      title="Fetch the next batch of candidates from all selected sources and load their details"
+                    >
+                      <Search className="w-3.5 h-3.5" />
+                      {noMoreCandidates ? "No more candidates" : "Search more candidates"}
                     </Button>
                   </div>
                 )}
