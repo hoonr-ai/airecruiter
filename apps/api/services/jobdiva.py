@@ -4327,6 +4327,21 @@ class JobDivaService:
                 resolved_job_id = int("".join(filter(str.isdigit, str(strip_job_version_suffix(job_id))))) if job_id else 0
             except (TypeError, ValueError):
                 resolved_job_id = 0
+
+        # Build an explicit text header to guarantee JobDiva's parser correctly 
+        # extracts the confirmed candidate name and contact info.
+        header_lines = []
+        if first_name or last_name:
+            header_lines.append(f"Name: {first_name} {last_name}".strip())
+        if email:
+            header_lines.append(f"Email: {email}")
+        if phone:
+            header_lines.append(f"Phone: {phone}")
+        
+        if header_lines:
+            header_text = "\n".join(header_lines)
+            resume_text = f"{header_text}\n\n================================\n\n{resume_text}"
+
         json_payload = {
             "filename": filename,
             "textfile": resume_text,
@@ -4386,12 +4401,10 @@ class JobDivaService:
 
                 logger.info(f"✅ JobDiva application linked/created → candidateId={new_cid}, job={job_id}")
 
-                # The JSON endpoint creates 'Unknown Unknown' with an Auto_ placeholder
-                # email. JobDiva's internal ATS parser runs asynchronously and might
-                # overwrite our update if we fire it instantly. Sleep to let it finish.
+                # We injected the name into the resume header, so JobDiva's parser should 
+                # extract it perfectly. We still call _update_candidate_name instantly 
+                # just to guarantee the exact spelling and apply any missing fields.
                 if new_cid and (first_name or last_name or email or phone):
-                    import asyncio
-                    await asyncio.sleep(4)
                     await self._update_candidate_name(token, new_cid, first_name, last_name, email, phone)
 
                 return True, new_cid
