@@ -255,6 +255,7 @@ def _build_prompt(
     job_title: str,
     seniority: str,
     customer_name: str,
+    job_description: str,
     industry: str,
     required_skills: List[Dict[str, Any]],
     preferred_skills: List[Dict[str, Any]],
@@ -274,6 +275,14 @@ def _build_prompt(
             years = s.get("minYears") or s.get("min_years") or 0
             lines.append(f"  - {name} (min {years} yrs)" if years else f"  - {name}")
         return "\n".join(lines)
+
+    def _fmt_job_description(text: str) -> str:
+        cleaned = " ".join((text or "").split()).strip()
+        if not cleaned:
+            return "N/A"
+        if len(cleaned) > 1800:
+            cleaned = cleaned[:1800].rstrip() + "..."
+        return cleaned
 
     is_it = family == "it"
     shot_key = _shot_key(family, domain)
@@ -395,6 +404,7 @@ ROLE CONTEXT
   Target total experience: {total_years}+ years
   Role family: {family}
   Role domain: {domain}
+  Job description: {_fmt_job_description(job_description)}
 
 RUBRIC — Must-have skills:
 {_fmt_skills(required_skills)}
@@ -446,7 +456,11 @@ STRICT RULES — FOLLOW EVERY ONE:
     current job-search status. The front-matter already covers those — your
     questions would be duplicates and will be rejected. Every question MUST
     probe a rubric skill or role competence.
-12. {"DIFFICULTY = EASY (beginner): focus on fundamentals and common day-to-day tasks." if difficulty == "easy" else ("DIFFICULTY = MEDIUM (intermediate): require practical implementation understanding and clear decision rationale." if difficulty == "medium" else "DIFFICULTY = HARD (expert): include deeper troubleshooting, trade-offs, architecture reasoning, and production-scale judgment.")}
+12. Use the job description as a hard grounding source for responsibilities,
+    tools, scope, and expected depth. Difficulty must change the actual level
+    of the questions for this JD, not merely rephrase, simplify for readability,
+    or reorder the same prompts.
+13. {"DIFFICULTY = EASY (beginner): focus on fundamentals and common day-to-day tasks." if difficulty == "easy" else ("DIFFICULTY = MEDIUM (intermediate): require practical implementation understanding and clear decision rationale." if difficulty == "medium" else "DIFFICULTY = HARD (expert): include deeper troubleshooting, trade-offs, architecture reasoning, and production-scale judgment.")}
 
 OUTPUT FORMAT — return a STRICT JSON object like this:
 {{
@@ -589,6 +603,7 @@ async def generate_screening_questions(
     rubric: Dict[str, Any],
     screening_level: str = "medium",
     customer_name: str = "",
+    job_description: str = "",
     work_arrangement: str = "on-site",   # one of: on-site | onsite | hybrid | remote
     city: str = "",
     address: str = "",
@@ -717,6 +732,7 @@ async def generate_screening_questions(
         job_title=job_title,
         seniority=seniority,
         customer_name=customer_name,
+        job_description=job_description,
         industry=industry,
         required_skills=required_skills,
         preferred_skills=preferred_skills,
