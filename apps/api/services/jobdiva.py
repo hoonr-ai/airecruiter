@@ -4309,6 +4309,10 @@ class JobDivaService:
         if not token:
             return False, None
 
+        # Check if candidate already exists to avoid duplicate/Unknown-Unknown profile
+        if email and not candidate_id:
+            candidate_id = await self.search_candidate_profile(email, first_name, last_name)
+
         from datetime import datetime
         resume_date = datetime.now().strftime("%m/%d/%Y 12:00:00")
 
@@ -4332,6 +4336,8 @@ class JobDivaService:
             "resumeDate": resume_date,
             "resumesource": 0
         }
+        if candidate_id:
+            json_payload["candidateid"] = int(candidate_id)
 
         try:
             for attempt in range(2):
@@ -4371,7 +4377,14 @@ class JobDivaService:
                     except Exception:
                         new_cid = None
 
-                logger.info(f"✅ JobDiva application created → candidateId={new_cid}, job={job_id}")
+                # When linking an existing candidate, JobDiva often returns 0 or empty
+                # body (no new profile created). Fall back to the pre-found candidate_id
+                # so the ID is correctly persisted and updateCandidateProfile still runs.
+                if not new_cid and candidate_id:
+                    new_cid = candidate_id
+                    logger.info(f"ℹ️ JobDiva returned no ID — using pre-found candidateId={new_cid}")
+
+                logger.info(f"✅ JobDiva application linked/created → candidateId={new_cid}, job={job_id}")
 
                 # The JSON endpoint creates 'Unknown Unknown' with an Auto_ placeholder
                 # email. JobDiva's internal ATS parser runs asynchronously and might

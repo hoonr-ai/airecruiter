@@ -929,16 +929,17 @@ async def _provision_batch_to_jobdiva(
                     logger.info(f"🎉 [{label}] Candidate {cand_id} → JobDiva ID: {new_jd_id}")
                     cand_data["jobdiva_candidate_id"] = new_jd_id
                     _persist_jobdiva_candidate_id(cand_id, cand_data)
-                    # Add to in-memory set so concurrent siblings don't re-create the same person
+                    # Add to in-memory sets so concurrent siblings don't re-create the same person.
+                    # This covers both newly created AND pre-existing profiles that were linked.
                     existing_jd_ids.add(str(new_jd_id))
-                    if email_lower and not email_lower.startswith("auto_"):
+                    if email_lower and not email_lower.startswith("auto_") and "@no-email.jobdiva.local" not in email_lower:
                         existing_emails.add(email_lower)
                     if phone_norm and len(phone_norm) >= 7:
                         existing_phones.add(phone_norm)
                     return "success"
                 elif success:
-                    # Created but JD returned no ID (rare — log and treat as partial success)
-                    logger.warning(f"⚠️ [{label}] Created for {cand_id} but got no new_jd_id")
+                    # Linked to existing profile but JD returned no ID — treat as success
+                    logger.warning(f"⚠️ [{label}] Linked for {cand_id} but got no new_jd_id from JobDiva")
                     return "success"
                 else:
                     logger.error(f"❌ [{label}] create_job_application_with_resume returned False for {cand_id}")
