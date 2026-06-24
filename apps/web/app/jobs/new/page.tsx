@@ -989,7 +989,7 @@ function NewJobPageContent() {
   // same N. The text input is the source of truth; the button reads it.
   const [selectBestN, setSelectBestN] = useState<number>(100);
   const [selectBestInput, setSelectBestInput] = useState<string>("100");
-  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "linkedin-unipile" | "linkedin-exa" | "dice" | "upload-resume">("all");
+  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "talent-search" | "linkedin-unipile" | "linkedin-exa" | "dice" | "upload-resume">("all");
   const [locationFilter, setLocationFilter] = useState<Set<string>>(new Set());
   const [minScore, setMinScore] = useState<number>(0);
   const [candidateSearchQuery, setCandidateSearchQuery] = useState<string>("");
@@ -1016,11 +1016,33 @@ function NewJobPageContent() {
     return Math.min(100, Math.max(1, parsed));
   }, [sourceLocations]);
 
+  const candidateHasSource = (cand: any, matcher: (src: string) => boolean) => {
+    const seen = new Set<string>();
+    const push = (raw: any) => {
+      const value = String(raw || "").toLowerCase().trim();
+      if (value) seen.add(value);
+    };
+    push(cand.source);
+    if (Array.isArray(cand.sources)) {
+      cand.sources.forEach(push);
+    }
+    for (const src of seen) {
+      if (matcher(src)) return true;
+    }
+    return false;
+  };
+
   const matchesSourceFilter = (cand: any) => {
     const src = String(cand.source || "").toLowerCase();
     switch (sourceFilter) {
       case "all": return true;
-      case "jobdiva": return src.startsWith("jobdiva");
+      case "jobdiva":
+        return (
+          !candidateHasSource(cand, (src) => src === "jobdiva-talentsearch") &&
+          candidateHasSource(cand, (src) => src.startsWith("jobdiva"))
+        );
+      case "talent-search":
+        return candidateHasSource(cand, (src) => src === "jobdiva-talentsearch");
       case "linkedin-unipile": return src === "linkedin-unipile" || src === "linkedin";
       case "linkedin-exa": return src === "linkedin-exa";
       case "dice": return src === "dice";
@@ -1030,7 +1052,8 @@ function NewJobPageContent() {
   };
   const sourceCounts = candidates.reduce((acc: Record<string, number>, c) => {
     const s = String(c.source || "").toLowerCase();
-    if (s.startsWith("jobdiva")) acc["jobdiva"] = (acc["jobdiva"] || 0) + 1;
+    if (candidateHasSource(c, (src) => src === "jobdiva-talentsearch")) acc["talent-search"] = (acc["talent-search"] || 0) + 1;
+    else if (candidateHasSource(c, (src) => src.startsWith("jobdiva"))) acc["jobdiva"] = (acc["jobdiva"] || 0) + 1;
     else if (s === "linkedin-unipile" || s === "linkedin") acc["linkedin-unipile"] = (acc["linkedin-unipile"] || 0) + 1;
     else if (s === "linkedin-exa") acc["linkedin-exa"] = (acc["linkedin-exa"] || 0) + 1;
     else if (s === "dice") acc["dice"] = (acc["dice"] || 0) + 1;
@@ -8214,6 +8237,7 @@ function NewJobPageContent() {
                       {([
                         { id: "all", label: "All", count: totalCandidatesCount },
                         { id: "jobdiva", label: "JobDiva", count: sourceCounts["jobdiva"] || 0 },
+                        { id: "talent-search", label: "Talent Search", count: sourceCounts["talent-search"] || 0 },
                         { id: "linkedin-unipile", label: "LinkedIn-Unipile", count: sourceCounts["linkedin-unipile"] || 0 },
                         { id: "linkedin-exa", label: "LinkedIn-Exa", count: sourceCounts["linkedin-exa"] || 0 },
                         { id: "dice", label: "Dice", count: sourceCounts["dice"] || 0 },
