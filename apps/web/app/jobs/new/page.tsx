@@ -643,6 +643,7 @@ function NewJobPageContent() {
   const engagement = useEngagementFlow();
   const searchParams = useSearchParams();
   const lastLoadedJobIdRef = useRef<string | null>(null);
+  const isUrlUpdateRef = useRef(false);
   const [currentStep, setCurrentStepState] = useState<Step>(1);
   // Track the highest step the user has ever reached so the pipeline/stepper
   // at the top allows jumping back to any step they've visited, not just
@@ -677,6 +678,48 @@ function NewJobPageContent() {
   const [jobData, setJobData] = useState<any>(null);
   const [isFetching, setIsFetching] = useState(false);
   const [isFetched, setIsFetched] = useState(false);
+
+  // 1. URL -> State (Handles direct links and Back/Forward buttons)
+  useEffect(() => {
+    const stepParam = searchParams.get("step");
+    if (stepParam) {
+      const stepNum = parseInt(stepParam, 10) as Step;
+      if (!isNaN(stepNum) && stepNum >= 1 && stepNum <= 5 && stepNum !== currentStep) {
+        isUrlUpdateRef.current = true;
+        setCurrentStepState(stepNum);
+        setMaxStepReached(current => (stepNum > current ? stepNum : current));
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams.get("step")]);
+
+  // 2. State -> URL (Handles internal Next/Back UI buttons)
+  useEffect(() => {
+    if (isUrlUpdateRef.current) {
+      // This state change was driven by the URL, do not overwrite the URL
+      isUrlUpdateRef.current = false;
+      return;
+    }
+
+    const params = new URLSearchParams(searchParams.toString());
+    const nextStepStr = String(currentStep);
+    const activeJobRef = (numericJobId || jobdivaId || "").trim();
+
+    let changed = false;
+    if (params.get("step") !== nextStepStr) {
+      params.set("step", nextStepStr);
+      changed = true;
+    }
+    if (activeJobRef && params.get("jobId") !== activeJobRef) {
+      params.set("jobId", activeJobRef);
+      changed = true;
+    }
+
+    if (changed) {
+      router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep, numericJobId, jobdivaId, pathname, router]);
 
   // External (non-JobDiva) requirement flow
   const [isExternal, setIsExternal] = useState(false);
