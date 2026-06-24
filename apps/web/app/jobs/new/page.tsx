@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useEffectEvent, useCallback, useMemo, useRef, Suspense, type ReactNode } from "react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   History,
   Plus,
@@ -592,8 +592,10 @@ type WizardMode = 'edit' | 'source' | 'view';
 
 function NewJobPageContent() {
   const router = useRouter();
+  const pathname = usePathname();
   const engagement = useEngagementFlow();
   const searchParams = useSearchParams();
+  const lastLoadedJobIdRef = useRef<string | null>(null);
   const [currentStep, setCurrentStepState] = useState<Step>(1);
   // Track the highest step the user has ever reached so the pipeline/stepper
   // at the top allows jumping back to any step they've visited, not just
@@ -1459,16 +1461,48 @@ function NewJobPageContent() {
       }
     }
 
-    if (jobIdFromUrl) {
-      if (jobIdFromUrl.includes("-")) {
-        setJobdivaId(jobIdFromUrl);
-      } else {
-        setNumericJobId(jobIdFromUrl);
-      }
-      setIsLoadingDraft(true);
-      loadJobDraft(jobIdFromUrl).finally(() => setIsLoadingDraft(false));
+    if (!jobIdFromUrl) {
+      lastLoadedJobIdRef.current = null;
+      return;
     }
+
+    if (jobIdFromUrl.includes("-")) {
+      setJobdivaId(jobIdFromUrl);
+    } else {
+      setNumericJobId(jobIdFromUrl);
+    }
+
+    if (lastLoadedJobIdRef.current === jobIdFromUrl) {
+      return;
+    }
+
+    lastLoadedJobIdRef.current = jobIdFromUrl;
+    setIsLoadingDraft(true);
+    loadJobDraft(jobIdFromUrl).finally(() => setIsLoadingDraft(false));
   }, [searchParams]);
+
+  useEffect(() => {
+    const activeJobRef = (numericJobId || jobdivaId || "").trim();
+    if (!activeJobRef) return;
+
+    const params = new URLSearchParams(searchParams.toString());
+    const nextStep = String(currentStep);
+    const currentStepParam = params.get("step");
+    const currentJobIdParam = params.get("jobId");
+
+    let changed = false;
+    if (currentStepParam !== nextStep) {
+      params.set("step", nextStep);
+      changed = true;
+    }
+    if (currentJobIdParam !== activeJobRef) {
+      params.set("jobId", activeJobRef);
+      changed = true;
+    }
+    if (!changed) return;
+
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+  }, [currentStep, jobdivaId, numericJobId, pathname, router, searchParams]);
 
   useEffect(() => {
     setHasSeededSourceLocation(false);
