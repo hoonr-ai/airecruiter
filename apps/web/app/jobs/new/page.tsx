@@ -209,6 +209,53 @@ function isRemoteJob(jd: { location_type?: string | null; city?: string | null }
   return (jd.city || "").trim().toUpperCase() === "REMOTE";
 }
 
+function buildAutoBotIntroduction({
+  title,
+  isRemote,
+  country,
+  location,
+}: {
+  title: string;
+  isRemote: boolean;
+  country: string;
+  location: string;
+}): string {
+  const introTitle = (title || "role").trim() || "role";
+  return isRemote
+    ? `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a remote ${introTitle} based in ${country}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`
+    : `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+}
+
+function matchesAutoBotIntroductionTemplate({
+  intro,
+  candidateTitles,
+  isRemote,
+  country,
+  location,
+}: {
+  intro: string;
+  candidateTitles: Array<string | null | undefined>;
+  isRemote: boolean;
+  country: string;
+  location: string;
+}): boolean {
+  const normalizedIntro = intro.trim().replace(/\s+/g, " ");
+  const seen = new Set<string>();
+  for (const rawTitle of candidateTitles) {
+    const candidateTitle = (rawTitle || "").trim() || "role";
+    if (seen.has(candidateTitle)) continue;
+    seen.add(candidateTitle);
+    const template = buildAutoBotIntroduction({
+      title: candidateTitle,
+      isRemote,
+      country,
+      location,
+    }).trim().replace(/\s+/g, " ");
+    if (normalizedIntro === template) return true;
+  }
+  return false;
+}
+
 const CANADIAN_PROVINCES = new Set([
   "ON", "BC", "QC", "AB", "MB", "SK", "NS", "NB", "NL", "PE", "YT", "NT", "NU",
 ]);
@@ -821,6 +868,9 @@ function NewJobPageContent() {
   const [botIntroduction, setBotIntroduction] = useState("");
   const [screenQuestions, setScreenQuestions] = useState<ScreenQuestion[]>([]);
   const [questionIdCounter, setQuestionIdCounter] = useState(1);
+  const lastAutoIntroTitleRef = useRef("");
+  const lastSyncedTitleForJDRef = useRef("");
+  const botIntroductionEditedRef = useRef(false);
 
   // Step 5 - Sourcing state
   // Recruiter QA 5.1 / 5.2: the "JobDiva Applicants" toggle was misleading —
@@ -1776,6 +1826,18 @@ function NewJobPageContent() {
             }
             if (rData.bot_introduction) {
               setBotIntroduction(rData.bot_introduction);
+              botIntroductionEditedRef.current = !matchesAutoBotIntroductionTemplate({
+                intro: rData.bot_introduction,
+                candidateTitles: [
+                  draft.enhanced_title,
+                  draft.title,
+                  embeddedDetails?.enhanced_title,
+                  embeddedDetails?.title,
+                ],
+                isRemote: isRemoteJob(embeddedDetails || draft),
+                country: deriveCountry((embeddedDetails || draft)?.state),
+                location: `${(embeddedDetails || draft)?.city || ""}, ${(embeddedDetails || draft)?.state || ""}`.trim().replace(/^, |, $/g, ""),
+              });
             }
             console.log("✅ Existing rubric detected and pre-loaded from database.");
           } else {
@@ -1788,7 +1850,10 @@ function NewJobPageContent() {
 
       // 4. Restore form state (Draft values overlay JobDiva values)
       if (draft.title !== undefined && draft.title !== null) setJobTitle(draft.title || "");
-      if (draft.enhanced_title !== undefined && draft.enhanced_title !== null) setEnhancedTitle(draft.enhanced_title || "");
+      if (draft.enhanced_title !== undefined && draft.enhanced_title !== null) {
+        setEnhancedTitle(draft.enhanced_title || "");
+        lastSyncedTitleForJDRef.current = (draft.enhanced_title || "").trim();
+      }
       if (draft.ai_description !== undefined && draft.ai_description !== null) setJobPosting(draft.ai_description || "");
       if (draft.recruiter_notes !== undefined && draft.recruiter_notes !== null) setRecruiterNotes(draft.recruiter_notes || "");
       if (draft.selected_employment_types?.length) setSelectedEmpTypes(draft.selected_employment_types);
@@ -1796,7 +1861,21 @@ function NewJobPageContent() {
       if (draft.screening_level) setScreeningLevel(draft.screening_level);
       if (draft.selected_job_boards?.length) setSelectedJobBoards(draft.selected_job_boards);
       if (draft.work_authorization) setWorkAuthorization(draft.work_authorization);
-      if (draft.bot_introduction) setBotIntroduction(draft.bot_introduction);
+      if (draft.bot_introduction) {
+        setBotIntroduction(draft.bot_introduction);
+        botIntroductionEditedRef.current = !matchesAutoBotIntroductionTemplate({
+          intro: draft.bot_introduction,
+          candidateTitles: [
+            draft.enhanced_title,
+            draft.title,
+            embeddedDetails?.enhanced_title,
+            embeddedDetails?.title,
+          ],
+          isRemote: isRemoteJob(embeddedDetails || draft),
+          country: deriveCountry((embeddedDetails || draft)?.state),
+          location: `${(embeddedDetails || draft)?.city || ""}, ${(embeddedDetails || draft)?.state || ""}`.trim().replace(/^, |, $/g, ""),
+        });
+      }
 
       // Restore resume match filters if they exist
       if (draft.resume_match_filters && draft.resume_match_filters.length > 0) {
@@ -1896,6 +1975,7 @@ function NewJobPageContent() {
       setJobdivaId(newRef);
       setJobTitle(extTitle.trim());
       setEnhancedTitle(extTitle.trim());
+      lastSyncedTitleForJDRef.current = extTitle.trim();
       setJobPosting(extDescription.trim());
       setJobData({
         id: newJobId,
@@ -2059,6 +2139,7 @@ function NewJobPageContent() {
     // RESET all states before new fetch to prevent stale data
     setJobTitle("");
     setEnhancedTitle("");
+    lastSyncedTitleForJDRef.current = "";
     setJobPosting("");
     setRecruiterNotes("");
     setSelectedEmpTypes([]);
@@ -2115,6 +2196,7 @@ function NewJobPageContent() {
       // 1. Job Title and Description
       setJobTitle(data.title || "");
       setEnhancedTitle(data.enhanced_title || data.title || "");
+      lastSyncedTitleForJDRef.current = (data.enhanced_title || data.title || "").trim();
 
       // Strict Check for AI Description
       // If JobDiva result has "" or null for ai_description, then setJobPosting to ""
@@ -2251,12 +2333,17 @@ function NewJobPageContent() {
 
       const data = await response.json();
       setJobPosting(data.description);
+      const syncedTitle = (titleOverride || enhancedTitle || jobTitle || "").trim();
+      if (syncedTitle) {
+        lastSyncedTitleForJDRef.current = syncedTitle;
+      }
 
       showToast("AI Job Description enriched!", "success");
       trackEvent("job_wizard_step2_jd_regenerate_success", {
         step: 2,
         generated_length: (data?.description || "").length,
       });
+      return true;
     } catch (error) {
       const message = (error as Error)?.message ?? "unknown error";
       logger.error("ai_jd.enhance.exception", { message });
@@ -2265,6 +2352,7 @@ function NewJobPageContent() {
         step: 2,
         error: truncateForTelemetry(message),
       });
+      return false;
     } finally {
       setIsGeneratingJD(false);
     }
@@ -2293,6 +2381,23 @@ function NewJobPageContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStep, jobPosting, isGeneratingJD, jobTitle, jobData?.description, isFetched, isFetching, jobdivaId, recruiterNotes]);
 
+  const syncBotIntroductionForTitle = (nextTitle: string) => {
+    if (!jobData || !nextTitle.trim()) return;
+    if (botIntroductionEditedRef.current) return;
+
+    const isRemote = isRemoteJob(jobData);
+    const country = deriveCountry(jobData.state);
+    const location = `${jobData.city || ""}, ${jobData.state || ""}`.trim().replace(/^, |, $/g, "");
+    const nextAutoIntro = buildAutoBotIntroduction({
+      title: nextTitle,
+      isRemote,
+      country,
+      location,
+    });
+    lastAutoIntroTitleRef.current = nextTitle;
+    setBotIntroduction(nextAutoIntro);
+  };
+
   const handleEnhanceTitle = async () => {
     if (!jobTitle) return;
     setIsEnhancingTitle(true);
@@ -2315,6 +2420,9 @@ function NewJobPageContent() {
       if (res.ok) {
         const data = await res.json();
         const nextTitle = (data?.title || "").trim();
+        if (nextTitle && jobData) {
+          syncBotIntroductionForTitle(nextTitle);
+        }
         setEnhancedTitle(nextTitle);
         if (nextTitle) {
           await handleEnhanceJob(nextTitle);
@@ -2344,6 +2452,22 @@ function NewJobPageContent() {
     } finally {
       setIsEnhancingTitle(false);
     }
+  };
+
+  const handleEnhancedTitleBlur = async () => {
+    const normalizedTitle = enhancedTitle.trim();
+    if (normalizedTitle !== enhancedTitle) {
+      setEnhancedTitle(normalizedTitle);
+    }
+    if (!normalizedTitle) return;
+
+    const lastSyncedTitle = (lastSyncedTitleForJDRef.current || "").trim();
+    if (normalizedTitle === lastSyncedTitle) return;
+
+    if (jobData) {
+      syncBotIntroductionForTitle(normalizedTitle);
+    }
+    await handleEnhanceJob(normalizedTitle);
   };
 
   const handleAddEmail = () => {
@@ -3096,8 +3220,13 @@ function NewJobPageContent() {
                 <Input
                   value={enhancedTitle}
                   onChange={(e) => {
-                    setEnhancedTitle(e.target.value);
+                    const nextValue = e.target.value;
+                    setEnhancedTitle(nextValue);
+                    if (!botIntroductionEditedRef.current) {
+                      syncBotIntroductionForTitle(nextValue);
+                    }
                   }}
+                  onBlur={handleEnhancedTitleBlur}
                   placeholder="Enhanced Job Title"
                   className="h-10 text-[14px] border-slate-200 focus:border-primary/50 focus:ring-primary/20 bg-white"
                 />
@@ -4790,6 +4919,14 @@ function NewJobPageContent() {
   }, [currentStep, rubricData, jobData, screenQuestions.length, screeningLevel]);
 
   useEffect(() => {
+    if (!jobData) return;
+    const currentTitle = (enhancedTitle || jobTitle || "").trim();
+    if (!currentTitle) return;
+
+    syncBotIntroductionForTitle(currentTitle);
+  }, [jobData, enhancedTitle, jobTitle]);
+
+  useEffect(() => {
     if (currentStep !== 5) return;
 
     syncStepFiveData();
@@ -6218,7 +6355,11 @@ function NewJobPageContent() {
             </div>
             <textarea
               value={botIntroduction}
-              onChange={(e) => setBotIntroduction(e.target.value)}
+              onChange={(e) => {
+                const nextValue = e.target.value;
+                setBotIntroduction(nextValue);
+                botIntroductionEditedRef.current = nextValue.trim().length > 0;
+              }}
               onBlur={(e) => {
                 trackEvent("job_wizard_step4_bot_introduction_saved", {
                   step: 4,
