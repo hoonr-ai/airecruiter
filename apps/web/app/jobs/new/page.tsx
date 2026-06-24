@@ -994,6 +994,14 @@ function NewJobPageContent() {
   // backend; the modal surfaces per-batch status so the recruiter can see
   // what's happening on long runs.
   const LAUNCH_BATCH_SIZE = 5;
+
+  // Pace between batches so save+engage calls don't fire faster than nginx's
+  // pair_batch_limit zone can sustain on large launches (seen: 26-30 batches
+  // back-to-back hit the burst cap within ~40s and got 503'd — see
+  // nginx.conf's pair_batch_limit comment). This is a courtesy pace, not the
+  // only safeguard: nginx still enforces the real ceiling.
+  const BATCH_LAUNCH_DELAY_MS = 350;
+
   // Bounded concurrency for the Launch PAIR contact-enrichment pass. Each
   // candidate's enrich-contact call runs the ZoomInfo→Apollo→Exa chain
   // server-side; doing them one-at-a-time made the modal crawl for minutes, so
@@ -6756,6 +6764,11 @@ function NewJobPageContent() {
     let skippedCandidateNames: string[] = [];
 
     for (let i = 0; i < batches.length; i++) {
+      
+      if (i > 0) {
+        await new Promise(resolve => setTimeout(resolve, BATCH_LAUNCH_DELAY_MS));
+      }
+
       const batch = batches[i];
       const batchIds = batch.map(c => c.candidate_id);
 
