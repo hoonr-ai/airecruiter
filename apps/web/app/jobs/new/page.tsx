@@ -1968,12 +1968,22 @@ function NewJobPageContent() {
 
       // 5. Navigate to the saved step
       if (draft.current_step) {
-        const savedStep = draft.current_step as Step;
-        setCurrentStep(savedStep);
+        let stepToUse = draft.current_step as Step;
+        
+        // Respect the URL step if the user manually navigated or used the back button
+        const urlStepStr = searchParams.get("step");
+        if (urlStepStr) {
+          const urlStep = parseInt(urlStepStr, 10) as Step;
+          if (!isNaN(urlStep) && urlStep >= 1 && urlStep <= 5) {
+            stepToUse = urlStep;
+          }
+        }
+
+        setCurrentStep(stepToUse);
         // Treat the saved step as previously-reached so the pipeline allows
         // hopping back to it (and any earlier step) without re-clicking Next.
-        setMaxStepReached(prev => (savedStep > prev ? savedStep : prev));
-        setPageSubtitle(STEP_DESCRIPTIONS[savedStep]);
+        setMaxStepReached(prev => Math.max(prev, draft.current_step as Step, stepToUse) as Step);
+        setPageSubtitle(STEP_DESCRIPTIONS[stepToUse]);
         setIsFetched(true);
         setNumericJobId(jobIdToLoad);
       }
