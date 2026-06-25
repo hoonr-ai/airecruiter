@@ -456,6 +456,33 @@ IMPORTANT:
         for item in skills_from_llm:
             if isinstance(item, dict) and 'name' in item:
                 if is_cert_or_edu(item["name"]):
+                    # Map the discarded skill containing cert/edu keywords to education/certifications
+                    evidence_type = (item.get('evidence_type') or '').lower()
+                    category = normalize_skill_category(item["name"], item.get('category', 'hard').lower())
+                    normalized_value = " ".join("".join(ch.lower() if ch.isalnum() else " " for ch in item["name"]).split())
+                    is_direct_text_match = bool(normalized_value and normalized_value in normalized_grounding_text)
+                    is_direct_hard_skill = category == "hard" and (evidence_type == "direct" or is_direct_text_match)
+                    required_label = "Required" if is_direct_hard_skill else ("Preferred" if category == "hard" else item.get('importance', 'preferred').capitalize())
+
+                    name_lower = item["name"].lower()
+                    if any(kw in name_lower for kw in ["phd", "doctor"]):
+                        degree = "PhD or equivalent"
+                    elif ("master of" in name_lower or "masters of" in name_lower or "master's" in name_lower or "masters" in name_lower or "degree" in name_lower) and "master" in name_lower and not any(kw in name_lower for kw in ["scrum", "belt", "electrician", "plumber", "agile"]):
+                        degree = "Master's degree"
+                    elif "bachelor" in name_lower:
+                        degree = "Bachelor's degree"
+                    elif ("associate of" in name_lower or "associate's" in name_lower or "associates" in name_lower or "degree" in name_lower) and "associate" in name_lower and not any(kw in name_lower for kw in ["certified", "certification", "aws", "azure", "google", "oracle"]):
+                        degree = "Associate's degree"
+                    elif any(kw in name_lower for kw in ["ged", "high school"]):
+                        degree = "High School / GED"
+                    else:
+                        degree = "Certification / License"
+
+                    education.append({
+                        "degree": degree,
+                        "field": item["name"],
+                        "required": required_label
+                    })
                     continue  # Skip certifications and education in skills
                 evidence_type = (item.get('evidence_type') or '').lower()
                 skill_min_years = item.get('min_years', min_years)
