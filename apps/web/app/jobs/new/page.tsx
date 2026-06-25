@@ -1018,6 +1018,7 @@ function NewJobPageContent() {
   const [qaOverrideEnabled, setQaOverrideEnabled] = useState(true);
   const [readyLaunchedPendingRedirect, setReadyLaunchedPendingRedirect] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
+  const [hasFetchedMoreJobDiva, setHasFetchedMoreJobDiva] = useState(false);
   const [booleanStringOpen, setBooleanStringOpen] = useState(false);
   const [generatedBoolean, setGeneratedBoolean] = useState("");
   const [isRefreshingBoolean, setIsRefreshingBoolean] = useState(false);
@@ -5658,10 +5659,18 @@ function NewJobPageContent() {
       titleCriteriaOverride?: typeof sourceTitles;
       skillCriteriaOverride?: typeof sourceSkills;
       companiesOverride?: typeof sourceCompanies;
+      sourcesOverride?: string[];
+      jobdivaOffset?: number;
+      jobdivaBatchSize?: number;
     }
   ): Promise<any[]> => {
     const apiUrl = API_BASE;
-    const payload = buildSearchPayload(booleanString, overrides);
+    const payload = {
+      ...buildSearchPayload(booleanString, overrides),
+      ...(overrides?.sourcesOverride ? { sources: overrides.sourcesOverride } : {}),
+      ...(typeof overrides?.jobdivaOffset === "number" ? { jobdiva_offset: overrides.jobdivaOffset } : {}),
+      ...(typeof overrides?.jobdivaBatchSize === "number" ? { jobdiva_batch_size: overrides.jobdivaBatchSize } : {}),
+    };
 
     const mapStageToStatus = (stage: string) => {
       const raw = String(stage || "").toLowerCase();
@@ -5956,6 +5965,7 @@ function NewJobPageContent() {
 
     setIsSearching(true);
     setHasSearched(true);
+    setHasFetchedMoreJobDiva(false);
     setRestoredFromCache(false);
     detailFailedIdsRef.current = new Set<string>();
     trackEvent("job_wizard_step5_candidate_search_started", {
@@ -6054,6 +6064,62 @@ function NewJobPageContent() {
         })),
         quality: overallQuality,
         ...buildStep5FilterContext(),
+      });
+    }
+  };
+
+  const handleSearchMoreJobDiva = async () => {
+    if (isSearching || hasFetchedMoreJobDiva || !searchSources.jobdiva) return;
+    const query = generatedBoolean || resolvedGeneratedBoolean;
+    const runStartMs = Date.now();
+    let runResults: Parameters<typeof collectCandidateQualityStats>[0] = [];
+
+    setIsSearching(true);
+    setHasSearched(true);
+    setRestoredFromCache(false);
+    detailFailedIdsRef.current = new Set<string>();
+    setSearchStatus("Searching JobDiva for more candidates...");
+    trackEvent("job_wizard_step5_jobdiva_search_more_started", {
+      step: 5,
+      query: truncateForTelemetry(query, 260),
+      jobdiva_offset: 150,
+      jobdiva_batch_size: 150,
+    });
+
+    try {
+      runResults = await runSearchStream(query, "append", {
+        sourcesOverride: ["JobDiva"],
+        jobdivaOffset: 150,
+        jobdivaBatchSize: 150,
+      });
+      setHasFetchedMoreJobDiva(true);
+      setSearchStatus(`Added ${runResults.length} more JobDiva profile${runResults.length === 1 ? "" : "s"}.`);
+    } catch (error) {
+      console.error("Failed to search more JobDiva candidates:", error);
+      showToast("Could not fetch more JobDiva candidates. Please try again.", "info");
+      trackEvent("job_wizard_step5_jobdiva_search_more_failed", {
+        step: 5,
+        error: truncateForTelemetry((error as Error)?.message || String(error)),
+      });
+    } finally {
+      setIsSearching(false);
+      const detailFailedCount = detailFailedIdsRef.current.size;
+      if (detailFailedCount > 0) {
+        showToast(
+          `Couldn't score ${detailFailedCount} additional candidate${detailFailedCount === 1 ? "" : "s"} — JobDiva details were unavailable. They're shown as N/A and remain launchable.`,
+          "info",
+        );
+      }
+      const runtimeSeconds = Number(((Date.now() - runStartMs) / 1000).toFixed(2));
+      setLastSearchRuntimeSec(runtimeSeconds);
+      setLastSearchRunsExecuted(1);
+      trackEvent("job_wizard_step5_jobdiva_search_more_finished", {
+        step: 5,
+        runtime_seconds: runtimeSeconds,
+        results_count: runResults.length,
+        quality: collectCandidateQualityStats(runResults),
+        jobdiva_offset: 150,
+        jobdiva_batch_size: 150,
       });
     }
   };
@@ -8503,6 +8569,21 @@ function NewJobPageContent() {
                 </div>
                 {candidates.length > 0 && (
                   <div className="flex items-center gap-2">
+                    {hasSearched && !isSearching && !hasFetchedMoreJobDiva && searchSources.jobdiva && (
+                      <Button
+                        variant="outline"
+                        className="h-8 px-4 text-[13px] font-bold border-indigo-200 text-indigo-700 bg-white shadow-sm flex items-center gap-2 hover:bg-indigo-50"
+                        onClick={handleSearchMoreJobDiva}
+                        disabled={isSearching}
+                      >
+                        {isSearching ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Search className="w-3.5 h-3.5" />
+                        )}
+                        Search more JobDiva
+                      </Button>
+                    )}
                     <Button
                       variant="outline"
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50"

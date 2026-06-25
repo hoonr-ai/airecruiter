@@ -410,6 +410,8 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                 else bool(request.include_relocation_candidates)
             ),
             min_experience_years=request.min_experience_years,
+            jobdiva_offset=max(0, int(request.jobdiva_offset or 0)),
+            jobdiva_batch_size=max(1, int(request.jobdiva_batch_size or 150)),
             # Placeholder customer values carry no client signal — skip them.
             client_name=(
                 "" if client_name.lower() in ("", "external", "unknown", "n/a")
@@ -511,6 +513,8 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                     recent_days=request.recent_days,
                     require_resume=require_resume,
                     min_experience_years=request.min_experience_years,
+                    jobdiva_offset=max(0, int(request.jobdiva_offset or 0)),
+                    jobdiva_batch_size=max(1, int(request.jobdiva_batch_size or 150)),
                 )
 
                 for candidate in candidates:
