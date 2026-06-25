@@ -1647,21 +1647,66 @@ class UnifiedCandidateSearch:
         """Legacy JobDiva TalentSearch boolean path kept as a separate source."""
         source_type = "JobDiva-TalentSearch"
         try:
+            from core import sourcing_config as sc
             countries, states = self._resolve_jobdiva_geo(criteria)
             flat_terms = list(criteria.title_criteria or []) + list(criteria.skill_criteria or [])
-            candidates = await self.jobdiva_service.search_candidates(
-                skills=flat_terms,
-                location=criteria.location or "",
-                page=1,
-                limit=int(criteria.page_size or 100),
-                job_id=None,
-                boolean_string=criteria.boolean_string or "",
-                recent_days=getattr(criteria, "recent_days", None),
-                require_resume=getattr(criteria, "require_resume", True),
-                countries=countries,
-                states=states,
-                page_number=getattr(criteria, "page_number", 0) or 0,
+            requested_page_size = max(1, int(criteria.page_size or 100))
+            configured_page_size = max(
+                1,
+                int(getattr(sc, "JOBDIVA_TALENTSEARCH_PAGE_SIZE", requested_page_size) or requested_page_size),
             )
+            page_size = min(requested_page_size, configured_page_size)
+            total_target = max(
+                page_size,
+                int(getattr(sc, "JOBDIVA_TALENTSEARCH_TOTAL_COUNT", page_size) or page_size),
+            )
+            source_cap = getattr(sc, "JOBDIVA_SOURCE_CAP", None)
+            if source_cap:
+                total_target = min(total_target, int(source_cap))
+
+            start_page = int(getattr(criteria, "page_number", 0) or 0)
+            total_pages = max(1, math.ceil(total_target / page_size))
+            candidates: List[Dict[str, Any]] = []
+            seen_ids = set()
+
+            for offset in range(total_pages):
+                page_number = start_page + offset
+                if len(candidates) >= total_target:
+                    break
+
+                page_candidates = await self.jobdiva_service.search_candidates(
+                    skills=flat_terms,
+                    location=criteria.location or "",
+                    page=page_number + 1,
+                    limit=page_size,
+                    job_id=None,
+                    boolean_string=criteria.boolean_string or "",
+                    recent_days=getattr(criteria, "recent_days", None),
+                    require_resume=getattr(criteria, "require_resume", True),
+                    countries=countries,
+                    states=states,
+                    page_number=page_number,
+                )
+
+                self._log_stage(
+                    "TalentSearch",
+                    f"TalentSearch pageNumber={page_number} returned {len(page_candidates)} candidate(s)",
+                )
+                if not page_candidates:
+                    break
+
+                for cand in page_candidates:
+                    cid = str(cand.get("candidate_id") or cand.get("id") or "").strip()
+                    dedupe_key = cid or f"{cand.get('email') or ''}:{cand.get('name') or ''}".lower()
+                    if dedupe_key in seen_ids:
+                        continue
+                    seen_ids.add(dedupe_key)
+                    candidates.append(cand)
+                    if len(candidates) >= total_target:
+                        break
+
+                if len(page_candidates) < page_size:
+                    break
 
             if not candidates:
                 return {"candidates": [], "source_type": source_type}
