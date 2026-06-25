@@ -643,6 +643,7 @@ function NewJobPageContent() {
   const engagement = useEngagementFlow();
   const searchParams = useSearchParams();
   const lastLoadedJobIdRef = useRef<string | null>(null);
+  const skipDraftLoadForJobRef = useRef<Set<string>>(new Set());
   const isUrlUpdateRef = useRef(false);
   const [currentStep, setCurrentStepState] = useState<Step>(1);
   // Track the highest step the user has ever reached so the pipeline/stepper
@@ -678,6 +679,12 @@ function NewJobPageContent() {
   const [jobData, setJobData] = useState<any>(null);
   const [isFetching, setIsFetching] = useState(false);
   const [isFetched, setIsFetched] = useState(false);
+  const markDraftLoadSkippedForImportedJob = (...ids: Array<string | number | null | undefined>) => {
+    ids
+      .map(id => String(id ?? "").trim())
+      .filter(Boolean)
+      .forEach(id => skipDraftLoadForJobRef.current.add(id));
+  };
 
   // 1. URL -> State (Handles direct links and Back/Forward buttons)
   useEffect(() => {
@@ -703,7 +710,7 @@ function NewJobPageContent() {
 
     const params = new URLSearchParams(searchParams.toString());
     const nextStepStr = String(currentStep);
-    const activeJobRef = (numericJobId || jobdivaId || "").trim();
+    const activeJobRef = (numericJobId || (isFetched ? jobdivaId : "") || "").trim();
 
     let changed = false;
     if (params.get("step") !== nextStepStr) {
@@ -719,7 +726,7 @@ function NewJobPageContent() {
       router.replace(`${pathname}?${params.toString()}`, { scroll: false });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentStep, numericJobId, jobdivaId, pathname, router]);
+  }, [currentStep, numericJobId, jobdivaId, isFetched, pathname, router]);
 
   // External (non-JobDiva) requirement flow
   const [isExternal, setIsExternal] = useState(false);
@@ -1469,9 +1476,7 @@ function NewJobPageContent() {
   const [isLoadingResume, setIsLoadingResume] = useState(false);
   const [showResumeModal, setShowResumeModal] = useState(false);
 
-  // Resume Setup load state. Gates the wizard shell so the user sees a full-page
-  // loader instead of a flash-of-empty-form while we hydrate from /jobs/{id}/draft.
-  const [isLoadingDraft, setIsLoadingDraft] = useState(false);
+  const [isHydratingJobSetup, setIsHydratingJobSetup] = useState(false);
   const stepEntrySnapshotRef = useRef<Partial<Record<Step, StepSnapshot>>>({});
   const stepStartMsRef = useRef<number>(Date.now());
 
@@ -1588,6 +1593,7 @@ function NewJobPageContent() {
 
     if (!jobIdFromUrl) {
       lastLoadedJobIdRef.current = null;
+      setIsHydratingJobSetup(false);
       return;
     }
 
@@ -1601,13 +1607,20 @@ function NewJobPageContent() {
       return;
     }
 
+    if (skipDraftLoadForJobRef.current.has(jobIdFromUrl)) {
+      skipDraftLoadForJobRef.current.delete(jobIdFromUrl);
+      lastLoadedJobIdRef.current = jobIdFromUrl;
+      setIsHydratingJobSetup(false);
+      return;
+    }
+
     lastLoadedJobIdRef.current = jobIdFromUrl;
-    setIsLoadingDraft(true);
-    loadJobDraft(jobIdFromUrl).finally(() => setIsLoadingDraft(false));
+    setIsHydratingJobSetup(true);
+    loadJobDraft(jobIdFromUrl).finally(() => setIsHydratingJobSetup(false));
   }, [searchParams]);
 
   useEffect(() => {
-    const activeJobRef = (numericJobId || jobdivaId || "").trim();
+    const activeJobRef = (numericJobId || (isFetched ? jobdivaId : "") || "").trim();
     if (!activeJobRef) return;
 
     const params = new URLSearchParams(searchParams.toString());
@@ -1627,7 +1640,7 @@ function NewJobPageContent() {
     if (!changed) return;
 
     router.replace(`${pathname}?${params.toString()}`, { scroll: false });
-  }, [currentStep, jobdivaId, numericJobId, pathname, router, searchParams]);
+  }, [currentStep, jobdivaId, numericJobId, isFetched, pathname, router, searchParams]);
 
   useEffect(() => {
     setHasSeededSourceLocation(false);
@@ -2230,6 +2243,8 @@ function NewJobPageContent() {
       }
 
       setJobData(data); // Store the full data object from backend
+
+      markDraftLoadSkippedForImportedJob(searchId, data.id, data.jobdiva_id);
 
       if (data.id) {
         console.log(`🔄 Identifier Resolved: Syncing internal numericJobId to Numeric PK '${data.id}'`);
@@ -9123,15 +9138,12 @@ const renderStepContent = () => {
   return content;
 };
 
-// Full-page loader while we hydrate a saved draft. Prevents the flash-of-
-// empty-form that recruiters see on Resume Setup while /jobs/{id}/draft
-// (plus rubric / screen questions) resolve.
-if (isLoadingDraft) {
+if (isHydratingJobSetup) {
   return (
     <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center">
       <div className="flex flex-col items-center gap-3 text-slate-500">
         <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
-        <div className="text-[15px] font-medium">Loading draft…</div>
+        <div className="text-[15px] font-medium">Loading job setup...</div>
       </div>
     </div>
   );
