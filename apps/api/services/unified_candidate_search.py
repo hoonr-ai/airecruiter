@@ -139,6 +139,10 @@ class SearchCriteria(BaseModel):
     require_resume: bool = True
     include_relocation_candidates: bool = True
     min_experience_years: Optional[int] = None
+    # JobDiva tranche controls. Initial search uses offset=0/batch=150; the
+    # "Search more" action uses offset=150/batch=150 to append the next page.
+    jobdiva_offset: int = 0
+    jobdiva_batch_size: int = 150
     # Hiring client / account name. Drives two rubric signals: the
     # "currently employed by client" hard gate (via current-employer
     # exclusion) and the positive "Same client / industry experience"
@@ -1568,12 +1572,17 @@ class UnifiedCandidateSearch:
             criteria_unconfigured = False
 
             if criteria.job_id:
-                # resumeCount drives JobAgentSearch latency (it scales with the
-                # number of candidates JobDiva ranks). We cap the pool to the
-                # top-100 for display + hydration anyway, so over-requesting
-                # just slows the call. See sourcing_config.JOBAGENT_RESUME_COUNT.
+                # resumeCount drives JobAgentSearch latency. JobAgent has no
+                # offset, so Search-more requests offset+batch candidates and
+                # slices off the already-shown ranks locally.
                 from core import sourcing_config as _sc_rc
-                resume_count = _sc_rc.JOBAGENT_RESUME_COUNT
+                batch_size = max(1, int(getattr(criteria, "jobdiva_batch_size", 150) or 150))
+                offset = max(0, int(getattr(criteria, "jobdiva_offset", 0) or 0))
+                max_resume_count = max(
+                    batch_size,
+                    int(getattr(_sc_rc, "JOBAGENT_MAX_RESUME_COUNT", _sc_rc.JOBAGENT_RESUME_COUNT) or batch_size),
+                )
+                resume_count = min(max_resume_count, offset + batch_size)
                 # Wall-clock as the orchestrator sees it. Comparing this to the
                 # service's "JobAgent TIMING total_ms" reveals event-loop
                 # contention: if this is much larger, the coroutine was starved
@@ -1598,7 +1607,16 @@ class UnifiedCandidateSearch:
                 self._log_stage(
                     "TalentSearch",
                     f"JobAgent jobId={criteria.job_id} resume_count={resume_count} "
-                    f"raw={len(candidates)} criteria_unconfigured={criteria_unconfigured}"
+                    f"raw={len(candidates)} offset={offset} batch={batch_size} "
+                    f"criteria_unconfigured={criteria_unconfigured}"
+                )
+                if offset:
+                    candidates = candidates[offset : offset + batch_size]
+                else:
+                    candidates = candidates[:batch_size]
+                self._log_stage(
+                    "TalentSearch",
+                    f"JobAgent tranche offset={offset} batch={batch_size} kept={len(candidates)}"
                 )
 
             if not candidates:
@@ -1650,27 +1668,32 @@ class UnifiedCandidateSearch:
             from core import sourcing_config as sc
             countries, states = self._resolve_jobdiva_geo(criteria)
             flat_terms = list(criteria.title_criteria or []) + list(criteria.skill_criteria or [])
-            requested_page_size = max(1, int(criteria.page_size or 100))
-            configured_page_size = max(
+            page_size = max(
                 1,
-                int(getattr(sc, "JOBDIVA_TALENTSEARCH_PAGE_SIZE", requested_page_size) or requested_page_size),
+                int(getattr(sc, "JOBDIVA_TALENTSEARCH_PAGE_SIZE", 150) or 150),
             )
-            page_size = min(requested_page_size, configured_page_size)
-            total_target = max(
-                page_size,
-                int(getattr(sc, "JOBDIVA_TALENTSEARCH_TOTAL_COUNT", page_size) or page_size),
+            batch_size = max(1, int(getattr(criteria, "jobdiva_batch_size", 150) or 150))
+            offset = max(0, int(getattr(criteria, "jobdiva_offset", 0) or 0))
+            max_total = max(
+                batch_size,
+                int(getattr(sc, "JOBDIVA_TALENTSEARCH_MAX_TOTAL_COUNT", page_size * 2) or batch_size),
             )
             source_cap = getattr(sc, "JOBDIVA_SOURCE_CAP", None)
             if source_cap:
-                total_target = min(total_target, int(source_cap))
+                max_total = min(max_total, int(source_cap))
+            if offset >= max_total:
+                return {"candidates": [], "source_type": source_type}
 
-            start_page = int(getattr(criteria, "page_number", 0) or 0)
-            total_pages = max(1, math.ceil(total_target / page_size))
+            total_target = min(batch_size, max_total - offset)
+            start_page = offset // page_size
+            first_page_skip = offset % page_size
+            total_pages = max(1, math.ceil((first_page_skip + total_target) / page_size))
+
             candidates: List[Dict[str, Any]] = []
             seen_ids = set()
 
-            for offset in range(total_pages):
-                page_number = start_page + offset
+            for page_offset in range(total_pages):
+                page_number = start_page + page_offset
                 if len(candidates) >= total_target:
                     break
 
@@ -1690,12 +1713,14 @@ class UnifiedCandidateSearch:
 
                 self._log_stage(
                     "TalentSearch",
-                    f"TalentSearch pageNumber={page_number} returned {len(page_candidates)} candidate(s)",
+                    f"TalentSearch pageNumber={page_number} offset={offset} batch={batch_size} "
+                    f"returned {len(page_candidates)} candidate(s)",
                 )
                 if not page_candidates:
                     break
 
-                for cand in page_candidates:
+                page_slice = page_candidates[first_page_skip:] if page_offset == 0 and first_page_skip else page_candidates
+                for cand in page_slice:
                     cid = str(cand.get("candidate_id") or cand.get("id") or "").strip()
                     dedupe_key = cid or f"{cand.get('email') or ''}:{cand.get('name') or ''}".lower()
                     if dedupe_key in seen_ids:
