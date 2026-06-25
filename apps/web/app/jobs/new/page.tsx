@@ -6467,7 +6467,7 @@ function NewJobPageContent() {
             <h3 className="text-[14px] font-bold text-slate-800">Screen</h3>
             <span className="text-[12px] font-normal text-slate-500">Questions asked during Hoonr-Curate phone screen</span>
             <span className="ml-auto text-slate-400 text-[11px] font-bold">
-              {screenQuestions.length} / 12 questions
+              {screenQuestions.length} question{screenQuestions.length === 1 ? "" : "s"}
             </span>
           </div>
 
