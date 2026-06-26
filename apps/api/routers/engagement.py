@@ -1018,7 +1018,12 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                             )
                         # Inject recruiter emails into PAIR payload so PAIR can send notifications (e.g. 20-hour report)
                         if _stop_row[1]:
-                            payload_obj.setdefault("jd", {})["recruiter_emails"] = _stop_row[1]
+                            recruiter_emails = [
+                                str(email).strip()
+                                for email in _parse_json_list(_stop_row[1])
+                                if str(email).strip()
+                            ]
+                            payload_obj.setdefault("jd", {})["recruiter_emails"] = recruiter_emails
                 finally:
                     _stop_conn.close()
             except HTTPException:
