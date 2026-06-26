@@ -997,32 +997,34 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
 
         _validate_pair_payload_contacts(payload_obj)
 
-        # Defense-in-depth: refuse to engage candidates for jobs whose outreach
-        # has been stopped. /candidates/save already blocks earlier, but this
-        # endpoint is also reachable directly.
+        # Fetch job metadata (recruiter emails) and defense-in-depth outreach check
         if job_id_from_payload and job_id_from_payload != "unknown":
             try:
                 _stop_conn = _get_db_connection()
                 try:
                     _stop_cur = _stop_conn.cursor()
                     _stop_cur.execute("""
-                        SELECT outreach_stopped_at FROM monitored_jobs
+                        SELECT outreach_stopped_at, recruiter_emails FROM monitored_jobs
                         WHERE job_id = %s OR jobdiva_id = %s
                         LIMIT 1
                     """, (str(job_id_from_payload), str(job_id_from_payload)))
                     _stop_row = _stop_cur.fetchone()
                     _stop_cur.close()
-                    if _stop_row and _stop_row[0] is not None:
-                        raise HTTPException(
-                            status_code=409,
-                            detail="Job activity has been stopped. Cannot launch new candidates.",
-                        )
+                    if _stop_row:
+                        if _stop_row[0] is not None:
+                            raise HTTPException(
+                                status_code=409,
+                                detail="Job activity has been stopped. Cannot launch new candidates.",
+                            )
+                        # Inject recruiter emails into PAIR payload so PAIR can send notifications (e.g. 20-hour report)
+                        if _stop_row[1]:
+                            payload_obj.setdefault("jd", {})["recruiter_emails"] = _stop_row[1]
                 finally:
                     _stop_conn.close()
             except HTTPException:
                 raise
             except Exception as _stop_check_err:
-                logger.warning(f"Could not check outreach_stopped_at for job {job_id_from_payload}: {_stop_check_err}")
+                logger.warning(f"Could not check job metadata for job {job_id_from_payload}: {_stop_check_err}")
 
         # Idempotency: drop candidates already at engage_status='sent' so retries
         # or staged-launch races don't create duplicate interviews on the PAIR
