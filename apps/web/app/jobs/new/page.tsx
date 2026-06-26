@@ -8587,7 +8587,7 @@ function NewJobPageContent() {
                     {hasSearched && !isSearching && !hasFetchedMoreJobDiva && searchSources.jobdiva && (
                       <Button
                         variant="outline"
-                        className="h-8 px-4 text-[13px] font-bold border-indigo-200 text-indigo-700 bg-white shadow-sm flex items-center gap-2 hover:bg-indigo-50"
+                        className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-800 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50 hover:text-slate-800 hover:border-slate-200"
                         onClick={handleSearchMoreJobDiva}
                         disabled={isSearching}
                       >
@@ -8601,7 +8601,7 @@ function NewJobPageContent() {
                     )}
                     <Button
                       variant="outline"
-                      className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50"
+                      className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-800 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50 hover:text-slate-800 hover:border-slate-200"
                       onClick={() => {
                         const n = Math.max(1, selectBestN);
                         const firstN = candidates
@@ -8670,11 +8670,11 @@ function NewJobPageContent() {
                         }
                       }}
                       aria-label="Number of best candidates to select"
-                      className="h-8 w-16 px-2 text-[13px] font-bold text-slate-700 border border-slate-200 rounded-md bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-[#6366f1]/40 focus:border-[#6366f1]"
+                      className="h-8 w-16 px-2 text-[13px] font-bold text-slate-800 border border-slate-200 rounded-md bg-white shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-300 focus:border-slate-200"
                     />
                     <Button
                       variant="outline"
-                      className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white"
+                      className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-800 bg-white shadow-sm hover:bg-slate-50 hover:text-slate-800 hover:border-slate-200"
                       onClick={() => {
                         const eligible = candidates.filter(c => {
                           const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
