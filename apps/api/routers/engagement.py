@@ -558,12 +558,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 "source_candidate_id": r.get("source_candidate_id"),
                 "name": candidate_name,
                 "email": candidate_email,
-                "phone": r.get("phone"),
-                "raw_resume_text": r.get("experience", ""), # LiveKit expects raw_resume_text
-                "experience": r.get("experience", ""),      # Frontend expects experience for auto-population
-                "summary": r.get("summary", ""),
-                "skills": r.get("skills", ""),
-                "education": r.get("education", ""),
+                "phone": r.get("phone")
             })
 
         # Assemble final payload matching pairbotqa /api/bulk-interviews schema
