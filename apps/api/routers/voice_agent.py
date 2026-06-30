@@ -107,6 +107,7 @@ class TranscriptionItem(BaseModel):
     total_score: float = 10.0
     hard_filter_status: str  # "passed", "failed", or "not_hard_filter"
     reason: Optional[str] = None
+    question_order: Optional[int] = None
 
 class VoiceAgentInterviewWebhook(BaseModel):
     interview_id: str
