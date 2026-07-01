@@ -930,8 +930,12 @@ class JobDivaService:
             except Exception as e:
                 logger.error(f"Failed to create JobDiva DB engine: {e}")
 
-    async def authenticate(self) -> str:
+    async def authenticate(self, force_refresh: bool = False) -> str:
         """Authenticate with JobDiva and return JWT token."""
+        if force_refresh:
+            self.cached_token = None
+            self.token_expiry = 0
+
         if self.cached_token and time.time() < self.token_expiry:
             return self.cached_token
         
