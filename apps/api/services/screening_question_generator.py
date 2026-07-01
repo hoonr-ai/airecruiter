@@ -291,15 +291,12 @@ def _build_prompt(
         )
     )
     rule3 = (
-        "Questions must be EXTREMELY SIMPLE and CONVERSATIONAL. This is a preliminary AI screening call, NOT a technical interview.\n"
-        "   Do NOT ask candidates to design systems, trace flows, or solve production issues. Just ask them if they have used\n"
-        "   a specific tool or framework, what they used it for, or ask a very basic conceptual question to verify they know what it is.\n\n"
+        "Questions must be INCREDIBLY SIMPLE and CONVERSATIONAL. This is a preliminary AI screening call, NOT a technical interview.\n"
+        "   Do NOT ask candidates to design systems, solve problems, manage requests, ensure efficiency, or troubleshoot.\n"
+        "   Literally just ask them if they have used a tool, what they used it for, or to give a brief example of a project where they used it.\n\n"
         "   Each question must simply verify:\n"
         "     - Basic familiarity with a required skill\n"
-        "     - General awareness of what a tool is used for\n"
-        "Questions must be INCREDIBLY SIMPLE and CONVERSATIONAL. This is a preliminary AI screening call, NOT a technical interview.\n"
-        "   Do NOT ask candidates to solve problems, manage requests, ensure efficiency, or troubleshoot.\n"
-        "   Literally just ask them if they have used a tool, or to give a brief example of a project where they used it.\n\n"
+        "     - General awareness of what a tool is used for\n\n"
         "   Example of good questions:\n"
         "     - \"Have you worked with React before? What kind of components did you build?\"\n"
         "     - \"Can you give a brief example of how you used Java Spring Boot in your last role?\"\n"
