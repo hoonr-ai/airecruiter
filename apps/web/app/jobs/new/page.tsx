@@ -1620,29 +1620,6 @@ function NewJobPageContent() {
   }, [searchParams]);
 
   useEffect(() => {
-    const activeJobRef = (numericJobId || (isFetched ? jobdivaId : "") || "").trim();
-    if (!activeJobRef) return;
-
-    const params = new URLSearchParams(searchParams.toString());
-    const nextStep = String(currentStep);
-    const currentStepParam = params.get("step");
-    const currentJobIdParam = params.get("jobId");
-
-    let changed = false;
-    if (currentStepParam !== nextStep) {
-      params.set("step", nextStep);
-      changed = true;
-    }
-    if (currentJobIdParam !== activeJobRef) {
-      params.set("jobId", activeJobRef);
-      changed = true;
-    }
-    if (!changed) return;
-
-    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
-  }, [currentStep, jobdivaId, numericJobId, isFetched, pathname, router, searchParams]);
-
-  useEffect(() => {
     setHasSeededSourceLocation(false);
   }, [numericJobId, jobdivaId]);
 
