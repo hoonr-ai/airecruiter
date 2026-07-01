@@ -2779,30 +2779,13 @@ class JobDivaService:
                     else:
                         # Ambiguous standalone "hybrid" mention — trust the API field
                         has_hybrid = ("hybrid" in val_lower)
-                has_onsite = "onsite" in desc_lower or "on-site" in desc_lower or "on site" in desc_lower
+                # Tighten onsite matching using regex with word boundaries to avoid false positives like "depending on site conditions"
+                has_onsite = bool(re.search(r'\b(?:onsite|on-site|work\s+on\s+site|working\s+on\s+site|on\s+site\s+(?:work|role|position|basis|location|office|presence|environment|days|requirement|required|mandatory|essential|only))\b', desc_lower))
 
-                # Check for "remote" but carefully exclude negative phrases.
+                # Check for "remote" but carefully exclude negative phrases using word-bounded regex.
                 # e.g. "not a WFH/remote role", "not remote", "no remote", "non-remote"
-                # all indicate the role is NOT remote.
-                # IMPORTANT: Be precise — "wfh/remote" alone is NOT negative
-                # (e.g. "supports WFH/remote work"). Only "not...wfh/remote" is.
-                # Similarly, "in-person" alone is NOT a remote-negation — a hybrid
-                # JD may say "in-person collaboration required" while still being remote
-                # some days.
-                _remote_negative_phrases = [
-                    "not remote",          # "this is not remote"
-                    "no remote",           # "no remote work"
-                    "non-remote",          # "non-remote position"
-                    "non remote",
-                    "not a remote",        # "not a remote role"
-                    "not wfh",             # "not wfh eligible"
-                    "not a wfh",           # "not a wfh role"
-                    "no wfh",              # "no wfh available"
-                    "not a wfh/remote",    # "not a WFH/remote role" (26-18278 pattern)
-                    "not wfh/remote",      # alternate phrasing
-                ]
-                _remote_mention = "remote" in desc_lower
-                _remote_negated = any(phrase in desc_lower for phrase in _remote_negative_phrases)
+                _remote_mention = bool(re.search(r'\bremote\b', desc_lower))
+                _remote_negated = bool(re.search(r'\b(?:not|no|non|never)(?:-|\s+)(?:a\s+|an\s+)?(?:remote|wfh|work\s+from\s+home|(?:wfh/)?remote)\b', desc_lower))
                 has_remote = _remote_mention and not _remote_negated
                 
                 # Determine what the API explicitly said
