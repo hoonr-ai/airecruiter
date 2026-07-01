@@ -1866,6 +1866,24 @@ async def _check_and_fire_candidate_passed_notification(
         # This prevents a race condition where two concurrent webhook calls both read the
         # flag as False before either has written True, resulting in duplicate emails.
         jobdiva_id_for_dedup = job_row["jobdiva_id"] if job_row else job_id
+
+        def _rollback_passed_email_flag():
+            try:
+                r_conn = get_db_connection()
+                r_cur = r_conn.cursor()
+                r_cur.execute("""
+                    UPDATE sourced_candidates
+                    SET data = data - 'engage_passed_email_sent',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE candidate_id = %s AND jobdiva_id = %s
+                """, (candidate_id, jobdiva_id_for_dedup))
+                r_conn.commit()
+                r_cur.close()
+                r_conn.close()
+                logger.info(f"↩️ Rolled back engage_passed_email_sent flag for candidate {candidate_id} / job {jobdiva_id_for_dedup}")
+            except Exception as r_err:
+                logger.error(f"Failed to rollback engage_passed_email_sent flag: {r_err}")
+
         cur.execute("""
             UPDATE sourced_candidates
             SET data = COALESCE(data, '{}'::jsonb) || '{"engage_passed_email_sent": true}'::jsonb,
@@ -2075,12 +2093,17 @@ async def _check_and_fire_candidate_passed_notification(
             # Flag was already set atomically before sending (race-condition-safe).
             # Refresh Performance Metrics for this job (e.g. Time to First Pass)
             asyncio.create_task(auto_assign_service.refresh_job_performance_metrics(job_id))
+        else:
+            logger.warning(f"⚠️ Email send failed for candidate {candidate_id} / job {job_id}. Rolling back dedup flag.")
+            _rollback_passed_email_flag()
 
         cur.close()
         conn.close()
 
     except Exception as e:
         logger.error(f"❌ Failed to process Candidate Passed notification: {e}", exc_info=True)
+        if 'updated' in locals() and updated and '_rollback_passed_email_flag' in locals():
+            _rollback_passed_email_flag()
 
 
 # ---------------------------------------------------------------------------
