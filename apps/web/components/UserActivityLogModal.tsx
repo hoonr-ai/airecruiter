@@ -83,29 +83,6 @@ export function UserActivityLogModal({
     return null;
   };
 
-  const loadResolvedQuestionsCompleted = async (): Promise<number | null> => {
-    try {
-      const evaluation = await api.engagement.getInterviewEvaluation(interviewId);
-      const fromEvaluation = extractQuestionsCompleted(evaluation);
-      if (typeof fromEvaluation === "number") {
-        return fromEvaluation;
-      }
-    } catch {
-      // Fallback to score-summary below.
-    }
-
-    try {
-      const scoreSummary = await api.engagement.getInterviewScoreSummary(interviewId);
-      const fromScoreSummary = extractQuestionsCompleted(scoreSummary);
-      if (typeof fromScoreSummary === "number") {
-        return fromScoreSummary;
-      }
-    } catch {
-      // Keep null to preserve existing activity-log value.
-    }
-
-    return null;
-  };
 
   useEffect(() => {
     if (isOpen && interviewId) {
