@@ -317,7 +317,7 @@ def _build_prompt(
         "   situational or behavioral questions. Example: \"How have you used Salesforce in your daily work?\""
     )
     categories_line = (
-        '"category": "scenario" | "architecture" | "debugging" | "production" | "trade-off" | "end-to-end" | "fundamentals",'
+        '"category": "experience" | "project-example" | "tool-familiarity" | "fundamentals" | "technical-depth",'
         if is_it
         else '"category": "process" | "stakeholder" | "behavioral" | "scenario",'
     )
