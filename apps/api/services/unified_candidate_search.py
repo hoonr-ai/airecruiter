@@ -897,26 +897,31 @@ class UnifiedCandidateSearch:
                                 )
                             await emit_jobdiva_scored(cand, assessment, "qualified_talent")
 
-                self._log_stage("JobDiva", "Running JobDiva JobAgent search...")
-                jobagent_res = await self._search_jobdiva_talent(criteria)
-                if jobagent_res.get("jobdiva_criteria_unconfigured"):
-                    summary["jobdiva_criteria_unconfigured"] = True
-                await _process_talent_pool(
-                    jobagent_res,
-                    stage_name="JobDiva",
-                    source_label="JobDiva-JobAgent",
-                    cap_label="JobAgent rank",
-                )
+                async def _run_jobagent_pool():
+                    self._log_stage("JobDiva", "Running JobDiva JobAgent search...")
+                    jobagent_res = await self._search_jobdiva_talent(criteria)
+                    if jobagent_res.get("jobdiva_criteria_unconfigured"):
+                        summary["jobdiva_criteria_unconfigured"] = True
+                    await _process_talent_pool(
+                        jobagent_res,
+                        stage_name="JobDiva",
+                        source_label="JobDiva-JobAgent",
+                        cap_label="JobAgent rank",
+                    )
 
-                self._log_stage("TalentSearch", "Running JobDiva Talent boolean search...")
-                talent_res = await self._search_jobdiva_talent_search(criteria)
-                summary["talent_search_count"] = len(talent_res.get("candidates", []))
-                await _process_talent_pool(
-                    talent_res,
-                    stage_name="TalentSearch",
-                    source_label="JobDiva-TalentSearch",
-                    cap_label="TalentSearch rank",
-                )
+                async def _run_talent_search_pool():
+                    self._log_stage("TalentSearch", "Running JobDiva Talent boolean search...")
+                    talent_res = await self._search_jobdiva_talent_search(criteria)
+                    summary["talent_search_count"] = len(talent_res.get("candidates", []))
+                    await _process_talent_pool(
+                        talent_res,
+                        stage_name="TalentSearch",
+                        source_label="JobDiva-TalentSearch",
+                        cap_label="TalentSearch rank",
+                    )
+
+                # Overlap both independent JobDiva talent searches to halve wall-clock latency
+                await asyncio.gather(_run_jobagent_pool(), _run_talent_search_pool())
             except Exception as e:
                 logger.error(f"JobDiva Talent stage failed: {e}", exc_info=True)
             finally:
