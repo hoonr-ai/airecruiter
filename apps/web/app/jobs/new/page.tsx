@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useEffectEvent, useCallback, useMemo, useRef, Suspense, type ReactNode } from "react";
 import Link from "next/link";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   History,
   Plus,
@@ -207,6 +207,53 @@ function isRemoteJob(jd: { location_type?: string | null; city?: string | null }
   if (!jd) return false;
   if ((jd.location_type || "").toLowerCase().includes("remote")) return true;
   return (jd.city || "").trim().toUpperCase() === "REMOTE";
+}
+
+function buildAutoBotIntroduction({
+  title,
+  isRemote,
+  country,
+  location,
+}: {
+  title: string;
+  isRemote: boolean;
+  country: string;
+  location: string;
+}): string {
+  const introTitle = (title || "role").trim() || "role";
+  return isRemote
+    ? `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a remote ${introTitle} based in ${country}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`
+    : `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+}
+
+function matchesAutoBotIntroductionTemplate({
+  intro,
+  candidateTitles,
+  isRemote,
+  country,
+  location,
+}: {
+  intro: string;
+  candidateTitles: Array<string | null | undefined>;
+  isRemote: boolean;
+  country: string;
+  location: string;
+}): boolean {
+  const normalizedIntro = intro.trim().replace(/\s+/g, " ");
+  const seen = new Set<string>();
+  for (const rawTitle of candidateTitles) {
+    const candidateTitle = (rawTitle || "").trim() || "role";
+    if (seen.has(candidateTitle)) continue;
+    seen.add(candidateTitle);
+    const template = buildAutoBotIntroduction({
+      title: candidateTitle,
+      isRemote,
+      country,
+      location,
+    }).trim().replace(/\s+/g, " ");
+    if (normalizedIntro === template) return true;
+  }
+  return false;
 }
 
 const CANADIAN_PROVINCES = new Set([
@@ -592,8 +639,12 @@ type WizardMode = 'edit' | 'source' | 'view';
 
 function NewJobPageContent() {
   const router = useRouter();
+  const pathname = usePathname();
   const engagement = useEngagementFlow();
   const searchParams = useSearchParams();
+  const lastLoadedJobIdRef = useRef<string | null>(null);
+  const skipDraftLoadForJobRef = useRef<Set<string>>(new Set());
+  const isUrlUpdateRef = useRef(false);
   const [currentStep, setCurrentStepState] = useState<Step>(1);
   // Track the highest step the user has ever reached so the pipeline/stepper
   // at the top allows jumping back to any step they've visited, not just
@@ -628,6 +679,54 @@ function NewJobPageContent() {
   const [jobData, setJobData] = useState<any>(null);
   const [isFetching, setIsFetching] = useState(false);
   const [isFetched, setIsFetched] = useState(false);
+  const markDraftLoadSkippedForImportedJob = (...ids: Array<string | number | null | undefined>) => {
+    ids
+      .map(id => String(id ?? "").trim())
+      .filter(Boolean)
+      .forEach(id => skipDraftLoadForJobRef.current.add(id));
+  };
+
+  // 1. URL -> State (Handles direct links and Back/Forward buttons)
+  useEffect(() => {
+    const stepParam = searchParams.get("step");
+    if (stepParam) {
+      const stepNum = parseInt(stepParam, 10) as Step;
+      if (!isNaN(stepNum) && stepNum >= 1 && stepNum <= 5 && stepNum !== currentStep) {
+        isUrlUpdateRef.current = true;
+        setCurrentStepState(stepNum);
+        setMaxStepReached(current => (stepNum > current ? stepNum : current));
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams.get("step")]);
+
+  // 2. State -> URL (Handles internal Next/Back UI buttons)
+  useEffect(() => {
+    if (isUrlUpdateRef.current) {
+      // This state change was driven by the URL, do not overwrite the URL
+      isUrlUpdateRef.current = false;
+      return;
+    }
+
+    const params = new URLSearchParams(searchParams.toString());
+    const nextStepStr = String(currentStep);
+    const activeJobRef = (numericJobId || (isFetched ? jobdivaId : "") || "").trim();
+
+    let changed = false;
+    if (params.get("step") !== nextStepStr) {
+      params.set("step", nextStepStr);
+      changed = true;
+    }
+    if (activeJobRef && params.get("jobId") !== activeJobRef) {
+      params.set("jobId", activeJobRef);
+      changed = true;
+    }
+
+    if (changed) {
+      router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentStep, numericJobId, jobdivaId, isFetched, pathname, router]);
 
   // External (non-JobDiva) requirement flow
   const [isExternal, setIsExternal] = useState(false);
@@ -819,6 +918,9 @@ function NewJobPageContent() {
   const [botIntroduction, setBotIntroduction] = useState("");
   const [screenQuestions, setScreenQuestions] = useState<ScreenQuestion[]>([]);
   const [questionIdCounter, setQuestionIdCounter] = useState(1);
+  const lastAutoIntroTitleRef = useRef("");
+  const lastSyncedTitleForJDRef = useRef("");
+  const botIntroductionEditedRef = useRef(false);
 
   // Step 5 - Sourcing state
   // Recruiter QA 5.1 / 5.2: the "JobDiva Applicants" toggle was misleading —
@@ -899,6 +1001,14 @@ function NewJobPageContent() {
   // backend; the modal surfaces per-batch status so the recruiter can see
   // what's happening on long runs.
   const LAUNCH_BATCH_SIZE = 5;
+
+  // Pace between batches so save+engage calls don't fire faster than nginx's
+  // pair_batch_limit zone can sustain on large launches (seen: 26-30 batches
+  // back-to-back hit the burst cap within ~40s and got 503'd — see
+  // nginx.conf's pair_batch_limit comment). This is a courtesy pace, not the
+  // only safeguard: nginx still enforces the real ceiling.
+  const BATCH_LAUNCH_DELAY_MS = 350;
+
   // Bounded concurrency for the Launch PAIR contact-enrichment pass. Each
   // candidate's enrich-contact call runs the ZoomInfo→Apollo→Exa chain
   // server-side; doing them one-at-a-time made the modal crawl for minutes, so
@@ -915,6 +1025,7 @@ function NewJobPageContent() {
   const [qaOverrideEnabled, setQaOverrideEnabled] = useState(true);
   const [readyLaunchedPendingRedirect, setReadyLaunchedPendingRedirect] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
+  const [hasFetchedMoreJobDiva, setHasFetchedMoreJobDiva] = useState(false);
   const [booleanStringOpen, setBooleanStringOpen] = useState(false);
   const [generatedBoolean, setGeneratedBoolean] = useState("");
   const [isRefreshingBoolean, setIsRefreshingBoolean] = useState(false);
@@ -989,7 +1100,7 @@ function NewJobPageContent() {
   // same N. The text input is the source of truth; the button reads it.
   const [selectBestN, setSelectBestN] = useState<number>(100);
   const [selectBestInput, setSelectBestInput] = useState<string>("100");
-  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "linkedin-unipile" | "linkedin-exa" | "dice" | "upload-resume">("all");
+  const [sourceFilter, setSourceFilter] = useState<"all" | "jobdiva" | "talent-search" | "linkedin-unipile" | "linkedin-exa" | "dice" | "upload-resume">("all");
   const [locationFilter, setLocationFilter] = useState<Set<string>>(new Set());
   const [minScore, setMinScore] = useState<number>(0);
   const [candidateSearchQuery, setCandidateSearchQuery] = useState<string>("");
@@ -1016,11 +1127,33 @@ function NewJobPageContent() {
     return Math.min(100, Math.max(1, parsed));
   }, [sourceLocations]);
 
+  const candidateHasSource = (cand: any, matcher: (src: string) => boolean) => {
+    const seen = new Set<string>();
+    const push = (raw: any) => {
+      const value = String(raw || "").toLowerCase().trim();
+      if (value) seen.add(value);
+    };
+    push(cand.source);
+    if (Array.isArray(cand.sources)) {
+      cand.sources.forEach(push);
+    }
+    for (const src of seen) {
+      if (matcher(src)) return true;
+    }
+    return false;
+  };
+
   const matchesSourceFilter = (cand: any) => {
     const src = String(cand.source || "").toLowerCase();
     switch (sourceFilter) {
       case "all": return true;
-      case "jobdiva": return src.startsWith("jobdiva");
+      case "jobdiva":
+        return (
+          !candidateHasSource(cand, (src) => src === "jobdiva-talentsearch") &&
+          candidateHasSource(cand, (src) => src.startsWith("jobdiva"))
+        );
+      case "talent-search":
+        return candidateHasSource(cand, (src) => src === "jobdiva-talentsearch");
       case "linkedin-unipile": return src === "linkedin-unipile" || src === "linkedin";
       case "linkedin-exa": return src === "linkedin-exa";
       case "dice": return src === "dice";
@@ -1030,7 +1163,8 @@ function NewJobPageContent() {
   };
   const sourceCounts = candidates.reduce((acc: Record<string, number>, c) => {
     const s = String(c.source || "").toLowerCase();
-    if (s.startsWith("jobdiva")) acc["jobdiva"] = (acc["jobdiva"] || 0) + 1;
+    if (candidateHasSource(c, (src) => src === "jobdiva-talentsearch")) acc["talent-search"] = (acc["talent-search"] || 0) + 1;
+    else if (candidateHasSource(c, (src) => src.startsWith("jobdiva"))) acc["jobdiva"] = (acc["jobdiva"] || 0) + 1;
     else if (s === "linkedin-unipile" || s === "linkedin") acc["linkedin-unipile"] = (acc["linkedin-unipile"] || 0) + 1;
     else if (s === "linkedin-exa") acc["linkedin-exa"] = (acc["linkedin-exa"] || 0) + 1;
     else if (s === "dice") acc["dice"] = (acc["dice"] || 0) + 1;
@@ -1342,9 +1476,7 @@ function NewJobPageContent() {
   const [isLoadingResume, setIsLoadingResume] = useState(false);
   const [showResumeModal, setShowResumeModal] = useState(false);
 
-  // Resume Setup load state. Gates the wizard shell so the user sees a full-page
-  // loader instead of a flash-of-empty-form while we hydrate from /jobs/{id}/draft.
-  const [isLoadingDraft, setIsLoadingDraft] = useState(false);
+  const [isHydratingJobSetup, setIsHydratingJobSetup] = useState(false);
   const stepEntrySnapshotRef = useRef<Partial<Record<Step, StepSnapshot>>>({});
   const stepStartMsRef = useRef<number>(Date.now());
 
@@ -1459,15 +1591,32 @@ function NewJobPageContent() {
       }
     }
 
-    if (jobIdFromUrl) {
-      if (jobIdFromUrl.includes("-")) {
-        setJobdivaId(jobIdFromUrl);
-      } else {
-        setNumericJobId(jobIdFromUrl);
-      }
-      setIsLoadingDraft(true);
-      loadJobDraft(jobIdFromUrl).finally(() => setIsLoadingDraft(false));
+    if (!jobIdFromUrl) {
+      lastLoadedJobIdRef.current = null;
+      setIsHydratingJobSetup(false);
+      return;
     }
+
+    if (jobIdFromUrl.includes("-")) {
+      setJobdivaId(jobIdFromUrl);
+    } else {
+      setNumericJobId(jobIdFromUrl);
+    }
+
+    if (lastLoadedJobIdRef.current === jobIdFromUrl) {
+      return;
+    }
+
+    if (skipDraftLoadForJobRef.current.has(jobIdFromUrl)) {
+      skipDraftLoadForJobRef.current.delete(jobIdFromUrl);
+      lastLoadedJobIdRef.current = jobIdFromUrl;
+      setIsHydratingJobSetup(false);
+      return;
+    }
+
+    lastLoadedJobIdRef.current = jobIdFromUrl;
+    setIsHydratingJobSetup(true);
+    loadJobDraft(jobIdFromUrl).finally(() => setIsHydratingJobSetup(false));
   }, [searchParams]);
 
   useEffect(() => {
@@ -1719,6 +1868,18 @@ function NewJobPageContent() {
             }
             if (rData.bot_introduction) {
               setBotIntroduction(rData.bot_introduction);
+              botIntroductionEditedRef.current = !matchesAutoBotIntroductionTemplate({
+                intro: rData.bot_introduction,
+                candidateTitles: [
+                  draft.enhanced_title,
+                  draft.title,
+                  embeddedDetails?.enhanced_title,
+                  embeddedDetails?.title,
+                ],
+                isRemote: isRemoteJob(embeddedDetails || draft),
+                country: deriveCountry((embeddedDetails || draft)?.state),
+                location: `${(embeddedDetails || draft)?.city || ""}, ${(embeddedDetails || draft)?.state || ""}`.trim().replace(/^, |, $/g, ""),
+              });
             }
             console.log("✅ Existing rubric detected and pre-loaded from database.");
           } else {
@@ -1731,7 +1892,10 @@ function NewJobPageContent() {
 
       // 4. Restore form state (Draft values overlay JobDiva values)
       if (draft.title !== undefined && draft.title !== null) setJobTitle(draft.title || "");
-      if (draft.enhanced_title !== undefined && draft.enhanced_title !== null) setEnhancedTitle(draft.enhanced_title || "");
+      if (draft.enhanced_title !== undefined && draft.enhanced_title !== null) {
+        setEnhancedTitle(draft.enhanced_title || "");
+        lastSyncedTitleForJDRef.current = (draft.enhanced_title || "").trim();
+      }
       if (draft.ai_description !== undefined && draft.ai_description !== null) setJobPosting(draft.ai_description || "");
       if (draft.recruiter_notes !== undefined && draft.recruiter_notes !== null) setRecruiterNotes(draft.recruiter_notes || "");
       if (draft.selected_employment_types?.length) setSelectedEmpTypes(draft.selected_employment_types);
@@ -1739,7 +1903,21 @@ function NewJobPageContent() {
       if (draft.screening_level) setScreeningLevel(draft.screening_level);
       if (draft.selected_job_boards?.length) setSelectedJobBoards(draft.selected_job_boards);
       if (draft.work_authorization) setWorkAuthorization(draft.work_authorization);
-      if (draft.bot_introduction) setBotIntroduction(draft.bot_introduction);
+      if (draft.bot_introduction) {
+        setBotIntroduction(draft.bot_introduction);
+        botIntroductionEditedRef.current = !matchesAutoBotIntroductionTemplate({
+          intro: draft.bot_introduction,
+          candidateTitles: [
+            draft.enhanced_title,
+            draft.title,
+            embeddedDetails?.enhanced_title,
+            embeddedDetails?.title,
+          ],
+          isRemote: isRemoteJob(embeddedDetails || draft),
+          country: deriveCountry((embeddedDetails || draft)?.state),
+          location: `${(embeddedDetails || draft)?.city || ""}, ${(embeddedDetails || draft)?.state || ""}`.trim().replace(/^, |, $/g, ""),
+        });
+      }
 
       // Restore resume match filters if they exist
       if (draft.resume_match_filters && draft.resume_match_filters.length > 0) {
@@ -1789,12 +1967,22 @@ function NewJobPageContent() {
 
       // 5. Navigate to the saved step
       if (draft.current_step) {
-        const savedStep = draft.current_step as Step;
-        setCurrentStep(savedStep);
+        let stepToUse = draft.current_step as Step;
+        
+        // Respect the URL step if the user manually navigated or used the back button
+        const urlStepStr = searchParams.get("step");
+        if (urlStepStr) {
+          const urlStep = parseInt(urlStepStr, 10) as Step;
+          if (!isNaN(urlStep) && urlStep >= 1 && urlStep <= 5) {
+            stepToUse = urlStep;
+          }
+        }
+
+        setCurrentStep(stepToUse);
         // Treat the saved step as previously-reached so the pipeline allows
         // hopping back to it (and any earlier step) without re-clicking Next.
-        setMaxStepReached(prev => (savedStep > prev ? savedStep : prev));
-        setPageSubtitle(STEP_DESCRIPTIONS[savedStep]);
+        setMaxStepReached(prev => Math.max(prev, draft.current_step as Step, stepToUse) as Step);
+        setPageSubtitle(STEP_DESCRIPTIONS[stepToUse]);
         setIsFetched(true);
         setNumericJobId(jobIdToLoad);
       }
@@ -1839,6 +2027,7 @@ function NewJobPageContent() {
       setJobdivaId(newRef);
       setJobTitle(extTitle.trim());
       setEnhancedTitle(extTitle.trim());
+      lastSyncedTitleForJDRef.current = extTitle.trim();
       setJobPosting(extDescription.trim());
       setJobData({
         id: newJobId,
@@ -2002,6 +2191,7 @@ function NewJobPageContent() {
     // RESET all states before new fetch to prevent stale data
     setJobTitle("");
     setEnhancedTitle("");
+    lastSyncedTitleForJDRef.current = "";
     setJobPosting("");
     setRecruiterNotes("");
     setSelectedEmpTypes([]);
@@ -2031,6 +2221,8 @@ function NewJobPageContent() {
 
       setJobData(data); // Store the full data object from backend
 
+      markDraftLoadSkippedForImportedJob(searchId, data.id, data.jobdiva_id);
+
       if (data.id) {
         console.log(`🔄 Identifier Resolved: Syncing internal numericJobId to Numeric PK '${data.id}'`);
         setNumericJobId(data.id.toString());
@@ -2058,6 +2250,7 @@ function NewJobPageContent() {
       // 1. Job Title and Description
       setJobTitle(data.title || "");
       setEnhancedTitle(data.enhanced_title || data.title || "");
+      lastSyncedTitleForJDRef.current = (data.enhanced_title || data.title || "").trim();
 
       // Strict Check for AI Description
       // If JobDiva result has "" or null for ai_description, then setJobPosting to ""
@@ -2194,12 +2387,17 @@ function NewJobPageContent() {
 
       const data = await response.json();
       setJobPosting(data.description);
+      const syncedTitle = (titleOverride || enhancedTitle || jobTitle || "").trim();
+      if (syncedTitle) {
+        lastSyncedTitleForJDRef.current = syncedTitle;
+      }
 
       showToast("AI Job Description enriched!", "success");
       trackEvent("job_wizard_step2_jd_regenerate_success", {
         step: 2,
         generated_length: (data?.description || "").length,
       });
+      return true;
     } catch (error) {
       const message = (error as Error)?.message ?? "unknown error";
       logger.error("ai_jd.enhance.exception", { message });
@@ -2208,6 +2406,7 @@ function NewJobPageContent() {
         step: 2,
         error: truncateForTelemetry(message),
       });
+      return false;
     } finally {
       setIsGeneratingJD(false);
     }
@@ -2236,6 +2435,23 @@ function NewJobPageContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStep, jobPosting, isGeneratingJD, jobTitle, jobData?.description, isFetched, isFetching, jobdivaId, recruiterNotes]);
 
+  const syncBotIntroductionForTitle = (nextTitle: string) => {
+    if (!jobData || !nextTitle.trim()) return;
+    if (botIntroductionEditedRef.current) return;
+
+    const isRemote = isRemoteJob(jobData);
+    const country = deriveCountry(jobData.state);
+    const location = `${jobData.city || ""}, ${jobData.state || ""}`.trim().replace(/^, |, $/g, "");
+    const nextAutoIntro = buildAutoBotIntroduction({
+      title: nextTitle,
+      isRemote,
+      country,
+      location,
+    });
+    lastAutoIntroTitleRef.current = nextTitle;
+    setBotIntroduction(nextAutoIntro);
+  };
+
   const handleEnhanceTitle = async () => {
     if (!jobTitle) return;
     setIsEnhancingTitle(true);
@@ -2258,6 +2474,9 @@ function NewJobPageContent() {
       if (res.ok) {
         const data = await res.json();
         const nextTitle = (data?.title || "").trim();
+        if (nextTitle && jobData) {
+          syncBotIntroductionForTitle(nextTitle);
+        }
         setEnhancedTitle(nextTitle);
         if (nextTitle) {
           await handleEnhanceJob(nextTitle);
@@ -2287,6 +2506,22 @@ function NewJobPageContent() {
     } finally {
       setIsEnhancingTitle(false);
     }
+  };
+
+  const handleEnhancedTitleBlur = async () => {
+    const normalizedTitle = enhancedTitle.trim();
+    if (normalizedTitle !== enhancedTitle) {
+      setEnhancedTitle(normalizedTitle);
+    }
+    if (!normalizedTitle) return;
+
+    const lastSyncedTitle = (lastSyncedTitleForJDRef.current || "").trim();
+    if (normalizedTitle === lastSyncedTitle) return;
+
+    if (jobData) {
+      syncBotIntroductionForTitle(normalizedTitle);
+    }
+    await handleEnhanceJob(normalizedTitle);
   };
 
   const handleAddEmail = () => {
@@ -3039,8 +3274,13 @@ function NewJobPageContent() {
                 <Input
                   value={enhancedTitle}
                   onChange={(e) => {
-                    setEnhancedTitle(e.target.value);
+                    const nextValue = e.target.value;
+                    setEnhancedTitle(nextValue);
+                    if (!botIntroductionEditedRef.current) {
+                      syncBotIntroductionForTitle(nextValue);
+                    }
                   }}
+                  onBlur={handleEnhancedTitleBlur}
                   placeholder="Enhanced Job Title"
                   className="h-10 text-[14px] border-slate-200 focus:border-primary/50 focus:ring-primary/20 bg-white"
                 />
@@ -4270,6 +4510,7 @@ function NewJobPageContent() {
       const levelForApi = screeningLevel === "L1" ? "light" : screeningLevel === "L2" ? "intensive" : "medium";
       const requestBody: any = {
         jobTitle: (enhancedTitle || jobTitle || "").trim(),
+        jobDescription: (jobPosting || jobData?.description || "").trim(),
         rubric: rubricData || {},
         screeningLevel: levelForApi,
         customerName: jobData?.customer_name || "",
@@ -4730,6 +4971,14 @@ function NewJobPageContent() {
     // re-derives the role-specific question set to match the new depth. User
     // edits are protected by `userHasEditedQuestionsRef` inside the initializer.
   }, [currentStep, rubricData, jobData, screenQuestions.length, screeningLevel]);
+
+  useEffect(() => {
+    if (!jobData) return;
+    const currentTitle = (enhancedTitle || jobTitle || "").trim();
+    if (!currentTitle) return;
+
+    syncBotIntroductionForTitle(currentTitle);
+  }, [jobData, enhancedTitle, jobTitle]);
 
   useEffect(() => {
     if (currentStep !== 5) return;
@@ -5402,10 +5651,18 @@ function NewJobPageContent() {
       titleCriteriaOverride?: typeof sourceTitles;
       skillCriteriaOverride?: typeof sourceSkills;
       companiesOverride?: typeof sourceCompanies;
+      sourcesOverride?: string[];
+      jobdivaOffset?: number;
+      jobdivaBatchSize?: number;
     }
   ): Promise<any[]> => {
     const apiUrl = API_BASE;
-    const payload = buildSearchPayload(booleanString, overrides);
+    const payload = {
+      ...buildSearchPayload(booleanString, overrides),
+      ...(overrides?.sourcesOverride ? { sources: overrides.sourcesOverride } : {}),
+      ...(typeof overrides?.jobdivaOffset === "number" ? { jobdiva_offset: overrides.jobdivaOffset } : {}),
+      ...(typeof overrides?.jobdivaBatchSize === "number" ? { jobdiva_batch_size: overrides.jobdivaBatchSize } : {}),
+    };
 
     const mapStageToStatus = (stage: string) => {
       const raw = String(stage || "").toLowerCase();
@@ -5700,6 +5957,7 @@ function NewJobPageContent() {
 
     setIsSearching(true);
     setHasSearched(true);
+    setHasFetchedMoreJobDiva(false);
     setRestoredFromCache(false);
     detailFailedIdsRef.current = new Set<string>();
     trackEvent("job_wizard_step5_candidate_search_started", {
@@ -5798,6 +6056,62 @@ function NewJobPageContent() {
         })),
         quality: overallQuality,
         ...buildStep5FilterContext(),
+      });
+    }
+  };
+
+  const handleSearchMoreJobDiva = async () => {
+    if (isSearching || hasFetchedMoreJobDiva || !searchSources.jobdiva) return;
+    const query = generatedBoolean || resolvedGeneratedBoolean;
+    const runStartMs = Date.now();
+    let runResults: Parameters<typeof collectCandidateQualityStats>[0] = [];
+
+    setIsSearching(true);
+    setHasSearched(true);
+    setRestoredFromCache(false);
+    detailFailedIdsRef.current = new Set<string>();
+    setSearchStatus("Searching JobDiva for more candidates...");
+    trackEvent("job_wizard_step5_jobdiva_search_more_started", {
+      step: 5,
+      query: truncateForTelemetry(query, 260),
+      jobdiva_offset: 150,
+      jobdiva_batch_size: 150,
+    });
+
+    try {
+      runResults = await runSearchStream(query, "append", {
+        sourcesOverride: ["JobDiva"],
+        jobdivaOffset: 150,
+        jobdivaBatchSize: 150,
+      });
+      setHasFetchedMoreJobDiva(true);
+      setSearchStatus(`Added ${runResults.length} more JobDiva profile${runResults.length === 1 ? "" : "s"}.`);
+    } catch (error) {
+      console.error("Failed to search more JobDiva candidates:", error);
+      showToast("Could not fetch more JobDiva candidates. Please try again.", "info");
+      trackEvent("job_wizard_step5_jobdiva_search_more_failed", {
+        step: 5,
+        error: truncateForTelemetry((error as Error)?.message || String(error)),
+      });
+    } finally {
+      setIsSearching(false);
+      const detailFailedCount = detailFailedIdsRef.current.size;
+      if (detailFailedCount > 0) {
+        showToast(
+          `Couldn't score ${detailFailedCount} additional candidate${detailFailedCount === 1 ? "" : "s"} — JobDiva details were unavailable. They're shown as N/A and remain launchable.`,
+          "info",
+        );
+      }
+      const runtimeSeconds = Number(((Date.now() - runStartMs) / 1000).toFixed(2));
+      setLastSearchRuntimeSec(runtimeSeconds);
+      setLastSearchRunsExecuted(1);
+      trackEvent("job_wizard_step5_jobdiva_search_more_finished", {
+        step: 5,
+        runtime_seconds: runtimeSeconds,
+        results_count: runResults.length,
+        quality: collectCandidateQualityStats(runResults),
+        jobdiva_offset: 150,
+        jobdiva_batch_size: 150,
       });
     }
   };
@@ -6145,7 +6459,7 @@ function NewJobPageContent() {
             <h3 className="text-[14px] font-bold text-slate-800">Screen</h3>
             <span className="text-[12px] font-normal text-slate-500">Questions asked during Hoonr-Curate phone screen</span>
             <span className="ml-auto text-slate-400 text-[11px] font-bold">
-              {screenQuestions.length} / 12 questions
+              {screenQuestions.length} question{screenQuestions.length === 1 ? "" : "s"}
             </span>
           </div>
 
@@ -6160,7 +6474,11 @@ function NewJobPageContent() {
             </div>
             <textarea
               value={botIntroduction}
-              onChange={(e) => setBotIntroduction(e.target.value)}
+              onChange={(e) => {
+                const nextValue = e.target.value;
+                setBotIntroduction(nextValue);
+                botIntroductionEditedRef.current = nextValue.trim().length > 0;
+              }}
               onBlur={(e) => {
                 trackEvent("job_wizard_step4_bot_introduction_saved", {
                   step: 4,
@@ -6504,6 +6822,11 @@ function NewJobPageContent() {
     let skippedCandidateNames: string[] = [];
 
     for (let i = 0; i < batches.length; i++) {
+      
+      if (i > 0) {
+        await new Promise(resolve => setTimeout(resolve, BATCH_LAUNCH_DELAY_MS));
+      }
+
       const batch = batches[i];
       const batchIds = batch.map(c => c.candidate_id);
 
@@ -8213,6 +8536,7 @@ function NewJobPageContent() {
                       {([
                         { id: "all", label: "All", count: totalCandidatesCount },
                         { id: "jobdiva", label: "JobDiva", count: sourceCounts["jobdiva"] || 0 },
+                        { id: "talent-search", label: "Talent Search", count: sourceCounts["talent-search"] || 0 },
                         { id: "linkedin-unipile", label: "LinkedIn-Unipile", count: sourceCounts["linkedin-unipile"] || 0 },
                         { id: "linkedin-exa", label: "LinkedIn-Exa", count: sourceCounts["linkedin-exa"] || 0 },
                         { id: "dice", label: "Dice", count: sourceCounts["dice"] || 0 },
@@ -8237,9 +8561,24 @@ function NewJobPageContent() {
                 </div>
                 {candidates.length > 0 && (
                   <div className="flex items-center gap-2">
+                    {hasSearched && !isSearching && !hasFetchedMoreJobDiva && searchSources.jobdiva && (
+                      <Button
+                        variant="outline"
+                        className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-800 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50 hover:text-slate-800 hover:border-slate-200"
+                        onClick={handleSearchMoreJobDiva}
+                        disabled={isSearching}
+                      >
+                        {isSearching ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Search className="w-3.5 h-3.5" />
+                        )}
+                        Search more JobDiva
+                      </Button>
+                    )}
                     <Button
                       variant="outline"
-                      className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50"
+                      className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-800 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50 hover:text-slate-800 hover:border-slate-200"
                       onClick={() => {
                         const n = Math.max(1, selectBestN);
                         const firstN = candidates
@@ -8308,11 +8647,11 @@ function NewJobPageContent() {
                         }
                       }}
                       aria-label="Number of best candidates to select"
-                      className="h-8 w-16 px-2 text-[13px] font-bold text-slate-700 border border-slate-200 rounded-md bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-[#6366f1]/40 focus:border-[#6366f1]"
+                      className="h-8 w-16 px-2 text-[13px] font-bold text-slate-800 border border-slate-200 rounded-md bg-white shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-300 focus:border-slate-200"
                     />
                     <Button
                       variant="outline"
-                      className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-700 bg-white"
+                      className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-800 bg-white shadow-sm hover:bg-slate-50 hover:text-slate-800 hover:border-slate-200"
                       onClick={() => {
                         const eligible = candidates.filter(c => {
                           const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
@@ -8776,15 +9115,12 @@ const renderStepContent = () => {
   return content;
 };
 
-// Full-page loader while we hydrate a saved draft. Prevents the flash-of-
-// empty-form that recruiters see on Resume Setup while /jobs/{id}/draft
-// (plus rubric / screen questions) resolve.
-if (isLoadingDraft) {
+if (isHydratingJobSetup) {
   return (
     <div className="min-h-[calc(100vh-4rem)] flex items-center justify-center">
       <div className="flex flex-col items-center gap-3 text-slate-500">
         <Loader2 className="w-8 h-8 animate-spin text-indigo-600" />
-        <div className="text-[15px] font-medium">Loading draft…</div>
+        <div className="text-[15px] font-medium">Loading job setup...</div>
       </div>
     </div>
   );

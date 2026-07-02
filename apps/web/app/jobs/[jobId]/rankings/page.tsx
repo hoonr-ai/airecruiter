@@ -447,6 +447,17 @@ function HardFilterHoverCard({
 export default function CandidateRankingsPage() {
   const { jobId } = useParams();
   const router = useRouter();
+  const [showBackButton, setShowBackButton] = useState(true);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get("source") === "email" || window.history.length <= 1) {
+        setShowBackButton(false);
+      }
+    }
+  }, []);
+
   const engagement = useEngagementFlow();
   const CANDIDATE_PAGE_SIZE = 100;
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
@@ -1599,16 +1610,18 @@ export default function CandidateRankingsPage() {
   return (
     <div className="max-w-[1600px] mx-auto px-2 space-y-4 pb-10">
       {/* Top Navigation */}
-      <div className="pt-2 mb-4">
-        <Button
-          variant="ghost"
-          onClick={() => router.back()}
-          className="text-slate-400 hover:text-slate-600 p-0 h-auto font-medium flex items-center gap-1.5 text-[14px]"
-        >
-          <ArrowLeft className="w-3.5 h-3.5" />
-          Back to Jobs Page
-        </Button>
-      </div>
+      {showBackButton && (
+        <div className="pt-2 mb-4">
+          <Button
+            variant="ghost"
+            onClick={() => router.back()}
+            className="text-slate-400 hover:text-slate-600 p-0 h-auto font-medium flex items-center gap-1.5 text-[14px]"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            Back to Jobs Page
+          </Button>
+        </div>
+      )}
 
       {/* Rankings Page Header matching the premium UI */}
       <div className="bg-white rounded-xl border border-slate-200 p-6 flex flex-col md:flex-row md:items-center justify-between shadow-sm mb-6 gap-6">
@@ -1625,7 +1638,7 @@ export default function CandidateRankingsPage() {
                     ({job?.jobdiva_id || job?.job_id || jobId})
                     {(job?.jobdiva_numeric_id || job?.jobdiva_id) && (
                       <a
-                        href={`https://www1.jobdiva.com/employers/myjobs/vieweditjobform.jsp?lstjobs=1&jobid=${encodeURIComponent(job.jobdiva_numeric_id || job.jobdiva_id || "")}`}
+                        href={`https://www1.jobdiva.com/employers/myjobs/vieweditjobform.jsp?lstjobs=1&jobid=${encodeURIComponent((job.jobdiva_numeric_id || job.jobdiva_id || "").replace(/-v\d+$/, ""))}`}
                         target="_blank"
                         rel="noopener noreferrer"
                         title="Open job in JobDiva"

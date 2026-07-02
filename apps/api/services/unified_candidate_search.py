@@ -139,6 +139,10 @@ class SearchCriteria(BaseModel):
     require_resume: bool = True
     include_relocation_candidates: bool = True
     min_experience_years: Optional[int] = None
+    # JobDiva tranche controls. Initial search uses offset=0/batch=150; the
+    # "Search more" action uses offset=150/batch=150 to append the next page.
+    jobdiva_offset: int = 0
+    jobdiva_batch_size: int = 150
     # Hiring client / account name. Drives two rubric signals: the
     # "currently employed by client" hard gate (via current-employer
     # exclusion) and the positive "Same client / industry experience"
@@ -834,67 +838,90 @@ class UnifiedCandidateSearch:
 
         async def produce_jobdiva_talent():
             """
-            Run the boolean-string Talent Search against the JobDiva talent pool.
+            Run the JobDiva talent-pool sources.
             Independent of Applicants — runs whenever "JobDiva" is in sources.
             """
             try:
                 if not talent_selected:
                     return
-                await queue.put({"type": "stage", "data": "Searching JobDiva Talent Search..."})
-                self._log_stage("TalentSearch", "Running JobDiva Talent boolean search...")
-                talent_res = await self._search_jobdiva_talent(criteria)
-                talent_pool = talent_res.get("candidates", [])
-                summary["talent_search_count"] = len(talent_pool)
-                if talent_res.get("jobdiva_criteria_unconfigured"):
-                    summary["jobdiva_criteria_unconfigured"] = True
+                await queue.put({"type": "stage", "data": "Searching JobDiva..."})
 
-                # Source cap (JOBDIVA_SOURCE_CAP) — see Applicants stage above.
-                # JobAgent results arrive in JobDiva's API rank order
-                # (preserved end-to-end via `api_rank`); this slice keeps the
-                # top-N by JobDiva's own ranking.
-                from core import sourcing_config as _sc_cap
-                _talent_cap = _sc_cap.JOBDIVA_SOURCE_CAP
-                if talent_pool and _talent_cap and len(talent_pool) > _talent_cap:
-                    self._log_stage(
-                        "TalentSearch",
-                        f"Capping {len(talent_pool)} talent profiles to top-{_talent_cap} by JobAgent rank.",
+                async def _process_talent_pool(
+                    talent_res: Dict[str, Any],
+                    *,
+                    stage_name: str,
+                    source_label: str,
+                    cap_label: str,
+                ) -> None:
+                    talent_pool = talent_res.get("candidates", [])
+
+                    # Source cap (JOBDIVA_SOURCE_CAP) — see Applicants stage above.
+                    from core import sourcing_config as _sc_cap
+                    _talent_cap = _sc_cap.JOBDIVA_SOURCE_CAP
+                    if talent_pool and _talent_cap and len(talent_pool) > _talent_cap:
+                        self._log_stage(
+                            stage_name,
+                            f"Capping {len(talent_pool)} talent profiles to top-{_talent_cap} by {cap_label}.",
+                        )
+                        talent_pool = talent_pool[:_talent_cap]
+
+                    if not talent_pool:
+                        self._log_stage(stage_name, "No talent-pool candidates returned.")
+                        return
+                    self._attach_cached_enhanced_info(talent_pool)
+
+                    fresh_talent: List[Dict[str, Any]] = []
+                    for _cand in talent_pool:
+                        _cand["source"] = _cand.get("source") or source_label
+                        if await emit_jobdiva_agent_result(_cand, source_label):
+                            fresh_talent.append(_cand)
+
+                    if not fresh_talent:
+                        return
+
+                    from core import sourcing_config as _sc_talent
+                    async for event in self._enrich_filtered_jobdiva_progressive(fresh_talent, criteria):
+                        ev_type = event.get("type")
+                        if ev_type == "candidate_detail":
+                            await queue.put(event)
+                            continue
+                        if ev_type == "candidate_enriched":
+                            cand = event["candidate"]
+                            assessment = self._filter_assessment(cand, criteria, enforce_years=True)
+                            if _sc_talent.JOBDIVA_BYPASS_PASS_GATE:
+                                assessment["passes"] = True
+                            elif not assessment["passes"]:
+                                self._log_stage(
+                                    stage_name,
+                                    f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
+                                )
+                            await emit_jobdiva_scored(cand, assessment, "qualified_talent")
+
+                async def _run_jobagent_pool():
+                    self._log_stage("JobDiva", "Running JobDiva JobAgent search...")
+                    jobagent_res = await self._search_jobdiva_talent(criteria)
+                    if jobagent_res.get("jobdiva_criteria_unconfigured"):
+                        summary["jobdiva_criteria_unconfigured"] = True
+                    await _process_talent_pool(
+                        jobagent_res,
+                        stage_name="JobDiva",
+                        source_label="JobDiva-JobAgent",
+                        cap_label="JobAgent rank",
                     )
-                    talent_pool = talent_pool[:_talent_cap]
 
-                if not talent_pool:
-                    self._log_stage("TalentSearch", "No talent-pool candidates returned.")
-                    return
-                self._attach_cached_enhanced_info(talent_pool)
+                async def _run_talent_search_pool():
+                    self._log_stage("TalentSearch", "Running JobDiva Talent boolean search...")
+                    talent_res = await self._search_jobdiva_talent_search(criteria)
+                    summary["talent_search_count"] = len(talent_res.get("candidates", []))
+                    await _process_talent_pool(
+                        talent_res,
+                        stage_name="TalentSearch",
+                        source_label="JobDiva-TalentSearch",
+                        cap_label="TalentSearch rank",
+                    )
 
-                # Stage 1: emit a minimal agent_result row for every fresh
-                # talent-pool candidate before any resume / LLM work.
-                fresh_talent: List[Dict[str, Any]] = []
-                for _cand in talent_pool:
-                    _cand["source"] = _cand.get("source") or "JobDiva-JobAgent"
-                    if await emit_jobdiva_agent_result(_cand, "JobDiva-JobAgent"):
-                        fresh_talent.append(_cand)
-
-                if not fresh_talent:
-                    return
-
-                # Stages 2-3: progressive enrichment + scoring.
-                from core import sourcing_config as _sc_talent
-                async for event in self._enrich_filtered_jobdiva_progressive(fresh_talent, criteria):
-                    ev_type = event.get("type")
-                    if ev_type == "candidate_detail":
-                        await queue.put(event)
-                        continue
-                    if ev_type == "candidate_enriched":
-                        cand = event["candidate"]
-                        assessment = self._filter_assessment(cand, criteria, enforce_years=True)
-                        if _sc_talent.JOBDIVA_BYPASS_PASS_GATE:
-                            assessment["passes"] = True
-                        elif not assessment["passes"]:
-                            self._log_stage(
-                                "TalentSearch",
-                                f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
-                            )
-                        await emit_jobdiva_scored(cand, assessment, "qualified_talent")
+                # Overlap both independent JobDiva talent searches to halve wall-clock latency
+                await asyncio.gather(_run_jobagent_pool(), _run_talent_search_pool())
             except Exception as e:
                 logger.error(f"JobDiva Talent stage failed: {e}", exc_info=True)
             finally:
@@ -1550,12 +1577,17 @@ class UnifiedCandidateSearch:
             criteria_unconfigured = False
 
             if criteria.job_id:
-                # resumeCount drives JobAgentSearch latency (it scales with the
-                # number of candidates JobDiva ranks). We cap the pool to the
-                # top-100 for display + hydration anyway, so over-requesting
-                # just slows the call. See sourcing_config.JOBAGENT_RESUME_COUNT.
+                # resumeCount drives JobAgentSearch latency. JobAgent has no
+                # offset, so Search-more requests offset+batch candidates and
+                # slices off the already-shown ranks locally.
                 from core import sourcing_config as _sc_rc
-                resume_count = _sc_rc.JOBAGENT_RESUME_COUNT
+                batch_size = max(1, int(getattr(criteria, "jobdiva_batch_size", 150) or 150))
+                offset = max(0, int(getattr(criteria, "jobdiva_offset", 0) or 0))
+                max_resume_count = max(
+                    batch_size,
+                    int(getattr(_sc_rc, "JOBAGENT_MAX_RESUME_COUNT", _sc_rc.JOBAGENT_RESUME_COUNT) or batch_size),
+                )
+                resume_count = min(max_resume_count, offset + batch_size)
                 # Wall-clock as the orchestrator sees it. Comparing this to the
                 # service's "JobAgent TIMING total_ms" reveals event-loop
                 # contention: if this is much larger, the coroutine was starved
@@ -1580,7 +1612,16 @@ class UnifiedCandidateSearch:
                 self._log_stage(
                     "TalentSearch",
                     f"JobAgent jobId={criteria.job_id} resume_count={resume_count} "
-                    f"raw={len(candidates)} criteria_unconfigured={criteria_unconfigured}"
+                    f"raw={len(candidates)} offset={offset} batch={batch_size} "
+                    f"criteria_unconfigured={criteria_unconfigured}"
+                )
+                if offset:
+                    candidates = candidates[offset : offset + batch_size]
+                else:
+                    candidates = candidates[:batch_size]
+                self._log_stage(
+                    "TalentSearch",
+                    f"JobAgent tranche offset={offset} batch={batch_size} kept={len(candidates)}"
                 )
 
             if not candidates:
@@ -1624,6 +1665,103 @@ class UnifiedCandidateSearch:
                 "source_type": "JobDiva-JobAgent",
                 "jobdiva_criteria_unconfigured": False,
             }
+
+    async def _search_jobdiva_talent_search(self, criteria: SearchCriteria) -> Dict[str, Any]:
+        """Legacy JobDiva TalentSearch boolean path kept as a separate source."""
+        source_type = "JobDiva-TalentSearch"
+        try:
+            from core import sourcing_config as sc
+            countries, states = self._resolve_jobdiva_geo(criteria)
+            flat_terms = list(criteria.title_criteria or []) + list(criteria.skill_criteria or [])
+            page_size = max(
+                1,
+                int(getattr(sc, "JOBDIVA_TALENTSEARCH_PAGE_SIZE", 150) or 150),
+            )
+            batch_size = max(1, int(getattr(criteria, "jobdiva_batch_size", 150) or 150))
+            offset = max(0, int(getattr(criteria, "jobdiva_offset", 0) or 0))
+            max_total = max(
+                batch_size,
+                int(getattr(sc, "JOBDIVA_TALENTSEARCH_MAX_TOTAL_COUNT", page_size * 2) or batch_size),
+            )
+            source_cap = getattr(sc, "JOBDIVA_SOURCE_CAP", None)
+            if source_cap:
+                max_total = min(max_total, int(source_cap))
+            if offset >= max_total:
+                return {"candidates": [], "source_type": source_type}
+
+            total_target = min(batch_size, max_total - offset)
+            start_page = offset // page_size
+            first_page_skip = offset % page_size
+            total_pages = max(1, math.ceil((first_page_skip + total_target) / page_size))
+
+            candidates: List[Dict[str, Any]] = []
+            seen_ids = set()
+
+            for page_offset in range(total_pages):
+                page_number = start_page + page_offset
+                if len(candidates) >= total_target:
+                    break
+
+                page_candidates = await self.jobdiva_service.search_candidates(
+                    skills=flat_terms,
+                    location=criteria.location or "",
+                    page=page_number + 1,
+                    limit=page_size,
+                    job_id=None,
+                    boolean_string=criteria.boolean_string or "",
+                    recent_days=getattr(criteria, "recent_days", None),
+                    require_resume=getattr(criteria, "require_resume", True),
+                    countries=countries,
+                    states=states,
+                    page_number=page_number,
+                )
+
+                self._log_stage(
+                    "TalentSearch",
+                    f"TalentSearch pageNumber={page_number} offset={offset} batch={batch_size} "
+                    f"returned {len(page_candidates)} candidate(s)",
+                )
+                if not page_candidates:
+                    break
+
+                page_slice = page_candidates[first_page_skip:] if page_offset == 0 and first_page_skip else page_candidates
+                for cand in page_slice:
+                    cid = str(cand.get("candidate_id") or cand.get("id") or "").strip()
+                    dedupe_key = cid or f"{cand.get('email') or ''}:{cand.get('name') or ''}".lower()
+                    if dedupe_key in seen_ids:
+                        continue
+                    seen_ids.add(dedupe_key)
+                    candidates.append(cand)
+                    if len(candidates) >= total_target:
+                        break
+
+                if len(page_candidates) < page_size:
+                    break
+
+            if not candidates:
+                return {"candidates": [], "source_type": source_type}
+
+            before = len(candidates)
+            candidates = self._filter_by_state(candidates, criteria)
+            after_state = len(candidates)
+            if after_state != before:
+                self._log_stage(
+                    "TalentSearch",
+                    f"State filter: {before} → {after_state} (dropped {before - after_state})",
+                )
+
+            for idx, c in enumerate(candidates):
+                c.setdefault("source", source_type)
+                c.setdefault("api_rank", idx + 1)
+
+            self._log_stage(
+                "TalentSearch",
+                f"Proceeding to LLM extraction for {len(candidates)} candidate(s) from {source_type}",
+            )
+            return {"candidates": candidates, "source_type": source_type}
+        except Exception as e:
+            logger.error(f"JobDiva TalentSearch failed: {e}")
+            return {"candidates": [], "source_type": source_type}
 
     async def _search_jobdiva_applicants(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:

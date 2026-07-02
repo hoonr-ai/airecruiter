@@ -353,6 +353,12 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
         numeric_id = search_id
         ref_code = search_id
 
+        # Versioned refs (26-06182-v2) are LOCAL clones. get_job_by_id strips the
+        # -vN suffix internally so the external fetch returns the root JobDiva job,
+        # but the response identity (id / jobdiva_id) must stay the versioned ref
+        # so local lookups + the wizard's subsequent saves hit the v2 row, not v1.
+        is_versioned_ref = bool(re.search(r"-v\d+$", str(search_id)))
+
         # External job short-circuit: don't hit JobDiva for EXT-N refs or negative IDs.
         search_id_str = str(search_id)
         is_external_fetch = (
@@ -383,11 +389,20 @@ async def fetch_job_from_jobdiva(request: JobFetchRequest, background_tasks: Bac
             job = None
 
         if job:
-            numeric_id = str(job.get("id"))
-            # Safely fetch the explicitly mapped job reference string (26-06182)
-            fetched_ref = job.get("jobdiva_id")
-            ref_code = str(fetched_ref) if fetched_ref and str(fetched_ref).strip() and str(fetched_ref) != "None" else search_id
-            
+            if is_versioned_ref:
+                # Keep the versioned ref as our local identity; only borrow the
+                # canonical JobDiva metadata (title / customer / description) the
+                # root job returned. Expose the root numeric id separately so the
+                # UI can still build a working "View in JobDiva" link.
+                job["jobdiva_numeric_id"] = str(job.get("id") or "")
+                numeric_id = str(search_id)
+                ref_code = str(search_id)
+            else:
+                numeric_id = str(job.get("id"))
+                # Safely fetch the explicitly mapped job reference string (26-06182)
+                fetched_ref = job.get("jobdiva_id")
+                ref_code = str(fetched_ref) if fetched_ref and str(fetched_ref).strip() and str(fetched_ref) != "None" else search_id
+
             # Ensure the returned job object has both IDs clearly labeled
             job["id"] = numeric_id
             job["jobdiva_id"] = ref_code
@@ -728,7 +743,14 @@ async def validate_and_fix_incomplete_jobs() -> int:
             for row in jobs:
                 job_data = dict(row._mapping)
                 job_id = job_data['job_id']
-                
+
+                # Versioned clones (26-06182-v2) are local-only and share the
+                # original JobDiva job. Refetching one by its versioned ref would
+                # resolve to the root job and overwrite this row's jobdiva_id with
+                # the root ref — collapsing v1/v2 into one candidate bucket. Skip.
+                if re.search(r"-v\d+$", str(job_id)):
+                    continue
+
                 # Check if job is incomplete
                 if not _validate_job_completeness(job_data):
                     logger.info(f"📋 Job {job_id} is incomplete, attempting to refetch")
@@ -1193,6 +1215,13 @@ async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData)
             if row:
                 numeric_id = row[0]
                 logger.info(f"✅ Identifier Resolution: {job_id} resolved to Numeric PK {numeric_id}")
+            elif re.search(r"-v\d+$", str(job_id)):
+                # Versioned clone with no local row yet: it shares the original
+                # JobDiva job, so get_job_by_id would strip -vN and resolve to
+                # v1's numeric PK — clobbering v1. Keep the versioned ref as the
+                # identity so the INSERT/UPDATE below targets the v2 row only.
+                numeric_id = job_id
+                logger.info(f"↩️ Versioned ref {job_id} has no local row; keeping versioned identity (no JobDiva fallback).")
             else:
                 # If not found in DB, try to fetch from JobDiva API as fallback
                 job_info = await jobdiva_service.get_job_by_id(job_id)

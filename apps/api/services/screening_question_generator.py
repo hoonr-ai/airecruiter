@@ -99,48 +99,35 @@ def _question_count_for_level(level: str) -> int:
 _IT_DOMAIN_SHOTS: Dict[str, str] = {
     "data": (
         "BAD:  \"Do you have Databricks experience?\"\n"
-        "     GOOD: \"Walk me through how you organized the bronze/silver/gold layers on your\n"
-        "            most recent Databricks project. What trade-offs drove using Delta Live\n"
-        "            Tables vs raw Structured Streaming for your silver layer?\""
+        "     GOOD: \"Can you describe a basic data pipeline you built or maintained using Databricks?\""
     ),
     "backend": (
         "BAD:  \"Do you have .NET / Java backend experience?\"\n"
-        "     GOOD: \"Describe a real production incident in your backend service caused by an\n"
-        "            async/await deadlock or thread-pool starvation. What signal led you to it,\n"
-        "            and what concrete code change resolved it?\""
+        "     GOOD: \"What kind of APIs or services did you typically build using Java Spring Boot?\""
     ),
     "frontend": (
         "BAD:  \"Do you have React experience?\"\n"
-        "     GOOD: \"Tell me about a component you migrated off useEffect to useMemo or\n"
-        "            useSyncExternalStore. What bug forced the change, and how did you verify\n"
-        "            the fix didn't regress reconciliation?\""
+        "     GOOD: \"Can you give an example of a simple feature or component you built using React?\""
     ),
     "devops": (
         "BAD:  \"Do you know Kubernetes?\"\n"
-        "     GOOD: \"Walk through how you diagnosed a CrashLoopBackOff in a prod Deployment.\n"
-        "            What kubectl/log signals led you to root cause, and what was the actual fix —\n"
-        "            probe config, image issue, or resource limit?\""
+        "     GOOD: \"Have you used Kubernetes to manage deployments? Can you describe your general workflow?\""
     ),
     "mobile": (
         "BAD:  \"Do you have iOS / Android experience?\"\n"
-        "     GOOD: \"Describe a memory leak you found via Instruments / LeakCanary. What\n"
-        "            retain cycle or lifecycle bug caused it, and what was the structural fix?\""
+        "     GOOD: \"What was the main focus of the last mobile app you worked on?\""
     ),
     "security": (
         "BAD:  \"Do you have appsec experience?\"\n"
-        "     GOOD: \"Walk through a real OWASP Top-10 finding you triaged. How did you reason\n"
-        "            about severity, and what compensating control did you ship before the\n"
-        "            permanent fix?\""
+        "     GOOD: \"Can you describe a general security best practice you always follow in your projects?\""
     ),
     "qa": (
         "BAD:  \"Do you have test automation experience?\"\n"
-        "     GOOD: \"Describe a flaky e2e test you stabilized. What was the root cause class —\n"
-        "            timing, shared state, network mock — and how did you assert it stayed fixed?\""
+        "     GOOD: \"What tools do you typically use for writing automated tests, and what do you usually test?\""
     ),
     "generic_it": (
         "BAD:  \"Tell me about your engineering experience.\"\n"
-        "     GOOD: \"Walk me through the most recent production change you owned end to end.\n"
-        "            What constraint forced a non-obvious decision, and what was the trade-off?\""
+        "     GOOD: \"Can you briefly describe a recent project you worked on and the technologies you used?\""
     ),
 }
 
@@ -148,72 +135,55 @@ _IT_DOMAIN_SHOTS: Dict[str, str] = {
 _NON_IT_FAMILY_SHOTS: Dict[str, str] = {
     "recruiting": (
         "BAD:  \"Describe your recruiting experience.\"\n"
-        "     GOOD: \"Walk me through the last hard-to-fill role you closed. What sourcing\n"
-        "            channel did you abandon and why, and what changed in your outreach to land\n"
-        "            the hire?\""
+        "     GOOD: \"Can you briefly describe the types of roles you have sourced for recently?\""
     ),
     "finance": (
         "BAD:  \"Tell me about month-end close.\"\n"
-        "     GOOD: \"Describe the most complex variance you investigated last quarter. Which\n"
-        "            GL accounts were involved, what was the root cause, and what control did\n"
-        "            you change to prevent recurrence?\""
+        "     GOOD: \"Can you walk me through your typical responsibilities during the month-end close?\""
     ),
     "ops": (
         "BAD:  \"Tell me about your ops experience.\"\n"
-        "     GOOD: \"Describe a process you redesigned end to end. What was the bottleneck\n"
-        "            metric you targeted, and how did you measure improvement after the change?\""
+        "     GOOD: \"What are some basic operational processes you've helped manage day-to-day?\""
     ),
     "sales": (
         "BAD:  \"Tell me about your sales experience.\"\n"
-        "     GOOD: \"Walk me through your largest closed deal in the last 12 months. What\n"
-        "            objection nearly killed it, and how did you reframe to close?\""
+        "     GOOD: \"Can you briefly describe the type of product or service you were selling in your last role?\""
     ),
     "hr": (
         "BAD:  \"Describe your HR background.\"\n"
-        "     GOOD: \"Describe a real employee-relations case you handled. What policy was in\n"
-        "            tension, and how did you balance the parties involved?\""
+        "     GOOD: \"What were your main day-to-day HR responsibilities in your most recent role?\""
     ),
     "marketing": (
         "BAD:  \"Tell me about your marketing experience.\"\n"
-        "     GOOD: \"Describe a campaign you killed. What metric drove the decision, and\n"
-        "            where did you redirect the spend?\""
+        "     GOOD: \"Can you share a brief example of a marketing campaign you helped run?\""
     ),
     "customer_success": (
         "BAD:  \"Tell me about a tough renewal.\"\n"
-        "     GOOD: \"Walk through a churn save in the last 6 months. What signal warned you,\n"
-        "            what intervention did you run, and did NRR move?\""
+        "     GOOD: \"How do you typically ensure your customers are successful with the product?\""
     ),
     "program_management": (
         "BAD:  \"Tell me about a program you ran.\"\n"
-        "     GOOD: \"Walk me through the last cross-team dependency that nearly slipped your\n"
-        "            launch. Which RAID-log entry caught it, who did you escalate to, and what\n"
-        "            decision unblocked the path?\""
+        "     GOOD: \"Can you describe a typical project you managed from start to finish?\""
     ),
     "accounting": (
         "BAD:  \"Tell me about your accounting experience.\"\n"
-        "     GOOD: \"Describe a real audit finding you remediated. What control was missing,\n"
-        "            and what did you change in the close cycle so it wouldn't repeat?\""
+        "     GOOD: \"What are the main accounting software tools you use on a daily basis?\""
     ),
     "healthcare": (
         "BAD:  \"Tell me about your clinical experience.\"\n"
-        "     GOOD: \"Walk me through a patient case where your assessment changed the planned\n"
-        "            care pathway. What signal led you to escalate, and what was the outcome?\""
+        "     GOOD: \"Can you briefly describe the type of patient care you provided in your last role?\""
     ),
     "legal": (
         "BAD:  \"Describe your legal background.\"\n"
-        "     GOOD: \"Walk through a recent contract you negotiated where the counterparty\n"
-        "            pushed back hard on a specific clause. How did you reframe the risk and\n"
-        "            land an acceptable redline?\""
+        "     GOOD: \"What kinds of contracts did you spend the most time reviewing recently?\""
     ),
     "education": (
         "BAD:  \"Describe your teaching experience.\"\n"
-        "     GOOD: \"Describe a unit students consistently struggled with. How did you redesign\n"
-        "            the lesson, and what assessment evidence showed it worked?\""
+        "     GOOD: \"What age group or subject matter did you focus on in your most recent teaching role?\""
     ),
     "generic_non_it": (
         "BAD:  \"Describe your background.\"\n"
-        "     GOOD: \"Walk me through your most measurable win in the last year — the metric,\n"
-        "            your specific contribution, and what almost went wrong along the way.\""
+        "     GOOD: \"Can you describe your core responsibilities in your most recent role?\""
     ),
 }
 
@@ -255,6 +225,7 @@ def _build_prompt(
     job_title: str,
     seniority: str,
     customer_name: str,
+    job_description: str,
     industry: str,
     required_skills: List[Dict[str, Any]],
     preferred_skills: List[Dict[str, Any]],
@@ -274,6 +245,14 @@ def _build_prompt(
             years = s.get("minYears") or s.get("min_years") or 0
             lines.append(f"  - {name} (min {years} yrs)" if years else f"  - {name}")
         return "\n".join(lines)
+
+    def _fmt_job_description(text: str) -> str:
+        cleaned = " ".join((text or "").split()).strip()
+        if not cleaned:
+            return "N/A"
+        if len(cleaned) > 1800:
+            cleaned = cleaned[:1800].rstrip() + "..."
+        return cleaned
 
     is_it = family == "it"
     shot_key = _shot_key(family, domain)
@@ -312,46 +291,30 @@ def _build_prompt(
         )
     )
     rule3 = (
-        "Questions must be PRACTICAL and SCENARIO-DRIVEN. Anchor each question on a concrete\n"
-        "   production-shaped problem (real OR hypothetical) — \"You have a service doing X —\n"
-        "   what would you check first?\" is fine; \"sort an array in O(log n)\" is not. Lead\n"
-        "   with the scenario, end with the ask. Prefer \"You have a REST API slow at 10k\n"
-        "   users. What would you check?\" over \"Can you explain how you used X to do Y?\"\n\n"
-        "   Each question must surface ONE of:\n"
-        "     - System / production experience (real or hypothetical, but concrete)\n"
-        "     - Architecture understanding (how the pieces fit at the system level)\n"
-        "     - Real usage of frameworks/tools (how, when, why — not what)\n"
-        "     - Problem-solving maturity (trade-offs, failure-mode reasoning, prioritization\n"
-        "       under constraint)\n"
-        "     - End-to-end workflow understanding (how the rubric skills connect into a flow)\n"
-        "     - Conceptual fundamentals — fair game when paired with a 'why we use it' or\n"
-        "       'when does this matter' that requires real-world judgment (e.g. \"difference\n"
-        "       between sync and async in JavaScript — why use async/await?\"). NOT trivia.\n\n"
-        "   Strongly recommended for full-stack or multi-layer roles: include AT LEAST ONE\n"
-        "   end-to-end workflow question — e.g. \"A user clicks Save. Trace the complete flow\n"
-        "   from UI through API, service, and DB, and back.\" These naturally exercise multiple\n"
-        "   rubric skills in one question.\n\n"
-        f"   Calibrate difficulty by the {total_years}+ year target experience for this role:\n"
-        "     - 2–4 yrs → implementation understanding (how they used the tool, what they\n"
-        "       configured, what broke and how they noticed)\n"
-        "     - 5–8 yrs → architecture + debugging (how the pieces connect, how they diagnose\n"
-        "       a real production issue end to end)\n"
-        "     - 8+ yrs → scalability, design decisions, production hardening (what they'd\n"
-        "       change at 10× scale, what trade-off they made and why, system evolution)\n\n"
+        "Questions must be INCREDIBLY SIMPLE and CONVERSATIONAL. This is a preliminary AI screening call, NOT a technical interview.\n"
+        "   Do NOT ask candidates to design systems, solve problems, manage requests, ensure efficiency, or troubleshoot.\n"
+        "   Literally just ask them if they have used a tool, what they used it for, or to give a brief example of a project where they used it.\n\n"
+        "   Each question must simply verify:\n"
+        "     - Basic familiarity with a required skill\n"
+        "     - General awareness of what a tool is used for\n\n"
+        "   Example of good questions:\n"
+        "     - \"Have you worked with React before? What kind of components did you build?\"\n"
+        "     - \"Can you give a brief example of how you used Java Spring Boot in your last role?\"\n"
+        "     - \"What was the main focus of the last Java application you worked on?\"\n\n"
+        f"   Keep the difficulty extremely low, regardless of the {total_years}+ year target experience.\n"
+        "   The goal is just to ensure they aren't completely faking their resume. If they can describe basic usage, they pass.\n\n"
         "   AVOID, every time:\n"
-        "     - Coding exercises, live coding, LeetCode / DSA / algorithm puzzles\n"
-        "     - Trivia (memorizing one keyword or syntax form, with no 'why' or 'when' angle)\n"
-        "     - Behavioral / observational phrasing (\"tell me about a time\", \"describe a\n"
-        "       challenging issue\", \"what does success look like\", \"share an example\")"
+        "     - 'How do you handle X?' or 'How do you ensure Y?' or 'What steps do you take to Z?' (Too difficult!)\n"
+        "     - Technical troubleshooting or debugging scenarios\n"
+        "     - System design or architecture questions\n"
+        "     - Coding exercises or syntax trivia"
     ) if is_it else (
-        "Mix question types across the set: ~50% process/scenario, ~25% stakeholder/communication,\n"
-        "   ~25% behavioral/ownership. For junior seniority: favor concrete-task questions. For\n"
-        "   senior/manager: favor cross-team decisions, prioritization trade-offs, and measurable\n"
-        "   outcomes. AVOID software-delivery jargon (CI/CD, deployment, rollback, architecture,\n"
-        "   production systems, release pipelines) — this is not a technical role."
+        "Keep the questions extremely simple and high-level. This is an automated AI pre-screen.\n"
+        "   Just ask about their general familiarity with the required tools or processes. Do NOT ask complex\n"
+        "   situational or behavioral questions. Example: \"How have you used Salesforce in your daily work?\""
     )
     categories_line = (
-        '"category": "scenario" | "architecture" | "debugging" | "production" | "trade-off" | "end-to-end" | "fundamentals",'
+        '"category": "experience" | "project-example" | "tool-familiarity" | "fundamentals" | "technical-depth",'
         if is_it
         else '"category": "process" | "stakeholder" | "behavioral" | "scenario",'
     )
@@ -371,17 +334,16 @@ def _build_prompt(
 
     task_objective = (
         "Produce exactly {target_count} role-specific screening questions that are job-relevant and\n"
-        "beginner-friendly: practical and clear, focused on fundamentals and day-to-day usage.\n"
-        "Avoid advanced edge cases or deep architecture forensics."
+        "INCREDIBLY beginner-friendly. Focus purely on basic familiarity. Example: 'Have you used Java? What did you build?'\n"
+        "Avoid ANY technical problem-solving."
         if difficulty == "easy"
         else (
             "Produce exactly {target_count} role-specific screening questions that are job-relevant and\n"
-            "intermediate: practical and specific, requiring hands-on understanding without overly\n"
-            "advanced expert-only depth."
+            "extremely simple. Focus on everyday usage. Example: 'Can you give an example of how you used Java?'\n"
+            "Avoid ANY 'how do you handle X' or 'what steps do you take to Y' questions."
             if difficulty == "medium"
             else "Produce exactly {target_count} role-specific screening questions that are job-relevant and\n"
-            "expert-level: depth-probing and technically rigorous, capable of differentiating senior\n"
-            "practitioners from surface-level familiarity."
+            "conversational. Ask about their experience with the tools, but DO NOT ask them to solve technical problems."
         )
     )
 
@@ -395,6 +357,7 @@ ROLE CONTEXT
   Target total experience: {total_years}+ years
   Role family: {family}
   Role domain: {domain}
+  Job description: {_fmt_job_description(job_description)}
 
 RUBRIC — Must-have skills:
 {_fmt_skills(required_skills)}
@@ -406,38 +369,22 @@ TASK
 {task_objective.format(target_count=target_count)}
 
 STRICT RULES — FOLLOW EVERY ONE:
-1. Do NOT write "Can you describe your experience with <skill>?" — that is the boilerplate
-   you are replacing. Always probe a specific sub-capability, decision, trade-off, or
-   failure mode.
+1. Only ask "Have you used X?" or "What kind of projects did you build with X?". Never ask candidates to solve a problem or explain *how* they ensure performance, handle concurrency, or write efficient code. Those are technical interview questions, not screening questions.
 2. Ground questions in the rubric skills. Bundle naturally related skills into a single
-   question (Java + Spring Boot, Angular + React, HTML + CSS + JS into a UI question)
-   rather than forcing one question per skill. Domain example for THIS role
-   ({domain if is_it else family}):
-     {shot_block}
+   question (Java + Spring Boot, Angular + React, HTML + CSS + JS into a UI question).
 3. {rubric_anchor_rule}
 4. {rule3}
 5. Reference specific named concepts, tools, or artifacts where sensible — for THIS
-   domain that means: {artifacts}. Do not be generic, and do not pull in concepts from
-   unrelated domains.
-6. {"Behavioral / observational phrasing is invalid and will be rejected by a post-filter — do not write 'tell me about a time / situation / recent', 'describe a challenging issue', 'what does success look like', 'share an example', 'how did you balance', 'how did you typically approach'. Rewrite any such draft as a scenario-driven probe." if is_it else "Ground questions in stakeholder, process, or outcome language consistent with this non-technical role."}
+   domain that means: {artifacts}.
+6. It is PERFECTLY FINE to ask "Can you describe a recent project where you used X?" or "Tell me about your experience with Y." Do not force artificial scenarios.
 7. The `pass_criteria` field MUST be ONE string with two parts:
-    - "Pass: " followed by a comma-separated CHECKLIST of 5–8 named concepts, tools,
-      patterns, or layers a real practitioner would mention while answering — items the
-      recruiter can literally tick off during the call. NOT a sentence.
+    - "Pass: " followed by a simple CHECKLIST of 1–3 basic concepts or general tasks a practitioner would mention. NOT a sentence.
     - " | Red flag: " followed by ONE short phrase a fake/surface candidate would say.
     Format examples:
-      - "Pass: thread pool tuning, DB connection pool, query plan / N+1, caching layer,
-        async/queue offload, JVM heap & GC. | Red flag: 'we'd just add more servers.'"
-      - "Pass: event loop, microtask queue, promises, async/await as syntactic sugar,
-        non-blocking I/O, error propagation in awaited calls. | Red flag: 'async/await
-        makes JavaScript multi-threaded.'"
-      - "Pass: HTTP request, controller, service layer, validation, DB transaction,
-        response payload, optimistic UI update, error rollback. | Red flag: 'the
-        frontend just calls the backend.'"
+      - "Pass: writing SQL queries, joining tables, basic CRUD operations. | Red flag: 'I just copy pasted code.'"
+      - "Pass: creating React components, using useState, passing props. | Red flag: 'React is a database.'"
     Never use "N+ years", "X years of experience", or duration thresholds anywhere.
-8. Each `question_text` is ≤ 25 words and answerable verbally in 60–90 seconds — no
-    coding. Lead with the scenario and end with the ask: "You have X. What would you
-    check?" / "A user does Y. Trace the flow." NOT "Can you explain how you used X?"
+8. Each `question_text` is ≤ 25 words and answerable verbally in 30–60 seconds — no coding. Ask simple, direct questions. "What kind of tasks did you do with X?" is perfect.
 9. Do not repeat or paraphrase the same question.
 10. Return nothing except the JSON below.
 11. Do NOT generate questions about work arrangement (onsite / remote / hybrid /
@@ -446,7 +393,9 @@ STRICT RULES — FOLLOW EVERY ONE:
     current job-search status. The front-matter already covers those — your
     questions would be duplicates and will be rejected. Every question MUST
     probe a rubric skill or role competence.
-12. {"DIFFICULTY = EASY (beginner): focus on fundamentals and common day-to-day tasks." if difficulty == "easy" else ("DIFFICULTY = MEDIUM (intermediate): require practical implementation understanding and clear decision rationale." if difficulty == "medium" else "DIFFICULTY = HARD (expert): include deeper troubleshooting, trade-offs, architecture reasoning, and production-scale judgment.")}
+12. Use the job description as a hard grounding source for responsibilities,
+    tools, scope, and expected depth.
+13. {"DIFFICULTY = EASY (very beginner): purely ask 'have you used this' and 'what did you use it for'." if difficulty == "easy" else ("DIFFICULTY = MEDIUM (beginner): purely ask 'can you give an example of a project where you used this'." if difficulty == "medium" else "DIFFICULTY = HARD (intermediate): purely ask 'tell me about your general experience with this tool'. No problem solving.")}
 
 OUTPUT FORMAT — return a STRICT JSON object like this:
 {{
@@ -470,19 +419,9 @@ No markdown, no preamble, no trailing commentary. JSON only.
 # IT-role question text. When any of these hits, the question is dropped and
 # the deterministic technical template fills its slot.
 _IT_BEHAVIORAL_BAN_PATTERNS = re.compile(
-    r"(tell me about (a |the )?(time|recent|situation|experience|challenging|project)"
-    r"|describe (a |the )?(time|situation|challenging|project|experience|real situation)"
-    r"|walk me through (a |the )?(time|situation)"
-    r"|when priorities (have )?conflict"
+    r"(when priorities (have )?conflict"
     r"|how did you balance"
-    r"|directly influenced (the )?(final )?outcome"
     r"|what does (strong execution|success|good) look like"
-    r"|share (an? |one )?example"
-    r"|what decision mattered (most|the most)"
-    r"|how did you typically approach"
-    r"|how do you typically (handle|approach)"
-    r"|describe your (approach|experience) (with|to)"
-    r"|tell me how you (would |usually )?(approach|handle)"
     r")",
     flags=re.IGNORECASE,
 )
@@ -589,6 +528,7 @@ async def generate_screening_questions(
     rubric: Dict[str, Any],
     screening_level: str = "medium",
     customer_name: str = "",
+    job_description: str = "",
     work_arrangement: str = "on-site",   # one of: on-site | onsite | hybrid | remote
     city: str = "",
     address: str = "",
@@ -717,6 +657,7 @@ async def generate_screening_questions(
         job_title=job_title,
         seniority=seniority,
         customer_name=customer_name,
+        job_description=job_description,
         industry=industry,
         required_skills=required_skills,
         preferred_skills=preferred_skills,
@@ -732,31 +673,31 @@ async def generate_screening_questions(
     difficulty = difficulty_mode_normalized
     system_message = (
         "You are a senior technical recruiter and AI interview screener for engineering hiring. "
-        "Write 4–6 first-round audio screening questions at BEGINNER level: practical, clear, "
-        "day-to-day fundamentals tied to rubric skills. Avoid advanced edge cases. NOT a deep "
+        "Write 4–6 first-round audio screening questions at VERY BEGINNER level: extremely simple, "
+        "high-level awareness checks tied to rubric skills. Avoid technical depth. NOT a deep "
         "technical interview. NOT a behavioral interview. NOT a coding exercise. Output strict JSON only."
         if difficulty == "easy"
         else (
             "You are a senior technical recruiter and AI interview screener for engineering hiring. "
-            "Write 4–6 first-round audio screening questions at INTERMEDIATE level: practical and "
-            "specific, requiring hands-on understanding and clear implementation reasoning. NOT a deep "
+            "Write 4–6 first-round audio screening questions at BEGINNER level: clear, practical, "
+            "day-to-day fundamentals. Avoid advanced edge cases. NOT a deep "
             "technical interview. NOT a behavioral interview. NOT a coding exercise. Output strict JSON only."
             if difficulty == "medium"
             else "You are a senior technical recruiter and AI interview screener for engineering hiring. "
-            "Write 4–6 first-round audio screening questions at EXPERT level: depth-probing and "
-            "technically rigorous, with concrete trade-offs, debugging, and system-level judgment. "
+            "Write 4–6 first-round audio screening questions at INTERMEDIATE level: practical "
+            "hands-on checks, but keep it accessible. Avoid overly rigorous depth-probing. "
             "NOT a behavioral interview. NOT a coding exercise. Output strict JSON only."
         )
     ) if is_it_role else (
-        "You write role-relevant screening questions for non-technical roles at BEGINNER level: "
-        "fundamentals and day-to-day execution checks. Avoid software-delivery jargon. Output strict JSON."
+        "You write role-relevant screening questions for non-technical roles at VERY BEGINNER level: "
+        "high-level awareness and basic checks. Avoid jargon. Output strict JSON."
         if difficulty == "easy"
         else (
-            "You write role-relevant screening questions for non-technical roles at INTERMEDIATE level: "
-            "practical scenario and stakeholder execution checks. Avoid software-delivery jargon. Output strict JSON."
+            "You write role-relevant screening questions for non-technical roles at BEGINNER level: "
+            "fundamentals and day-to-day execution checks. Avoid jargon. Output strict JSON."
             if difficulty == "medium"
-            else "You write role-relevant screening questions for non-technical roles at EXPERT level: "
-            "deeper decision-making, trade-offs, and measurable-outcome ownership checks. Avoid software-delivery jargon. Output strict JSON."
+            else "You write role-relevant screening questions for non-technical roles at INTERMEDIATE level: "
+            "practical scenarios, but keep it accessible and high-level. Avoid jargon. Output strict JSON."
         )
     )
 
@@ -770,7 +711,7 @@ async def generate_screening_questions(
     # LLM failure.
     from core import llm_cache as _llm_cache
     _screening_cache_key = _llm_cache.make_key(
-        "screening", 1, system_message, prompt, screening_level, leniency_mode, difficulty_mode_normalized
+        "screening", 2, system_message, prompt, screening_level, leniency_mode, difficulty_mode_normalized
     )
     try:
         _cached = await _llm_cache.get_json(_screening_cache_key)
@@ -823,16 +764,14 @@ async def generate_screening_questions(
                         f"In a system using {name}, if errors increased, what would you check first "
                         "and what practical step would you take next?"
                         if leniency_mode
-                        else f"In a production system using {name}, what specific failure-mode signal "
-                        "(metric, log line, or error class) led you to root cause, and which exact "
-                        "configuration or code change prevented recurrence?"
+                        else f"In a system using {name}, what is a common issue you might encounter, "
+                        "and how would you generally go about troubleshooting it?"
                     )
                     criteria = (
                         f"Candidate demonstrates understanding of how to troubleshoot issues in {name}. "
                         f"They can identify a debugging approach and explain a {name} configuration or code change."
                         if leniency_mode
-                        else f"Candidate names a concrete {name} signal, root cause, and the precise "
-                        "configuration knob, code path, or design change that fixed it."
+                        else f"Candidate mentions a typical issue in {name} and provides a reasonable, high-level troubleshooting step."
                     )
                     category = "debugging"
                 elif level in ("light", "low", "basic", "quick"):
@@ -840,14 +779,13 @@ async def generate_screening_questions(
                         f"What is one {name} feature, API, or configuration you have used directly, "
                         "and what changed because of it?"
                         if leniency_mode
-                        else f"Name one specific configuration, syntax detail, or API in {name} that "
-                        "you've tuned or used directly, and what observable behavior changed."
+                        else f"Can you describe a basic feature or component of {name} that you "
+                        "have used in your day-to-day work?"
                     )
                     criteria = (
                         f"Candidate demonstrates familiarity with {name}. They can describe a feature or configuration they've worked with and how it affects behavior."
                         if leniency_mode
-                        else f"Candidate names a real {name} flag/API/syntax detail and ties it to a "
-                        "concrete, verifiable behavior change — not a generic 'we used it for X'."
+                        else f"Candidate describes a real {name} feature or component and shows basic familiarity with its usage."
                     )
                     category = "technical-depth"
                 else:
@@ -855,15 +793,13 @@ async def generate_screening_questions(
                         f"Describe one implementation choice you made with {name}, and one trade-off "
                         "you considered while making that decision."
                         if leniency_mode
-                        else f"Walk through one concrete implementation choice you made with {name} — "
-                        "what specific alternative did you reject, and what technical trade-off "
-                        "(latency, consistency, throughput, cost) drove the decision?"
+                        else f"Describe a time you used {name}. What was the general goal, "
+                        "and what basic steps did you take to achieve it?"
                     )
                     criteria = (
                         f"Candidate can explain a {name} implementation decision they made and articulate a trade-off or consideration involved."
                         if leniency_mode
-                        else f"Candidate identifies a specific {name} implementation choice, names the "
-                        "rejected alternative, and articulates a concrete technical trade-off."
+                        else f"Candidate explains a scenario where they used {name} and outlines the basic approach taken."
                     )
                     category = "technical-depth"
             else:
@@ -945,18 +881,16 @@ async def generate_screening_questions(
             )
             if is_it_role:
                 q_text = (
-                    f"What is one {name} configuration, API, or behavior you have used directly, "
-                    "and what changed as a result?"
+                    f"What is one {name} feature or behavior you have used directly, "
+                    "and what was the outcome?"
                     if leniency_mode
-                    else f"Name one specific configuration, syntax detail, API, or version-pinned "
-                    f"behavior in {name} that you have personally tuned, and what observable "
-                    "system behavior changed as a result."
+                    else f"Can you give a simple example of how you have used {name} "
+                    "in a recent project?"
                 )
                 criteria = (
                     f"Candidate demonstrates familiarity with {name} and can describe a feature or behavior they've worked with."
                     if leniency_mode
-                    else f"Candidate names a real {name} flag/API/syntax detail and ties it to a "
-                    "concrete, verifiable behavior change — not a generic 'we used it for X'."
+                    else f"Candidate gives a clear, practical example of how they have utilized {name}."
                 )
                 category = "technical-depth"
             else:

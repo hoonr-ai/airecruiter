@@ -138,15 +138,22 @@ FAST_PATH_DETAIL_BACKGROUND_PAGE_DELAY_S = 1.0
 # ─────────────────────────────────────────────────────────────────────────
 # JobAgentSearch latency scales with resumeCount — measured 2026-06-04 on
 # real jobs: jobId 32364764 took 13s @ rc=100 vs 110s @ rc=400; jobId
-# 32344914 took 1.6s @ rc=100 vs 3.8s @ rc=400. The talent pool is capped
-# to the top-100 for display AND background hydration
-# (FAST_PATH_DETAIL_BACKGROUND_MAX_CANDIDATES) regardless, so the old
-# max(200, page_size*4)=400 just made JobDiva rank ~300 candidates we
-# immediately discard. 150 = the 100 display cap + headroom to absorb the
-# client-side state filter and cross-source dedup, while keeping the call
-# fast. Bump if a search's state filter is dropping enough to starve the
-# top-100; lower toward 100 for the fastest first paint.
+# 32344914 took 1.6s @ rc=100 vs 3.8s @ rc=400. The UI fetches candidates in
+# 150-result tranches: 150 on the first search, then the next 150 only when the
+# recruiter clicks "Search more". JobAgent has no offset parameter, so the
+# second tranche requests 300 and slices off the first 150 locally.
 JOBAGENT_RESUME_COUNT = 150
+JOBAGENT_MAX_RESUME_COUNT = 300
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# TalentSearch pagination
+# ─────────────────────────────────────────────────────────────────────────
+# JobDiva TalentSearch supports pageNumber/pageSize, so each recruiter action
+# maps cleanly to one 150-result page: page 0 initially, page 1 on Search more.
+JOBDIVA_TALENTSEARCH_PAGE_SIZE = 150
+JOBDIVA_TALENTSEARCH_TOTAL_COUNT = 150
+JOBDIVA_TALENTSEARCH_MAX_TOTAL_COUNT = 300
 
 
 # ─────────────────────────────────────────────────────────────────────────

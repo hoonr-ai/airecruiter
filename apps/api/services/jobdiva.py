@@ -690,6 +690,27 @@ def calculate_date_duration(start_date_str: str, end_date_str: str) -> str:
     except Exception:
         return ""
 
+_VERSION_SUFFIX_RE = re.compile(r"-v\d+$")
+
+
+def strip_job_version_suffix(ref: Any) -> Optional[str]:
+    """Reduce an internal versioned job reference to its root JobDiva reference.
+
+    Versioned refs (e.g. ``26-06182-v2``) are LOCAL clones created by "Edit Job
+    Setup" after launch — JobDiva itself only knows the root ref ``26-06182``.
+    The ``-vN`` suffix is a display / internal-relations concept (it keeps each
+    version's candidate bucket separate); it must NEVER be sent to JobDiva.
+
+    Use this ONLY when a value is about to become a JobDiva HTTP payload
+    (jobdivaref / jobOrderId / updateJob). Do NOT use it for local DB row
+    resolution (``WHERE job_id = ...`` / ``WHERE jobdiva_id = ...``) — there the
+    full versioned ref is the real key and stripping it would clobber v1.
+    """
+    if ref is None:
+        return None
+    return _VERSION_SUFFIX_RE.sub("", str(ref).strip())
+
+
 def normalize_jobdiva_date(date_val: Any) -> str:
     """
     Format JobDiva date/timestamp into a readable YYYY-MM-DD format.
@@ -909,8 +930,12 @@ class JobDivaService:
             except Exception as e:
                 logger.error(f"Failed to create JobDiva DB engine: {e}")
 
-    async def authenticate(self) -> str:
+    async def authenticate(self, force_refresh: bool = False) -> str:
         """Authenticate with JobDiva and return JWT token."""
+        if force_refresh:
+            self.cached_token = None
+            self.token_expiry = 0
+
         if self.cached_token and time.time() < self.token_expiry:
             return self.cached_token
         
@@ -1128,7 +1153,7 @@ class JobDivaService:
         # Versioned jobs are local clones used for re-editing after launch; they
         # share the original JobDiva job, so sourcing must resolve against the
         # un-versioned reference.
-        s = re.sub(r"-v\d+$", "", s)
+        s = strip_job_version_suffix(s)
         if "-" not in s:
             try:
                 return int(s)
@@ -2512,6 +2537,11 @@ class JobDivaService:
 
     async def get_job_by_id(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Fetch a specific job by ID from JobDiva, including AI UDFs."""
+        # Versioned refs (26-06182-v2) are local clones that share the original
+        # JobDiva job — strip the -vN suffix so the external SearchJob lookup
+        # uses the root ref and doesn't 404 / trip the strict ref-match guard.
+        # The caller keeps the versioned ref for any local DB identity it needs.
+        job_id = strip_job_version_suffix(job_id)
         logger.info(f"Fetching Job ID: {job_id}")
         token = await self.authenticate()
         if not token: return None
@@ -2696,44 +2726,98 @@ class JobDivaService:
                     p_range = ""
                 
                 # Improved Location Type detection - Only use actual location fields, not employment fields
-                loc_type_raw = get_field(j, ["location type", "location_type"]) or ""
+                loc_type_raw = get_field(j, ["location type", "location_type", "onsite_remote", "onsiteremote", "onsite remote", "onSiteRemote"]) or ""
+                val_lower = str(loc_type_raw).lower().strip()
                 
-                # Clean the raw value to remove employment type contamination
-                def clean_location_type(value):
-                    if not value:
-                        return ""
-                    val_lower = str(value).lower().strip()
+                loc_type = ""
+                
+                # 1. Look for explicit keywords in the raw location field
+                if "remote" in val_lower:
+                    loc_type = "Remote"
+                elif "hybrid" in val_lower:
+                    loc_type = "Hybrid"
+                elif "onsite" in val_lower or "on-site" in val_lower:
+                    loc_type = "Onsite"
+                elif val_lower:
+                    # 2. Check for employment type contamination if no explicit location word found
                     employment_terms = [
                         "direct placement", "contract", "full-time", "part-time", 
                         "w2", "1099", "c2c", "corp to corp", "open", "pending",
                         "temporary", "permanent", "temp to perm", "fulltime", "parttime"
                     ]
-                    if any(term in val_lower for term in employment_terms):
-                        return ""
-                    return str(value).strip()
+                    if not any(term in val_lower for term in employment_terms):
+                        loc_type = str(loc_type_raw).strip()
                 
-                cleaned_loc_type = clean_location_type(loc_type_raw)
+                # 3. Prioritize Job Description over JobDiva API field
+                # JobDiva API often incorrectly defaults to "Remote" when JD says Hybrid/Onsite.
+                desc_lower = description.lower()
                 
-                loc_type = "Onsite" # Default
-                if cleaned_loc_type:
-                    if "remote" in cleaned_loc_type.lower():
-                        loc_type = "Remote"
-                    elif "hybrid" in cleaned_loc_type.lower():
-                        loc_type = "Hybrid"
-                    elif "onsite" in cleaned_loc_type.lower() or "on-site" in cleaned_loc_type.lower():
-                        loc_type = "Onsite"
+                has_hybrid = False
+                # Only treat "hybrid" as a work-arrangement signal when it appears
+                # near work-context words. Avoid false positives from tech JDs that
+                # say "hybrid cloud", "hybrid architecture", "hybrid environment" etc.
+                _hybrid_work_phrases = [
+                    "hybrid role", "hybrid position", "hybrid work", "hybrid schedule",
+                    "hybrid model", "hybrid arrangement", "hybrid option",
+                    "hybrid setting", "hybrid basis", "hybrid format",
+                    "hybrid working", "hybrid opportunity", "hybrid flexibility",
+                ]
+                _hybrid_tech_phrases = [
+                    "hybrid cloud", "hybrid environment", "hybrid architecture",
+                    "hybrid infrastructure", "hybrid network", "hybrid system",
+                    "hybrid solution", "hybrid deployment", "hybrid setup",
+                    "hybrid approach", "hybrid technology", "hybrid platform",
+                    "hybrid data", "hybrid storage",
+                ]
+                if "hybrid" in desc_lower:
+                    # Has a work-context phrase → definitely hybrid work arrangement
+                    if any(phrase in desc_lower for phrase in _hybrid_work_phrases):
+                        has_hybrid = True
+                    # Only has tech phrases → NOT a work arrangement signal
+                    elif any(phrase in desc_lower for phrase in _hybrid_tech_phrases):
+                        has_hybrid = False
                     else:
-                        # Only use the cleaned value if it's not empty and looks like a valid location type
-                        loc_type = cleaned_loc_type
+                        # Ambiguous standalone "hybrid" mention — trust the API field
+                        has_hybrid = ("hybrid" in val_lower)
+                # Tighten onsite matching using regex with word boundaries to avoid false positives like "depending on site conditions"
+                has_onsite = bool(re.search(r'\b(?:onsite|on-site|work\s+on\s+site|working\s+on\s+site|on\s+site\s+(?:work|role|position|basis|location|office|presence|environment|days|requirement|required|mandatory|essential|only))\b', desc_lower))
+
+                # Check for "remote" but carefully exclude negative phrases using word-bounded regex.
+                # e.g. "not a WFH/remote role", "not remote", "no remote", "non-remote"
+                _remote_mention = bool(re.search(r'\bremote\b', desc_lower))
+                _remote_negated = bool(re.search(r'\b(?:not|no|non|never)(?:-|\s+)(?:a\s+|an\s+)?(?:remote|wfh|work\s+from\s+home|(?:wfh/)?remote)\b', desc_lower))
+                has_remote = _remote_mention and not _remote_negated
                 
-                # Fallback: check description for location keywords if no valid location type found
-                if not cleaned_loc_type or loc_type == "Onsite":
-                    if "remote" in description.lower():
-                        loc_type = "Remote"
-                    elif "hybrid" in description.lower():
-                        loc_type = "Hybrid"
-                    elif "on-site" in description.lower() or "onsite" in description.lower():
-                        loc_type = "Onsite"
+                # Determine what the API explicitly said
+                api_loc = ""
+                if "hybrid" in val_lower: api_loc = "Hybrid"
+                elif "remote" in val_lower: api_loc = "Remote"
+                elif "onsite" in val_lower or "on-site" in val_lower: api_loc = "Onsite"
+                
+                # If API and JD both agree on Onsite, trust it — even if "remote" appears
+                # negatively in the JD (e.g. "This is not a WFH/remote role").
+                if api_loc == "Onsite" and has_onsite and not has_hybrid:
+                    loc_type = "Onsite"
+                elif has_hybrid:
+                    loc_type = "Hybrid"
+                elif has_onsite and has_remote:
+                    # Mentions both Onsite and Remote -> usually implies a Hybrid arrangement
+                    loc_type = "Hybrid"
+                elif has_onsite:
+                    loc_type = "Onsite"
+                elif has_remote:
+                    loc_type = "Remote"
+                elif _remote_negated and api_loc == "Remote":
+                    # JD explicitly says "not remote" / "no WFH" but API says Remote.
+                    # The JD overrides the API — the job is clearly NOT remote.
+                    # Default to Onsite since the JD is denying remote without naming an alternative.
+                    loc_type = "Onsite"
+                else:
+                    # JD is silent about location keywords, trust the API field
+                    loc_type = api_loc
+                        
+                if not loc_type:
+                    loc_type = "Onsite"
                 
                 result = {
                     "id": get_field(j, ["id", "jobId"]),
@@ -3835,10 +3919,11 @@ class JobDivaService:
         jdiva_job_id = await self._resolve_jobdiva_job_id(job_id)
         if not jdiva_job_id:
             logger.warning(f"Could not resolve JobDiva Job ID for {job_id}")
-            # Try to use it directly if it's numeric
+            # Try to use it directly if it's numeric. Strip any -vN suffix first
+            # so "26-06182-v2" doesn't digit-mash into a bogus 26061822.
             try:
-                jdiva_job_id = int("".join(filter(str.isdigit, str(job_id)))) if job_id else 0
-            except:
+                jdiva_job_id = int("".join(filter(str.isdigit, str(strip_job_version_suffix(job_id))))) if job_id else 0
+            except (TypeError, ValueError):
                 pass
 
         # JobDiva v2 action date format: yyyy-MM-dd'T'HH:mm:ss
@@ -4211,32 +4296,73 @@ class JobDivaService:
         if not token:
             return False, None
 
+        # Check if candidate already exists to avoid duplicate/Unknown-Unknown profile
+        if email and not candidate_id:
+            candidate_id = await self.search_candidate_profile(email, first_name, last_name)
+
         from datetime import datetime
         resume_date = datetime.now().strftime("%m/%d/%Y 12:00:00")
 
         url = f"{self.api_url}/apiv2/jobdiva/CreateJobApplicationWithResume"
+        # Resolve to the real numeric JobDiva job id. This correctly handles a
+        # numeric id, a reference string (26-06182) AND a versioned ref
+        # (26-06182-v2 -> root job), instead of digit-mashing the ref into a
+        # bogus number. Fall back to digit extraction only if resolution fails.
+        resolved_job_id = await self._resolve_jobdiva_job_id(job_id)
+        if not resolved_job_id:
+            try:
+                resolved_job_id = int("".join(filter(str.isdigit, str(strip_job_version_suffix(job_id))))) if job_id else 0
+            except (TypeError, ValueError):
+                resolved_job_id = 0
+
+        # Build an explicit text header to guarantee JobDiva's parser correctly 
+        # extracts the confirmed candidate name and contact info.
+        header_lines = []
+        if first_name or last_name:
+            header_lines.append(f"Name: {first_name} {last_name}".strip())
+        if email:
+            header_lines.append(f"Email: {email}")
+        if phone:
+            header_lines.append(f"Phone: {phone}")
+        
+        if header_lines:
+            header_text = "\n".join(header_lines)
+            resume_text = f"{header_text}\n\n================================\n\n{resume_text}"
+
         json_payload = {
             "filename": filename,
             "textfile": resume_text,
             "filecontent": "",
-            "jobid": int("".join(filter(str.isdigit, str(job_id)))) if job_id else 0,
+            "jobid": int(resolved_job_id or 0),
             "recruiterid": int(JOBDIVA_PAIR_RECRUITER_ID or 0),
             "resumeDate": resume_date,
             "resumesource": 0
         }
+        if candidate_id:
+            json_payload["candidateid"] = int(candidate_id)
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
-                    url,
-                    json=json_payload,
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Accept": "application/json",
-                    }
-                )
-            status, res_body = response.status_code, response.text
-            logger.info(f"🔎 CreateJobApplicationWithResume: {status} — {res_body[:200]}")
+            for attempt in range(2):
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(
+                        url,
+                        json=json_payload,
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Accept": "application/json",
+                        }
+                    )
+                status, res_body = response.status_code, response.text
+                
+                if status == 401 and attempt == 0:
+                    logger.warning(f"⚠️ CreateJobApplicationWithResume got 401. Refreshing token...")
+                    token = await self.authenticate(force_refresh=True)
+                    if not token:
+                        return False, None
+                    continue
+
+                logger.info(f"🔎 CreateJobApplicationWithResume: {status} — {res_body[:200]}")
+                break
 
             if status in [200, 201]:
                 try:
@@ -4253,10 +4379,18 @@ class JobDivaService:
                     except Exception:
                         new_cid = None
 
-                logger.info(f"✅ JobDiva application created → candidateId={new_cid}, job={job_id}")
+                # When linking an existing candidate, JobDiva often returns 0 or empty
+                # body (no new profile created). Fall back to the pre-found candidate_id
+                # so the ID is correctly persisted and updateCandidateProfile still runs.
+                if not new_cid and candidate_id:
+                    new_cid = candidate_id
+                    logger.info(f"ℹ️ JobDiva returned no ID — using pre-found candidateId={new_cid}")
 
-                # The JSON endpoint creates 'Unknown Unknown' with an Auto_ placeholder
-                # email. Fix name + real contact info immediately.
+                logger.info(f"✅ JobDiva application linked/created → candidateId={new_cid}, job={job_id}")
+
+                # We injected the name into the resume header, so JobDiva's parser should 
+                # extract it perfectly. We still call _update_candidate_name instantly 
+                # just to guarantee the exact spelling and apply any missing fields.
                 if new_cid and (first_name or last_name or email or phone):
                     await self._update_candidate_name(token, new_cid, first_name, last_name, email, phone)
 
@@ -4273,6 +4407,7 @@ class JobDivaService:
         Used to fix 'Unknown Unknown' + Auto_ placeholder email created by
         CreateJobApplicationWithResume JSON mode.
         Endpoint: POST /apiv2/jobdiva/updateCandidateProfile
+
         """
         url = f"{self.api_url}/apiv2/jobdiva/updateCandidateProfile"
         payload = {
@@ -4287,16 +4422,26 @@ class JobDivaService:
             payload["phone"] = phone
             
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    url,
-                    json=payload,
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Accept": "application/json"
-                    }
-                )
-            logger.info(f"🔎 updateCandidateProfile response: {response.status_code} — {response.text[:300]}")
+            for attempt in range(2):
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(
+                        url,
+                        json=payload,
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Accept": "application/json"
+                        }
+                    )
+                
+                if response.status_code == 401 and attempt == 0:
+                    logger.warning(f"⚠️ updateCandidateProfile got 401. Refreshing token...")
+                    token = await self.authenticate(force_refresh=True)
+                    if not token:
+                        return False
+                    continue
+
+                logger.info(f"🔎 updateCandidateProfile response: {response.status_code} — {response.text[:300]}")
+                break
             if response.status_code in [200, 201]:
                 logger.info(f"✅ Profile updated for candidateId={candidate_id}: {first_name} {last_name}, email={bool(email)}, phone={bool(phone)}")
                 return True

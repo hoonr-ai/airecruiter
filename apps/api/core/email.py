@@ -57,7 +57,7 @@ MS_GRAPH_SENDER_EMAIL = _cfg("MS_GRAPH_SENDER_EMAIL") or SMTP_FROM
 # PAIR-specific (not SMTP credentials)
 PAIR_TEAM_EMAIL    = _cfg("PAIR_TEAM_EMAIL",    "pair-recruiting@pyramidci.com")
 JOB_POSTING_EMAIL  = _cfg("JOB_POSTING_EMAIL",  "Jobposting@pyramidci.com")
-APP_BASE_URL       = _cfg("APP_BASE_URL",        "https://qacurate.hoonr.ai")
+APP_BASE_URL       = _cfg("APP_BASE_URL",        "https://curate.hoonr.ai")
 JOBDIVA_URL        = _cfg("JOBDIVA_URL",         "https://www1.jobdiva.com")
 
 
@@ -86,7 +86,7 @@ def resolve_app_base_url(override: Optional[str] = None) -> str:
     candidate = (override or "").strip().rstrip("/")
     if candidate.startswith("http://") or candidate.startswith("https://"):
         return candidate
-    return APP_BASE_URL.rstrip("/")
+    return (APP_BASE_URL or "https://curate.hoonr.ai").rstrip("/")
 
 def _smtp_configured() -> bool:
     """Return True only when enough SMTP settings are present to attempt a send."""
@@ -361,7 +361,7 @@ def notify_pair_launched(
     """
     base_url = resolve_app_base_url(app_base_url)
     jobdiva_link   = jobdiva_job_link(job_id, jobdiva_id)
-    rankings_link  = f"{base_url}/jobs/{job_id}/rankings"
+    rankings_link  = f"{base_url}/jobs/{jobdiva_id}/rankings?source=email"
 
     jd_hyperlink = (
         f'<a href="{jobdiva_link}" target="_blank" '
@@ -670,9 +670,9 @@ def notify_candidate_passed(
     """
     base_url = resolve_app_base_url(app_base_url)
     jobdiva_link   = jobdiva_job_link(job_id, jobdiva_id)
-    rankings_link  = f"{base_url}/jobs/{job_id}/rankings"
+    rankings_link  = f"{base_url}/jobs/{jobdiva_id}/rankings?source=email"
     # Deep link to the candidate evaluation report
-    report_link    = f"{base_url}/jobs/{job_id}/report?candidateId={candidate_id}"
+    report_link    = f"{base_url}/jobs/{jobdiva_id}/report?candidateId={candidate_id}"
 
     jd_hyperlink = (
         f'<a href="{jobdiva_link}" target="_blank" '
@@ -721,6 +721,8 @@ def notify_candidate_passed(
         reason = item.get("reason")
         score = item.get("score", item.get("candidate_score"))
         total_score = item.get("total_score", item.get("total", 10))
+        q_order_raw = item.get("question_order", 0)
+        reason_norm = str(reason or "").strip().lower()
 
         hf_status_raw = item.get("hard_filter_status") or ""
         hf_status = str(hf_status_raw).strip().lower().replace(" ", "_")
@@ -736,12 +738,29 @@ def notify_candidate_passed(
         # - no score badge for info-only questions
         is_info_only = bool(item.get("is_info_only"))
         if not is_info_only:
+            try:
+                q_order = int(q_order_raw)
+            except (TypeError, ValueError):
+                q_order = 0
+
             score_value = None
             try:
                 score_value = float(score) if score is not None else None
             except (TypeError, ValueError):
                 score_value = None
-            is_info_only = (not is_hard_filter) and (score_value is None or score_value < 0)
+
+            if q_order > 0:
+                # Pairbot contract: non-hard-filter Q1-9 are informational.
+                is_info_only = (not is_hard_filter) and (q_order <= 9)
+            else:
+                looks_informational = (
+                    "informational answer captured" in reason_norm
+                    or "info-only" in reason_norm
+                    or "information only" in reason_norm
+                )
+                is_info_only = (not is_hard_filter) and (
+                    looks_informational or score_value is None or score_value < 0
+                )
 
         is_scored_question = bool(item.get("is_scored_question"))
         if not is_scored_question:
@@ -757,7 +776,7 @@ def notify_candidate_passed(
         if is_hard_filter:
             badges.append(_badge("Hard Filter", "#fef2f2", "#fecaca", "#b91c1c"))
         elif is_info_only:
-            badges.append(_badge("Info Only", "#eff6ff", "#bfdbfe", "#1d4ed8"))
+            badges.append(_badge("Info-Only", "#eff6ff", "#bfdbfe", "#1d4ed8"))
 
         if is_scored_question and score is not None:
             if score_num is not None and score_num >= 7:

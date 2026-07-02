@@ -139,6 +139,8 @@ class CandidateSearchRequest(BaseModel):
     require_resume: Optional[bool] = None
     include_relocation_candidates: Optional[bool] = None
     min_experience_years: Optional[int] = None
+    jobdiva_offset: int = 0
+    jobdiva_batch_size: int = 150
     # Optional hiring client / account name. When omitted the backend reads
     # customer_name from monitored_jobs. Powers the "Same client / industry"
     # scoring dimension and the currently-employed-by-client veto.

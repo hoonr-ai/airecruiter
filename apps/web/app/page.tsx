@@ -162,7 +162,7 @@ export default function DashboardPage() {
           passSubmissions: details.pass_submissions || 0,
           pairExternalSubs: details.pair_external_subs || 0,
           feedbackCompleted: details.feedback_completed || 0,
-          timeToFirstPass: details.time_to_first_pass || 0,
+          timeToFirstPass: parseFloat(details.time_to_first_pass) || 0,
         };
       }).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
@@ -446,6 +446,48 @@ export default function DashboardPage() {
           </Button>
         </div>
       </div>
+
+      {/* Avg Time to First Pass stat — jobs launched since most recent Monday */}
+      {activeTab === "active" && !isLoading && (() => {
+        // Dynamically compute start-of-most-recent-Monday (UTC midnight)
+        const now = new Date();
+        const dayOfWeek = now.getUTCDay(); // 0=Sun, 1=Mon ... 6=Sat
+        const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+        const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysToMonday));
+        const mondayLabel = monday.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+
+        const sinceMondayJobs = allJobs.filter(j =>
+          j.pairLaunchedAt &&
+          new Date(j.pairLaunchedAt) >= monday &&
+          typeof j.timeToFirstPass === "number" &&
+          j.timeToFirstPass > 0
+        );
+        const avg = sinceMondayJobs.length > 0
+          ? sinceMondayJobs.reduce((sum, j) => sum + j.timeToFirstPass, 0) / sinceMondayJobs.length
+          : null;
+        return (
+          <div className="flex items-center justify-between px-5 py-3 bg-indigo-50 border border-indigo-100 rounded-xl">
+            <div className="flex items-center gap-2 text-[13.5px]">
+              <span className="font-semibold text-indigo-700">⚡ Average Time to First Pass</span>
+              <span className="text-indigo-300">·</span>
+              <span className="text-slate-500">Jobs launched since {mondayLabel}</span>
+            </div>
+            <div className="flex items-center gap-3">
+              {avg !== null ? (
+                <>
+                  <span className="text-[15px] font-bold text-indigo-700">{avg.toFixed(1)} mins</span>
+                  <span className="text-[12.5px] text-slate-500 font-medium">({(avg / 60).toFixed(2)} hrs)</span>
+                  <span className="inline-flex items-center rounded-full bg-indigo-100 px-2.5 py-0.5 text-[12px] font-semibold text-indigo-600">
+                    {sinceMondayJobs.length} job{sinceMondayJobs.length !== 1 ? "s" : ""} with a first pass
+                  </span>
+                </>
+              ) : (
+                <span className="text-[13px] text-slate-400 italic">No first-pass data yet this week</span>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Jobs Table */}
       <div className="bg-white rounded-2xl shadow-[0_2px_10px_-4px_rgba(0,0,0,0.1)] border border-slate-200 overflow-hidden mt-2">

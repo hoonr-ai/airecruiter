@@ -410,6 +410,8 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                 else bool(request.include_relocation_candidates)
             ),
             min_experience_years=request.min_experience_years,
+            jobdiva_offset=max(0, int(request.jobdiva_offset or 0)),
+            jobdiva_batch_size=max(1, int(request.jobdiva_batch_size or 150)),
             # Placeholder customer values carry no client signal — skip them.
             client_name=(
                 "" if client_name.lower() in ("", "external", "unknown", "n/a")
@@ -511,6 +513,8 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                     recent_days=request.recent_days,
                     require_resume=require_resume,
                     min_experience_years=request.min_experience_years,
+                    jobdiva_offset=max(0, int(request.jobdiva_offset or 0)),
+                    jobdiva_batch_size=max(1, int(request.jobdiva_batch_size or 150)),
                 )
 
                 for candidate in candidates:
@@ -1162,7 +1166,13 @@ async def refresh_candidate_resume_match(
     try:
         from psycopg2.extras import RealDictCursor
 
+        # Both keys default to the incoming ref so the sourced_candidates lookup
+        # below works even if the job row isn't found. For a v2 job both columns
+        # equal the versioned ref "26-06182-v2", keeping the lookup in the v2
+        # candidate bucket. (resolved_numeric_job_id was previously referenced
+        # but never defined here — a hard NameError → 500 on every call.)
         resolved_jobdiva_id = job_id_or_ref
+        resolved_numeric_job_id = job_id_or_ref
         conn = get_db_connection()
         try:
             with conn.cursor() as cur:
@@ -1178,6 +1188,7 @@ async def refresh_candidate_resume_match(
                 job_row = cur.fetchone()
                 if job_row:
                     resolved_jobdiva_id = job_row[0] or job_row[1] or job_id_or_ref
+                    resolved_numeric_job_id = job_row[1] or job_row[0] or job_id_or_ref
         finally:
             conn.close()
 
@@ -3129,9 +3140,9 @@ async def save_candidate_feedback(
     # 3. Push to JobDiva — POST /apiv2/jobdiva/createCandidateNote
     #    Recruiter = PAIR (configured via JOBDIVA_PAIR_RECRUITER_ID env var)
     from core import JOBDIVA_PAIR_RECRUITER_ID
-    from core.email import APP_BASE_URL
+    from core.email import resolve_app_base_url
     
-    report_link = f"{APP_BASE_URL}/jobs/{app_job_ref}/report?candidateId={jd_candidate_id}"
+    report_link = f"{resolve_app_base_url()}/jobs/{app_job_ref}/report?candidateId={jd_candidate_id}"
 
     jobdiva_result = await jobdiva_service.create_candidate_note(
         candidate_id=jd_candidate_id,
