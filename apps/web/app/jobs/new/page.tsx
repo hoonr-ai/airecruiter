@@ -997,10 +997,10 @@ function NewJobPageContent() {
   const [isEnrichingContacts, setIsEnrichingContacts] = useState(false);
   const [missingContactsOpen, setMissingContactsOpen] = useState(false);
   // Realtime progress for the batched Launch PAIR flow (enrichment + per-batch
-  // save/engage). Batches of 5 keep individual payloads small enough for the
+  // save/engage). Batches of 20 keep individual payloads small enough for the
   // backend; the modal surfaces per-batch status so the recruiter can see
   // what's happening on long runs.
-  const LAUNCH_BATCH_SIZE = 5;
+  const LAUNCH_BATCH_SIZE = 20;
 
   // Pace between batches so save+engage calls don't fire faster than nginx's
   // pair_batch_limit zone can sustain on large launches (seen: 26-30 batches

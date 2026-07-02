@@ -98,7 +98,7 @@ export const initialLaunchProgress: LaunchPairProgress = {
   open: false,
   phase: "idle",
   totalCandidates: 0,
-  batchSize: 15,
+  batchSize: 20,
   enrichTotal: 0,
   enrichDone: 0,
   enrichSucceeded: 0,
