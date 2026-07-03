@@ -97,6 +97,37 @@ def _compute_analytics_sync() -> Dict[str, Any]:
                 reverse=True
             )[:10]
 
+            # 5. Candidate Sources (grouped by Step 5 channels: JobDiva Talent, LinkedIn, Dice, Exa)
+            cur.execute("""
+                SELECT source, COUNT(*)
+                FROM sourced_candidates
+                GROUP BY source
+            """)
+            source_rows = cur.fetchall()
+            source_buckets = {
+                "JobDiva Talent": 0,
+                "LinkedIn": 0,
+                "Dice": 0,
+                "Exa": 0,
+            }
+            for src, count in source_rows:
+                src_str = str(src or "").lower().strip()
+                if "jobdiva" in src_str:
+                    source_buckets["JobDiva Talent"] += count
+                elif "exa" in src_str:
+                    source_buckets["Exa"] += count
+                elif "linkedin" in src_str or "unipile" in src_str:
+                    source_buckets["LinkedIn"] += count
+                elif "dice" in src_str:
+                    source_buckets["Dice"] += count
+                else:
+                    source_buckets["JobDiva Talent"] += count
+
+            candidates_by_source = [
+                {"source": name, "count": count}
+                for name, count in source_buckets.items()
+            ]
+
             return {
                 "overview": {
                     "total_monitored_jobs": active_jobs,
@@ -106,7 +137,8 @@ def _compute_analytics_sync() -> Dict[str, Any]:
                 },
                 "candidates_by_status": candidates_by_status,
                 "jobs_by_customer": jobs_by_customer,
-                "top_recruiters": top_recruiters
+                "top_recruiters": top_recruiters,
+                "candidates_by_source": candidates_by_source
             }
     except Exception as e:
         logger.error(f"Error computing admin analytics: {e}")
@@ -121,6 +153,7 @@ def _compute_analytics_sync() -> Dict[str, Any]:
             "candidates_by_status": {},
             "jobs_by_customer": [],
             "top_recruiters": [],
+            "candidates_by_source": [],
             "warning": f"Analytics partially unavailable: {e}"
         }
     finally:
