@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
@@ -22,6 +22,8 @@ from models import (
     CandidateAnalysisRequest, CandidateAnalysisResponse, CandidateFeedbackRequest,
 )
 from routers._helpers import get_db_connection
+from core.auth import get_current_user, UserIdentity
+from routers.jobs import _verify_job_access_by_id
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -304,7 +306,7 @@ async def get_open_to_work_diag():
 
 
 @router.post("/candidates/search")
-async def search_jobdiva_candidates(request: CandidateSearchRequest):
+async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserIdentity = Depends(get_current_user)):
     """
     Unified candidate search with hierarchical skills/titles and intelligent resume processing.
 
@@ -321,6 +323,8 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
 
     if not request.job_id:
         return {"candidates": [], "message": "job_id required for candidate search"}
+
+    _verify_job_access_by_id(str(request.job_id), user)
 
     try:
         from services.unified_candidate_search import unified_search_service, SearchCriteria
@@ -850,11 +854,13 @@ async def get_job_candidates(
     job_id_or_ref: str,
     limit: Optional[int] = Query(default=None, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    user: UserIdentity = Depends(get_current_user),
 ):
     """
     Fetches all sourced candidates tied to a specific job.
     Supports both numeric job_id and reference jobdiva_id.
     """
+    _verify_job_access_by_id(job_id_or_ref, user)
     try:
         from psycopg2.extras import RealDictCursor
 
@@ -1112,13 +1118,14 @@ async def get_job_candidates(
 
 
 @router.get("/jobs/{job_id_or_ref}/launched-candidate-keys")
-async def get_launched_candidate_keys(job_id_or_ref: str):
+async def get_launched_candidate_keys(job_id_or_ref: str, user: UserIdentity = Depends(get_current_user)):
     """
     Lightweight endpoint returning just (candidate_id, source) tuples for
     every candidate already in sourced_candidates for this job. The Step 5
     UI uses this to mark already-launched rows as disabled with an
     "Already Launched" badge, preventing duplicate Launch PAIR clicks.
     """
+    _verify_job_access_by_id(job_id_or_ref, user)
     try:
         conn = get_db_connection()
         try:

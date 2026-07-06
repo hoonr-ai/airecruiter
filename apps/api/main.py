@@ -317,6 +317,7 @@ manual_candidates_router = _safe_import("manual_candidates")
 candidates_router = _safe_import("candidates")
 jobs_router = _safe_import("jobs")
 dnc_router = _safe_import("dnc")
+admin_analytics_router = _safe_import("admin_analytics")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
 # prod reverse proxy a 307 with the wrong scheme (when uvicorn isn't running
@@ -355,7 +356,11 @@ _mount(manual_candidates_router, "manual_candidates")
 _mount(candidates_router, "candidates")
 _mount(jobs_router, "jobs")
 _mount(dnc_router, "dnc")
+_mount(admin_analytics_router, "admin_analytics")
 _mount(engagement, "engagement", prefix="/api/v1/engagement")
+
+from core.auth import auth_router
+app.include_router(auth_router)
 
 app.add_middleware(
     CORSMiddleware,
