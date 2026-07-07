@@ -139,6 +139,6 @@ export const api = {
     getMe: () => req<any>(`/api/v1/auth/me`),
   },
   adminAnalytics: {
-    get: () => req<any>(`/admin/analytics`),
+    get: () => req<any>(`/api/v1/admin/analytics`),
   },
 };
