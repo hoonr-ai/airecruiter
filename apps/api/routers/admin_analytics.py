@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from core.auth import get_current_user, UserIdentity
 from routers._helpers import get_db_connection
 
-router = APIRouter()
+router = APIRouter(prefix="/api/v1", tags=["Admin Analytics"])
 logger = logging.getLogger(__name__)
 
 def _compute_analytics_sync() -> Dict[str, Any]:
