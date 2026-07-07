@@ -3,8 +3,28 @@
 // helper handles the JSON case.
 
 import { trackEvent } from "@/lib/analytics";
+import { msalInstance } from "@/lib/msal-config";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_URL!;
+
+export function getActiveUserEmail(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    const active = msalInstance.getActiveAccount();
+    if (active?.username) return active.username;
+    const all = msalInstance.getAllAccounts();
+    if (all && all.length > 0 && all[0].username) {
+      return all[0].username;
+    }
+  } catch (e) {
+    // ignore if MSAL not initialized yet
+  }
+  try {
+    return localStorage.getItem("dev_user_email") || undefined;
+  } catch (e) {
+    return undefined;
+  }
+}
 
 type JsonInit = Omit<RequestInit, "body" | "headers"> & {
   body?: unknown;
@@ -19,10 +39,12 @@ async function req<T>(path: string, init: JsonInit = {}): Promise<T> {
   let trackedError = false;
 
   try {
+    const userEmail = getActiveUserEmail();
     const res = await fetch(`${API_BASE}${path}`, {
       ...rest,
       headers: {
         ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...(userEmail ? { "X-User-Email": userEmail } : {}),
         ...(headers || {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -112,5 +134,11 @@ export const api = {
       req<any>(`/api/v1/engagement/interviews/${interviewId}/score-summary`),
     getAssessmentData: (interviewId: string) =>
       req<any>(`/api/v1/engagement/assess/${interviewId}`),
+  },
+  auth: {
+    getMe: () => req<any>(`/api/v1/auth/me`),
+  },
+  adminAnalytics: {
+    get: () => req<any>(`/admin/analytics`),
   },
 };

@@ -330,7 +330,7 @@ export default function DashboardPage() {
   const SortableHeader = ({ field, children, className = "" }: { field: keyof Job; children: React.ReactNode; className?: string }) => {
     const isActive = sortField === field;
     return (
-      <th className={`px-6 py-4 text-center text-[12.5px] font-bold uppercase tracking-wide border-b border-slate-100 whitespace-nowrap transition-colors ${isActive ? "text-[#4f46e5] bg-indigo-50" : "text-slate-500 bg-[#fcfdfd]"} ${className}`}>
+      <th className={`px-6 py-4 text-center text-[12.5px] font-bold border-b border-slate-100 whitespace-nowrap transition-colors ${isActive ? "text-[#4f46e5] bg-indigo-50" : "text-slate-500 bg-[#fcfdfd]"} ${className}`}>
         <div className="flex items-center justify-center gap-1.5 cursor-pointer hover:text-[#4f46e5] transition-colors" onClick={() => handleSort(field)}>
           {children}
           {isActive
@@ -495,25 +495,25 @@ export default function DashboardPage() {
           <table className="min-w-full divide-y divide-slate-100">
             <thead className="bg-[#fcfdfd] sticky top-0 z-20 shadow-sm">
               <tr>
-                <SortableHeader field="id">JOBDIVA ID</SortableHeader>
-                <SortableHeader field="title" className="sticky left-0 bg-[#fcfdfd] z-30 shadow-[5px_0_15px_-5px_rgba(0,0,0,0.03)] border-r border-slate-100/50 min-w-[220px]">JOB TITLE</SortableHeader>
-                <SortableHeader field="customer_name">CUSTOMER NAME</SortableHeader>
-                <SortableHeader field="recruiterEmails">RECRUITER EMAILS</SortableHeader>
-                <SortableHeader field="location">LOCATION / ZIP</SortableHeader>
-                <SortableHeader field="priority">PRIORITY</SortableHeader>
-                <SortableHeader field="programDuration">PROGRAM DURATION</SortableHeader>
-                <SortableHeader field="maxAllowedSubmittals">MAX ALLOWED SUBMITTALS</SortableHeader>
-                <SortableHeader field="status">JOB STATUS</SortableHeader>
-                <SortableHeader field="pairStatus">HOONR-CURATE STATUS</SortableHeader>
-                <SortableHeader field="pairLaunchedAt">FIRST PAIR LAUNCH</SortableHeader>
-                <SortableHeader field="candidatesLaunched">CANDIDATES LAUNCHED</SortableHeader>
-                <SortableHeader field="completeSubmissions">COMPLETE SUBMISSIONS</SortableHeader>
-                <SortableHeader field="passSubmissions">PASS SUBMISSIONS</SortableHeader>
-                <SortableHeader field="pairExternalSubs">HOONR-CURATE EXTERNAL SUBS</SortableHeader>
-                <SortableHeader field="feedbackCompleted">FEEDBACK COMPLETED</SortableHeader>
-                <SortableHeader field="timeToFirstPass">TIME TO FIRST PASS</SortableHeader>
-                <th className="px-6 py-4 text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide border-b border-l border-slate-100/50 sticky right-0 bg-[#fcfdfd] z-30 shadow-[-10px_0_15px_-5px_rgba(0,0,0,0.03)] whitespace-nowrap">
-                  ACTIONS
+                <SortableHeader field="id">JobDiva ID</SortableHeader>
+                <SortableHeader field="title" className="sticky left-0 bg-[#fcfdfd] z-30 shadow-[5px_0_15px_-5px_rgba(0,0,0,0.03)] border-r border-slate-100/50 min-w-[220px]">Job Title</SortableHeader>
+                <SortableHeader field="customer_name">Customer Name</SortableHeader>
+                <SortableHeader field="recruiterEmails">Recruiter Emails</SortableHeader>
+                <SortableHeader field="location">Location / Zip</SortableHeader>
+                <SortableHeader field="priority">Priority</SortableHeader>
+                <SortableHeader field="programDuration">Program Duration</SortableHeader>
+                <SortableHeader field="maxAllowedSubmittals">Max Allowed Submittals</SortableHeader>
+                <SortableHeader field="status">Job Status</SortableHeader>
+                <SortableHeader field="pairStatus">Hoonr-Curate Status</SortableHeader>
+                <SortableHeader field="pairLaunchedAt">First PAIR Launch</SortableHeader>
+                <SortableHeader field="candidatesLaunched">Candidates Launched</SortableHeader>
+                <SortableHeader field="completeSubmissions">Complete Submissions</SortableHeader>
+                <SortableHeader field="passSubmissions">Pass Submissions</SortableHeader>
+                <SortableHeader field="pairExternalSubs">Hoonr-Curate External Subs</SortableHeader>
+                <SortableHeader field="feedbackCompleted">Feedback Completed</SortableHeader>
+                <SortableHeader field="timeToFirstPass">Time to First Pass</SortableHeader>
+                <th className="px-6 py-4 text-center text-[12.5px] font-bold text-slate-500 border-b border-l border-slate-100/50 sticky right-0 bg-[#fcfdfd] z-30 shadow-[-10px_0_15px_-5px_rgba(0,0,0,0.03)] whitespace-nowrap">
+                  Actions
                 </th>
               </tr>
             </thead>

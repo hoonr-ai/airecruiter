@@ -2,9 +2,11 @@
 
 import { useMsal } from "@azure/msal-react";
 import { LogOut } from "lucide-react";
+import { useUserRole } from "@/hooks/use-user-role";
 
 export function AzureLoginButton() {
     const { instance, accounts } = useMsal();
+    const { role, isAdmin } = useUserRole();
 
     const handleLogout = () => {
         instance.logoutRedirect({
@@ -25,7 +27,12 @@ export function AzureLoginButton() {
                     {(accounts[0].name || accounts[0].username || "A").charAt(0).toUpperCase()}
                 </div>
                 <div className="flex flex-col overflow-hidden">
-                    <span className="text-sm font-semibold truncate">{accounts[0].name}</span>
+                    <div className="flex items-center gap-1.5">
+                        <span className="text-sm font-semibold truncate">{accounts[0].name}</span>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded uppercase font-bold ${isAdmin ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-200 text-slate-600'}`}>
+                            {role}
+                        </span>
+                    </div>
                     <span className="text-xs text-slate-500 truncate">{accounts[0].username}</span>
                 </div>
             </div>
