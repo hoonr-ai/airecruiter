@@ -8584,7 +8584,7 @@ function NewJobPageContent() {
                         const firstN = candidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                            return !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
+                            return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
                           })
                           .slice(0, n);
 
@@ -8617,7 +8617,7 @@ function NewJobPageContent() {
                         const firstN = candidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                            return !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
+                            return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
                           })
                           .slice(0, n);
                         const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.jobdiva_candidate_id || c.id));
@@ -8661,11 +8661,19 @@ function NewJobPageContent() {
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
 
                         if (allSelected) {
-                          // Deselect all
-                          setSelectedCandidates(new Set());
+                          // Deselect all within active tab
+                          setSelectedCandidates(prev => {
+                            const next = new Set(prev);
+                            allIds.forEach(id => next.delete(id));
+                            return next;
+                          });
                         } else {
                           // Select all within active tab (skipping already-launched and DNC)
-                          setSelectedCandidates(new Set(allIds));
+                          setSelectedCandidates(prev => {
+                            const next = new Set(prev);
+                            allIds.forEach(id => next.add(id));
+                            return next;
+                          });
                         }
                       }}
                     >
