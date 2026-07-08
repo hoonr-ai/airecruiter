@@ -50,7 +50,7 @@ import { CandidateMessageModal } from "@/components/candidate-message-modal";
 import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { UserActivityLogModal } from "@/components/UserActivityLogModal";
 import { MissingPhonesModal, type MissingPhoneCandidate } from "@/components/missing-phones-modal";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 import { buildJobDivaCandidateUrl } from "@/lib/jobdiva";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 
@@ -484,7 +484,7 @@ export default function CandidateRankingsPage() {
     if (actionCandidateId) {
       setSyncingCandidateId(actionCandidateId);
       try {
-        const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates/${actionCandidateId}/feedback`, {
+        const response = await authFetch(`${API_BASE}/jobs/${jobId}/candidates/${actionCandidateId}/feedback`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ feedback_type: 'Submit' })
@@ -511,7 +511,7 @@ export default function CandidateRankingsPage() {
     if (actionCandidateId && rejectReason) {
       setSyncingCandidateId(actionCandidateId);
       try {
-        const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates/${actionCandidateId}/feedback`, {
+        const response = await authFetch(`${API_BASE}/jobs/${jobId}/candidates/${actionCandidateId}/feedback`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -991,7 +991,7 @@ export default function CandidateRankingsPage() {
     });
 
     try {
-      const res = await fetch(`${API_BASE}/candidates/enrich-contact`, {
+      const res = await authFetch(`${API_BASE}/candidates/enrich-contact`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2563,7 +2563,7 @@ export default function CandidateRankingsPage() {
           if (picked && picked !== cand.phone) {
             try {
               // Passing candidate_id in the body bypasses strict URL path decoders on QA
-              await fetch(`${API_BASE}/candidates/${encodeURIComponent(cid)}/phone`, {
+              await authFetch(`${API_BASE}/candidates/${encodeURIComponent(cid)}/phone`, {
                 method: "PATCH",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({

@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface TranscriptionItem {
@@ -124,7 +124,7 @@ export default function CandidateEvaluationReportPage() {
       try {
         setIsLoading(true);
         // Use query parameter to avoid URL encoding issues on QA
-        const res = await fetch(`${API_BASE}/candidates/evaluation-report?candidate_id=${encodeURIComponent(candidateId as string)}&job_id=${jobId}`);
+        const res = await authFetch(`${API_BASE}/candidates/evaluation-report?candidate_id=${encodeURIComponent(candidateId as string)}&job_id=${jobId}`);
         if (!res.ok) throw new Error("Failed to fetch evaluation report");
         const json = await res.json();
         setData(json);
@@ -152,7 +152,7 @@ export default function CandidateEvaluationReportPage() {
     if (candidateId) {
       setSyncingCandidateId(candidateId);
       try {
-        const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates/${candidateId}/feedback`, {
+        const response = await authFetch(`${API_BASE}/jobs/${jobId}/candidates/${candidateId}/feedback`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ feedback_type: 'Submit' })
@@ -189,7 +189,7 @@ export default function CandidateEvaluationReportPage() {
     if (candidateId && rejectReason) {
       setSyncingCandidateId(candidateId);
       try {
-        const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates/${candidateId}/feedback`, {
+        const response = await authFetch(`${API_BASE}/jobs/${jobId}/candidates/${candidateId}/feedback`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
