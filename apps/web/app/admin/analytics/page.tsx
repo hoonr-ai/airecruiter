@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { 
-  LayoutDashboard, 
   Briefcase, 
   Archive, 
   Users, 
@@ -61,7 +60,7 @@ export default function AdminAnalyticsPage() {
   const [error, setError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
-  const fetchAnalytics = async (refresh = false) => {
+  const fetchAnalytics = useCallback(async (refresh = false) => {
     if (refresh) setIsRefreshing(true);
     else setIsLoading(true);
     setError(null);
@@ -79,13 +78,13 @@ export default function AdminAnalyticsPage() {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     if (!isRoleLoading && isAdmin) {
       fetchAnalytics();
     }
-  }, [isRoleLoading, isAdmin]);
+  }, [isRoleLoading, isAdmin, fetchAnalytics]);
 
   if (isRoleLoading) {
     return (
@@ -129,6 +128,7 @@ export default function AdminAnalyticsPage() {
 
   const totalCandidates = Object.values(data?.candidates_by_status || {}).reduce((a, b) => a + b, 0) || 1;
   const maxJobCount = Math.max(...(data?.jobs_by_customer?.map((c) => c.job_count) || [1]), 1);
+  const maxSrcCount = Math.max(...(data?.candidates_by_source?.map((s) => s.count) || [1]), 1);
 
   // Standard pipeline funnel stages aligning with candidate ranking page statuses
   const pipelineStages = [
@@ -160,6 +160,15 @@ export default function AdminAnalyticsPage() {
     );
   };
 
+  const escapeCsvField = (value: string | number | null | undefined): string => {
+    if (value === null || value === undefined) return '""';
+    let str = String(value);
+    if (/^[=+\-@]/.test(str)) {
+      str = `'${str}`;
+    }
+    return `"${str.replace(/"/g, '""')}"`;
+  };
+
   const exportToCSV = () => {
     if (!data) return;
     const lines = [
@@ -177,16 +186,16 @@ export default function AdminAnalyticsPage() {
       ...pipelineStages.map((stage) => {
         const count = getStageCount(stage);
         const pct = Math.round((count / totalCandidates) * 100);
-        return `"${stage.label}",${count},${pct}%`;
+        return `${escapeCsvField(stage.label)},${count},${pct}%`;
       }),
       "",
       "--- TOP CLIENT VOLUME ---",
       "Rank,Customer Name,Active Jobs",
-      ...(data.jobs_by_customer || []).map((c, idx) => `#${idx + 1},"${c.customer_name}",${c.job_count}`),
+      ...(data.jobs_by_customer || []).map((c, idx) => `#${idx + 1},${escapeCsvField(c.customer_name)},${c.job_count}`),
       "",
       "--- RECRUITER LEADERBOARD ---",
       "Rank,Recruiter Email,Active Jobs,Candidate Volume",
-      ...(data.top_recruiters || []).map((r, idx) => `#${idx + 1},"${r.email}",${r.active_jobs},${r.total_candidates}`),
+      ...(data.top_recruiters || []).map((r, idx) => `#${idx + 1},${escapeCsvField(r.email)},${r.active_jobs},${r.total_candidates}`),
     ];
 
     const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
@@ -506,9 +515,8 @@ export default function AdminAnalyticsPage() {
             ) : (
               <div className="space-y-5 my-auto">
                 {(data?.candidates_by_source || []).map((srcItem) => {
-                  const maxSrc = Math.max(...(data?.candidates_by_source?.map((s) => s.count) || [1]), 1);
                   const percentage = Math.round((srcItem.count / (overview.total_sourced_candidates || 1)) * 100);
-                  const widthPct = Math.round((srcItem.count / maxSrc) * 100);
+                  const widthPct = Math.round((srcItem.count / maxSrcCount) * 100);
 
                   return (
                     <div key={srcItem.source} className="space-y-2">
