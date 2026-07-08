@@ -88,7 +88,7 @@ import {
 } from "@/components/launch-pair-progress-modal";
 import { normalizePhone } from "@/lib/phone";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 import { trackEvent } from "@/lib/analytics";
 import { logger } from "@/lib/logger";
 
@@ -2599,7 +2599,7 @@ function NewJobPageContent() {
     try {
       const apiUrl = API_BASE;
       // Use the new endpoint that saves directly to monitored_jobs
-      const response = await fetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/save`, {
+      const response = await authFetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: saveController.signal,
