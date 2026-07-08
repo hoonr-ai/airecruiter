@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 import {
   Dialog,
   DialogContent,
@@ -69,7 +69,7 @@ export function AssessModal({
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(
+      const response = await authFetch(
         `${API_BASE}/api/v1/engagement/assess/${interviewId}`
       );
       if (!response.ok) throw new Error("Failed to fetch assessment data");
