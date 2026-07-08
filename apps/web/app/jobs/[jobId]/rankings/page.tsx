@@ -1220,7 +1220,7 @@ export default function CandidateRankingsPage() {
     });
 
     try {
-      const res = await fetch(
+      const res = await authFetch(
         `${API_BASE}/jobs/${jobId}/candidates/${encodeURIComponent(candidateKey)}/refresh-resume-match`,
         {
           method: "POST",
@@ -1426,7 +1426,7 @@ export default function CandidateRankingsPage() {
       limit: String(CANDIDATE_PAGE_SIZE),
       offset: String(offset),
     });
-    const candRes = await fetch(`${apiBase}/jobs/${jobId}/candidates?${query.toString()}`);
+    const candRes = await authFetch(`${apiBase}/jobs/${jobId}/candidates?${query.toString()}`);
     const candData = await candRes.json();
 
     if (candData.status !== "success" || !Array.isArray(candData.candidates)) return;
@@ -1498,7 +1498,7 @@ export default function CandidateRankingsPage() {
       const apiBase = API_BASE;
 
       // Fetch job details
-      const jobRes = await fetch(`${apiBase}/jobs/${jobId}/monitored-data`);
+      const jobRes = await authFetch(`${apiBase}/jobs/${jobId}/monitored-data`);
       const jobData = await jobRes.json();
 
       // Handle both { data: { ... } } and flat { ... } structures
@@ -1532,7 +1532,7 @@ export default function CandidateRankingsPage() {
       // B5: parallel fetch step-3 criteria so the applied-filters panel can
       // render priority + required/preferred chips next to sourcing filters.
       try {
-        const critRes = await fetch(`${apiBase}/api/jobs/${jobId}/criteria`);
+        const critRes = await authFetch(`${apiBase}/api/jobs/${jobId}/criteria`);
         if (critRes.ok) {
           const critData = await critRes.json();
           if (Array.isArray(critData?.criteria)) {

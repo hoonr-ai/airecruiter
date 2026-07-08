@@ -199,7 +199,7 @@ export function MissingContactsModal({
     });
     setSavingPhone(prev => ({ ...prev, [cand.candidate_id]: true }));
     try {
-      const res = await fetch(
+      const res = await authFetch(
         `${API_BASE}/candidates/phone`,
         {
           method: "PATCH",
@@ -238,7 +238,7 @@ export function MissingContactsModal({
     });
     setSavingEmail(prev => ({ ...prev, [cand.candidate_id]: true }));
     try {
-      const res = await fetch(
+      const res = await authFetch(
         `${API_BASE}/candidates/email`,
         {
           method: "PATCH",
