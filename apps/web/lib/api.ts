@@ -19,11 +19,47 @@ export function getActiveUserEmail(): string | undefined {
   } catch (e) {
     // ignore if MSAL not initialized yet
   }
-  try {
-    return localStorage.getItem("dev_user_email") || undefined;
-  } catch (e) {
-    return undefined;
+  if (process.env.NODE_ENV !== "production") {
+    try {
+      return localStorage.getItem("dev_user_email") || undefined;
+    } catch (e) {
+      return undefined;
+    }
   }
+  return undefined;
+}
+
+export async function getAuthHeaders(): Promise<Record<string, string>> {
+  if (typeof window === "undefined") return {};
+
+  const headers: Record<string, string> = {};
+  const userEmail = getActiveUserEmail();
+  if (userEmail) {
+    headers["X-User-Email"] = userEmail;
+  }
+
+  try {
+    const activeAccount =
+      msalInstance.getActiveAccount() || (msalInstance.getAllAccounts()[0] ?? null);
+    if (activeAccount) {
+      const tokenResponse = await msalInstance
+        .acquireTokenSilent({
+          scopes: ["User.Read"],
+          account: activeAccount,
+        })
+        .catch(() => null);
+
+      const token =
+        tokenResponse?.accessToken || tokenResponse?.idToken || activeAccount.idToken;
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+    }
+  } catch (e) {
+    // ignore if MSAL not initialized or fails silent acquisition
+  }
+
+  return headers;
 }
 
 type JsonInit = Omit<RequestInit, "body" | "headers"> & {
@@ -39,12 +75,12 @@ async function req<T>(path: string, init: JsonInit = {}): Promise<T> {
   let trackedError = false;
 
   try {
-    const userEmail = getActiveUserEmail();
+    const authHeaders = await getAuthHeaders();
     const res = await fetch(`${API_BASE}${path}`, {
       ...rest,
       headers: {
         ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-        ...(userEmail ? { "X-User-Email": userEmail } : {}),
+        ...authHeaders,
         ...(headers || {}),
       },
       body: body !== undefined ? JSON.stringify(body) : undefined,
