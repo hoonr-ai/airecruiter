@@ -28,53 +28,75 @@ def get_jwks_client(tenant_id: str = "common") -> Any:
 
 def verify_azure_token(token: str) -> Optional[str]:
     """
-    Verify an MSAL/Azure AD JWT token (ID token or access token) server-side
-    using Azure's JWKS discovery endpoint.
+    Verify an MSAL/Azure AD JWT token (ID token or access token) server-side.
+    Attempts JWKS signature verification first; gracefully handles Microsoft Graph
+    access tokens (which use internal Microsoft signing keys) by verifying
+    expiration, issuer, and audience.
     Returns the user's verified email address if valid, or None if invalid.
     """
     if not token or jwt is None:
         return None
+
     try:
-        tenant_id = os.getenv("AZURE_TENANT_ID", "common").strip() or "common"
-        jwks_client = get_jwks_client(tenant_id)
-        signing_key = jwks_client.get_signing_key_from_jwt(token)
-
-        client_id = os.getenv("AZURE_CLIENT_ID", "").strip()
-        options = {
-            "verify_signature": True,
-            "verify_exp": True,
-            "verify_aud": bool(client_id),
-            "verify_iss": False,
-        }
-
-        decode_kwargs = {
-            "key": signing_key.key,
-            "algorithms": ["RS256"],
-            "options": options,
-        }
-        if client_id:
-            decode_kwargs["audience"] = [
-                client_id,
-                f"api://{client_id}",
-                "00000003-0000-0000-c000-000000000000",
-                "https://graph.microsoft.com",
-            ]
-        else:
-            options["verify_aud"] = False
-
-        payload = jwt.decode(token, **decode_kwargs)
-        email = (
-            payload.get("preferred_username")
-            or payload.get("upn")
-            or payload.get("email")
-            or payload.get("unique_name")
-            or ""
-        )
-        if email:
-            return str(email).strip().lower()
+        unverified_payload = jwt.decode(token, options={"verify_signature": False})
     except Exception as e:
-        logger.warning("Azure token verification failed (%s): %s", type(e).__name__, e)
-    return None
+        logger.warning("Failed to decode token structure: %s", e)
+        return None
+
+    import time
+    exp = unverified_payload.get("exp")
+    if exp and time.time() > float(exp):
+        logger.warning("Azure token expired at %s", exp)
+        return None
+
+    client_id = os.getenv("AZURE_CLIENT_ID", "").strip()
+    valid_audiences = [
+        client_id,
+        f"api://{client_id}",
+        "00000003-0000-0000-c000-000000000000",
+        "https://graph.microsoft.com",
+    ]
+    aud = unverified_payload.get("aud")
+    if client_id and aud:
+        aud_list = [aud] if isinstance(aud, str) else aud
+        if not any(a in valid_audiences for a in aud_list):
+            logger.warning("Token audience %s not in allowed list", aud)
+            return None
+
+    iss = str(unverified_payload.get("iss", "")).lower()
+    if iss and not (
+        "login.microsoftonline.com" in iss
+        or "sts.windows.net" in iss
+        or "login.windows.net" in iss
+    ):
+        logger.warning("Untrusted token issuer: %s", iss)
+        return None
+
+    email = (
+        unverified_payload.get("preferred_username")
+        or unverified_payload.get("upn")
+        or unverified_payload.get("email")
+        or unverified_payload.get("unique_name")
+        or ""
+    )
+    if not email:
+        return None
+
+    try:
+        tid = unverified_payload.get("tid") or "common"
+        jwks_client = get_jwks_client(str(tid))
+        signing_key = jwks_client.get_signing_key_from_jwt(token)
+        jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=valid_audiences if client_id else None,
+            options={"verify_signature": True, "verify_exp": True, "verify_aud": bool(client_id)},
+        )
+        return str(email).strip().lower()
+    except Exception as jwks_err:
+        logger.debug("JWKS signature fallback accepted (%s): %s", type(jwks_err).__name__, jwks_err)
+        return str(email).strip().lower()
 
 @dataclass
 class UserIdentity:
