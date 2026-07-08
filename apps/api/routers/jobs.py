@@ -842,17 +842,25 @@ def persist_rubric_background_task(jobdiva_id: str, rubric: Any, recruiter_notes
     except Exception as e:
         logger.error(f"❌ [Background] Failed to persist rubric for {jobdiva_id}: {e}")
 
-def _verify_job_access_by_id(job_id: str, user: UserIdentity) -> None:
+def _verify_job_access_by_id(job_id: str, user: UserIdentity, allow_not_found: bool = False) -> None:
     if user.is_admin:
         return
     try:
         job_dict = _get_job_draft_sync(job_id)
         if job_dict.get("status") == "success" and job_dict.get("data"):
             verify_job_access(job_dict["data"], user)
+            return
+        elif allow_not_found and job_dict.get("status") == "error" and "No data found" in str(job_dict.get("message", "")):
+            return
     except Exception as e:
         if isinstance(e, HTTPException):
             raise
-        logger.debug(f"Could not verify job access by id {job_id}: {e}")
+        logger.error(f"Error verifying job access for job_id={job_id}: {e}")
+
+    raise HTTPException(
+        status_code=403,
+        detail="Access denied. You do not have permission to access or modify this job."
+    )
 
 def _ensure_user_in_recruiter_emails(draft_data: Any, user: UserIdentity) -> None:
     if user.is_admin or not user.email:
@@ -877,7 +885,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
     Save or update job data with real database persistence.
     Consolidated into monitored_jobs using the reference number as job_id.
     """
-    _verify_job_access_by_id(job_id, user)
+    _verify_job_access_by_id(job_id, user, allow_not_found=True)
     _ensure_user_in_recruiter_emails(draft_data, user)
     try:
         import json
@@ -1192,7 +1200,7 @@ def _get_job_draft_sync(job_id: str) -> dict:
 
 @router.get("/jobs/{job_id}/draft")
 async def get_job_draft(job_id: str, user_session: str = "default", user: UserIdentity = Depends(get_current_user)):
-    _verify_job_access_by_id(job_id, user)
+    _verify_job_access_by_id(job_id, user, allow_not_found=False)
     try:
         return await asyncio.to_thread(_get_job_draft_sync, job_id)
     except Exception as e:
@@ -1206,7 +1214,7 @@ async def save_step_progress(job_id: str, step: int, draft_data: JobDraftData, b
     """
     Auto-save progress when user navigates between steps.
     """
-    _verify_job_access_by_id(job_id, user)
+    _verify_job_access_by_id(job_id, user, allow_not_found=True)
     _ensure_user_in_recruiter_emails(draft_data, user)
     try:
         draft_data.current_step = step
@@ -1236,7 +1244,7 @@ async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData,
     Save job data directly to monitored_jobs table without touching drafts table.
     This is used when the user wants form data to go straight to monitoring.
     """
-    _verify_job_access_by_id(job_id, user)
+    _verify_job_access_by_id(job_id, user, allow_not_found=True)
     _ensure_user_in_recruiter_emails(draft_data, user)
     try:
         import json
@@ -1542,7 +1550,7 @@ async def get_monitored_job_data(job_id: str, user: UserIdentity = Depends(get_c
     """
     Get current data from monitored_jobs table for verification.
     """
-    _verify_job_access_by_id(job_id, user)
+    _verify_job_access_by_id(job_id, user, allow_not_found=False)
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
