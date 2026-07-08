@@ -155,9 +155,13 @@ def get_current_user(
         email = os.getenv("DEV_USER_EMAIL", "").strip().lower()
 
     # 4. Fail closed by default unless DEV_ALLOW_UNAUTHENTICATED_ADMIN is explicitly enabled
+    # AND the environment is explicitly local/test (impossible to leave on in prod)
     if not email:
+        env = os.getenv("ENV", "").strip().lower() or os.getenv("ENVIRONMENT", "").strip().lower()
+        is_local_env = env in ("local", "test", "dev", "development")
         allow_unauth_admin = os.getenv("DEV_ALLOW_UNAUTHENTICATED_ADMIN", "false").lower() in ("1", "true", "yes")
-        if allow_unauth_admin:
+        if allow_unauth_admin and is_local_env:
+            logger.warning("Unauthenticated admin fallback triggered in '%s' environment.", env)
             return UserIdentity(email="unauthenticated@hoonr.ai", role="admin")
         raise HTTPException(
             status_code=401,
