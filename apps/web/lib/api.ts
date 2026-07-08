@@ -42,24 +42,36 @@ export async function getAuthHeaders(): Promise<Record<string, string>> {
     const activeAccount =
       msalInstance.getActiveAccount() || (msalInstance.getAllAccounts()[0] ?? null);
     if (activeAccount) {
-      const tokenResponse = await msalInstance
-        .acquireTokenSilent({
+      try {
+        const tokenResponse = await msalInstance.acquireTokenSilent({
           scopes: ["User.Read"],
           account: activeAccount,
-        })
-        .catch(() => null);
-
-      const token =
-        tokenResponse?.accessToken || tokenResponse?.idToken || activeAccount.idToken;
-      if (token) {
-        headers["Authorization"] = `Bearer ${token}`;
+        });
+        const token = tokenResponse?.idToken || tokenResponse?.accessToken;
+        if (token) {
+          headers["Authorization"] = `Bearer ${token}`;
+        }
+      } catch (err: any) {
+        const errMsg = strError(err);
+        if (
+          err?.name === "InteractionRequiredAuthError" ||
+          errMsg.includes("interaction_required") ||
+          errMsg.includes("aadsts160021") ||
+          errMsg.includes("login_required")
+        ) {
+          msalInstance.loginRedirect({ scopes: ["User.Read"] }).catch(() => {});
+        }
       }
     }
   } catch (e) {
-    // ignore if MSAL not initialized or fails silent acquisition
+    // ignore if MSAL not initialized
   }
 
   return headers;
+}
+
+function strError(e: any): string {
+  return (e?.message || e?.errorCode || String(e || "")).toLowerCase();
 }
 
 type JsonInit = Omit<RequestInit, "body" | "headers"> & {
@@ -90,6 +102,13 @@ async function req<T>(path: string, init: JsonInit = {}): Promise<T> {
     const durationMs = Math.round((ended - started) * 100) / 100;
 
     if (!res.ok) {
+      if (res.status === 401 && typeof window !== "undefined") {
+        const activeAccount =
+          msalInstance.getActiveAccount() || (msalInstance.getAllAccounts()[0] ?? null);
+        if (activeAccount) {
+          msalInstance.loginRedirect({ scopes: ["User.Read"] }).catch(() => {});
+        }
+      }
       const text = await res.text().catch(() => "");
       trackedError = true;
       trackEvent("api_request_error", {

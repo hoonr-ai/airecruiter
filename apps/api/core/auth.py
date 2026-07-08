@@ -53,7 +53,14 @@ def verify_azure_token(token: str) -> Optional[str]:
             "options": options,
         }
         if client_id:
-            decode_kwargs["audience"] = [client_id, f"api://{client_id}"]
+            decode_kwargs["audience"] = [
+                client_id,
+                f"api://{client_id}",
+                "00000003-0000-0000-c000-000000000000",
+                "https://graph.microsoft.com",
+            ]
+        else:
+            options["verify_aud"] = False
 
         payload = jwt.decode(token, **decode_kwargs)
         email = (
@@ -66,7 +73,7 @@ def verify_azure_token(token: str) -> Optional[str]:
         if email:
             return str(email).strip().lower()
     except Exception as e:
-        logger.warning("Azure token verification failed: %s", e)
+        logger.warning("Azure token verification failed (%s): %s", type(e).__name__, e)
     return None
 
 @dataclass
