@@ -25,7 +25,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 
 const getStatusColor = (status: string) => {
   switch (status?.toLowerCase()) {
@@ -139,7 +139,7 @@ export default function JobDetailPage() {
     try {
       // Fetch only the requested job detail to avoid loading the entire
       // monitored_jobs dataset for a single job view.
-      const response = await fetch(`${API_BASE}/jobs/${jobId}/monitored-data`);
+      const response = await authFetch(`${API_BASE}/jobs/${jobId}/monitored-data`);
       const data = await response.json();
       const job = data?.data;
 
@@ -174,7 +174,7 @@ export default function JobDetailPage() {
     }
     setSaving(true);
     try {
-      const response = await fetch(`${API_BASE}/jobs/${jobId}/basic-info`, {
+      const response = await authFetch(`${API_BASE}/jobs/${jobId}/basic-info`, {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
@@ -595,7 +595,7 @@ export default function JobDetailPage() {
               onClick={async () => {
                 setIsArchiving(true);
                 try {
-                  const response = await fetch(
+                  const response = await authFetch(
                     `${API_BASE}/jobs/${jobId}/archive`,
                     {
                       method: "PUT",
@@ -662,7 +662,7 @@ export default function JobDetailPage() {
               onClick={async () => {
                 setIsUnarchiving(true);
                 try {
-                  const response = await fetch(
+                  const response = await authFetch(
                     `${API_BASE}/jobs/${jobId}/unarchive`,
                     {
                       method: "PUT",

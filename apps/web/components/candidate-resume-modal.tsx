@@ -21,7 +21,7 @@ import {
   ExternalLink,
   Loader2
 } from "lucide-react";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 import { logger } from "@/lib/logger";
 
 interface CandidateResumeData {
@@ -66,7 +66,7 @@ export function CandidateResumeModal({
       // localhost fallback (which itself hard-coded the prefix) — in prod
       // the request 404'd through nginx. Single source of truth via
       // API_BASE keeps dev + prod consistent.
-      const response = await fetch(`${API_BASE}/api/v1/candidates/resume/${id}`);
+      const response = await authFetch(`${API_BASE}/api/v1/candidates/resume/${id}`);
       const data = await response.json();
 
       if (response.ok) {

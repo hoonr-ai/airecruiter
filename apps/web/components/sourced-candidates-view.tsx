@@ -7,7 +7,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { EngageWizardModal } from "@/components/EngageWizardModal";
 import { AssessModal } from "@/components/AssessModal";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 
 import {
   ArrowLeft,
@@ -142,7 +142,7 @@ export function SourcedCandidatesView({
         is_selected: false
       };
       
-      const response = await fetch(`${API_BASE}/candidates/save`, {
+      const response = await authFetch(`${API_BASE}/candidates/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

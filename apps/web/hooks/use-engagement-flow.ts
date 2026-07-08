@@ -1,6 +1,6 @@
 "use client";
 
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 import { logger } from "@/lib/logger";
 
 // Shared engagement API calls. Previously duplicated across
@@ -56,7 +56,7 @@ export type LatestInterviewResult = {
 
 export function useEngagementFlow() {
   async function generatePayload(input: GeneratePayloadInput): Promise<GeneratePayloadResult> {
-    const res = await fetch(`${API_BASE}/api/v1/engagement/engage/generate-payload`, {
+    const res = await authFetch(`${API_BASE}/api/v1/engagement/engage/generate-payload`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ candidate_ids: input.candidateIds, job_id: input.jobId }),
@@ -76,7 +76,7 @@ export function useEngagementFlow() {
     } catch {
       throw new Error("Invalid JSON format in payload");
     }
-    const res = await fetch(`${API_BASE}/api/v1/engagement/engage/send-bulk-interview`, {
+    const res = await authFetch(`${API_BASE}/api/v1/engagement/engage/send-bulk-interview`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -107,7 +107,7 @@ export function useEngagementFlow() {
 
   async function latestInterviewById(candidateId: string): Promise<LatestInterviewResult> {
     try {
-      const res = await fetch(`${API_BASE}/api/v1/engagement/latest-interview/by-id/${candidateId}`);
+      const res = await authFetch(`${API_BASE}/api/v1/engagement/latest-interview/by-id/${candidateId}`);
       if (!res.ok) return { success: false };
       return (await res.json()) as LatestInterviewResult;
     } catch (e) {
