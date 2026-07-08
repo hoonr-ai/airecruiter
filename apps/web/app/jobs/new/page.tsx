@@ -3,6 +3,7 @@
 import { useState, useEffect, useEffectEvent, useCallback, useMemo, useRef, Suspense, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import type { Step, ScreeningLevel, RegenerateDifficulty, EmploymentType, ScreenQuestion, WizardMode } from "@/lib/jobs/wizard-types";
 import {
   History,
   Plus,
@@ -277,22 +278,9 @@ function isRecruiterSource(source: string | null | undefined): boolean {
   return (source || "").toLowerCase() === "recruiter";
 }
 
-type Step = 1 | 2 | 3 | 4 | 5;
-type ScreeningLevel = "L1" | "L1.5" | "L2";
-type RegenerateDifficulty = "easy" | "medium" | "hard";
-type EmploymentType = "W2" | "1099" | "C2C" | "Full-Time";
-type ScreenQuestion = {
-  id: number;
-  question_text: string;
-  pass_criteria: string;
-  is_default: boolean;
-  category: string;
-  order_index: number;
-  // 4.3: onsite/hybrid arrangement must knock candidates out automatically
-  // when they say no. Persisted per-question so non-default recruiter-authored
-  // questions can also be marked as hard filters.
-  is_hard_filter?: boolean;
-};
+// Step / ScreeningLevel / RegenerateDifficulty / EmploymentType / ScreenQuestion /
+// WizardMode are now shared via @/lib/jobs/wizard-types (imported above) so the
+// campaign wizard can reuse the same step components + state container.
 
 // F2: availability screening question needs a date-aware control, not free text.
 // The default question is generated with category "default" (not a dedicated
@@ -635,7 +623,7 @@ export default function NewJobPage() {
   );
 }
 
-type WizardMode = 'edit' | 'source' | 'view';
+// WizardMode moved to @/lib/jobs/wizard-types (imported at top).
 
 function NewJobPageContent() {
   const router = useRouter();

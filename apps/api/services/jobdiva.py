@@ -3584,9 +3584,13 @@ class JobDivaService:
                         "selected_job_boards", "selected_employment_types", "recruiter_emails",
                         
                         # Metrics fields for UI display
-                        "candidates_sourced", "resumes_shortlisted", "complete_submissions", 
+                        "candidates_sourced", "resumes_shortlisted", "complete_submissions",
                         "pass_submissions", "pair_external_subs", "feedback_completed", "time_to_first_pass",
-                        "pair_launched_at"
+                        "pair_launched_at",
+
+                        # Campaign grouping + phone-screen intro (inherited from a
+                        # campaign when a job is added under one).
+                        "campaign_id", "bot_introduction",
                     ]
                     
                     # Fields where an empty string IS a valid intentional value (cleared UDFs or optional fields)
@@ -3677,7 +3681,12 @@ class JobDivaService:
                         "selected_job_boards": json.dumps(data.get("selected_job_boards", [])),
                         "screening_level": data.get("screening_level", "L1.5"),
                         "processing_status": data.get("processing_status", "pending"),
-                        
+
+                        # Phone-screen intro + campaign grouping (both plain TEXT
+                        # columns; campaign_id is NULL for standalone jobs).
+                        "bot_introduction": data.get("bot_introduction") or "",
+                        "campaign_id": data.get("campaign_id"),
+
                         # Identification
                         "job_id": job_id,
                         "jobdiva_id": data.get("jobdiva_id") or "",

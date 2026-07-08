@@ -303,6 +303,53 @@ class JobBasicInfoUpdate(BaseModel):
     work_authorization: Optional[str] = None
     recruiter_emails: Optional[List[str]] = None
 
+# =====================================================
+# CAMPAIGN MODELS
+# =====================================================
+# A Campaign groups multiple jobs under shared common properties + a reusable
+# JD/rubric/screening-questions template. Field names/encodings mirror the
+# monitored_jobs columns so propagation to a child job is a straight copy.
+class CampaignData(BaseModel):
+    campaign_id: Optional[str] = None
+    name: str
+    customer_name: Optional[str] = None
+
+    # Common properties inherited by every child job
+    recruiter_emails: List[str] = []
+    selected_employment_types: List[str] = []  # W2 | 1099 | C2C | Full-Time
+    screening_level: str = "L1.5"              # L1 | L1.5 | L2 (matches JobDraftData)
+    recruiter_notes: Optional[str] = None
+    work_authorization: Optional[str] = None
+    selected_job_boards: List[str] = []
+    bot_introduction: Optional[str] = None
+
+    # Shared JD/rubric/questions/sourcing template child jobs seed from
+    template_enhanced_title: Optional[str] = None
+    template_ai_description: Optional[str] = None
+    template_rubric: Optional[Dict[str, Any]] = None
+    template_screen_questions: List[Dict[str, Any]] = []
+    template_sourcing_filters: Optional[Dict[str, Any]] = None
+
+    # Automation + lifecycle
+    pair_enabled: bool = False
+    status: str = "active"                       # active | paused | archived
+    user_session: Optional[str] = None
+
+
+class CampaignAddJobRequest(BaseModel):
+    """Add a job under a campaign. Provide jobdiva_id (JobDiva import) or
+    title+description (external requirement). Common props + template are
+    inherited from the campaign row; screening_level/selected_job_boards may
+    be overridden per job."""
+    jobdiva_id: Optional[str] = None
+    title: Optional[str] = None
+    description: Optional[str] = None
+    customer_name: Optional[str] = None
+    # Optional per-job overrides
+    screening_level: Optional[str] = None
+    selected_job_boards: Optional[List[str]] = None
+
+
 # Legacy / Unused but kept for safety if referenced elsewhere temporarily
 class JobDescription(BaseModel):
     title: str
