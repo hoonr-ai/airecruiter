@@ -5,7 +5,69 @@ from dataclasses import dataclass
 from typing import Optional, List, Dict, Any
 from fastapi import Request, HTTPException, Depends, APIRouter, Header
 
+try:
+    import jwt
+    from jwt import PyJWKClient
+except ImportError:
+    jwt = None
+    PyJWKClient = None
+
 logger = logging.getLogger(__name__)
+
+_jwks_clients: Dict[str, Any] = {}
+
+
+def get_jwks_client(tenant_id: str = "common") -> Any:
+    if PyJWKClient is None:
+        raise RuntimeError("PyJWT is not installed. Install PyJWT to verify Azure tokens.")
+    if tenant_id not in _jwks_clients:
+        jwks_url = f"https://login.microsoftonline.com/{tenant_id}/discovery/v2.0/keys"
+        _jwks_clients[tenant_id] = PyJWKClient(jwks_url, cache_keys=True)
+    return _jwks_clients[tenant_id]
+
+
+def verify_azure_token(token: str) -> Optional[str]:
+    """
+    Verify an MSAL/Azure AD JWT token (ID token or access token) server-side
+    using Azure's JWKS discovery endpoint.
+    Returns the user's verified email address if valid, or None if invalid.
+    """
+    if not token or jwt is None:
+        return None
+    try:
+        tenant_id = os.getenv("AZURE_TENANT_ID", "common").strip() or "common"
+        jwks_client = get_jwks_client(tenant_id)
+        signing_key = jwks_client.get_signing_key_from_jwt(token)
+
+        client_id = os.getenv("AZURE_CLIENT_ID", "").strip()
+        options = {
+            "verify_signature": True,
+            "verify_exp": True,
+            "verify_aud": bool(client_id),
+            "verify_iss": False,
+        }
+
+        decode_kwargs = {
+            "key": signing_key.key,
+            "algorithms": ["RS256"],
+            "options": options,
+        }
+        if client_id:
+            decode_kwargs["audience"] = [client_id, f"api://{client_id}"]
+
+        payload = jwt.decode(token, **decode_kwargs)
+        email = (
+            payload.get("preferred_username")
+            or payload.get("upn")
+            or payload.get("email")
+            or payload.get("unique_name")
+            or ""
+        )
+        if email:
+            return str(email).strip().lower()
+    except Exception as e:
+        logger.warning("Azure token verification failed: %s", e)
+    return None
 
 @dataclass
 class UserIdentity:
@@ -54,23 +116,54 @@ def get_current_user(
     x_user_email: Optional[str] = Header(default=None, alias="X-User-Email", description="User email for RBAC simulation/authentication")
 ) -> UserIdentity:
     """
-    FastAPI dependency to extract the current authenticated user's identity
-    from request headers (X-User-Email).
+    FastAPI dependency to extract the current authenticated user's identity.
+    Validates server-side MSAL/Azure access token (Authorization: Bearer <token>) first.
+    Falls back to trusted proxy headers or local dev email only if explicitly enabled.
     """
-    email = x_user_email or request.headers.get("x-user-email") or request.headers.get("X-User-Email") or ""
-    email = email.strip().lower()
-    
-    # In local development or automated testing, allow fallback if SSO is disabled/unauthenticated
+    email = ""
+
+    # 1. Server-side token validation: check Authorization Bearer token
+    auth_header = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    if auth_header.strip().lower().startswith("bearer "):
+        token = auth_header.strip()[7:].strip()
+        email = verify_azure_token(token) or ""
+        if not email:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired Bearer authentication token."
+            )
+
+    # 2. Check X-User-Email only if explicitly trusted via config/environment
+    # (e.g. injected by authenticating reverse proxy like nginx, or in explicit dev mode)
+    if not email:
+        client_email = x_user_email if isinstance(x_user_email, str) else None
+        client_email = client_email or request.headers.get("x-user-email") or request.headers.get("X-User-Email") or ""
+        client_email = client_email.strip().lower()
+        if client_email:
+            trust_proxy_header = os.getenv("TRUST_X_USER_EMAIL", "false").lower() in ("1", "true", "yes")
+            dev_mode = os.getenv("DEV_MODE", "false").lower() in ("1", "true", "yes")
+            if trust_proxy_header or dev_mode:
+                email = client_email
+            else:
+                logger.warning(
+                    "Untrusted X-User-Email header ignored: %s (set TRUST_X_USER_EMAIL=true or provide Bearer token)",
+                    client_email
+                )
+
+    # 3. Fallback for local dev environments where DEV_USER_EMAIL is explicitly configured
     if not email:
         email = os.getenv("DEV_USER_EMAIL", "").strip().lower()
-        
+
+    # 4. Fail closed by default unless DEV_ALLOW_UNAUTHENTICATED_ADMIN is explicitly enabled
     if not email:
-        # If still empty, check if unauthenticated calls should default to admin (for legacy test compatibility)
-        allow_unauth_admin = os.getenv("DEV_ALLOW_UNAUTHENTICATED_ADMIN", "true").lower() in ("1", "true", "yes")
+        allow_unauth_admin = os.getenv("DEV_ALLOW_UNAUTHENTICATED_ADMIN", "false").lower() in ("1", "true", "yes")
         if allow_unauth_admin:
             return UserIdentity(email="unauthenticated@hoonr.ai", role="admin")
-        return UserIdentity(email="", role="recruiter")
-        
+        raise HTTPException(
+            status_code=401,
+            detail="Authentication required. Provide a valid Authorization Bearer token."
+        )
+
     role = get_user_role(email)
     return UserIdentity(email=email, role=role)
 
