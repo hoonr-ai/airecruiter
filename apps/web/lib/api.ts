@@ -77,6 +77,18 @@ function strError(e: any): string {
   return (e?.message || e?.errorCode || String(e || "")).toLowerCase();
 }
 
+export async function authFetch(url: string, init: RequestInit = {}): Promise<Response> {
+  const authHeaders = await getAuthHeaders();
+  const existingHeaders = (init.headers || {}) as Record<string, string>;
+  return fetch(url, {
+    ...init,
+    headers: {
+      ...authHeaders,
+      ...existingHeaders,
+    },
+  });
+}
+
 type JsonInit = Omit<RequestInit, "body" | "headers"> & {
   body?: unknown;
   headers?: Record<string, string>;

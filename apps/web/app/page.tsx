@@ -22,7 +22,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Users } from "lucide-react";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 
 interface Job {
   id: string;
@@ -116,7 +116,7 @@ export default function DashboardPage() {
     const timeoutId = setTimeout(() => controller.abort(), 15000);
     try {
       const includeArchived = activeTab === "archived";
-      const response = await fetch(
+      const response = await authFetch(
         `${API_BASE}/jobs/monitored?include_archived=${includeArchived}`,
         { signal: controller.signal },
       );
@@ -777,7 +777,7 @@ export default function DashboardPage() {
                 if (!jobToArchive) return;
                 setIsArchiving(true);
                 try {
-                  const response = await fetch(
+                  const response = await authFetch(
                     `${API_BASE}/jobs/${jobToArchive.jobdiva_id || jobToArchive.id}/archive`,
                     {
                       method: "PUT",
@@ -853,7 +853,7 @@ export default function DashboardPage() {
                 if (!jobToStop) return;
                 setIsStopping(true);
                 try {
-                  const response = await fetch(
+                  const response = await authFetch(
                     `${API_BASE}/jobs/${jobToStop.jobdiva_id || jobToStop.id}/stop-activity`,
                     {
                       method: "POST",
@@ -927,7 +927,7 @@ export default function DashboardPage() {
                 setIsCreatingVersion(true);
                 try {
                   const ref = jobToEditVersion.jobdiva_id || jobToEditVersion.id;
-                  const response = await fetch(
+                  const response = await authFetch(
                     `${API_BASE}/jobs/${encodeURIComponent(ref)}/new-version`,
                     {
                       method: "POST",
@@ -1002,7 +1002,7 @@ export default function DashboardPage() {
                 if (!jobToUnarchive) return;
                 setIsUnarchiving(true);
                 try {
-                  const response = await fetch(
+                  const response = await authFetch(
                     `${API_BASE}/jobs/${jobToUnarchive.jobdiva_id || jobToUnarchive.id}/unarchive`,
                     {
                       method: "PUT",
