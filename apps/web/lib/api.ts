@@ -47,7 +47,10 @@ export async function getAuthHeaders(): Promise<Record<string, string>> {
           scopes: ["User.Read"],
           account: activeAccount,
         });
-        const token = tokenResponse?.idToken || tokenResponse?.accessToken;
+        let token = tokenResponse?.idToken || tokenResponse?.accessToken;
+        if (!token && (activeAccount as any)?.idToken) {
+          token = (activeAccount as any).idToken;
+        }
         if (token) {
           headers["Authorization"] = `Bearer ${token}`;
         }
