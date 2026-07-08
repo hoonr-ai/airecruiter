@@ -762,7 +762,7 @@ function NewJobPageContent() {
   // Function to fetch candidate resume if not available - only real JobDiva resumes
   const fetchCandidateResume = async (candidateId: string) => {
     try {
-      const response = await fetch(`${API_BASE}/candidates/${candidateId}/resume`);
+      const response = await authFetch(`${API_BASE}/candidates/${candidateId}/resume`);
       const data = await response.json();
 
       // Check if the API returned an error or no real resume
@@ -1073,7 +1073,7 @@ function NewJobPageContent() {
     if (!candId) return false;
     try {
       const apiUrl = API_BASE;
-      const res = await fetch(`${apiUrl}/candidates/${encodeURIComponent(candId)}/profile-url`);
+      const res = await authFetch(`${apiUrl}/candidates/${encodeURIComponent(candId)}/profile-url`);
       if (!res.ok) return false;
       const data = await res.json();
       const url = (data?.profile_url || "").trim();
@@ -1632,7 +1632,7 @@ function NewJobPageContent() {
     const ref = jobdivaId || numericJobId;
     if (!ref) return;
     try {
-      const res = await fetch(`${API_BASE}/jobs/${ref}/launched-candidate-keys`);
+      const res = await authFetch(`${API_BASE}/jobs/${ref}/launched-candidate-keys`);
       if (!res.ok) return;
       const json = await res.json();
       const keys = new Set<string>();
@@ -1665,7 +1665,7 @@ function NewJobPageContent() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/dnc/keys`);
+        const res = await authFetch(`${API_BASE}/dnc/keys`);
         if (!res.ok) return;
         const json = await res.json();
         if (cancelled) return;
@@ -1719,7 +1719,7 @@ function NewJobPageContent() {
     let cancelled = false;
     const poll = async () => {
       try {
-        const resp = await fetch(`${API_BASE}/candidates/open-to-work-statuses`, {
+        const resp = await authFetch(`${API_BASE}/candidates/open-to-work-statuses`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ links: pendingUrls }),
@@ -1786,7 +1786,7 @@ function NewJobPageContent() {
       const apiUrl = API_BASE;
 
       // 1. Fetch the basic draft info from monitored_jobs
-      const draftResponse = await fetch(`${apiUrl}/jobs/${jobIdToLoad}/draft`);
+      const draftResponse = await authFetch(`${apiUrl}/jobs/${jobIdToLoad}/draft`);
       if (!draftResponse.ok) {
         console.error("Draft fetch HTTP error:", draftResponse.status);
         return false;
@@ -1821,7 +1821,7 @@ function NewJobPageContent() {
         // Cold path: no persisted job_details yet (e.g. the user pasted a
         // JobDiva ID but hasn't saved the job). Fall back to the old JobDiva
         // fetch so the first-time flow still works.
-        const detailsResponse = await fetch(`${apiUrl}/jobs/fetch`, {
+        const detailsResponse = await authFetch(`${apiUrl}/jobs/fetch`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ job_id: jobIdToLoad.trim() })
@@ -1842,7 +1842,7 @@ function NewJobPageContent() {
       // 2. Restore specialized data for later steps (Rubric, Filters, etc.)
       // Always check for existing rubric regardless of current step to prevent redundant AI generation
       try {
-        const rubricRes = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobIdToLoad}/rubric`);
+        const rubricRes = await authFetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobIdToLoad}/rubric`);
         if (rubricRes.ok) {
           const rData = await rubricRes.json();
           // Only pre-load if it's an actual populated rubric, not an empty shell
@@ -2006,7 +2006,7 @@ function NewJobPageContent() {
     setIsCreatingExternal(true);
     try {
       const apiUrl = API_BASE;
-      const createRes = await fetch(`${apiUrl}/jobs/external/create`, {
+      const createRes = await authFetch(`${apiUrl}/jobs/external/create`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2043,7 +2043,7 @@ function NewJobPageContent() {
 
       // Fire rubric extraction in the background — same endpoint JobDiva flow uses.
       try {
-        const rubricRes = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
+        const rubricRes = await authFetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -2088,7 +2088,7 @@ function NewJobPageContent() {
     setIsSavingPasteResume(true);
     try {
       const apiUrl = API_BASE;
-      const res = await fetch(`${apiUrl}/jobs/${encodeURIComponent(jobRef)}/manual-candidate`, {
+      const res = await authFetch(`${apiUrl}/jobs/${encodeURIComponent(jobRef)}/manual-candidate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2139,7 +2139,7 @@ function NewJobPageContent() {
       const apiUrl = API_BASE;
       const formData = new FormData();
       bulkFiles.forEach(f => formData.append("files", f));
-      const res = await fetch(`${apiUrl}/jobs/${encodeURIComponent(jobRef)}/bulk-resumes`, {
+      const res = await authFetch(`${apiUrl}/jobs/${encodeURIComponent(jobRef)}/bulk-resumes`, {
         method: "POST",
         body: formData,
       });
@@ -2200,7 +2200,7 @@ function NewJobPageContent() {
 
     try {
       const apiUrl = API_BASE;
-      const response = await fetch(`${apiUrl}/jobs/fetch`, {
+      const response = await authFetch(`${apiUrl}/jobs/fetch`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_id: searchId })
@@ -2343,7 +2343,7 @@ function NewJobPageContent() {
       has_notes_override: notesOverride !== undefined,
     });
     try {
-      const response = await fetch(`${API_BASE}/api/v1/ai-generation/jobs/${numericJobId || jobdivaId || 'new'}/generate-description`, {
+      const response = await authFetch(`${API_BASE}/api/v1/ai-generation/jobs/${numericJobId || jobdivaId || 'new'}/generate-description`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2461,7 +2461,7 @@ function NewJobPageContent() {
     });
     try {
       const apiUrl = API_BASE;
-      const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-title`, {
+      const res = await authFetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-title`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -4529,7 +4529,7 @@ function NewJobPageContent() {
       if (opts.difficultyMode) {
         requestBody.difficulty_mode = opts.difficultyMode;
       }
-      const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobRef}/screening-questions/generate`, {
+      const res = await authFetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobRef}/screening-questions/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestBody),
@@ -5024,7 +5024,7 @@ function NewJobPageContent() {
     const checkJobdivaCriteria = async () => {
       setIsCheckingJobdivaCriteria(true);
       try {
-        const res = await fetch(`${API_BASE}/candidates/jobdiva/${encodeURIComponent(jobRef)}/criteria-status`);
+        const res = await authFetch(`${API_BASE}/candidates/jobdiva/${encodeURIComponent(jobRef)}/criteria-status`);
         if (!res.ok) throw new Error(`criteria status check failed (${res.status})`);
 
         const data = await res.json();
@@ -5696,7 +5696,7 @@ function NewJobPageContent() {
     searchAbortRef.current = controller;
     let response: Response;
     try {
-      response = await fetch(`${apiUrl}/candidates/search`, {
+      response = await authFetch(`${apiUrl}/candidates/search`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -6838,7 +6838,7 @@ function NewJobPageContent() {
       let batchSavedCount = 0;
       let batchDncSkipped = 0;
       try {
-        const response = await fetch(`${API_BASE}/candidates/save`, {
+        const response = await authFetch(`${API_BASE}/candidates/save`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -7198,7 +7198,7 @@ function NewJobPageContent() {
         }
 
         try {
-          const res = await fetch(`${API_BASE}/candidates/enrich-contact`, {
+          const res = await authFetch(`${API_BASE}/candidates/enrich-contact`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -9267,7 +9267,7 @@ return (
                     setIsGeneratingRubric(true);
                     try {
                       const apiUrl = API_BASE;
-                      const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
+                      const res = await authFetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({
