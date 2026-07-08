@@ -89,6 +89,26 @@ export async function authFetch(url: string, init: RequestInit = {}): Promise<Re
   });
 }
 
+if (typeof window !== "undefined" && !(window as any).__apiFetchPatched) {
+  (window as any).__apiFetchPatched = true;
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = async function (input: RequestInfo | URL, init: RequestInit = {}) {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as any)?.url;
+    if (url && (url.startsWith(API_BASE) || url.includes(API_BASE))) {
+      const authHeaders = await getAuthHeaders();
+      const existingHeaders = (init.headers || {}) as Record<string, string>;
+      init = {
+        ...init,
+        headers: {
+          ...authHeaders,
+          ...existingHeaders,
+        },
+      };
+    }
+    return originalFetch(input, init);
+  };
+}
+
 type JsonInit = Omit<RequestInit, "body" | "headers"> & {
   body?: unknown;
   headers?: Record<string, string>;
