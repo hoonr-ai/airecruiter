@@ -222,12 +222,9 @@ def verify_job_access(job_data: Dict[str, Any], user: UserIdentity) -> None:
         
     clean_assigned_emails = [str(e).strip().lower() for e in emails if e]
     
-    # If job has no assigned recruiters, we restrict to admins only
+    # If job has no assigned recruiters (legacy or unassigned), allow authenticated recruiters to access/claim it
     if not clean_assigned_emails:
-        raise HTTPException(
-            status_code=403, 
-            detail="This job is unassigned or legacy. Only Admins can access unassigned jobs."
-        )
+        return
         
     if user.email not in clean_assigned_emails:
         raise HTTPException(
