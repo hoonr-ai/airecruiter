@@ -13,6 +13,7 @@ import {
   AlertTriangle,
   Rocket,
   ArrowRight,
+  ChevronRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -20,14 +21,6 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Table,
-  TableHeader,
-  TableBody,
-  TableHead,
-  TableRow,
-  TableCell,
-} from "@/components/ui/table";
 import {
   Dialog,
   DialogContent,
@@ -39,8 +32,10 @@ import { CampaignForm } from "@/components/campaigns/CampaignForm";
 import { cn } from "@/lib/utils";
 import {
   Campaign,
+  CampaignChildJob,
   CampaignCreatePayload,
   addJobToCampaign,
+  bulkAddJobsToCampaign,
   getCampaign,
   updateCampaign,
 } from "@/lib/campaigns";
@@ -59,12 +54,13 @@ export default function CampaignDetailPage() {
 
   const [addOpen, setAddOpen] = useState(false);
   const [addMode, setAddMode] = useState<"jobdiva" | "external">("jobdiva");
-  const [jobdivaId, setJobdivaId] = useState("");
+  const [jobdivaIds, setJobdivaIds] = useState("");
   const [extTitle, setExtTitle] = useState("");
   const [extDescription, setExtDescription] = useState("");
   const [isAdding, setIsAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
 
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
 
   const load = useCallback(async () => {
@@ -86,7 +82,7 @@ export default function CampaignDetailPage() {
 
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(null), 3500);
+    const t = setTimeout(() => setToast(null), 4000);
     return () => clearTimeout(t);
   }, [toast]);
 
@@ -106,43 +102,74 @@ export default function CampaignDetailPage() {
   };
 
   const resetAddForm = () => {
-    setJobdivaId("");
+    setJobdivaIds("");
     setExtTitle("");
     setExtDescription("");
     setAddError(null);
     setAddMode("jobdiva");
   };
 
-  const handleAddJob = async () => {
+  const handleAdd = async () => {
     setAddError(null);
-    if (addMode === "jobdiva" && !jobdivaId.trim()) {
-      setAddError("Enter a JobDiva Job ID");
-      return;
-    }
-    if (addMode === "external" && (!extTitle.trim() || !extDescription.trim())) {
-      setAddError("Title and description are required for an external requirement");
-      return;
-    }
-    setIsAdding(true);
-    try {
-      const { ref } = await addJobToCampaign(
-        campaignId,
-        addMode === "jobdiva"
-          ? { jobdiva_id: jobdivaId.trim() }
-          : { title: extTitle.trim(), description: extDescription.trim() },
-      );
-      setAddOpen(false);
-      resetAddForm();
-      // Auto-prep done (common props + JD/rubric/questions template inherited).
-      // Hand off to the existing jobs wizard's Source step for candidate review
-      // + manual Launch PAIR.
-      router.push(`/jobs/new?jobId=${encodeURIComponent(ref)}&mode=source&step=5`);
-    } catch (e) {
-      console.error("Failed to add job", e);
-      setAddError("Couldn't add the job. Try again.");
-      setIsAdding(false);
+    if (addMode === "jobdiva") {
+      const ids = jobdivaIds
+        .split(/[,\n]/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (ids.length === 0) {
+        setAddError("Enter at least one JobDiva Job ID");
+        return;
+      }
+      setIsAdding(true);
+      try {
+        const r = await bulkAddJobsToCampaign(campaignId, ids);
+        setAddOpen(false);
+        resetAddForm();
+        await load();
+        const failed = r.requested - r.added;
+        setToast({
+          message:
+            `Added ${r.added} of ${r.requested} job${r.requested === 1 ? "" : "s"}` +
+            (r.fetched_from_jobdiva ? ` · ${r.fetched_from_jobdiva} fetched from JobDiva` : "") +
+            (failed ? ` · ${failed} failed` : ""),
+          type: failed ? "error" : "success",
+        });
+      } catch (e) {
+        console.error("Failed to add jobs", e);
+        setAddError("Couldn't add the jobs. Try again.");
+      } finally {
+        setIsAdding(false);
+      }
+    } else {
+      if (!extTitle.trim() || !extDescription.trim()) {
+        setAddError("Title and description are required for an external requirement");
+        return;
+      }
+      setIsAdding(true);
+      try {
+        await addJobToCampaign(campaignId, {
+          title: extTitle.trim(),
+          description: extDescription.trim(),
+        });
+        setAddOpen(false);
+        resetAddForm();
+        await load();
+        setToast({ message: "Job added to campaign", type: "success" });
+      } catch (e) {
+        console.error("Failed to add job", e);
+        setAddError("Couldn't add the job. Try again.");
+      } finally {
+        setIsAdding(false);
+      }
     }
   };
+
+  const toggleExpand = (id: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
 
   if (isLoading) {
     return (
@@ -171,7 +198,7 @@ export default function CampaignDetailPage() {
 
   const jobs = campaign.jobs ?? [];
   const launchedCount = jobs.filter((j) => j.pair_launched_at).length;
-  const openSource = (j: (typeof jobs)[number]) =>
+  const openSource = (j: CampaignChildJob) =>
     router.push(`/jobs/new?jobId=${encodeURIComponent(j.jobdiva_id || j.job_id)}&mode=source&step=5`);
 
   return (
@@ -219,9 +246,7 @@ export default function CampaignDetailPage() {
             {campaign.recruiter_emails?.length ?? 0}
           </Stat>
           <Stat icon={<Briefcase className="h-4 w-4" />} label="Job Boards">
-            {campaign.selected_job_boards?.length
-              ? campaign.selected_job_boards.join(", ")
-              : "—"}
+            {campaign.selected_job_boards?.length ? campaign.selected_job_boards.join(", ") : "—"}
           </Stat>
         </div>
 
@@ -240,12 +265,14 @@ export default function CampaignDetailPage() {
         <h2 className="text-lg font-semibold text-slate-900">
           Jobs <span className="text-slate-400 font-normal">({jobs.length})</span>
           {jobs.length > 0 && (
-            <span className="ml-3 text-sm font-normal text-emerald-600">{launchedCount}/{jobs.length} launched</span>
+            <span className="ml-3 text-sm font-normal text-emerald-600">
+              {launchedCount}/{jobs.length} launched
+            </span>
           )}
         </h2>
         <Button onClick={() => setAddOpen(true)}>
           <Plus className="h-4 w-4 mr-1.5" />
-          Add Job
+          Add Jobs
         </Button>
       </div>
 
@@ -254,62 +281,74 @@ export default function CampaignDetailPage() {
           <Briefcase className="h-9 w-9 text-slate-300 mb-3" />
           <p className="text-slate-700 font-medium">No jobs in this campaign yet</p>
           <p className="text-sm text-slate-500 mt-1">
-            Add a job — it inherits this campaign&apos;s common settings.
+            Add jobs by JobDiva ID — they inherit this campaign&apos;s settings + template.
           </p>
         </div>
       ) : (
-        <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Job</TableHead>
-                <TableHead>Customer</TableHead>
-                <TableHead>Screening</TableHead>
-                <TableHead>Launch</TableHead>
-                <TableHead className="text-right">Action</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {jobs.map((j) => (
-                <TableRow key={j.job_id} className="cursor-pointer" onClick={() => openSource(j)}>
-                  <TableCell className="font-medium text-slate-800">
-                    {j.enhanced_title || j.title || j.jobdiva_id || j.job_id}
-                    {j.jobdiva_id && (
-                      <span className="text-slate-400 font-normal ml-2">{j.jobdiva_id}</span>
+        <div className="space-y-2">
+          {jobs.map((j) => {
+            const isOpen = expanded.has(j.job_id);
+            const location = [j.city, j.state].filter(Boolean).join(", ");
+            return (
+              <div key={j.job_id} className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => toggleExpand(j.job_id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      toggleExpand(j.job_id);
+                    }
+                  }}
+                  className="w-full flex items-center gap-3 p-4 text-left cursor-pointer hover:bg-slate-50 transition-colors"
+                >
+                  <ChevronRight
+                    className={cn("h-4 w-4 text-slate-400 shrink-0 transition-transform", isOpen && "rotate-90")}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium text-slate-800 truncate">
+                      {j.enhanced_title || j.title || j.jobdiva_id || j.job_id}
+                      {j.jobdiva_id && (
+                        <span className="text-slate-400 font-normal ml-2">{j.jobdiva_id}</span>
+                      )}
+                    </div>
+                    {j.customer_name && (
+                      <div className="text-sm text-slate-500 truncate">{j.customer_name}</div>
                     )}
-                  </TableCell>
-                  <TableCell className="text-slate-600">{j.customer_name || "—"}</TableCell>
-                  <TableCell className="text-slate-600">{j.screening_level || "—"}</TableCell>
-                  <TableCell>
-                    {j.pair_launched_at ? (
-                      <Badge className="bg-emerald-100 text-emerald-700 gap-1">
-                        <Rocket className="h-3 w-3" />
-                        Launched
-                        {typeof j.candidates_launched === "number" && j.candidates_launched > 0 && (
-                          <span className="font-normal">· {j.candidates_launched}</span>
-                        )}
-                      </Badge>
-                    ) : (
-                      <Badge variant="secondary">Not launched</Badge>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        openSource(j);
-                      }}
-                      className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
-                    >
-                      {j.pair_launched_at ? "Review" : "Review & Launch"}
-                      <ArrowRight className="h-3.5 w-3.5" />
-                    </button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+                  </div>
+                  <LaunchBadge job={j} />
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      openSource(j);
+                    }}
+                    className="inline-flex items-center gap-1 text-sm text-primary hover:underline shrink-0"
+                  >
+                    {j.pair_launched_at ? "Review" : "Review & Launch"}
+                    <ArrowRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+
+                {isOpen && (
+                  <div className="border-t border-slate-100 p-4 grid grid-cols-2 md:grid-cols-3 gap-4">
+                    <Field label="Location">
+                      {location || "—"}
+                      {j.location_type ? ` · ${j.location_type}` : ""}
+                    </Field>
+                    <Field label="Employment">{j.employment_type || "—"}</Field>
+                    <Field label="Screening">{j.screening_level || "—"}</Field>
+                    <Field label="Pay Rate">{j.pay_rate || "—"}</Field>
+                    <Field label="Openings">{j.openings ? String(j.openings) : "—"}</Field>
+                    <Field label="Candidates">
+                      {(j.candidates_sourced ?? 0)} sourced · {(j.candidates_launched ?? 0)} launched
+                    </Field>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 
@@ -333,20 +372,20 @@ export default function CampaignDetailPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Add-job dialog */}
+      {/* Add-jobs dialog */}
       <Dialog
         open={addOpen}
-        onOpenChange={(o) => {
+        onOpenChange={(o: boolean) => {
           setAddOpen(o);
           if (!o) resetAddForm();
         }}
       >
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Add Job to Campaign</DialogTitle>
+            <DialogTitle>Add Jobs to Campaign</DialogTitle>
             <DialogDescription>
-              The job inherits this campaign&apos;s common settings + JD / rubric / screening
-              template, then opens the sourcing view for review and launch.
+              Each job inherits this campaign&apos;s common settings + JD / rubric / screening
+              template. Launch each from its card.
             </DialogDescription>
           </DialogHeader>
 
@@ -363,20 +402,24 @@ export default function CampaignDetailPage() {
                     : "bg-white text-slate-600 border-slate-200 hover:border-slate-300",
                 )}
               >
-                {m === "jobdiva" ? "JobDiva Requirement" : "External Requirement"}
+                {m === "jobdiva" ? "JobDiva Requirements" : "External Requirement"}
               </button>
             ))}
           </div>
 
           {addMode === "jobdiva" ? (
             <div className="space-y-1.5 mt-2">
-              <Label htmlFor="add-jobdiva-id">JobDiva Job ID</Label>
-              <Input
-                id="add-jobdiva-id"
-                value={jobdivaId}
-                onChange={(e) => setJobdivaId(e.target.value)}
-                placeholder="e.g. 26-08025"
+              <Label htmlFor="add-jobdiva-ids">JobDiva Job IDs</Label>
+              <Textarea
+                id="add-jobdiva-ids"
+                value={jobdivaIds}
+                onChange={(e) => setJobdivaIds(e.target.value)}
+                rows={3}
+                placeholder="Comma-separated, e.g. 26-08025, 26-09001, 26-09002"
               />
+              <p className="text-xs text-slate-400">
+                We&apos;ll fetch each job&apos;s details from JobDiva and add them under this campaign.
+              </p>
             </div>
           ) : (
             <div className="space-y-3 mt-2">
@@ -408,8 +451,8 @@ export default function CampaignDetailPage() {
             <Button variant="outline" onClick={() => setAddOpen(false)} disabled={isAdding}>
               Cancel
             </Button>
-            <Button onClick={handleAddJob} disabled={isAdding}>
-              {isAdding ? "Adding…" : "Add Job"}
+            <Button onClick={handleAdd} disabled={isAdding}>
+              {isAdding ? "Adding…" : addMode === "jobdiva" ? "Add Jobs" : "Add Job"}
             </Button>
           </div>
         </DialogContent>
@@ -424,6 +467,34 @@ export default function CampaignDetailPage() {
           {toast.message}
         </div>
       )}
+    </div>
+  );
+}
+
+function LaunchBadge({ job }: { job: CampaignChildJob }) {
+  if (job.pair_launched_at) {
+    return (
+      <Badge className="bg-emerald-100 text-emerald-700 gap-1 shrink-0">
+        <Rocket className="h-3 w-3" />
+        Launched
+        {typeof job.candidates_launched === "number" && job.candidates_launched > 0 && (
+          <span className="font-normal">· {job.candidates_launched}</span>
+        )}
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="secondary" className="shrink-0">
+      Not launched
+    </Badge>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div className="text-xs font-medium text-slate-400 uppercase tracking-wide">{label}</div>
+      <p className="text-sm text-slate-800 mt-0.5">{children}</p>
     </div>
   );
 }

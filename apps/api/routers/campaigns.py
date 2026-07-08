@@ -26,7 +26,7 @@ import logging
 import json
 import time
 
-from models import CampaignData, CampaignAddJobRequest
+from models import CampaignData, CampaignAddJobRequest, CampaignBulkAddRequest
 from routers._helpers import get_db_connection, get_dict_cursor_connection
 from services.jobdiva import jobdiva_service
 
@@ -217,6 +217,7 @@ async def get_campaign(campaign_id: str):
                     SELECT job_id, jobdiva_id, title, enhanced_title, customer_name,
                            status, screening_level, processing_status,
                            pair_launched_at, created_at,
+                           city, state, location_type, employment_type, pay_rate, openings,
                            -- candidates_* are INTEGER per the DDL but TEXT on some
                            -- older DBs; cast-through-text keeps this robust to both.
                            COALESCE(NULLIF(candidates_launched::text, '')::int, 0) AS candidates_launched,
@@ -275,94 +276,194 @@ async def delete_campaign(campaign_id: str):
         raise HTTPException(status_code=500, detail="Failed to delete campaign")
 
 
+def _seed_job_rubric(campaign: Dict[str, Any], ref: str) -> None:
+    """Seed a child job's rubric + screening-questions satellite tables from the
+    campaign template. save_full_rubric accepts the same dict shape
+    generate-rubric produces (which template_rubric holds) and persists
+    screen_questions when embedded. Keyed by the job's reference string. Non-fatal."""
+    template_rubric = campaign.get("template_rubric") or {}
+    template_questions = campaign.get("template_screen_questions") or []
+    if not (template_rubric or template_questions):
+        return
+    try:
+        from services.job_rubric_db import JobRubricDB
+
+        rubric_payload = dict(template_rubric)
+        if template_questions:
+            rubric_payload["screen_questions"] = template_questions
+        JobRubricDB().save_full_rubric(
+            jobdiva_id=ref,
+            rubric_obj=rubric_payload,
+            recruiter_notes=campaign.get("recruiter_notes"),
+            bot_introduction=campaign.get("bot_introduction"),
+        )
+    except Exception as e:
+        logger.warning(f"template rubric seed failed for {ref}: {e}")
+
+
+async def _create_campaign_job(
+    campaign: Dict[str, Any],
+    campaign_id: str,
+    jobdiva_id: Optional[str] = None,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+    screening_level: Optional[str] = None,
+    selected_job_boards: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Create one child job under a campaign. When a jobdiva_id is given, first
+    pull the real requirement details from JobDiva; on failure (or for external
+    requirements) fall back to the campaign's JD template. Common props + JD +
+    campaign_id are always inherited; rubric/questions are seeded from the
+    template. Returns a per-job result dict."""
+    fetched = None
+    if jobdiva_id:
+        try:
+            fetched = await jobdiva_service.get_job_by_id(jobdiva_id)
+        except Exception as e:
+            logger.warning(f"JobDiva fetch failed for {jobdiva_id}: {e}")
+            fetched = None
+
+    if fetched and fetched.get("title"):
+        # Real JobDiva metadata: numeric id is the PK, ref is the hyphenated code.
+        job_id = str(fetched.get("id") or jobdiva_id)
+        ref = str(fetched.get("jobdiva_id") or jobdiva_id)
+        data: Dict[str, Any] = {
+            "job_id": job_id,
+            "jobdiva_id": ref,
+            "title": fetched.get("title") or campaign.get("template_enhanced_title") or "",
+            "customer_name": fetched.get("customer_name") or fetched.get("company") or campaign.get("customer_name") or "",
+            "city": fetched.get("city") or "",
+            "state": fetched.get("state") or "",
+            "zip_code": fetched.get("zip_code") or "",
+            "location_type": fetched.get("location_type") or "Onsite",
+            "jobdiva_description": fetched.get("jobdiva_description") or fetched.get("description") or "",
+            "employment_type": fetched.get("employment_type") or "",
+            "pay_rate": fetched.get("pay_rate") or "",
+            "openings": fetched.get("openings") or "",
+            "posted_date": fetched.get("posted_date") or "",
+            "start_date": fetched.get("start_date") or "",
+            "priority": fetched.get("priority") or "",
+            "program_duration": fetched.get("program_duration") or "",
+            "max_allowed_submittals": fetched.get("max_allowed_submittals") or "",
+        }
+    else:
+        # External requirement, or JobDiva fetch unavailable — template-based stub.
+        job_id = jobdiva_id or f"MANUAL_{int(time.time() * 1000)}"
+        ref = jobdiva_id or job_id
+        data = {
+            "job_id": job_id,
+            "jobdiva_id": jobdiva_id or "",
+            "title": title or campaign.get("template_enhanced_title") or "",
+            "customer_name": campaign.get("customer_name") or "",
+            "jobdiva_description": description or "",
+        }
+
+    # Overlay campaign-inherited common props + template + campaign_id.
+    # Raw Python lists — monitor_job_locally json.dumps them exactly once.
+    data.update({
+        "campaign_id": campaign_id,
+        "enhanced_title": campaign.get("template_enhanced_title") or data.get("title") or "",
+        "ai_description": campaign.get("template_ai_description") or "",
+        "recruiter_notes": campaign.get("recruiter_notes") or "",
+        "work_authorization": campaign.get("work_authorization") or data.get("work_authorization") or "",
+        "recruiter_emails": campaign.get("recruiter_emails") or [],
+        "selected_employment_types": campaign.get("selected_employment_types") or [],
+        "selected_job_boards": (
+            selected_job_boards if selected_job_boards is not None else (campaign.get("selected_job_boards") or [])
+        ),
+        "screening_level": screening_level or campaign.get("screening_level") or "L1.5",
+        "bot_introduction": campaign.get("bot_introduction") or "",
+        "processing_status": "campaign_created",
+    })
+
+    ok = jobdiva_service.monitor_job_locally(data["job_id"], data)
+    if ok:
+        _seed_job_rubric(campaign, ref)
+
+    return {
+        "jobdiva_id": jobdiva_id or "",
+        "job_id": data["job_id"],
+        "ref": ref,
+        "title": data.get("title"),
+        "fetched": bool(fetched and fetched.get("title")),
+        "ok": ok,
+    }
+
+
 @router.post("/campaigns/{campaign_id}/jobs")
 async def add_job_to_campaign(campaign_id: str, req: CampaignAddJobRequest):
-    """Create a monitored_jobs row under a campaign, inheriting the campaign's
-    common props + JD template and stamped with campaign_id. Reuses
-    jobdiva_service.monitor_job_locally (the single row-birth path).
-
-    NOTE: this seeds the scalar common props + AI-JD template. Seeding the full
-    rubric/screening-questions template into the satellite tables + auto-running
-    sourcing is driven by the frontend add-job flow (Phase 4) via the existing
-    per-job endpoints.
-    """
+    """Add a single job under a campaign (JobDiva import or external requirement),
+    inheriting common props + JD/rubric/questions template and stamped with
+    campaign_id."""
     try:
         campaign = _get_campaign_row(campaign_id)
         if not campaign:
             raise HTTPException(status_code=404, detail="Campaign not found")
-
         if not req.jobdiva_id and not (req.title and req.description):
             raise HTTPException(
                 status_code=400,
                 detail="Provide jobdiva_id, or title + description for an external requirement",
             )
-
-        job_id = req.jobdiva_id or f"MANUAL_{int(time.time())}"
-
-        # Raw Python lists — monitor_job_locally json.dumps them exactly once.
-        data = {
-            "job_id": job_id,
-            "jobdiva_id": req.jobdiva_id or "",
-            "campaign_id": campaign_id,
-            "title": req.title or campaign.get("template_enhanced_title") or "",
-            "enhanced_title": campaign.get("template_enhanced_title") or req.title or "",
-            "customer_name": req.customer_name or campaign.get("customer_name") or "",
-            "jobdiva_description": req.description or "",
-            "ai_description": campaign.get("template_ai_description") or "",
-            "recruiter_notes": campaign.get("recruiter_notes") or "",
-            "work_authorization": campaign.get("work_authorization") or "",
-            "recruiter_emails": campaign.get("recruiter_emails") or [],
-            "selected_employment_types": campaign.get("selected_employment_types") or [],
-            "selected_job_boards": (
-                req.selected_job_boards
-                if req.selected_job_boards is not None
-                else (campaign.get("selected_job_boards") or [])
-            ),
-            "screening_level": req.screening_level or campaign.get("screening_level") or "L1.5",
-            "bot_introduction": campaign.get("bot_introduction") or "",
-            "processing_status": "campaign_created",
-        }
-
-        ok = jobdiva_service.monitor_job_locally(job_id, data)
-        if not ok:
+        result = await _create_campaign_job(
+            campaign, campaign_id,
+            jobdiva_id=req.jobdiva_id, title=req.title, description=req.description,
+            screening_level=req.screening_level, selected_job_boards=req.selected_job_boards,
+        )
+        if not result["ok"]:
             raise HTTPException(status_code=500, detail="Failed to create job under campaign")
-
-        # Seed the job's rubric + screening-questions satellite tables from the
-        # campaign template so the Source step (and PAIR launch) see the
-        # inherited rubric/questions. save_full_rubric accepts the same dict
-        # shape generate-rubric produces (which is what template_rubric holds),
-        # and persists screen_questions when embedded. Keyed by the job's
-        # reference (jobdiva_id for imports, else the MANUAL_* job_id).
-        ref = req.jobdiva_id or job_id
-        template_rubric = campaign.get("template_rubric") or {}
-        template_questions = campaign.get("template_screen_questions") or []
-        if template_rubric or template_questions:
-            try:
-                from services.job_rubric_db import JobRubricDB
-
-                rubric_payload = dict(template_rubric)
-                if template_questions:
-                    rubric_payload["screen_questions"] = template_questions
-                JobRubricDB().save_full_rubric(
-                    jobdiva_id=ref,
-                    rubric_obj=rubric_payload,
-                    recruiter_notes=campaign.get("recruiter_notes"),
-                    bot_introduction=campaign.get("bot_introduction"),
-                )
-            except Exception as e:
-                # Non-fatal: the job row is created; the recruiter can still
-                # (re)generate the rubric in the Source step if seeding failed.
-                logger.warning(f"template rubric seed failed for {ref}: {e}")
-
-        return {
-            "status": "success",
-            "campaign_id": campaign_id,
-            "job_id": job_id,
-            "jobdiva_id": req.jobdiva_id or "",
-            "ref": ref,
-        }
+        return {"status": "success", "campaign_id": campaign_id, **result}
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"add_job_to_campaign failed for {campaign_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to add job to campaign")
+
+
+@router.post("/campaigns/{campaign_id}/jobs/bulk")
+async def bulk_add_jobs_to_campaign(campaign_id: str, req: CampaignBulkAddRequest):
+    """Add many JobDiva requirements at once. Accepts a list of ids (the frontend
+    splits the comma-separated input). Each id is fetched from JobDiva and created
+    under the campaign, inheriting the template. Returns a per-id result list so
+    the UI can show which fetched vs fell back to the template."""
+    try:
+        campaign = _get_campaign_row(campaign_id)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+
+        # Accept a raw comma/newline string too, for robustness.
+        raw_ids: List[str] = []
+        for entry in (req.jobdiva_ids or []):
+            raw_ids.extend(str(entry).replace("\n", ",").split(","))
+        ids = []
+        seen = set()
+        for rid in raw_ids:
+            v = rid.strip()
+            if v and v not in seen:
+                seen.add(v)
+                ids.append(v)
+        if not ids:
+            raise HTTPException(status_code=400, detail="Provide at least one JobDiva Job ID")
+
+        results = []
+        for jid in ids:
+            try:
+                results.append(await _create_campaign_job(campaign, campaign_id, jobdiva_id=jid))
+            except Exception as e:
+                logger.error(f"bulk add failed for {jid}: {e}", exc_info=True)
+                results.append({"jobdiva_id": jid, "ok": False, "error": str(e)})
+
+        added = sum(1 for r in results if r.get("ok"))
+        fetched = sum(1 for r in results if r.get("fetched"))
+        return {
+            "status": "success",
+            "campaign_id": campaign_id,
+            "requested": len(ids),
+            "added": added,
+            "fetched_from_jobdiva": fetched,
+            "results": results,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"bulk_add_jobs_to_campaign failed for {campaign_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to add jobs to campaign")

@@ -350,6 +350,13 @@ class CampaignAddJobRequest(BaseModel):
     selected_job_boards: Optional[List[str]] = None
 
 
+class CampaignBulkAddRequest(BaseModel):
+    """Add many JobDiva requirements to a campaign at once. Each id is fetched
+    from JobDiva and created under the campaign, inheriting the template.
+    Entries may themselves be comma/newline-separated for robustness."""
+    jobdiva_ids: List[str] = []
+
+
 # Legacy / Unused but kept for safety if referenced elsewhere temporarily
 class JobDescription(BaseModel):
     title: str

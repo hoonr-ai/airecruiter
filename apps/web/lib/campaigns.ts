@@ -35,6 +35,29 @@ export interface CampaignChildJob {
   created_at?: string | null;
   candidates_launched?: number;
   candidates_sourced?: number;
+  city?: string;
+  state?: string;
+  location_type?: string;
+  employment_type?: string;
+  pay_rate?: string;
+  openings?: string | number;
+}
+
+export interface BulkAddJobResult {
+  jobdiva_id: string;
+  job_id?: string;
+  ref?: string;
+  title?: string | null;
+  fetched?: boolean;
+  ok?: boolean;
+  error?: string;
+}
+
+export interface BulkAddResponse {
+  requested: number;
+  added: number;
+  fetched_from_jobdiva: number;
+  results: BulkAddJobResult[];
 }
 
 export interface Campaign {
@@ -167,6 +190,18 @@ export async function addJobToCampaign(
     res,
     `POST /api/campaigns/${campaignId}/jobs`,
   );
+}
+
+export async function bulkAddJobsToCampaign(
+  campaignId: string,
+  jobdivaIds: string[],
+): Promise<BulkAddResponse> {
+  const res = await fetch(`${CAMPAIGNS_BASE}/${encodeURIComponent(campaignId)}/jobs/bulk`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jobdiva_ids: jobdivaIds }),
+  });
+  return json<BulkAddResponse>(res, `POST /api/campaigns/${campaignId}/jobs/bulk`);
 }
 
 // =====================================================
