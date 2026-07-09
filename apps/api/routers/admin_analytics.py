@@ -29,11 +29,27 @@ def _compute_analytics_sync() -> Dict[str, Any]:
                 else:
                     active_jobs = count
 
-            # 2. Sourced candidates by status
+            # 2. Sourced candidates by effective funnel status
             cur.execute("""
-                SELECT COALESCE(status, 'sourced'), COUNT(*)
-                FROM sourced_candidates
-                GROUP BY COALESCE(status, 'sourced')
+                SELECT
+                    CASE
+                        WHEN LOWER(COALESCE(sc.data->>'engage_status', '')) IN ('pass', 'passed', 'qualified', 'shortlisted', 'hired', 'selected') THEN 'passed'
+                        WHEN LOWER(COALESCE(sc.data->>'engage_status', '')) IN ('fail', 'failed', 'rejected', 'disqualified', 'declined') THEN 'failed'
+                        WHEN LOWER(COALESCE(sc.data->>'engage_status', '')) IN ('in_progress', 'in progress', 'screening', 'interview_completed', 'interview completed', 'contacted') THEN 'in_progress'
+                        WHEN COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''
+                             OR EXISTS (
+                                 SELECT 1 FROM engage_interview_audit ea
+                                 WHERE ea.candidate_id = sc.candidate_id
+                                   AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
+                             ) THEN 'launched'
+                        WHEN LOWER(COALESCE(sc.status, '')) IN ('launched', 'submitted') THEN 'launched'
+                        WHEN LOWER(COALESCE(sc.status, '')) IN ('pass', 'passed', 'qualified', 'shortlisted') THEN 'passed'
+                        WHEN LOWER(COALESCE(sc.status, '')) IN ('fail', 'failed', 'rejected') THEN 'failed'
+                        ELSE COALESCE(NULLIF(TRIM(sc.status), ''), 'pending')
+                    END AS effective_status,
+                    COUNT(*)
+                FROM sourced_candidates sc
+                GROUP BY effective_status
             """)
             status_rows = cur.fetchall()
             candidates_by_status = {}
@@ -60,20 +76,21 @@ def _compute_analytics_sync() -> Dict[str, Any]:
             # 4. Top Recruiters
             # First map candidate counts by jobdiva_id
             cur.execute("""
-                SELECT jobdiva_id, COUNT(*)
+                SELECT CAST(jobdiva_id AS TEXT), COUNT(*)
                 FROM sourced_candidates
+                WHERE jobdiva_id IS NOT NULL
                 GROUP BY jobdiva_id
             """)
-            cand_count_map = {row[0]: row[1] for row in cur.fetchall()}
+            cand_count_map = {str(row[0]): row[1] for row in cur.fetchall()}
 
-            # Get recruiter emails and jobdiva_id for active jobs
+            # Get recruiter emails, jobdiva_id, and job_id for active jobs
             cur.execute("""
-                SELECT jobdiva_id, recruiter_emails
+                SELECT jobdiva_id, job_id, recruiter_emails
                 FROM monitored_jobs
                 WHERE COALESCE(is_archived, FALSE) = FALSE
             """)
             recruiter_stats = {}
-            for jobdiva_id, raw_emails in cur.fetchall():
+            for jobdiva_id, job_id, raw_emails in cur.fetchall():
                 emails = []
                 if isinstance(raw_emails, str):
                     try:
@@ -84,7 +101,9 @@ def _compute_analytics_sync() -> Dict[str, Any]:
                     emails = raw_emails
                 
                 clean_emails = set(str(e).strip().lower() for e in emails if e and str(e).strip())
-                cand_count = cand_count_map.get(jobdiva_id, 0)
+                cand_count = cand_count_map.get(str(jobdiva_id), 0)
+                if cand_count == 0 and job_id:
+                    cand_count = cand_count_map.get(str(job_id), 0)
                 for em in clean_emails:
                     if em not in recruiter_stats:
                         recruiter_stats[em] = {"email": em, "active_jobs": 0, "total_candidates": 0}
