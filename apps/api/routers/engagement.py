@@ -384,7 +384,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         dnc_blocked_ids: List[str] = []
         for cid in request.candidate_ids:
             cur.execute("""
-                SELECT candidate_id, name, email, phone, resume_text, headline, location, data
+                SELECT candidate_id, name, email, phone, resume_text, headline, location, data, resume_match_percentage
                 FROM sourced_candidates
                 WHERE candidate_id = %s
                   AND dnc_stopped_at IS NULL
@@ -436,6 +436,9 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                     except Exception:
                         data_blob = {}
                 headline = row.get("headline") or data_blob.get("headline", "")
+                match_score = row.get("resume_match_percentage")
+                if match_score is None:
+                    match_score = data_blob.get("match_score")
 
                 resumes.append({
                     "source_candidate_id": row.get("candidate_id") or cid,
@@ -447,6 +450,8 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                     "summary": headline,
                     "skills": "",
                     "education": "",
+                    "match_score": match_score,
+                    "resume_screening_score": match_score,
                 })
             else:
                 # Fallback for candidates not found in DB
@@ -558,7 +563,9 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 "source_candidate_id": r.get("source_candidate_id"),
                 "name": candidate_name,
                 "email": candidate_email,
-                "phone": r.get("phone")
+                "phone": r.get("phone"),
+                "match_score": r.get("match_score"),
+                "resume_screening_score": r.get("resume_screening_score"),
             })
 
         # Assemble final payload matching pairbotqa /api/bulk-interviews schema
