@@ -16,7 +16,7 @@ def _compute_analytics_sync() -> Dict[str, Any]:
         with conn.cursor() as cur:
             # 1. Overview: Monitored vs Archived Jobs
             cur.execute("""
-                SELECT COALESCE(is_archived, FALSE), COUNT(*)
+                SELECT COALESCE(is_archived, FALSE), COUNT(DISTINCT COALESCE(jobdiva_id, job_id::text))
                 FROM monitored_jobs
                 GROUP BY COALESCE(is_archived, FALSE)
             """)
