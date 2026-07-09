@@ -383,15 +383,27 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         candidate_phone = ""
         dnc_blocked_ids: List[str] = []
         for cid in request.candidate_ids:
-            cur.execute("""
-                SELECT candidate_id, name, email, phone, resume_text, headline, location, data, resume_match_percentage
-                FROM sourced_candidates
-                WHERE candidate_id = %s
-                  AND dnc_stopped_at IS NULL
-                ORDER BY updated_at DESC
-                LIMIT 1
-            """, (cid,))
-            row = cur.fetchone()
+            try:
+                cur.execute("""
+                    SELECT candidate_id, name, email, phone, resume_text, headline, location, data, resume_match_percentage
+                    FROM sourced_candidates
+                    WHERE candidate_id = %s
+                      AND dnc_stopped_at IS NULL
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                """, (cid,))
+                row = cur.fetchone()
+            except Exception:
+                cur.connection.rollback()
+                cur.execute("""
+                    SELECT candidate_id, name, email, phone, resume_text, headline, location, data
+                    FROM sourced_candidates
+                    WHERE candidate_id = %s
+                      AND dnc_stopped_at IS NULL
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                """, (cid,))
+                row = cur.fetchone()
             if not row:
                 # Either the candidate isn't sourced for any job, or every
                 # row is dnc_stopped. Probe a second query to tell them
