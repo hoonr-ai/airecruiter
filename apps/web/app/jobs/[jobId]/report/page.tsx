@@ -53,6 +53,10 @@ interface EvaluationReport {
     name: string;
     email: string;
     phone: string;
+    gender_label?: "male" | "female" | "default" | string;
+    gender_confidence?: number;
+    gender_source?: string;
+    gender_updated_at?: string;
     headline: string;
     location: string;
     availability: string;
@@ -308,7 +312,6 @@ export default function CandidateEvaluationReportPage() {
     { label: "Phone", value: candidate.phone || "No data available" },
     { label: "Available", value: formatAvailability(candidate.availability, pair.interview?.completed_at) },
   ];
-
   return (
     <div className="min-h-screen bg-[#f8fafc] font-sans pb-20 text-[#1e293b]">
       <style jsx global>{`

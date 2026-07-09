@@ -111,6 +111,10 @@ export interface Candidate {
   certifications?: Certification[];
   candidate_certification?: Certification[];
   urls?: CandidateUrls;
+  gender_label?: "male" | "female" | "default" | string;
+  gender_confidence?: number;
+  gender_source?: "self_declared" | "inferred" | "unknown" | string;
+  gender_updated_at?: string;
   enhanced_info?: Record<string, unknown>;
   jobdiva_candidate_id?: string;
   jobdiva_resume_id?: string;

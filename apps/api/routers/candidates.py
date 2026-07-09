@@ -15,6 +15,7 @@ from services.unipile import unipile_service
 from services.sourced_candidates_storage import sourced_candidates_storage
 from services.dnc_storage import load_dnc_phone_set
 from services.unified_candidate_search import SearchCriteria, unified_search_service
+from services.gender_logic import normalize_gender_prediction, to_gender_fields, infer_gender_from_name_ai
 from services import contact_enrichment
 from utils.phone import normalize_phone
 from models import (
@@ -268,6 +269,63 @@ def _candidate_to_persist_row(job_id: str, cand: Dict[str, Any]) -> Dict[str, An
     }
 
 
+def _extract_candidate_gender_fields(cand: Dict[str, Any]) -> Dict[str, Any]:
+    """Return canonical gender fields for API payloads.
+
+    Accepted input labels include legacy values (e.g. "else"), which are
+    normalized to "default".
+    """
+
+    data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else _json_load_safe(cand.get("data"), {})
+    enhanced = cand.get("enhanced_info") if isinstance(cand.get("enhanced_info"), dict) else {}
+
+    raw_label = (
+        cand.get("gender_label")
+        or data_blob.get("gender_label")
+        or enhanced.get("gender_label")
+        or "default"
+    )
+    raw_conf = (
+        cand.get("gender_confidence")
+        if cand.get("gender_confidence") is not None
+        else data_blob.get("gender_confidence", 0.0)
+    )
+    raw_source = (
+        cand.get("gender_source")
+        or data_blob.get("gender_source")
+        or "unknown"
+    )
+    raw_updated = (
+        cand.get("gender_updated_at")
+        or data_blob.get("gender_updated_at")
+    )
+
+    normalized = normalize_gender_prediction(
+        predicted_label=raw_label,
+        confidence=raw_conf,
+        source=raw_source,
+        threshold=0.0,
+        updated_at=raw_updated,
+    )
+    return to_gender_fields(normalized)
+
+
+async def _extract_candidate_gender_fields_with_ai(cand: Dict[str, Any]) -> Dict[str, Any]:
+    fields = _extract_candidate_gender_fields(cand)
+    if fields.get("gender_label") in {"male", "female"}:
+        return fields
+
+    name = str(cand.get("name") or cand.get("person_name") or "").strip()
+    if not name:
+        return fields
+
+    ai_pred = await infer_gender_from_name_ai(name)
+    ai_fields = to_gender_fields(ai_pred)
+    if ai_fields.get("gender_label") in {"male", "female"}:
+        return ai_fields
+    return fields
+
+
 @router.post("/candidates/open-to-work-statuses")
 async def get_open_to_work_statuses(payload: Dict[str, Any]):
     """Poll-friendly read-only lookup for LinkedIn Open-to-Work status.
@@ -432,6 +490,14 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
             persist_tasks: List[asyncio.Task] = []
             try:
                 async for event in unified_search_service.search_candidates(criteria):
+                    if event.get("type") == "candidate":
+                        cand = event.get("data") or {}
+                        if isinstance(cand, dict):
+                            cand.update(await _extract_candidate_gender_fields_with_ai(cand))
+                    # Do not inject gender into candidate_detail patches.
+                    # These patches often omit identity fields and would
+                    # normalize to "default", unintentionally overwriting a
+                    # previously inferred male/female label on the UI row.
                     yield json.dumps(event) + "\n"
                     if event.get("type") == "candidate":
                         cand = event.get("data") or {}
@@ -2949,6 +3015,14 @@ async def get_candidate_evaluation_report(
             "feedback_reason": data_blob.get("feedback_reason"),
             "feedback_at":     data_blob.get("feedback_at"),
         }
+        candidate_info.update(
+            await _extract_candidate_gender_fields_with_ai(
+                {
+                    "name": cand_row.get("name"),
+                    "data": data_blob,
+                }
+            )
+        )
 
         # Normalize engage_score to a 100-point scale if total_score is available
         display_engage_score = None

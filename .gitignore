@@ -1,3 +1,4 @@
+.gitignore
 .env
 .env.local
 .env.production
@@ -32,3 +33,4 @@ apps/api/scripts/smoke_launch_pair.py
 Bulk_Interviews_Engage.postman_collection.json
 test_bulk.py
 test_bulk_refactored.py
+pr-362-auth-rbac-fix-plan.md
