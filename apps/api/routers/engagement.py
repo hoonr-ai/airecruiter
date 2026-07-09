@@ -451,6 +451,11 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 match_score = row.get("resume_match_percentage")
                 if match_score is None:
                     match_score = data_blob.get("match_score")
+                if match_score is not None:
+                    try:
+                        match_score = float(match_score)
+                    except Exception:
+                        pass
 
                 resumes.append({
                     "source_candidate_id": row.get("candidate_id") or cid,
