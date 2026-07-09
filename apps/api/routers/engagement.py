@@ -719,13 +719,17 @@ async def _post_to_pairbot(
     """
     last_exc: Optional[BaseException] = None
     last_response: Optional[httpx.Response] = None
+    headers = {"Content-Type": "application/json"}
+    pair_api_key = os.getenv("PAIR_API_KEY", "pair_c2d0855ded28565926ead54a18aef873cc5d80111ae3c791fb7e26cf1cc4931d")
+    if pair_api_key:
+        headers["Authorization"] = f"Bearer {pair_api_key}"
     for attempt in range(max_attempts):
         try:
             async with httpx.AsyncClient(timeout=timeout_seconds) as client:
                 response = await client.post(
                     url,
                     json=payload_obj,
-                    headers={"Content-Type": "application/json"},
+                    headers=headers,
                 )
             if response.status_code < 500:
                 return response
@@ -1741,8 +1745,12 @@ async def get_assessment_data(interview_id: str):
 # ---------------------------------------------------------------------------
 async def _proxy_get(path: str, params: dict = None):
     try:
+        headers = {}
+        pair_api_key = os.getenv("PAIR_API_KEY", "pair_c2d0855ded28565926ead54a18aef873cc5d80111ae3c791fb7e26cf1cc4931d")
+        if pair_api_key:
+            headers["Authorization"] = f"Bearer {pair_api_key}"
         async with httpx.AsyncClient(timeout=30.0) as client:
-            res = await client.get(f"{EXTERNAL_INTERVIEW_API_URL}{path}", params=params)
+            res = await client.get(f"{EXTERNAL_INTERVIEW_API_URL}{path}", params=params, headers=headers)
             res.raise_for_status()
             return res.json()
     except Exception as e:
@@ -1751,8 +1759,12 @@ async def _proxy_get(path: str, params: dict = None):
 
 async def _proxy_post(path: str, json_data: dict = None):
     try:
+        headers = {"Content-Type": "application/json"}
+        pair_api_key = os.getenv("PAIR_API_KEY", "pair_c2d0855ded28565926ead54a18aef873cc5d80111ae3c791fb7e26cf1cc4931d")
+        if pair_api_key:
+            headers["Authorization"] = f"Bearer {pair_api_key}"
         async with httpx.AsyncClient(timeout=30.0) as client:
-            res = await client.post(f"{EXTERNAL_INTERVIEW_API_URL}{path}", json=json_data)
+            res = await client.post(f"{EXTERNAL_INTERVIEW_API_URL}{path}", json=json_data, headers=headers)
             res.raise_for_status()
             return res.json()
     except Exception as e:
