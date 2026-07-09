@@ -171,6 +171,15 @@ export default function AdminAnalyticsPage() {
 
   const exportToCSV = () => {
     if (!data) return;
+
+    const passed = getStageCount({ key: "passed", aliases: ["pass", "passed", "qualified", "shortlisted", "hired", "offer accepted", "selected", "interested", "complete", "completed"] });
+    const failed = getStageCount({ key: "failed", aliases: ["fail", "failed", "rejected", "reject", "disqualified", "declined"] });
+    const totalEvaluated = passed + failed;
+    const passRateRatio = totalEvaluated > 0 ? `${Math.round((passed / totalEvaluated) * 100)}%` : "0%";
+    const poolDensity = data.overview.total_monitored_jobs > 0
+      ? Math.round(data.overview.total_sourced_candidates / data.overview.total_monitored_jobs)
+      : data.overview.total_sourced_candidates;
+
     const lines = [
       "Hoonr Curate - Executive Analytics Report",
       `Generated: ${new Date().toLocaleDateString()}`,
@@ -189,11 +198,23 @@ export default function AdminAnalyticsPage() {
         return `${escapeCsvField(stage.label)},${count},${pct}%`;
       }),
       "",
-      "--- TOP CLIENT VOLUME ---",
-      "Rank,Customer Name,Active Jobs",
-      ...(data.jobs_by_customer || []).map((c, idx) => `#${idx + 1},${escapeCsvField(c.customer_name)},${c.job_count}`),
+      "--- SCREENING QUALITY & CONVERSION ---",
+      "Metric,Value,Benchmark",
+      `Pass Rate Ratio,${passRateRatio},of evaluated candidates shortlisted`,
+      `Avg. Pool Density,${poolDensity},candidates sourced per active job`,
       "",
-      "--- RECRUITER LEADERBOARD ---",
+      "--- TALENT SOURCING ORIGINS ---",
+      "Source Channel,Profiles,Percentage",
+      ...(data.candidates_by_source || []).map((s) => {
+        const pct = Math.round((s.count / totalCandidates) * 100);
+        return `${escapeCsvField(s.source)},${s.count},${pct}%`;
+      }),
+      "",
+      "--- TOP CLIENT VOLUME (TOP 5) ---",
+      "Rank,Customer Name,Active Jobs",
+      ...(data.jobs_by_customer || []).slice(0, 5).map((c, idx) => `#${idx + 1},${escapeCsvField(c.customer_name)},${c.job_count}`),
+      "",
+      "--- RECRUITER PRODUCTIVITY LEADERBOARD ---",
       "Rank,Recruiter Email,Active Jobs,Candidate Volume",
       ...(data.top_recruiters || []).map((r, idx) => `#${idx + 1},${escapeCsvField(r.email)},${r.active_jobs},${r.total_candidates}`),
     ];
