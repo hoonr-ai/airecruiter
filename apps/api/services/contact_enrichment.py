@@ -32,7 +32,7 @@ import asyncio
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -60,14 +60,32 @@ _EXA_TERMINAL_STATES = {"completed", "failed", "cancelled"}
 _EXA_POLL_INTERVAL_S = 4  # per Exa docs
 # Structured output we ask the agent to fill. Only the two billable contact
 # fields (email $0.02 / phone $0.07 per run) — richer schemas just cost more.
+# The `description` on each field matters: per Exa engineering, contact-field
+# descriptions in the outputSchema are what activate the agent's contact
+# enrichment tool — a bare {"type": "string"} is NOT enough.
 _EXA_CONTACT_SCHEMA = {
     "type": "object",
     "properties": {
         "contact": {
             "type": "object",
+            "description": "Contact details for the person named in the query.",
             "properties": {
-                "email": {"type": "string", "format": "email"},
-                "phone": {"type": "string", "format": "phone"},
+                "email": {
+                    "type": "string",
+                    "format": "email",
+                    "description": (
+                        "The person's best current email address "
+                        "(work email preferred, personal email acceptable)."
+                    ),
+                },
+                "phone": {
+                    "type": "string",
+                    "format": "phone",
+                    "description": (
+                        "The person's best direct phone number "
+                        "(mobile preferred), including country code."
+                    ),
+                },
             },
         }
     },
@@ -370,6 +388,21 @@ def extract_exa_contact_fields(structured: Any) -> Dict[str, Any]:
         "personalEmail": personal_email,
         "phoneCandidates": [phone] if phone else [],
     }
+
+
+def sanitize_agent_contact(email: Any, phone: Any) -> Tuple[str, str]:
+    """Sanity-gate contact values returned by an Exa Agent run before they
+    touch candidate rows: email must at least look like an email; phone is
+    normalised (digits + optional leading '+') and must carry >= 7 digits.
+    Failing values come back as "" so callers can treat them as absent.
+    """
+    e = str(email or "").strip()
+    if "@" not in e:
+        e = ""
+    p = _normalise_phone(str(phone or ""))
+    if sum(1 for ch in p if ch.isdigit()) < 7:
+        p = ""
+    return e, p
 
 
 def _build_exa_contact_query(full_name: str, company: str, linkedin_url: str) -> str:
