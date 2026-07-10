@@ -607,7 +607,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 "name": candidate_name,
                 "email": candidate_email,
                 "phone": r.get("phone"),
-                "gender_label": gender.gender_label,,
+                "gender_label": gender.gender_label,
                 "match_score": r.get("match_score"),
                 "resume_screening_score": r.get("resume_screening_score"),
             })
