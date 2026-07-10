@@ -30,6 +30,7 @@ from core.email import (
     _build_word_resume_document,
     resolve_app_base_url,
 )
+from services.gender_logic import normalize_gender_prediction, infer_gender_from_name_ai
 from services.jobdiva import jobdiva_service
 from services.auto_assign_service import auto_assign_service
 from core import (
@@ -462,6 +463,25 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                     "name": name,
                     "email": email,
                     "phone": phone,  # already sanitized to digits only above
+                    "gender_label": (
+                        row.get("gender_label")
+                        or data_blob.get("gender_label")
+                        or "default"
+                    ),
+                    "gender_confidence": (
+                        row.get("gender_confidence")
+                        if row.get("gender_confidence") is not None
+                        else data_blob.get("gender_confidence", 0.0)
+                    ),
+                    "gender_source": (
+                        row.get("gender_source")
+                        or data_blob.get("gender_source")
+                        or "unknown"
+                    ),
+                    "gender_updated_at": (
+                        row.get("gender_updated_at")
+                        or data_blob.get("gender_updated_at")
+                    ),
                     # pairbotqa expects experience / summary / skills — map raw resume
                     "experience": resume_text,
                     "summary": headline,
@@ -576,11 +596,23 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         for r in resumes:
             candidate_name = r.get("name") or "Unknown"
             candidate_email = str(r.get("email") or "").strip().lower()
+            gender = normalize_gender_prediction(
+                predicted_label=r.get("gender_label", "default"),
+                confidence=r.get("gender_confidence", 0.0),
+                source=r.get("gender_source", "unknown"),
+                threshold=0.0,
+                updated_at=r.get("gender_updated_at"),
+            )
+            if gender.gender_label == "default" and candidate_name:
+                ai_gender = await infer_gender_from_name_ai(candidate_name)
+                if ai_gender.gender_label in {"male", "female"}:
+                    gender = ai_gender
             final_resumes.append({
                 "source_candidate_id": r.get("source_candidate_id"),
                 "name": candidate_name,
                 "email": candidate_email,
                 "phone": r.get("phone"),
+                "gender_label": gender.gender_label,
                 "match_score": r.get("match_score"),
                 "resume_screening_score": r.get("resume_screening_score"),
             })
