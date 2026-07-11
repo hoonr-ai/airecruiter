@@ -45,6 +45,7 @@ _stub_module("core", __path__=[])
 _stub_module(
     "core.config",
     EXA_API_KEY="",
+    EXA_CONTACT_ENRICH_ENABLED=True,
     OPENAI_API_KEY="",
     GEMINI_API_KEY="",
 )
