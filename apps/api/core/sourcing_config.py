@@ -187,6 +187,35 @@ CANDIDATES_DETAIL_CHUNK_DELAY_S = 1.5
 # the old hard radius filter.
 JOBDIVA_LOCATION_SOFT_KEEP = True
 
+import os as _os_geo
+
+def _env_bool_geo(var: str, default: bool) -> bool:
+    raw = _os_geo.getenv(var)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+# Send talentSearchDef.zipCode + withinMiles on JobDiva TalentSearch.
+# The swagger documents both fields; an operational note in
+# scripts/jobdiva_mainframe_search.py claims the endpoint silently ignores
+# structured geo. Harmless if ignored, a real server-side radius filter if
+# honored — default ON. scripts/jobdiva_zip_radius_probe.py settles it live.
+# Guardrails against the honored case: the radius is sent with 2x headroom
+# (so the UI's BEYOND-radius soft-keep bucket still gets the near-miss
+# band; only far-away noise is cut server-side), and the zip is skipped
+# entirely for multi-location-chip searches (one anchor can't represent an
+# OR of locations) and for Remote jobs.
+JOBDIVA_ZIP_RADIUS_ENABLED = _env_bool_geo("JOBDIVA_ZIP_RADIUS_ENABLED", True)
+
+# Rewrite frontend location clauses (`"Tempe, AZ 85281" within 25 mi`) into
+# JobDiva's native boolean geo dialect (`Within 25 miles of 85281`) before
+# sending to TalentSearch. Default OFF until the probe confirms the dialect
+# is parsed as geo — if JobDiva treated it as keywords, the words
+# "within/miles" would poison the search.
+JOBDIVA_BOOLEAN_ZIP_DIALECT_ENABLED = _env_bool_geo(
+    "JOBDIVA_BOOLEAN_ZIP_DIALECT_ENABLED", False
+)
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # Exa Agent API (Websets 2.0) — agentic deep-search pass for LinkedIn-Exa

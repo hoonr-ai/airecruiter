@@ -117,7 +117,8 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT resume_match_filters, sourcing_filters, jobdiva_id, customer_name
+                    SELECT resume_match_filters, sourcing_filters, jobdiva_id, customer_name,
+                           location_type, city
                     FROM monitored_jobs
                     WHERE job_id = %s OR jobdiva_id = %s
                     LIMIT 1
@@ -135,6 +136,9 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
         resolved_job_ref = row[2] or job_ref
         customer_name = str(row[3] or "").strip() if len(row) > 3 else ""
         client_name = "" if customer_name.lower() in ("", "external", "unknown", "n/a") else customer_name
+        location_type = str(row[4] or "").strip() if len(row) > 4 else ""
+        if not location_type and len(row) > 5 and str(row[5] or "").strip().upper() == "REMOTE":
+            location_type = "Remote"
 
         title_criteria = [
             {
@@ -167,6 +171,7 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
             companies=sourcing_filters.get("companies") or [],
             resume_match_filters=resume_match_filters,
             location=primary_location,
+            location_type=location_type or "Unspecified",
             page_size=100,
             sources=["JobDiva"],
             bypass_screening=False,
@@ -398,6 +403,31 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
         elif request.locations:
             location = request.locations[0].value
 
+        # Work arrangement: request wins; else read monitored_jobs so Remote
+        # jobs skip the commute-radius constraint even when the caller
+        # doesn't send it. Handles the JobDiva quirk of location_type being
+        # empty with the literal string "REMOTE" in city.
+        location_type = (getattr(request, "location_type", "") or "").strip()
+        if location_type.lower() in ("", "unspecified"):
+            location_type = ""
+            try:
+                conn = get_db_connection()
+                try:
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT location_type, city FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
+                            (request.job_id, request.job_id),
+                        )
+                        row = cursor.fetchone()
+                finally:
+                    conn.close()
+                if row:
+                    location_type = str(row[0] or "").strip()
+                    if not location_type and str(row[1] or "").strip().upper() == "REMOTE":
+                        location_type = "Remote"
+            except Exception as e:
+                logger.warning(f"Failed to load location_type for job {request.job_id}: {e}")
+
         effective_limit = int(request.limit or request.page_size or 100)
         require_resume = True if request.require_resume is None else bool(request.require_resume)
 
@@ -459,6 +489,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
             keywords=request.keywords or [],
             resume_match_filters=resume_match_filters,
             location=location,
+            location_type=location_type or "Unspecified",
             within_miles=within_miles,
             companies=companies,
             page_size=effective_limit,
@@ -574,6 +605,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
                     keywords=request.keywords or [],
                     resume_match_filters=fallback_resume_match_filters,
                     location=fallback_location,
+                    location_type=location_type or "Unspecified",
                     within_miles=within_miles,
                     companies=request.companies or [],
                     page_size=effective_limit,

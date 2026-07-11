@@ -12,7 +12,7 @@ from services.jobdiva import JobDivaService, _is_placeholder_email
 from services.unipile import unipile_service
 from services.vetted import vetted_service
 from services.exa_service import exa_service, _extract_city_from_highlights
-from services.location import normalize_location_string, within_radius
+from services.location import haversine_miles, normalize_location_string, within_radius
 from core.config import (
     SCORING_REQUIRED_WEIGHT,
     SCORING_PREFERRED_WEIGHT,
@@ -120,6 +120,10 @@ class SearchCriteria(BaseModel):
     resume_match_filters: List[Dict[str, Any]] = []
     location: str = ""
     within_miles: int = 25
+    # Job work arrangement ("Remote" | "Hybrid" | "Onsite" | "Unspecified").
+    # Remote jobs skip the commute-radius constraint entirely (any US
+    # location passes; non-US is still dropped).
+    location_type: str = "Unspecified"
     # Structured geo for JobDiva talentSearchDef. Optional — backend will
     # derive these from `location` when the frontend doesn't send them.
     countries: List[str] = []
@@ -583,6 +587,8 @@ class UnifiedCandidateSearch:
                 "education", "certifications", "enhanced_info",
                 "enhanced_info_status", "received", "city", "state",
                 "linkedin_url", "profile_url", "image_url", "data",
+                "zipcode", "distance_miles", "location_out_of_radius",
+                "location_match_reason",
             ):
                 v = cand.get(key)
                 if v not in (None, "", [], {}):
@@ -701,6 +707,9 @@ class UnifiedCandidateSearch:
                 # sources + absorbed contact/profile on the surviving row.
                 "sources", "profile_url", "linkedin_url", "image_url",
                 "resume_id", "city", "state",
+                # Geo verdict → UI "~N mi away" badge on the location cell.
+                "zipcode", "distance_miles", "location_out_of_radius",
+                "location_match_reason",
                 # Candidate-details failure flag → UI renders "N/A" + keeps the
                 # row launchable (vs. a 0% drop).
                 "detail_failed",
@@ -1145,8 +1154,9 @@ class UnifiedCandidateSearch:
                             jd_title=self._role_hint_from_criteria(criteria) or (criteria.role_hint or ""),
                             jd_role=self._role_hint_from_criteria(criteria) or (criteria.role_hint or ""),
                             skills=criteria.sourcing_skill_values(),
-                            location=self._scope_location_to_us(criteria.location),
+                            location=self._search_location_for_source(criteria),
                             seed_urls=seed_urls,
+                            within_miles=getattr(criteria, "within_miles", 25),
                         )
                     except Exception as e:
                         logger.warning("deep_research_candidates raised: %s", e)
@@ -1671,7 +1681,12 @@ class UnifiedCandidateSearch:
         source_type = "JobDiva-TalentSearch"
         try:
             from core import sourcing_config as sc
-            countries, states = self._resolve_jobdiva_geo(criteria)
+            countries, states, geo_zip = self._resolve_jobdiva_geo(criteria)
+            # Remote jobs have no commute constraint — search US-wide
+            # instead of anchoring to the office zip/state.
+            if str(getattr(criteria, "location_type", "") or "").strip().lower() == "remote":
+                geo_zip = ""
+                states = []
             flat_terms = list(criteria.title_criteria or []) + list(criteria.skill_criteria or [])
             page_size = max(
                 1,
@@ -1714,6 +1729,8 @@ class UnifiedCandidateSearch:
                     countries=countries,
                     states=states,
                     page_number=page_number,
+                    zip_code=geo_zip,
+                    within_miles=getattr(criteria, "within_miles", 25),
                 )
 
                 self._log_stage(
@@ -1842,30 +1859,45 @@ class UnifiedCandidateSearch:
         "u.k.", "england", "scotland",
     })
 
-    def _resolve_jobdiva_geo(self, criteria: SearchCriteria) -> tuple[List[str], List[str]]:
+    def _resolve_jobdiva_geo(self, criteria: SearchCriteria) -> tuple[List[str], List[str], str]:
         """
-        Produce (countries, states) for JobDiva's talentSearchDef.
+        Produce (countries, states, zip_code) for JobDiva's talentSearchDef.
 
         Priority: explicit `criteria.countries` / `criteria.states` if set;
-        otherwise heuristically split `criteria.location` by comma and pick
-        out a US state code and/or a country. Always defaults to ``["US"]``
-        when no country can be resolved — searches are US-only by policy.
+        otherwise parse `criteria.location`. The Step-5 seed is
+        "City, ST ZIP" — the zip must be extracted BEFORE tokenizing
+        (it used to ride along as "AZ 85281", fail the len==2 state-code
+        check, and silently drop the state from the payload). Always
+        defaults to ``["US"]`` when no country can be resolved — searches
+        are US-only by policy.
         """
+        from services import zip_index
+
+        loc = (criteria.location or "").strip()
+        parsed = self._parse_location(loc) if loc else {"city": "", "state": "", "zip": ""}
+        zip_code = parsed.get("zip") or ""
+        if zip_code and not zip_index.is_known_zip(zip_code):
+            zip_code = ""
+        # Job has no zip but a resolvable city → use the zip nearest the
+        # city centroid so zip+radius search still has something to anchor.
+        if not zip_code and parsed.get("city") and parsed.get("state"):
+            zip_code = zip_index.city_state_default_zip(parsed["city"], parsed["state"]) or ""
+
         countries = [c.strip() for c in (criteria.countries or []) if c and c.strip()]
         states = [s.strip() for s in (criteria.states or []) if s and s.strip()]
         if countries or states:
-            return countries, states
+            return countries, states, zip_code
 
-        loc = (criteria.location or "").strip()
         if not loc:
             # No location criteria at all → still scope to US-only.
-            return ["US"], []
+            return ["US"], [], ""
 
-        tokens = [t.strip() for t in loc.split(",") if t.strip()]
-        if not tokens:
-            return ["US"], []
+        # Strip the zip before tokenizing — "Tempe, AZ 85281" must yield
+        # the token "AZ", not "AZ 85281".
+        loc_no_zip = re.sub(r"\b\d{5}(?:-\d{4})?\b", " ", loc)
+        tokens = [t.strip() for t in loc_no_zip.split(",") if t.strip()]
 
-        # Walk tokens right-to-left: first match country, then state.
+        # Walk tokens right-to-left for a country match.
         consumed: set = set()
         for idx in range(len(tokens) - 1, -1, -1):
             token_upper = tokens[idx].upper()
@@ -1874,20 +1906,30 @@ class UnifiedCandidateSearch:
                 consumed.add(idx)
                 break
 
-        for idx in range(len(tokens) - 1, -1, -1):
-            if idx in consumed:
-                continue
-            token_upper = tokens[idx].upper()
-            if len(token_upper) == 2 and token_upper in self._US_STATE_CODES:
-                states.append(token_upper)
-                if not countries:
-                    countries.append("US")
-                break
+        # State: prefer the robust parser (handles "AZ", "Arizona",
+        # "AZ 85281"), fall back to the raw token walk.
+        parsed_state = (parsed.get("state") or "").upper()
+        if parsed_state and parsed_state in self._US_STATE_CODES:
+            states.append(parsed_state)
+        else:
+            for idx in range(len(tokens) - 1, -1, -1):
+                if idx in consumed:
+                    continue
+                token_upper = tokens[idx].upper()
+                if len(token_upper) == 2 and token_upper in self._US_STATE_CODES:
+                    states.append(token_upper)
+                    break
+
+        # Bare-zip input ("85281") → backfill the state from the zip index.
+        if not states and zip_code:
+            zip_entry = zip_index.lookup_zip(zip_code)
+            if zip_entry and zip_entry["state"].upper() in self._US_STATE_CODES:
+                states.append(zip_entry["state"].upper())
 
         if not countries:
             countries.append("US")
 
-        return countries, states
+        return countries, states, zip_code
 
     # Adjacent-state map for the "within N miles spills across state lines"
     # case (Charlotte NC ↔ Fort Mill SC, NYC ↔ Jersey City NJ, etc.). Hand-
@@ -2397,6 +2439,17 @@ class UnifiedCandidateSearch:
             cleaned.append(loc)
         return cleaned
 
+    def _search_location_for_source(self, criteria: SearchCriteria) -> str:
+        """Location string to hand external sources (Exa, Dice, Unipile).
+
+        Remote jobs search nationwide — anchoring a remote search to the
+        office city just biases discovery toward one metro for no reason.
+        Onsite/hybrid keep the US-scoped job location.
+        """
+        if str(getattr(criteria, "location_type", "") or "").strip().lower() == "remote":
+            return "United States"
+        return self._scope_location_to_us(criteria.location)
+
     def _scope_location_to_us(self, location: Any) -> str:
         """Append ", United States" to a location string when no country is
         already named, so downstream services (Exa, Dice, Vetted, Unipile)
@@ -2478,8 +2531,26 @@ class UnifiedCandidateSearch:
         if not criteria.location:
             return True, "no_location_requirement", None
 
+        # Remote jobs have no commute constraint — any US location passes.
+        # (Non-US candidates are still dropped by the _is_likely_non_us gate.)
+        if str(getattr(criteria, "location_type", "") or "").strip().lower() == "remote":
+            return True, "remote_job_no_location_constraint", None
+
+        from services import zip_index
+
         required = self._parse_location(criteria.location)
-        if not required["city"] and not required["state"]:
+
+        # Bare-zip input ("85281") or noisy city text: backfill city/state
+        # from the offline zip index so every check below still works.
+        if required.get("zip"):
+            zip_entry = zip_index.lookup_zip(required["zip"])
+            if zip_entry:
+                if not required["city"]:
+                    required["city"] = self._normalize_term(zip_entry["city"])
+                if not required["state"]:
+                    required["state"] = self._normalize_term(zip_entry["state"])
+
+        if not required["city"] and not required["state"] and not required.get("zip"):
             return True, "empty_location_requirement", None
 
         # B1: opt-out for "open to relocation" candidates whose actual location
@@ -2488,7 +2559,16 @@ class UnifiedCandidateSearch:
         include_relocation = bool(getattr(criteria, "include_relocation_candidates", True))
 
         candidate_locs = self._candidate_structured_locations(candidate)
-        if not candidate_locs:
+
+        # Direct zip from the source payload (JobDiva JobAgent) — usable even
+        # when the candidate's location strings are blank or noisy, and more
+        # precise than city-level matching when present.
+        direct_zip = ""
+        direct_zip_entry = zip_index.lookup_zip(str(candidate.get("zipcode") or "").strip())
+        if direct_zip_entry:
+            direct_zip = direct_zip_entry["zip"]
+
+        if not candidate_locs and not direct_zip:
             if relocation_flag and not include_relocation:
                 return False, "relocation_excluded_by_filter", None
             # Soft-keep with sentinel distance so the UI counts these under
@@ -2500,6 +2580,11 @@ class UnifiedCandidateSearch:
         # If search is state-only, enforce state equality without geocoding.
         if required["state"] and not required["city"]:
             seen_states: List[str] = []
+            if direct_zip_entry:
+                zip_state = self._normalize_term(direct_zip_entry["state"])
+                seen_states.append(zip_state)
+                if zip_state == required["state"]:
+                    return True, "state_match", None
             for value in candidate_locs:
                 parsed = self._parse_location(value)
                 state = parsed.get("state")
@@ -2515,22 +2600,38 @@ class UnifiedCandidateSearch:
 
         # Hard cap 100 mi everywhere (defense-in-depth — UI also caps).
         miles = min(100, int(getattr(criteria, "within_miles", 25) or 25))
-        target = normalize_location_string(criteria.location)
         geocode_failure = False
         closest_distance: Optional[float] = None
 
-        # OFFLINE FAST-PATH: zip / city+state normalized match. JobAgent
-        # locations are noisy ("PLANO, TX 75024" vs "Plano, TX" vs "Plano TX")
-        # and Nominatim is rate-limited, so doing a string-level normalized
-        # match catches the obvious in-radius cases without an HTTP call.
-        # Falls through to Nominatim for anything not directly resolvable.
+        # OFFLINE FAST-PATH: exact zip / city+state match, then real centroid
+        # distances from the offline zip index. JobAgent locations are noisy
+        # ("PLANO, TX 75024" vs "Plano, TX" vs "Plano TX") and Nominatim is
+        # rate-limited/best-effort, so anything resolvable against the local
+        # index gets a deterministic distance with no HTTP call. Nominatim
+        # remains only for strings the index can't place (misspellings,
+        # neighborhoods, non-standard formats).
         try:
             from services.us_state_index import state_centroid_distance_miles
         except Exception:
             state_centroid_distance_miles = None  # type: ignore[assignment]
 
+        # Resolve the search target to coordinates offline: zip centroid
+        # first (most precise), else the city's averaged centroid.
+        required_point: Optional[Tuple[float, float]] = None
+        if required.get("zip"):
+            required_point = zip_index.zip_centroid(required["zip"])
+        if required_point is None and required.get("city") and required.get("state"):
+            required_point = zip_index.city_state_centroid(required["city"], required["state"])
+
         offline_state_mismatch_distance: Optional[float] = None
-        for candidate_loc in candidate_locs:
+        best_offline_distance: Optional[float] = None
+        unresolved_locs: List[str] = []
+
+        parse_targets = list(candidate_locs)
+        if direct_zip:
+            parse_targets.append(direct_zip)
+
+        for candidate_loc in parse_targets:
             parsed = self._parse_location(candidate_loc)
             cand_city = parsed.get("city", "")
             cand_state = parsed.get("state", "")
@@ -2549,12 +2650,28 @@ class UnifiedCandidateSearch:
             ):
                 return True, "city_state_match", 0.0
 
-            # State-centroid distance as a cheap upper-bound check. If the
-            # candidate's state centroid is already far beyond the radius,
-            # we can skip the Nominatim call and report the cross-state
-            # distance as the candidate's offline-estimated distance. (We
-            # only short-circuit reject when the gap is large enough that
-            # any in-state metro pair would also be outside the radius.)
+            # Offline centroid distance — candidate zip beats city+state
+            # for precision. Deterministic, offline, and immune to geocoder
+            # flakiness whenever both sides resolve against the index.
+            cand_point = zip_index.zip_centroid(cand_zip) if cand_zip else None
+            if cand_point is None and cand_city and cand_state:
+                cand_point = zip_index.city_state_centroid(cand_city, cand_state)
+            if cand_point is not None and required_point is not None:
+                d = haversine_miles(cand_point[0], cand_point[1], required_point[0], required_point[1])
+                if best_offline_distance is None or d < best_offline_distance:
+                    best_offline_distance = float(d)
+                continue
+
+            # This signal couldn't be placed offline ("Greater Phoenix
+            # Area", neighborhoods, misspellings) — it still deserves a
+            # Nominatim attempt below. A stale-but-resolvable signal must
+            # not confirm the candidate outside while a fresher unresolved
+            # one would have geocoded in-radius.
+            unresolved_locs.append(candidate_loc)
+
+            # State-centroid distance as a cheap upper-bound estimate when
+            # the exact locality can't be resolved — at least the UI can
+            # render a real number under BEYOND instead of the sentinel.
             if (
                 state_centroid_distance_miles is not None
                 and cand_state and required.get("state")
@@ -2567,9 +2684,28 @@ class UnifiedCandidateSearch:
                     if offline_state_mismatch_distance is None or centroid_d < offline_state_mismatch_distance:
                         offline_state_mismatch_distance = float(centroid_d)
 
-        # Network path: defer to Nominatim for any candidate we couldn't
-        # resolve offline.
-        for candidate_loc in candidate_locs:
+        if best_offline_distance is not None:
+            offline_d = round(best_offline_distance, 1)
+            if offline_d <= miles:
+                return True, "within_radius", offline_d
+            # Outside per the offline signals. Only confirmed if EVERY
+            # location signal was offline-resolvable; otherwise fall through
+            # and let Nominatim try the unresolved strings, seeding the
+            # closest-distance with the offline estimate.
+            closest_distance = offline_d
+            if not unresolved_locs:
+                if relocation_flag and not include_relocation:
+                    return False, "relocation_excluded_by_filter", offline_d
+                return True, "outside_radius_soft_keep", offline_d
+
+        # Network path: Nominatim for the strings the offline index couldn't
+        # place. Geocode the cleaned "City, ST" reconstruction as target —
+        # raw strings with zips/suffixes ("Plano, TX 75024") routinely miss.
+        if required.get("city") and required.get("state"):
+            target = f"{required['city']}, {required['state']}"
+        else:
+            target = normalize_location_string(criteria.location)
+        for candidate_loc in unresolved_locs:
             is_within, reason, distance = within_radius(candidate_loc, target, miles)
             if isinstance(distance, (int, float)) and distance >= 0:
                 if closest_distance is None or distance < closest_distance:
@@ -2627,7 +2763,11 @@ class UnifiedCandidateSearch:
         # splitting on comma. This is a normalization fix for inputs like
         # "Plano, TX 75024" / "PLANO TX 75024-1234" / "75024" — zip stays
         # accessible for downstream offline match instead of being stripped.
-        zip_match = re.search(r"\b(\d{5})(?:-\d{4})?\b", text)
+        # Take the LAST match: in address-style strings ("10001 W Main St,
+        # Mesa, AZ 85201") the leading 5-digit number is a street number,
+        # and the zip — when present — trails.
+        zip_matches = list(re.finditer(r"\b(\d{5})(?:-\d{4})?\b", text))
+        zip_match = zip_matches[-1] if zip_matches else None
         zip_code = zip_match.group(1) if zip_match else ""
         if zip_code:
             text = (text[:zip_match.start()] + text[zip_match.end():]).strip(" ,")
@@ -2663,9 +2803,38 @@ class UnifiedCandidateSearch:
                             state = candidate_state
                             break
 
+        normalized_state = state_aliases.get(self._normalize_term(state), self._normalize_term(state))
+
+        # Cross-validate the zip against the state: a street number in an
+        # address-style string ("10001 W Main St, Mesa, AZ") can collide
+        # with a real zip on the other side of the country. When any part
+        # of the string resolves to a US state and the zip's own state
+        # disagrees, the 5-digit number wasn't a zip — drop it. Unknown
+        # zips (not in the index) are kept for the exact-equality match.
+        if zip_code:
+            from services import zip_index
+            zip_entry = zip_index.lookup_zip(zip_code)
+            if zip_entry:
+                state_hint = resolve_state_code(normalized_state) if normalized_state else None
+                if not state_hint:
+                    for part in reversed(parts[1:]):
+                        first_token = part.split()[0] if part.split() else ""
+                        state_hint = resolve_state_code(first_token)
+                        if state_hint:
+                            break
+                if state_hint and zip_entry["state"].upper() != state_hint.upper():
+                    zip_code = ""
+            # Foreign postal codes collide with US zips ("Paris, 75001,
+            # France" — 75001 is Addison, TX). A named non-US country in
+            # the string disqualifies the number as a US anchor.
+            if zip_code and any(
+                p.strip().lower() in self._NON_US_LOCATION_TOKENS for p in parts
+            ):
+                zip_code = ""
+
         return {
             "city": self._normalize_term(city),
-            "state": state_aliases.get(self._normalize_term(state), self._normalize_term(state)),
+            "state": normalized_state,
             "zip": zip_code,
         }
 
@@ -3396,6 +3565,16 @@ class UnifiedCandidateSearch:
         # Confirmed-outside reasons. "outside_radius_soft_keep" only counts as
         # confirmed when we have a real (non-sentinel) distance beyond the radius.
         miles = min(100, int(getattr(criteria, "within_miles", 25) or 25))
+        # Stamp the badge fields for every scored candidate — previously only
+        # the JobDiva LocationGate set them, so Exa/LinkedIn rows never showed
+        # the out-of-radius badge even with a confirmed distance.
+        if (
+            isinstance(distance, (int, float))
+            and distance != _UNKNOWN_DISTANCE_SENTINEL
+            and distance > miles
+        ):
+            candidate["location_out_of_radius"] = True
+            candidate.setdefault("location_match_reason", reason)
         if reason in ("state_mismatch", "relocation_excluded_by_filter"):
             return f"location outside {criteria.location}"
         if (
@@ -4757,7 +4936,7 @@ class UnifiedCandidateSearch:
             skills = [{"value": s, "priority": "Must Have"} for s in skill_values]
             candidates = await self.unipile_service.search_candidates(
                 skills=skills,
-                location=self._scope_location_to_us(criteria.location),
+                location=self._search_location_for_source(criteria),
                 open_to_work=criteria.open_to_work,
                 limit=criteria.page_size,
                 boolean_string=self._scope_boolean_to_us(
@@ -4906,7 +5085,7 @@ class UnifiedCandidateSearch:
             boolean_string = criteria.boolean_string or self._build_boolean_string(criteria)
             candidates = await self.exa_service.search_dice_candidates(
                 skills=skills_values,
-                location=self._scope_location_to_us(criteria.location),
+                location=self._search_location_for_source(criteria),
                 limit=min(criteria.page_size, 50),
                 boolean_string=self._scope_boolean_to_us(boolean_string),
                 role_hint=self._role_hint_from_criteria(criteria),
@@ -4920,7 +5099,7 @@ class UnifiedCandidateSearch:
         try:
             candidates = await self.vetted_service.search_candidates(
                 skills=criteria.sourcing_skill_values(),
-                location=self._scope_location_to_us(criteria.location),
+                location=self._search_location_for_source(criteria),
                 limit=criteria.page_size
             )
             return {"candidates": candidates, "source_type": "VettedDB"}
@@ -4941,7 +5120,7 @@ class UnifiedCandidateSearch:
             exa_limit = min(50, max(30, requested))
             candidates = await self.exa_service.search_candidates(
                 skills=skills_values,
-                location=self._scope_location_to_us(criteria.location),
+                location=self._search_location_for_source(criteria),
                 limit=exa_limit,
                 boolean_string=self._scope_boolean_to_us(boolean_string),
                 role_hint=self._role_hint_from_criteria(criteria),

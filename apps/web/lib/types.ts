@@ -87,9 +87,15 @@ export interface Candidate {
   location?: string;
   city?: string;
   state?: string;
+  zipcode?: string;
   work_city?: string;
   work_state?: string;
   work_location?: string;
+  // Backend geo verdict: haversine miles from the search location
+  // (9999 = unknown/sentinel), plus the out-of-radius soft-keep flag.
+  distance_miles?: number | null;
+  location_out_of_radius?: boolean;
+  location_match_reason?: string;
   years_experience?: number;
   experience_years?: number;
   skills?: (string | { name: string; years?: number })[];

@@ -58,7 +58,7 @@ async def tira_match_resume(
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute(
-        "SELECT job_id, jobdiva_id, sourcing_filters, resume_match_filters, title, enhanced_title "
+        "SELECT job_id, jobdiva_id, sourcing_filters, resume_match_filters, title, enhanced_title, location_type, city "
         "FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
         (job_id, job_id),
     )
@@ -124,6 +124,10 @@ async def tira_match_resume(
         elif isinstance(first_loc, str):
             location_val = first_loc
 
+    job_location_type = str(job_row.get("location_type") or "").strip()
+    if not job_location_type and str(job_row.get("city") or "").strip().upper() == "REMOTE":
+        job_location_type = "Remote"
+
     criteria = SearchCriteria(
         job_id=str(job_row.get("job_id")),
         title_criteria=title_criteria,
@@ -131,6 +135,7 @@ async def tira_match_resume(
         keywords=keywords,
         resume_match_filters=resume_match_filters if isinstance(resume_match_filters, list) else [],
         location=location_val,
+        location_type=job_location_type or "Unspecified",
         sources=["tira-match"],
     )
 

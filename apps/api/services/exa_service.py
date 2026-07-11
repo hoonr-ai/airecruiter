@@ -155,6 +155,21 @@ def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
     return "", ""
 
 
+def _strip_zip_for_query(location: str) -> str:
+    """Drop zip codes from a location destined for Exa query/prompt text.
+
+    LinkedIn profile location lines never show zips ("Tempe, Arizona,
+    United States"), so a zip in the neural query is pure noise. The zip
+    still drives the offline radius post-filter — it just doesn't belong
+    in the NL text.
+    """
+    cleaned = re.sub(r"\b\d{5}(?:-\d{4})?\b", "", str(location or ""))
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+,", ",", cleaned)
+    cleaned = re.sub(r",\s*,", ",", cleaned)
+    return cleaned.strip(" ,")
+
+
 def _exa_query_from_boolean(boolean_string: str, skills: List[str], location: str, role_hint: str = "") -> str:
     """Build an Exa-friendly query.
 
@@ -192,7 +207,7 @@ def _exa_query_from_boolean(boolean_string: str, skills: List[str], location: st
         # Match the location only on its city portion (`split(",", 1)[0]`)
         # so a boolean that already says "located in New York" won't get
         # "New York, NY" appended on top of it.
-        loc = (location or "").strip()
+        loc = _strip_zip_for_query(location)
         if loc:
             city_token = loc.split(",", 1)[0].strip().lower()
             if city_token and city_token not in lower_bs:
@@ -202,6 +217,7 @@ def _exa_query_from_boolean(boolean_string: str, skills: List[str], location: st
     skills_str = ", ".join(skills) if skills else ""
     prefix = role_hint or "candidate"
     query = f"{prefix} {skills_str}".strip()
+    location = _strip_zip_for_query(location)
     if location:
         query += f" located in {location}"
     return query
@@ -381,6 +397,7 @@ class ExaService:
         skills: List[str],
         location: str,
         seed_urls: List[str],
+        within_miles: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Exa Agent API (Websets 2.0) pass — agentic enrichment + discovery.
 
@@ -436,9 +453,22 @@ class ExaService:
         # followers", etc.). Schema still allows null so the agent doesn't
         # fail validation when a profile genuinely doesn't expose the data,
         # but the prose strongly biases toward "go look".
+        query_location = _strip_zip_for_query(location)
+        radius_hint = ""
+        if query_location and query_location.lower() not in ("united states", "usa", "us"):
+            radius = max(1, min(100, int(within_miles or 25)))
+            radius_hint = (
+                f"LOCATION REQUIREMENT: candidates must CURRENTLY live in or within "
+                f"~{radius} miles of {query_location}. Verify against the LinkedIn "
+                "profile's own location line — a past job, employer HQ, or university "
+                "in that city does NOT count. Prefer verified-local candidates; if you "
+                "cannot verify, still include the candidate but report the location "
+                "string their profile actually shows. "
+            )
         query = (
             f"Find LinkedIn profiles matching: title=\"{jd_title}\" | role=\"{jd_role}\" "
-            f"| skills=\"{top_skills}\" | location=\"{location}\". "
+            f"| skills=\"{top_skills}\" | location=\"{query_location}\". "
+            + radius_hint +
             "Also enrich every profile passed in `input.data`. "
             "For each candidate, you MUST attempt to extract ALL of the following — "
             "treat null as a last resort, not a default:\n"
@@ -456,6 +486,11 @@ class ExaService:
             "start (YYYY-MM), end (YYYY-MM or 'Present').\n"
             f"  4. fit_rationale: one sentence (≤300 chars) on why this candidate's "
             f"titles fit the role \"{jd_role}\".\n"
+            "  5. location: the candidate's CURRENT residence exactly as the "
+            "LinkedIn profile's location line shows it (e.g. 'Tempe, Arizona, "
+            "United States' or 'Greater Phoenix Area'). Never substitute a "
+            "company HQ or a past position's city; leave empty only if the "
+            "profile shows no location at all.\n"
             "Return at least 30 candidates with linkedin_url populated. Do not "
             "drop candidates just because one field is hard to find — partial "
             "enrichment is better than skipping them."
@@ -480,7 +515,16 @@ class ExaService:
                             "linkedin_url": {"type": "string"},
                             "name": {"type": "string"},
                             "current_title": {"type": "string"},
-                            "location": {"type": "string"},
+                            "location": {
+                                "type": "string",
+                                "description": (
+                                    "Candidate's CURRENT residence from the LinkedIn "
+                                    "profile's own location line, e.g. 'Tempe, Arizona, "
+                                    "United States' or 'Greater Phoenix Area'. Not a "
+                                    "company HQ, not a past position's city. Empty "
+                                    "string if the profile shows no location."
+                                ),
+                            },
                             "last_activity": {"type": ["string", "null"]},
                             "follower_count": {"type": ["integer", "null"]},
                             "recent_companies": {
