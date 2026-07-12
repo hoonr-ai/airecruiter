@@ -175,6 +175,50 @@ class SearchCriteria(BaseModel):
             values.append(value)
         return values
 
+    def skill_only_values(self) -> List[str]:
+        """Plain skill strings from skill_criteria ONLY (titles excluded).
+
+        Used for the natural-language Exa/Dice queries where titles and
+        skills occupy different slots of the sentence — mixing titles into
+        the skill list (as sourcing_skill_values does) reads as
+        '<title> with <title>, <skill> experience'."""
+        values: List[str] = []
+        seen = set()
+        for item in self.skill_criteria or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("match_type") == "exclude":
+                continue
+            value = str(item.get("value", "")).strip()
+            if not value:
+                continue
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            values.append(value)
+        return values
+
+    def sourcing_titles(self) -> List[str]:
+        """Plain non-exclude title strings, in criteria order, deduped.
+
+        Feeds the one-role-per-search Exa/Dice fan-out and the Exa Agent
+        deep-search prompt."""
+        titles: List[str] = []
+        seen = set()
+        for item in self.title_criteria or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("match_type", "must") == "exclude":
+                continue
+            value = str(item.get("value", "")).strip()
+            key = value.lower()
+            if not value or key in seen:
+                continue
+            seen.add(key)
+            titles.append(value)
+        return titles
+
 class UnifiedCandidateSearch:
     def __init__(self):
         self.jobdiva_service = JobDivaService()
@@ -1150,10 +1194,20 @@ class UnifiedCandidateSearch:
 
                 async with self._exa_agent_semaphore:
                     try:
+                        # Plain title text — the agent query is natural
+                        # language, so no quoted-boolean role hints here.
+                        # jd_role joins the top titles with " or " and is the
+                        # string the agent prompt prefers. (criteria has no
+                        # `role_hint` field; the old `criteria.role_hint`
+                        # fallback raised AttributeError whenever
+                        # title_criteria was empty and silently killed Pass B.)
+                        agent_titles = criteria.sourcing_titles()
                         results = await self.exa_service.deep_research_candidates(
-                            jd_title=self._role_hint_from_criteria(criteria) or (criteria.role_hint or ""),
-                            jd_role=self._role_hint_from_criteria(criteria) or (criteria.role_hint or ""),
-                            skills=criteria.sourcing_skill_values(),
+                            jd_title=agent_titles[0] if agent_titles else "",
+                            jd_role=" or ".join(agent_titles[:2]),
+                            skills=criteria.skill_only_values(),
+                            # Remote-aware: US-wide for remote jobs, else the
+                            # US-scoped job location.
                             location=self._search_location_for_source(criteria),
                             seed_urls=seed_urls,
                             within_miles=getattr(criteria, "within_miles", 25),
@@ -1191,6 +1245,13 @@ class UnifiedCandidateSearch:
                         "exa_recent_companies": entry.get("recent_companies") or [],
                         "exa_fit_rationale": entry.get("fit_rationale") or "",
                     }
+                    # Contact fields from the agent's enrichment tool (schema
+                    # requests them with descriptions when the enrich flag is
+                    # on). Sanity-gate before use; only backfill — never
+                    # overwrite ZoomInfo/Apollo data already on the row.
+                    agent_email, agent_phone = contact_enrichment.sanitize_agent_contact(
+                        entry.get("email"), entry.get("phone")
+                    )
 
                     if nurl and nurl in pass_a_by_url:
                         existing = pass_a_by_url[nurl]
@@ -1203,6 +1264,10 @@ class UnifiedCandidateSearch:
                         merged = list(dict.fromkeys([*prior_sources, "LinkedIn-DeepSearch"]))
                         patch_fields["sources"] = merged
                         patch_fields["_stage"] = "exa_deep_search"
+                        if agent_email and not str(existing.get("email") or "").strip():
+                            patch_fields["email"] = agent_email
+                        if agent_phone and not str(existing.get("phone") or "").strip():
+                            patch_fields["phone"] = agent_phone
                         existing["sources"] = merged
                         existing.update({k: v for k, v in patch_fields.items() if v is not None})
                         await queue.put({
@@ -1237,6 +1302,8 @@ class UnifiedCandidateSearch:
                             "title": entry.get("current_title") or "",
                             "headline": entry.get("current_title") or "",
                             "location": entry.get("location") or "",
+                            "email": agent_email,
+                            "phone": agent_phone,
                             "profile_url": url,
                             "source": "LinkedIn-DeepSearch",
                             "sources": ["LinkedIn-DeepSearch"],
@@ -1271,14 +1338,22 @@ class UnifiedCandidateSearch:
                                 "passes": True, "matched": [], "missing": [],
                                 "excluded": [], "score": 0,
                             }
-                        # Deep-only candidates are born without contact info and
-                        # never pass through the Pass A enrichment block, so they
-                        # surfaced with blank email/phone. Run the same
-                        # ZoomInfo→Apollo enrichment (Exa = source of truth) here,
-                        # before emit so dedup sees the resolved contact fields.
-                        await self._apply_contact_enrichment(
-                            new_cand, criteria, overwrite=True
-                        )
+                        # Deep-only candidates never pass through the Pass A
+                        # enrichment block. The agent run may have supplied
+                        # email/phone already (contact fields in the output
+                        # schema); only fall through to ZoomInfo→Apollo when
+                        # something is still missing — mirrors the launch-time
+                        # chain's first-hit-wins short-circuit and preserves
+                        # the per-job enrichment budget. overwrite=True keeps
+                        # ZoomInfo/Apollo as the source of truth for whatever
+                        # fields they do return.
+                        if not (
+                            str(new_cand.get("email") or "").strip()
+                            and str(new_cand.get("phone") or "").strip()
+                        ):
+                            await self._apply_contact_enrichment(
+                                new_cand, criteria, overwrite=True
+                            )
                         await emit_candidate(new_cand, assessment)
                         new_found += 1
             except Exception as e:
@@ -5052,43 +5127,22 @@ class UnifiedCandidateSearch:
                 return True
         return False
 
-    @staticmethod
-    def _role_hint_from_criteria(criteria: SearchCriteria) -> str:
-        """Pick up to two `must` titles from the criteria and join with OR.
-
-        Used to anchor Exa/Dice queries when the boolean string is empty.
-        Falls back to "" so the caller can use its own default — Exa uses
-        "candidate", Dice uses "resume profile". Never hardcodes a role
-        family (the previous "software engineer OR developer" default
-        biased non-tech searches into engineering candidates).
-        """
-        titles: List[str] = []
-        for item in criteria.title_criteria or []:
-            if not isinstance(item, dict):
-                continue
-            if item.get("match_type", "must") == "exclude":
-                continue
-            value = str(item.get("value", "")).strip()
-            if value:
-                titles.append(value)
-            if len(titles) >= 2:
-                break
-        if not titles:
-            return ""
-        if len(titles) == 1:
-            return f'"{titles[0]}"'
-        return " OR ".join(f'"{t}"' for t in titles)
-
     async def _search_dice(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
-            skills_values = criteria.sourcing_skill_values()
-            boolean_string = criteria.boolean_string or self._build_boolean_string(criteria)
+            # Structured criteria feed natural-language queries (one role per
+            # search — Exa doesn't parse boolean syntax). Only the recruiter-
+            # edited boolean is passed as a last-resort term source; the
+            # auto-built one is derived from these same fields and adds
+            # nothing. US scoping rides on `location`, never empty here.
             candidates = await self.exa_service.search_dice_candidates(
-                skills=skills_values,
+                skills=criteria.skill_only_values(),
                 location=self._search_location_for_source(criteria),
                 limit=min(criteria.page_size, 50),
-                boolean_string=self._scope_boolean_to_us(boolean_string),
-                role_hint=self._role_hint_from_criteria(criteria),
+                boolean_string=criteria.boolean_string or "",
+                titles=criteria.sourcing_titles(),
+                min_experience_years=criteria.min_experience_years,
+                companies=criteria.companies,
+                keywords=criteria.keywords,
             )
             return {"candidates": candidates, "source_type": "Dice"}
         except Exception as e:
@@ -5109,8 +5163,6 @@ class UnifiedCandidateSearch:
 
     async def _search_exa(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
-            skills_values = criteria.sourcing_skill_values()
-            boolean_string = criteria.boolean_string or self._build_boolean_string(criteria)
             # Floor at 30 so the Exa Research Pass B has a meaningful seed-URL
             # sample even when the recruiter's page_size is small, and cap at
             # 50 (Exa's per-call sweet spot for people search before relevance
@@ -5118,12 +5170,20 @@ class UnifiedCandidateSearch:
             # candidates surface and the deep-search pass discovers little.
             requested = criteria.page_size or 30
             exa_limit = min(50, max(30, requested))
+            # Structured criteria feed natural-language queries (one role per
+            # search — Exa doesn't parse boolean syntax). Only the recruiter-
+            # edited boolean is passed as a last-resort term source; the
+            # auto-built one is derived from these same fields and adds
+            # nothing. US scoping rides on `location`, never empty here.
             candidates = await self.exa_service.search_candidates(
-                skills=skills_values,
+                skills=criteria.skill_only_values(),
                 location=self._search_location_for_source(criteria),
                 limit=exa_limit,
-                boolean_string=self._scope_boolean_to_us(boolean_string),
-                role_hint=self._role_hint_from_criteria(criteria),
+                boolean_string=criteria.boolean_string or "",
+                titles=criteria.sourcing_titles(),
+                min_experience_years=criteria.min_experience_years,
+                companies=criteria.companies,
+                keywords=criteria.keywords,
             )
             # Open-to-Work enrichment via Apify (mirrors Hoonrai/Revelio path).
             # Cache-first: fills `open_to_work` for any LinkedIn URL already

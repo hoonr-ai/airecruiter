@@ -23,7 +23,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite://")
 import pytest  # noqa: E402
 
 from services import zip_index  # noqa: E402
-from services.exa_service import _exa_query_from_boolean, _strip_zip_for_query  # noqa: E402
+from services.exa_service import compose_people_query, _strip_zip_for_query  # noqa: E402
 from services.jobdiva_boolean_translator import (  # noqa: E402
     count_location_clauses,
     rewrite_location_clauses_to_zip_dialect,
@@ -335,7 +335,9 @@ def test_strip_zip_for_query():
     assert _strip_zip_for_query("") == ""
 
 
-def test_exa_query_appends_location_without_zip():
-    q = _exa_query_from_boolean('"Data Engineer"', [], "Tempe, AZ 85281, United States")
+def test_people_query_drops_zip_from_location():
+    # The NL people-query (used by both Exa search + deep-research) must not
+    # carry a zip — LinkedIn location lines never show them.
+    q = compose_people_query("Data Engineer", location="Tempe, AZ 85281, United States")
     assert "85281" not in q
-    assert "located in Tempe, AZ, United States" in q
+    assert "based in Tempe, AZ, United States" in q

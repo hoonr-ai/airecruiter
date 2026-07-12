@@ -139,6 +139,34 @@ def test_query_builder() -> int:
     return f
 
 
+def test_sanitize_agent_contact() -> int:
+    """Gates that keep junk agent output (Pass B deep-search contacts) off
+    candidate rows."""
+    f = 0
+    out = ce.sanitize_agent_contact("jane@acme.com", "+1 (415) 555-0100")
+    f += _check("valid pair passes, phone normalised", out == ("jane@acme.com", "+14155550100"), str(out))
+    out = ce.sanitize_agent_contact("not-an-email", "12345")
+    f += _check("junk email + short phone rejected", out == ("", ""), str(out))
+    out = ce.sanitize_agent_contact(None, None)
+    f += _check("None pair -> empty strings", out == ("", ""), str(out))
+    out = ce.sanitize_agent_contact("", "415-555-0100")
+    f += _check("phone-only kept", out == ("", "4155550100"), str(out))
+    return f
+
+
+def test_schema_descriptions() -> int:
+    """Contact-field descriptions in the outputSchema are what activate the
+    Exa Agent's contact-enrichment tool (per Exa engineering) — pin them so
+    a schema refactor can't silently deactivate enrichment."""
+    f = 0
+    props = ce._EXA_CONTACT_SCHEMA["properties"]["contact"]["properties"]
+    f += _check("email field has a description",
+                bool(str(props.get("email", {}).get("description") or "").strip()), str(props))
+    f += _check("phone field has a description",
+                bool(str(props.get("phone", {}).get("description") or "").strip()), str(props))
+    return f
+
+
 def run() -> int:
     failures = 0
     print("[test] extract_exa_contact_fields")
@@ -149,6 +177,10 @@ def run() -> int:
     failures += test_zoominfo_email_gating()
     print("[test] _build_exa_contact_query")
     failures += test_query_builder()
+    print("[test] sanitize_agent_contact")
+    failures += test_sanitize_agent_contact()
+    print("[test] _EXA_CONTACT_SCHEMA descriptions")
+    failures += test_schema_descriptions()
     if failures:
         print(f"FAIL: {failures} check(s) failed")
         return 1
