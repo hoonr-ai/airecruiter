@@ -426,12 +426,13 @@ class AutoAssignService:
             resume_match_filters = []
             sourcing_filters = {}
             jobdiva_numeric_id = None
+            job_location_type = ""
 
             try:
                 with self._get_db_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
-                            "SELECT resume_match_filters, sourcing_filters, jobdiva_id, status FROM monitored_jobs "
+                            "SELECT resume_match_filters, sourcing_filters, jobdiva_id, status, location_type, city FROM monitored_jobs "
                             "WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
                             (job_id, job_id)
                         )
@@ -441,6 +442,9 @@ class AutoAssignService:
                             sourcing_filters = row[1] if isinstance(row[1], dict) else (json.loads(row[1]) if row[1] else {})
                             jobdiva_ref_id = row[2]
                             job_status = row[3]
+                            job_location_type = str(row[4] or "").strip()
+                            if not job_location_type and str(row[5] or "").strip().upper() == "REMOTE":
+                                job_location_type = "Remote"
 
                             # Skip if job is clearly inactive
                             if job_status and job_status.lower() in ['closed', 'cancelled', 'filled', 'inactive']:
@@ -486,6 +490,7 @@ class AutoAssignService:
                 companies=sourcing_filters.get("companies") or [],
                 resume_match_filters=resume_match_filters,
                 location=primary_location,
+                location_type=job_location_type or "Unspecified",
                 # Capped at 100 (was 500). The 15-min auto-sync doesn't need
                 # to pull half a thousand applicants per cycle — JobDiva
                 # typically returns <50 fresh hits between cycles, and the

@@ -546,6 +546,17 @@ export function CandidateMatchTable({
                             </span>
                           </span>
                         )}
+                        {candidate.location_out_of_radius &&
+                          typeof candidate.distance_miles === "number" &&
+                          candidate.distance_miles > 0 &&
+                          candidate.distance_miles < 9000 && (
+                            <span
+                              className="inline-flex items-center w-fit px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 text-[10px] font-semibold border border-amber-200"
+                              title="Outside the search radius (straight-line distance from the job location)"
+                            >
+                              ~{Math.round(candidate.distance_miles)} mi away
+                            </span>
+                          )}
                       </div>
                     ) : awaitingDetails(candidate) ? (
                       <Skeleton className="h-4 w-28" data-testid="shimmer-location" />

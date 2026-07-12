@@ -994,6 +994,8 @@ class JobDivaService:
         countries: Optional[List[str]] = None,
         states: Optional[List[str]] = None,
         page_number: int = 0,
+        zip_code: str = "",
+        within_miles: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search for candidates.
@@ -1025,6 +1027,8 @@ class JobDivaService:
             countries=countries or [],
             states=states or [],
             page_number=page_number or 0,
+            zip_code=zip_code or "",
+            within_miles=within_miles,
         )
 
     async def _search_job_applicants(self, job_id: str, limit: int, token: str, skills: List[Any] = None, location: str = "") -> List[Dict[str, Any]]:
@@ -1099,6 +1103,7 @@ class JobDivaService:
                         
                         home_city = get_field(c, ["CITY", "city", "locationCity"]) or ""
                         home_state = get_field(c, ["STATE", "state", "locationState"]) or ""
+                        home_zip = get_field(c, ["ZIPCODE", "zipcode", "ZIP", "zip", "postalCode", "POSTALCODE"]) or ""
                         work_city = get_field(c, ["workCity", "WORKCITY"]) or ""
                         work_state = get_field(c, ["workState", "WORKSTATE"]) or ""
                         work_location_str = ", ".join(p for p in [work_city, work_state] if p).strip()
@@ -1115,6 +1120,7 @@ class JobDivaService:
                             "email": _get_candidate_email(c),
                             "city": home_city,
                             "state": home_state,
+                            "zipcode": home_zip,
                             "location": home_location_str,
                             "work_city": work_city,
                             "work_state": work_state,
@@ -1531,6 +1537,8 @@ class JobDivaService:
         countries: Optional[List[str]] = None,
         states: Optional[List[str]] = None,
         page_number: int = 0,
+        zip_code: str = "",
+        within_miles: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search JobDiva Talent Search using the generated Boolean string.
@@ -1551,13 +1559,18 @@ class JobDivaService:
         from services.jobdiva_boolean_translator import (
             translate_for_jobdiva,
             extract_skill_years,
+            rewrite_location_clauses_to_zip_dialect,
+            count_location_clauses,
         )
+        from core import sourcing_config as _sc
 
         jd_results = []
         raw_search_value = (
             boolean_string.strip()
             if boolean_string
-            else self._build_talent_boolean(skills, location)
+            else self._build_talent_boolean(
+                skills, location, zip_code=zip_code, within_miles=within_miles
+            )
         )
 
         # Pull { skill: years } hints from the passed `skills` payload so
@@ -1573,24 +1586,59 @@ class JobDivaService:
             recent_days=recent_days,
         )
 
+        # Optional: turn quoted frontend location clauses into JobDiva's
+        # native zip-radius dialect. Off by default — probe-gated.
+        if getattr(_sc, "JOBDIVA_BOOLEAN_ZIP_DIALECT_ENABLED", False):
+            translated_search_value = rewrite_location_clauses_to_zip_dialect(
+                translated_search_value
+            )
+
         url = f"{self.api_url}/apiv2/jobdiva/TalentSearch"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         skills_value = translated_search_value or raw_search_value
         countries_str = ",".join([c for c in (countries or []) if c]).strip()
         states_str = ",".join([s for s in (states or []) if s]).strip()
-        payload = {
-            "talentSearchDef": {
-                "skills": skills_value,
-                "countries": countries_str,
-                "states": states_str,
-                "pageNumber": int(page_number or 0),
-                "pageSize": limit,
-            }
+        talent_search_def: Dict[str, Any] = {
+            "skills": skills_value,
+            "countries": countries_str,
+            "states": states_str,
+            "pageNumber": int(page_number or 0),
+            "pageSize": limit,
         }
+        # Structured zip-radius (swagger: TalentSearchDef.zipCode/withinMiles).
+        # Harmless if the server ignores them; a real geo filter if honored.
+        # When the zip rides along, states is blanked: a border-metro radius
+        # legitimately spans states (NYC ↔ NJ), and for zip-bearing wizard
+        # locations production has never sent states anyway (the old parser
+        # dropped them), so this is the no-recall-regression choice.
+        # Skipped for multi-location searches: the structured field can only
+        # carry ONE anchor, and pinning a `(A within 25 mi OR B within 25 mi)`
+        # boolean to chip A's zip would exclude chip B's candidates
+        # server-side. Geo stays in the boolean for those.
+        zip_radius_miles = 0
+        zip5 = str(zip_code or "").strip()
+        if (
+            getattr(_sc, "JOBDIVA_ZIP_RADIUS_ENABLED", True)
+            and len(zip5) == 5 and zip5.isdigit()
+            and count_location_clauses(raw_search_value) < 2
+        ):
+            # 2x headroom: the server-side filter (if honored) is a COARSE
+            # recall gate — it must not empty the UI's BEYOND-radius
+            # soft-keep bucket. The client-side verdict still measures true
+            # distance against the recruiter's exact radius; this just cuts
+            # the wrong-coast noise while keeping the near-miss band.
+            zip_radius_miles = max(1, min(100, int(within_miles or 25) * 2))
+            talent_search_def["zipCode"] = zip5
+            talent_search_def["withinMiles"] = zip_radius_miles
+            talent_search_def["states"] = ""
+        payload = {"talentSearchDef": talent_search_def}
 
         logger.debug(
             f"JobDiva Talent Search — skills: {skills_value!r} | "
-            f"countries={countries_str!r} states={states_str!r} "
+            f"countries={talent_search_def['countries']!r} "
+            f"states={talent_search_def['states']!r} "
+            f"zipCode={talent_search_def.get('zipCode', '')!r} "
+            f"withinMiles={zip_radius_miles or ''} "
             f"pageNumber={page_number} pageSize={limit} | "
             f"raw: {raw_search_value!r}"
         )
@@ -1688,6 +1736,7 @@ class JobDivaService:
 
                     city = get_field(c, ["city", "locationCity", "CITY"]) or ""
                     state = get_field(c, ["state", "locationState", "STATE"]) or ""
+                    zipcode = get_field(c, ["zipcode", "ZIPCODE", "zip", "ZIP", "postalCode", "POSTALCODE"]) or ""
                     location_str = ", ".join([p for p in [city, state] if p]).strip()
 
                     # Abstract: prefer an explicit summary/comments field if JobDiva
@@ -1739,6 +1788,7 @@ class JobDivaService:
                         "email": get_field(c, ["email", "EMAIL"]) or "",
                         "city": city,
                         "state": state,
+                        "zipcode": zipcode,
                         "location": location_str,
                         "work_city": "",
                         "work_state": "",
@@ -1910,6 +1960,13 @@ class JobDivaService:
             candidate["address1"] = addr
             counters["address1"] = counters.get("address1", 0) + 1
 
+        # Zip: detail wins (same rationale as city/state below) — feeds the
+        # offline zip-radius match in unified_candidate_search.
+        detail_zip = take(["zipcode", "ZIPCODE", "zip", "ZIP", "postalCode", "POSTALCODE", "postal_code"])
+        if detail_zip and detail_zip != candidate.get("zipcode"):
+            candidate["zipcode"] = detail_zip
+            counters["zipcode"] = counters.get("zipcode", 0) + 1
+
         linkedin = take(["linkedinUrl", "LINKEDINURL", "linkedin", "LINKEDIN", "linkedIn", "LINKEDIN_URL"])
         if linkedin:
             candidate["linkedin_url"] = linkedin
@@ -1958,9 +2015,16 @@ class JobDivaService:
         if city_changed or state_changed:
             counters["location"] = counters.get("location", 0) + 1
 
-    def _build_talent_boolean(self, skills: List[Any], location: str) -> str:
+    def _build_talent_boolean(
+        self,
+        skills: List[Any],
+        location: str,
+        zip_code: str = "",
+        within_miles: Optional[int] = None,
+    ) -> str:
         terms = []
         excludes = []
+        geo_clause = ""
         for skill in skills or []:
             name = skill.get("value") if isinstance(skill, dict) else str(skill)
             match_type = skill.get("match_type", "must") if isinstance(skill, dict) else "must"
@@ -1972,10 +2036,23 @@ class JobDivaService:
             else:
                 terms.append(term)
         if location and location.strip():
-            terms.append(f'"{location.strip()}"')
+            from core import sourcing_config as _sc
+            if (
+                getattr(_sc, "JOBDIVA_BOOLEAN_ZIP_DIALECT_ENABLED", False)
+                and zip_code and str(zip_code).strip().isdigit()
+            ):
+                # Native geo dialect instead of a location keyword — the
+                # quoted form only matches resumes containing the literal
+                # string (probe-gated, same flag as the translator rewrite).
+                miles = max(1, min(100, int(within_miles or 25)))
+                geo_clause = f"Within {miles} miles of {str(zip_code).strip()}"
+            else:
+                terms.append(f'"{location.strip()}"')
         search_value = " AND ".join(terms) if terms else "*"
         if excludes:
             search_value = f"{search_value} NOT ({' OR '.join(excludes)})"
+        if geo_clause:
+            search_value = f"{search_value} {geo_clause}"
         return search_value
 
     def _calculate_match_score(self, candidate: Dict[str, Any], required_skills: List[Any] = None) -> int:

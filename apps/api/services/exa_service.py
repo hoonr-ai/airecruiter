@@ -164,6 +164,23 @@ def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
 # The helpers below compose those sentences from structured criteria and only
 # fall back to flattening a legacy boolean string when nothing structured is
 # available.
+
+
+def _strip_zip_for_query(location: str) -> str:
+    """Drop zip codes from a location destined for Exa query/prompt text.
+
+    LinkedIn profile location lines never show zips ("Tempe, Arizona,
+    United States"), so a zip in the neural query is pure noise. The zip
+    still drives the offline radius post-filter — it just doesn't belong
+    in the NL text.
+    """
+    cleaned = re.sub(r"\b\d{5}(?:-\d{4})?\b", "", str(location or ""))
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+,", ",", cleaned)
+    cleaned = re.sub(r",\s*,", ",", cleaned)
+    return cleaned.strip(" ,")
+
+
 _BOOLEAN_OPERATOR_RE = re.compile(r"^(?:AND|OR|NOT|W/\d+)$", re.IGNORECASE)
 # Filler words that survive flattening a boolean string but carry no signal
 # as standalone query terms.
@@ -303,7 +320,9 @@ def compose_people_query(
         query += f", who has worked at {_join_natural(company_list)}"
     if keyword_list:
         query += f", {_join_natural(keyword_list)}"
-    loc = str(location or "").strip().strip(",")
+    # Strip zips — LinkedIn location lines never show them, so a zip in the
+    # NL query is noise. The zip still drives the offline radius post-filter.
+    loc = _strip_zip_for_query(location)
     if loc:
         if loc.lower() == "united states":
             loc = "the United States"
@@ -388,7 +407,15 @@ def build_deep_research_output_schema(include_contact_fields: Optional[bool] = N
         "linkedin_url": {"type": "string"},
         "name": {"type": "string"},
         "current_title": {"type": "string"},
-        "location": {"type": "string"},
+        "location": {
+            "type": "string",
+            "description": (
+                "Candidate's CURRENT residence from the LinkedIn profile's own "
+                "location line, e.g. 'Tempe, Arizona, United States' or 'Greater "
+                "Phoenix Area'. Not a company HQ, not a past position's city. "
+                "Empty string if the profile shows no location."
+            ),
+        },
         "last_activity": {"type": ["string", "null"]},
         "follower_count": {"type": ["integer", "null"]},
         "recent_companies": {
@@ -673,6 +700,7 @@ class ExaService:
         skills: List[str],
         location: str,
         seed_urls: List[str],
+        within_miles: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Exa Agent API (Websets 2.0) pass — agentic enrichment + discovery.
 
@@ -741,10 +769,36 @@ class ExaService:
             if include_contacts
             else ""
         )
+        # Residency requirement: bias the agent toward candidates who actually
+        # live in/near the job location and to report the profile's true
+        # location (not a company HQ or a past job's city). Skipped for
+        # US-wide / remote searches.
+        query_location = _strip_zip_for_query(location)
+        radius_hint = ""
+        if query_location and query_location.lower() not in (
+            "united states", "the united states", "usa", "us",
+        ):
+            radius = max(1, min(100, int(within_miles or 25)))
+            radius_hint = (
+                f"LOCATION REQUIREMENT: candidates must CURRENTLY live in or within "
+                f"~{radius} miles of {query_location}. Verify against the LinkedIn "
+                "profile's own location line — a past job, employer HQ, or university "
+                "in that city does NOT count. Prefer verified-local candidates; if you "
+                "cannot verify, still include the candidate but report the location "
+                "string their profile actually shows. "
+            )
+        location_clause = (
+            "  6. location: the candidate's CURRENT residence exactly as the "
+            "LinkedIn profile's location line shows it (e.g. 'Tempe, Arizona, "
+            "United States' or 'Greater Phoenix Area'). Never substitute a "
+            "company HQ or a past position's city; leave empty only if the "
+            "profile shows no location at all.\n"
+        )
         query = (
             f"Find LinkedIn profiles of candidates matching this role: {role_line}. "
             "Prefer candidates who are currently active in this role — skip retired "
             "or long-inactive profiles. "
+            + radius_hint +
             "Also enrich every profile passed in `input.data`. "
             "For each candidate, you MUST attempt to extract ALL of the following — "
             "treat null as a last resort, not a default:\n"
@@ -763,6 +817,7 @@ class ExaService:
             f"  4. fit_rationale: one sentence (≤300 chars) on why this candidate's "
             f"titles fit the role \"{role_text or jd_role}\".\n"
             f"{contact_clause}"
+            f"{location_clause}"
             "Return at least 30 candidates with linkedin_url populated. Do not "
             "drop candidates just because one field is hard to find — partial "
             "enrichment is better than skipping them."

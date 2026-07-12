@@ -322,7 +322,7 @@ async def _run_pipeline_trace(
 
     # Mirror production: location stripped, translated boolean built later
     # inside _search_talent_pool via the translator.
-    countries, states = service._resolve_jobdiva_geo(criteria)
+    countries, states, _geo_zip = service._resolve_jobdiva_geo(criteria)
     prod_boolean = service._strip_location_from_boolean(
         criteria.boolean_string or service._build_boolean_string(criteria),
         criteria.location,
@@ -814,7 +814,7 @@ async def _main_async(args: argparse.Namespace) -> int:
     # Build the canonical inputs once.
     service = UnifiedCandidateSearch()
     criteria = _build_criteria_from_payload(payload)
-    countries, states = service._resolve_jobdiva_geo(criteria)
+    countries, states, _geo_zip = service._resolve_jobdiva_geo(criteria)
     raw_boolean = criteria.boolean_string or service._build_boolean_string(criteria)
 
     # Probe A — production mirror
