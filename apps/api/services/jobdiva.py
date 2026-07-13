@@ -1133,7 +1133,9 @@ class JobDivaService:
                             "resume_text": self._extract_resume_text(c),
                             "resume_id": get_field(c, ["RESUMEID", "resumeId", "resume_id"]),
                             "received": get_field(c, ["RECEIVED", "received"]),
-                            "available": get_field(c, ["AVAILABLE", "available"]),
+                            "available": get_field(c, ["AVAILABLE", "available", "STATUS", "status"]),
+                            "availability_status": get_field(c, ["AVAILABLE", "available", "STATUS", "status"]),
+                            "employee_status": get_field(c, ["EMPLOYEESTATUS", "employeeStatus", "CURRENTEMPLOYEE", "currentEmployee", "ASSIGNMENTSTATUS", "assignmentStatus"]),
                             "lastnote": get_field(c, ["LASTNOTE", "lastNote"]),
                             "phone": _get_candidate_phone(c)
                         })
@@ -1378,6 +1380,8 @@ class JobDivaService:
             return [], criteria_unconfigured
 
         _norm_t0 = time.perf_counter()
+        if candidates:
+            logger.info(f"JobAgentSearch RAW CANDIDATE KEYS: {list(candidates[0].keys())}")
         for api_rank, c in enumerate(candidates):
             candidate_id = str(
                 get_field(c, ["candidateId", "CANDIDATEID", "id", "ID"]) or ""
@@ -1387,6 +1391,11 @@ class JobDivaService:
 
             first_name = get_field(c, ["firstName", "firstname", "FIRSTNAME"]) or "Unknown"
             last_name = get_field(c, ["lastName", "lastname", "LASTNAME"]) or "Candidate"
+
+            # Targeted debug for Carol Lynn
+            if "carol" in first_name.lower() and "lynn" in last_name.lower():
+                logger.info(f"CAROL_LYNN_RAW candidate_id={candidate_id} raw_keys={list(c.keys())} status={c.get('status')} available={c.get('available')} qualifications={c.get('qualifications')}")
+
             if not is_valid_candidate_name(first_name, last_name):
                 logger.warning("Dropping JobAgent candidate with invalid name: first=%r last=%r id=%r", first_name, last_name, candidate_id)
                 continue
@@ -1437,10 +1446,36 @@ class JobDivaService:
                 "received": get_field(c, ["received", "RECEIVED"]),
                 "available": get_field(c, ["available", "AVAILABLE"]) or "",
                 "availability_status": get_field(c, ["available", "AVAILABLE"]) or "",
+                "employee_status": get_field(
+                    c,
+                    [
+                        "EMPLOYEESTATUS",
+                        "employeeStatus",
+                        "CURRENTEMPLOYEE",
+                        "currentEmployee",
+                        "ASSIGNMENTSTATUS",
+                        "assignmentStatus",
+                    ],
+                ),
+                "qualifications": get_field(c, ["qualifications", "QUALIFICATIONS"]) or [],
                 "abstract": abstract,
                 "lastnote": get_field(c, ["lastNote", "LASTNOTE"]),
                 "phone": _get_candidate_phone(c),
             }
+
+            # Map the numeric status field to employee_status string:
+            # 0 = normal, 1 = Current Employee, 2 = Past Employee
+            raw_status = get_field(c, ["status", "STATUS"])
+            if raw_status is not None:
+                try:
+                    status_int = int(raw_status)
+                    if status_int == 1 and not record.get("employee_status"):
+                        record["employee_status"] = "Current Employee"
+                        logger.info(f"JobAgent status=1 → marking candidate {candidate_id} as Current Employee")
+                    elif status_int == 2 and not record.get("employee_status"):
+                        record["employee_status"] = "Past Employee"
+                except (ValueError, TypeError):
+                    pass
 
             if require_resume and not has_resume:
                 dropped_no_resume += 1
@@ -1804,6 +1839,17 @@ class JobDivaService:
                         "recent_availability": recent_availability,
                         "available": availability_status,
                         "availability_status": availability_status,
+                        "employee_status": get_field(
+                            c,
+                            [
+                                "EMPLOYEESTATUS",
+                                "employeeStatus",
+                                "CURRENTEMPLOYEE",
+                                "currentEmployee",
+                                "ASSIGNMENTSTATUS",
+                                "assignmentStatus",
+                            ],
+                        ),
                         "abstract": raw_abstract,
                         "profile_url": profile_url,
                         "lastnote": get_field(c, ["lastNote", "LASTNOTE"]),
@@ -2014,6 +2060,31 @@ class JobDivaService:
             candidate["location"] = ", ".join([p for p in parts if p]).strip()
         if city_changed or state_changed:
             counters["location"] = counters.get("location", 0) + 1
+
+        emp_status = take([
+            "EMPLOYEESTATUS",
+            "employeeStatus",
+            "CURRENTEMPLOYEE",
+            "currentEmployee",
+            "ASSIGNMENTSTATUS",
+            "assignmentStatus",
+        ])
+        if emp_status and not candidate.get("employee_status"):
+            candidate["employee_status"] = emp_status
+
+        avail_val = take(["AVAILABLE", "available", "STATUS", "status"])
+        if avail_val and not candidate.get("available"):
+            candidate["available"] = avail_val
+            candidate["availability_status"] = avail_val
+
+        quals = detail.get("qualifications") or detail.get("QUALIFICATIONS") or []
+        if isinstance(quals, list) and quals and not candidate.get("qualifications"):
+            candidate["qualifications"] = quals
+            for q in quals:
+                if isinstance(q, dict):
+                    qval = str(q.get("qualificationValue") or q.get("value") or "").strip()
+                    if "current employee" in qval.lower():
+                        candidate["employee_status"] = "Current Employee"
 
     def _build_talent_boolean(
         self,
@@ -2393,6 +2464,47 @@ class JobDivaService:
             len(ids), len(chunks), chunk_size, conc, len(results), _det_ms,
         )
         return results
+
+    async def _fetch_candidate_notes_action_types_batch(
+        self,
+        token: str,
+        candidate_ids: List[str],
+        chunk_size: int = 50,
+    ) -> Dict[str, List[str]]:
+        """Fetch CandidateNotesListDetail for candidates and extract their ACTIONTYPEs."""
+        ids = [str(cid).strip() for cid in (candidate_ids or []) if cid and str(cid).strip()]
+        if not ids:
+            return {}
+
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        endpoint = f"{self.api_url}/apiv2/bi/CandidateNotesListDetail"
+        chunks = [ids[i:i + chunk_size] for i in range(0, len(ids), chunk_size)]
+        results: Dict[str, List[str]] = {}
+
+        for chunk in chunks:
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.get(
+                        endpoint,
+                        params={"candidateIds": chunk},
+                        headers=headers,
+                    )
+                if response.status_code == 200:
+                    data = response.json()
+                    payload = data.get("data") if isinstance(data, dict) else data
+                    if isinstance(payload, list):
+                        for note_row in payload:
+                            if not isinstance(note_row, dict): continue
+                            cid = str(note_row.get("CONTACTID") or note_row.get("CANDIDATEID") or "")
+                            action_type = str(note_row.get("ACTIONTYPE") or "").strip()
+                            if cid and action_type:
+                                if cid not in results:
+                                    results[cid] = []
+                                results[cid].append(action_type)
+            except Exception as e:
+                logger.warning(f"CandidateNotesListDetail fetch failed: {e}")
+        return results
+
 
     async def _fetch_resume_text_batch(
         self,
@@ -4618,7 +4730,62 @@ class JobDivaService:
             logger.error(f"❌ get_job_submittals exception: {e}")
         return []
 
-    async def get_candidate_qualifications(self, candidate_id) -> List[Dict[str, Any]]:
+    async def _fetch_candidate_qualifications_batch(
+        self,
+        token: str,
+        candidate_ids: List[str],
+        chunk_size: int = 50,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Fetch CandidatesQualificationsDetail in batch and group by candidate ID."""
+        ids = [str(cid).strip() for cid in (candidate_ids or []) if cid and str(cid).strip()]
+        if not ids:
+            return {}
+
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        endpoint = f"{self.api_url}/apiv2/bi/CandidatesQualificationsDetail"
+        chunks = [ids[i:i + chunk_size] for i in range(0, len(ids), chunk_size)]
+        results: Dict[str, List[Dict[str, Any]]] = {}
+
+        for chunk in chunks:
+            try:
+                numeric_ids = [int(cid) for cid in chunk if cid.isdigit()]
+                if not numeric_ids:
+                    continue
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.get(
+                        endpoint,
+                        params={"candidateIds": numeric_ids},
+                        headers=headers,
+                    )
+                if response.status_code == 200:
+                    data = response.json()
+                    payload = data if isinstance(data, list) else (data.get("data") or [])
+                    if payload and len(payload) > 0:
+                        sample = payload[0] if isinstance(payload[0], dict) else {}
+                        logger.info(f"CandidatesQualificationsDetail sample keys: {list(sample.keys())[:10]}")
+                    for q_row in payload:
+                        if not isinstance(q_row, dict): continue
+                        # Try every possible candidate ID key JobDiva might use
+                        cid = str(
+                            q_row.get("CANDIDATEID") or
+                            q_row.get("candidateId") or
+                            q_row.get("CONTACTID") or
+                            q_row.get("contactId") or
+                            q_row.get("ID") or
+                            q_row.get("id") or ""
+                        )
+                        if cid:
+                            if cid not in results:
+                                results[cid] = []
+                            results[cid].append(q_row)
+                else:
+                    logger.warning(f"CandidatesQualificationsDetail HTTP {response.status_code} for ids={chunk[:3]}")
+            except Exception as e:
+                logger.warning(f"CandidatesQualificationsDetail batch fetch failed: {e}")
+        logger.info(f"CandidatesQualificationsDetail: fetched qualifications for {len(results)} candidates out of {len(ids)} requested")
+        return results
+
+    async def get_candidate_qualifications(self, candidate_id: str) -> List[Dict[str, Any]]:
         """
         Fetch qualification history for a candidate from JobDiva BI endpoint.
         Uses /apiv2/bi/CandidatesQualificationsDetail.

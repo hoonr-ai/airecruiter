@@ -13,7 +13,7 @@ Auto-creates the engage_interview_audit table on startup.
 import asyncio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Tuple
 import psycopg2.extras
 import json
 import logging
@@ -126,6 +126,129 @@ def _parse_json_list(val) -> list:
         except Exception:
             return [e.strip() for e in val.split(",") if e.strip()]
     return []
+
+
+def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str = "") -> Tuple[bool, str]:
+    """Check if a candidate should be excluded from PAIR outreach.
+
+    Excludes:
+      1. Current Employee / Working through Pyramid Consulting
+      2. Offer Extended
+      3. Offer Accepted
+      4. Current Employee of the hiring client
+    """
+    if not candidate or not isinstance(candidate, dict):
+        return False, ""
+
+    data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
+    enhanced = data.get("enhanced_info") if isinstance(data.get("enhanced_info"), dict) else {}
+
+    for avail_field in [data.get("available"), candidate.get("available")]:
+        if avail_field is False or str(avail_field).strip().lower() == "false":
+            return True, "Current Employee (Pyramid / Unavailable)"
+
+    quals = data.get("qualifications") or candidate.get("qualifications") or enhanced.get("qualifications") or []
+    if isinstance(quals, list):
+        for q in quals:
+            if not isinstance(q, dict):
+                continue
+            q_val = str(q.get("qualificationValue") or q.get("value") or "").strip()
+            q_val_lower = q_val.lower()
+            if "current employee" in q_val_lower:
+                return True, "Current Employee (Pyramid)"
+            if "offer extended" in q_val_lower or "offer - extended" in q_val_lower:
+                return True, "Offer Extended"
+            if "offer accepted" in q_val_lower or "offer - accepted" in q_val_lower or q_val_lower in {"placed", "hired"}:
+                return True, "Offer Accepted"
+
+    status_strs = [
+        str(data.get("employee_status") or "").strip(),
+        str(data.get("available") or "").strip(),
+        str(data.get("availability_status") or "").strip(),
+        str(data.get("status") or "").strip(),
+        str(candidate.get("status") or "").strip(),
+    ]
+
+    for st in status_strs:
+        if not st:
+            continue
+        st_lower = st.lower()
+        if "offer extended" in st_lower or "offer - extended" in st_lower:
+            return True, "Offer Extended"
+        if "offer accepted" in st_lower or "offer - accepted" in st_lower or st_lower in {"placed", "hired"}:
+            return True, "Offer Accepted"
+        if "current employee" in st_lower:
+            return True, "Current Employee (Pyramid)"
+
+    current_companies = []
+    for c_str in [
+        data.get("current_company"),
+        enhanced.get("current_company"),
+        data.get("company"),
+        data.get("company_name"),
+    ]:
+        if c_str and str(c_str).strip():
+            current_companies.append(str(c_str).strip())
+
+    exp_list = data.get("company_experience") or enhanced.get("company_experience") or []
+    if isinstance(exp_list, list):
+        for exp in exp_list:
+            if isinstance(exp, dict):
+                end_raw = str(exp.get("end_date") or exp.get("endDate") or exp.get("to") or "").strip()
+                is_curr = exp.get("is_current") is True or exp.get("current") is True or not end_raw or "present" in end_raw.lower() or "current" in end_raw.lower()
+                if is_curr:
+                    comp = exp.get("company") or exp.get("company_name") or exp.get("employer") or exp.get("name")
+                    if comp and str(comp).strip():
+                        current_companies.append(str(comp).strip())
+
+    def _norm(name: str) -> str:
+        s = name.lower()
+        for char in ".,-_'\"()/":
+            s = s.replace(char, " ")
+        words = [
+            w
+            for w in s.split()
+            if w
+            not in {
+                "inc",
+                "llc",
+                "ltd",
+                "corp",
+                "corporation",
+                "co",
+                "company",
+                "plc",
+                "pvt",
+                "private",
+                "limited",
+                "technologies",
+                "technology",
+                "solutions",
+                "consulting",
+                "services",
+                "group",
+                "holdings",
+            }
+        ]
+        return " ".join(words).strip()
+
+    client_norm = _norm(client_name)
+
+    for comp in current_companies:
+        comp_norm = _norm(comp)
+        if not comp_norm:
+            continue
+        if "pyramid" in comp_norm.split():
+            return True, "Current Employee (Pyramid)"
+        if client_norm and client_norm != "external" and len(client_norm) >= 3:
+            if comp_norm == client_norm or (
+                len(client_norm) >= 4
+                and len(comp_norm) >= 4
+                and (client_norm in comp_norm or comp_norm in client_norm)
+            ):
+                return True, "Employed by Hiring Client"
+
+    return False, ""
 
 
 def _format_normalized_score_100(score: Any, total: Any) -> Optional[str]:
@@ -1131,6 +1254,86 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 f"engage idempotency: skipped {len(skipped_already_sent)} already-sent candidates for job {job_id_from_payload}"
             )
 
+        if request.real_candidate_ids:
+            excluded_candidate_ids = set()
+            try:
+                _excl_conn = _get_db_connection()
+                try:
+                    _excl_cur = _excl_conn.cursor()
+                    _excl_cur.execute(
+                        """
+                        SELECT customer_name
+                        FROM monitored_jobs
+                        WHERE job_id = %s OR jobdiva_id = %s
+                        LIMIT 1
+                        """,
+                        (str(job_id_from_payload or ""), str(job_id_from_payload or "")),
+                    )
+                    _excl_client_row = _excl_cur.fetchone()
+                    _excl_client = (
+                        str(_excl_client_row[0])
+                        if _excl_client_row and _excl_client_row[0]
+                        else ""
+                    )
+
+                    _excl_cur.execute(
+                        """
+                        SELECT candidate_id, data
+                        FROM sourced_candidates
+                        WHERE candidate_id = ANY(%s)
+                          AND (jobdiva_id = %s OR jobdiva_id = %s)
+                        """,
+                        (
+                            list(request.real_candidate_ids),
+                            str(job_id_from_payload or ""),
+                            str(payload_obj.get("jd", {}).get("jobdiva_id") or ""),
+                        ),
+                    )
+                    for _row in _excl_cur.fetchall() or []:
+                        _cdata = _row[1] or {}
+                        if isinstance(_cdata, str):
+                            try:
+                                _cdata = json.loads(_cdata)
+                            except Exception:
+                                _cdata = {}
+                        _is_excl, _excl_reason = is_candidate_excluded_from_pair(
+                            _cdata, _excl_client
+                        )
+                        if _is_excl:
+                            logger.info(
+                                "send_bulk_interview skipping excluded candidate %s reason: %s",
+                                _row[0],
+                                _excl_reason,
+                            )
+                            excluded_candidate_ids.add(_row[0])
+                    _excl_cur.close()
+                finally:
+                    _excl_conn.close()
+            except Exception as _excl_err:
+                logger.warning(
+                    f"candidate exclusion check failed for job {job_id_from_payload}: {_excl_err}"
+                )
+
+            if excluded_candidate_ids:
+                kept_indices = [
+                    idx
+                    for idx, cid in enumerate(request.real_candidate_ids)
+                    if cid not in excluded_candidate_ids
+                ]
+                request.real_candidate_ids = [
+                    request.real_candidate_ids[i] for i in kept_indices
+                ]
+                existing_resumes = (
+                    payload_obj.get("resumes")
+                    if isinstance(payload_obj, dict)
+                    else None
+                )
+                if (
+                    isinstance(existing_resumes, list)
+                    and len(existing_resumes) >= max(kept_indices, default=-1) + 1
+                ):
+                    payload_obj["resumes"] = [existing_resumes[i] for i in kept_indices]
+
         if not request.real_candidate_ids:
             return {
                 "success": True,
@@ -1570,7 +1773,19 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
             # with a manual Engage click.
             cur.execute(
                 """
-                SELECT candidate_id
+                SELECT customer_name
+                FROM monitored_jobs
+                WHERE job_id = %s OR jobdiva_id = %s
+                LIMIT 1
+                """,
+                (str(job_id), str(job_id)),
+            )
+            client_row = cur.fetchone()
+            client_name = str(client_row["customer_name"]) if client_row and client_row.get("customer_name") else ""
+
+            cur.execute(
+                """
+                SELECT candidate_id, data
                 FROM sourced_candidates
                 WHERE candidate_id = ANY(%s)
                   AND (jobdiva_id = %s OR jobdiva_id = %s)
@@ -1579,7 +1794,19 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
                 """,
                 (list(candidate_ids), str(job_id), str(job_id)),
             )
-            eligible_ids = [str(r["candidate_id"]) for r in cur.fetchall()]
+            eligible_ids = []
+            for r in cur.fetchall():
+                c_data = r.get("data") or {}
+                if isinstance(c_data, str):
+                    try:
+                        c_data = json.loads(c_data)
+                    except Exception:
+                        c_data = {}
+                excluded, reason = is_candidate_excluded_from_pair(c_data, client_name)
+                if excluded:
+                    logger.info("auto_launch_skip candidate=%s job_id=%s reason=%s", r["candidate_id"], job_id, reason)
+                else:
+                    eligible_ids.append(str(r["candidate_id"]))
         finally:
             cur.close()
             conn.close()

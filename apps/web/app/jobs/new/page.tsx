@@ -1350,6 +1350,86 @@ function NewJobPageContent() {
     return shorter.length >= 4 && (cand.includes(client) || client.includes(cand));
   };
 
+  const getCandidateExclusionReason = (c: any): string => {
+    if (!c) return "";
+    const ei = c?.enhanced_info || c?.data?.enhanced_info || {};
+    const data = c?.data || c;
+
+    const offerStatus = String(c?.offer_status || data?.offer_status || "");
+    if (offerStatus.toLowerCase().includes("offer accepted")) return "Offer Accepted";
+    if (offerStatus.toLowerCase().includes("offer extended")) return "Offer Extended";
+
+    const actionTypes = c?.action_types || data?.action_types || [];
+    if (Array.isArray(actionTypes)) {
+      for (const at of actionTypes) {
+        const atLow = String(at).toLowerCase();
+        if (atLow.includes("offer accepted") || ["placed", "hired"].includes(atLow)) return "Offer Accepted";
+        if (atLow.includes("offer extended")) return "Offer Extended";
+      }
+    }
+
+    if (
+      c?.available === false ||
+      data?.available === false ||
+      String(c?.available).toLowerCase() === "false" ||
+      String(data?.available).toLowerCase() === "false"
+    ) {
+      return "Current Employee (Pyramid / Unavailable)";
+    }
+
+    const quals = data?.qualifications || c?.qualifications || ei?.qualifications || c?.data?.qualifications || [];
+    if (Array.isArray(quals)) {
+      for (const q of quals) {
+        if (!q || typeof q !== "object") continue;
+        // Check both camelCase (from some sources) and UPPERCASE (from BI endpoint)
+        const qVal = `${q.qualificationValue || ''} ${q.QUALVALUE || ''} ${q.value || ''} ${q.name || ''} ${q.QUALNAME || ''}`.toLowerCase();
+        if (qVal.includes("current employee")) return "Current Employee (Pyramid)";
+        if (qVal.includes("offer extended") || qVal.includes("offer - extended")) return "Offer Extended";
+        if (qVal.includes("offer accepted") || qVal.includes("offer - accepted") || ["placed", "hired"].includes(qVal)) {
+          return "Offer Accepted";
+        }
+      }
+    }
+
+    // JobDiva API: status=1 means Current Employee, status=2 means Past Employee
+    const numStatus = c?.status ?? data?.status;
+    if (numStatus === 1 || numStatus === "1") return "Current Employee (Pyramid)";
+
+    const statusStrs = [
+      String(c?.employee_status || ""),
+      String(data?.employee_status || ""),
+      String(c?.available || ""),
+      String(data?.available || ""),
+      String(c?.availability_status || ""),
+      String(data?.availability_status || ""),
+    ];
+    for (const st of statusStrs) {
+      if (!st) continue;
+      const stLower = st.toLowerCase();
+      if (stLower.includes("offer extended") || stLower.includes("offer - extended")) return "Offer Extended";
+      if (
+        stLower.includes("offer accepted") ||
+        stLower.includes("offer - accepted") ||
+        ["placed", "hired"].includes(stLower)
+      ) {
+        return "Offer Accepted";
+      }
+      if (stLower.includes("current employee")) return "Current Employee (Pyramid)";
+    }
+
+    const currComp = normalizeCompanyName(getCandidateCurrentCompany(c));
+
+    if (currComp && currComp.includes("pyramid")) {
+      return "Current Employee (Pyramid)";
+    }
+
+    if (isEmployedByClient(c)) {
+      return "Employed by Hiring Client";
+    }
+
+    return "";
+  };
+
   const sortedCandidates = useMemo(() => {
     const trimmedQuery = candidateSearchQuery.trim().toLowerCase();
     const sourcePriority = (c: any) => {
@@ -1368,6 +1448,7 @@ function NewJobPageContent() {
       // candidate_id so source-string drift between sourcing runs can't let a
       // launched candidate re-surface.
       if (launchedCandidateKeys.has(key) || launchedCandidateIds.has(String(candId))) return false;
+      if (getCandidateExclusionReason(c)) return false;
       if (!matchesSourceFilter(c)) return false;
       // Progressive rows (agent_result / details_loaded) bypass score &
       // location filters so they stay visible while shimmering. Once the
@@ -6671,7 +6752,7 @@ function NewJobPageContent() {
       // hiring client company are withheld from /candidates/save (even via the
       // second MissingContactsModal pass). Low score / thin profile / location
       // are NOT skip reasons — everyone else stays launchable.
-      .filter(c => !isEmployedByClient(c))
+      .filter(c => !getCandidateExclusionReason(c))
       .filter(c => {
         if (dncPhones.size === 0) return true;
         const np = normalizePhone(c.phone);
@@ -7073,7 +7154,7 @@ function NewJobPageContent() {
     for (const c of candidates) {
       const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
       if (!id || !selectedCandidates.has(id)) continue;
-      if (isEmployedByClient(c)) {
+      if (getCandidateExclusionReason(c)) {
         hardFilterSkipIds.add(id);
         hardFilterSkippedNames.push(getCandidateDisplayName(c) || c.name || "Unnamed");
       }

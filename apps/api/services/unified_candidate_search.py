@@ -633,6 +633,8 @@ class UnifiedCandidateSearch:
                 "linkedin_url", "profile_url", "image_url", "data",
                 "zipcode", "distance_miles", "location_out_of_radius",
                 "location_match_reason",
+                "qualifications", "employee_status", "available",
+                "availability_status", "current_company",
             ):
                 v = cand.get(key)
                 if v not in (None, "", [], {}):
@@ -754,6 +756,8 @@ class UnifiedCandidateSearch:
                 # Geo verdict → UI "~N mi away" badge on the location cell.
                 "zipcode", "distance_miles", "location_out_of_radius",
                 "location_match_reason",
+                "qualifications", "employee_status", "available",
+                "availability_status", "current_company",
                 # Candidate-details failure flag → UI renders "N/A" + keeps the
                 # row launchable (vs. a 0% drop).
                 "detail_failed",
@@ -1556,6 +1560,12 @@ class UnifiedCandidateSearch:
                     detail_map = await self.jobdiva_service._fetch_candidate_details_batch(
                         token, page_ids
                     )
+                    notes_actions_map = await self.jobdiva_service._fetch_candidate_notes_action_types_batch(
+                        token, page_ids
+                    )
+                    quals_map = await self.jobdiva_service._fetch_candidate_qualifications_batch(
+                        token, page_ids
+                    )
                     # Reset backoff on success.
                     backoff_s = 5.0
                 except Exception as exc:
@@ -1611,6 +1621,33 @@ class UnifiedCandidateSearch:
                         patch["city"] = str(city).strip()
                     if state:
                         patch["state"] = str(state).strip()
+
+                    quals = detail.get("qualifications") or detail.get("QUALIFICATIONS") or quals_map.get(str(cand_id)) or []
+                    if quals:
+                        patch["qualifications"] = quals
+                        for q in quals:
+                            if not isinstance(q, dict): continue
+                            qval = str(q.get("QUALIFICATIONVALUE") or q.get("qualificationValue") or "").strip()
+                            qname = str(q.get("QUALIFICATION") or q.get("qualificationName") or "").strip()
+                            if "current employee" in qval.lower() or "current employee" in qname.lower():
+                                patch["employee_status"] = "Current Employee"
+                    emp_status = get_field(detail, ["EMPLOYEESTATUS", "employeeStatus", "CURRENTEMPLOYEE", "currentEmployee", "ASSIGNMENTSTATUS", "assignmentStatus"])
+                    if emp_status:
+                        patch["employee_status"] = str(emp_status).strip()
+                    avail_val = get_field(detail, ["AVAILABLE", "available", "STATUS", "status"])
+                    if avail_val is not None and avail_val != "":
+                        patch["available"] = avail_val
+
+                    action_types = notes_actions_map.get(str(cand_id), [])
+                    if action_types:
+                        patch["action_types"] = action_types
+                        for at in action_types:
+                            at_low = at.lower()
+                            if "offer accepted" in at_low or "placed" in at_low or "hired" in at_low:
+                                patch["offer_status"] = "Offer Accepted"
+                                break
+                            elif "offer extended" in at_low:
+                                patch["offer_status"] = "Offer Extended"
 
                     if not patch:
                         continue
@@ -1730,6 +1767,22 @@ class UnifiedCandidateSearch:
             # the frontend renders sorted by api_rank so the UI matches the
             # order JobDiva returned, even when LLM scoring later assigns
             # different match_score values.
+
+            token = await self.jobdiva_service.authenticate()
+            if token and candidates:
+                cids = [str(c.get("candidate_id") or c.get("id") or "") for c in candidates]
+                quals_map = await self.jobdiva_service._fetch_candidate_qualifications_batch(token, cids)
+                for c in candidates:
+                    cid = str(c.get("candidate_id") or c.get("id") or "")
+                    quals = quals_map.get(cid, [])
+                    if quals:
+                        c["qualifications"] = quals
+                        for q in quals:
+                            if not isinstance(q, dict): continue
+                            qval = str(q.get("QUALIFICATIONVALUE") or q.get("qualificationValue") or "").strip()
+                            qname = str(q.get("QUALIFICATION") or q.get("qualificationName") or "").strip()
+                            if "current employee" in qval.lower() or "current employee" in qname.lower():
+                                c["employee_status"] = "Current Employee"
 
             for c in candidates:
                 c.setdefault("source", source_type)
@@ -4676,6 +4729,8 @@ class UnifiedCandidateSearch:
                     for k in (
                         "resume_text", "resume_id", "email", "phone",
                         "title", "location", "experience_years", "headline",
+                        "qualifications", "employee_status", "available",
+                        "availability_status", "current_company",
                     ):
                         v = candidate.get(k)
                         if v not in (None, "", [], {}):
