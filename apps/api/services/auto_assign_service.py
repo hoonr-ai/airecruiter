@@ -589,14 +589,15 @@ class AutoAssignService:
                                         location    = COALESCE(NULLIF(sc.location, ''), v.location),
                                         profile_url = COALESCE(NULLIF(sc.profile_url, ''), v.profile_url),
                                         resume_text = COALESCE(NULLIF(sc.resume_text, ''), v.resume_text),
-                                        data        = COALESCE(v.data, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
+                                        data        = COALESCE(sc.data, '{}'::jsonb) || COALESCE(v.data, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
                                             'engage_status',       sc.data->>'engage_status',
                                             'engage_interview_id', sc.data->>'engage_interview_id',
                                             'engage_score',        sc.data->'engage_score',
                                             'engage_updated_at',   sc.data->>'engage_updated_at',
                                             'engage_last_response',sc.data->'engage_last_response',
                                             'engage_hard_filter_status', sc.data->>'engage_hard_filter_status',
-                                            'engage_hard_filter_reason', sc.data->>'engage_hard_filter_reason'
+                                            'engage_hard_filter_reason', sc.data->>'engage_hard_filter_reason',
+                                            'engage_passed_email_sent',  sc.data->'engage_passed_email_sent'
                                         )),
                                         updated_at  = CURRENT_TIMESTAMP
                                     FROM (VALUES %s) AS v (
@@ -636,14 +637,15 @@ class AutoAssignService:
                                         location    = EXCLUDED.location,
                                         profile_url = EXCLUDED.profile_url,
                                         resume_text = EXCLUDED.resume_text,
-                                        data        = COALESCE(EXCLUDED.data, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
+                                        data        = COALESCE(sourced_candidates.data, '{}'::jsonb) || COALESCE(EXCLUDED.data, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
                                             'engage_status',       sourced_candidates.data->>'engage_status',
                                             'engage_interview_id', sourced_candidates.data->>'engage_interview_id',
                                             'engage_score',        sourced_candidates.data->'engage_score',
                                             'engage_updated_at',   sourced_candidates.data->>'engage_updated_at',
                                             'engage_last_response',sourced_candidates.data->'engage_last_response',
                                             'engage_hard_filter_status', sourced_candidates.data->>'engage_hard_filter_status',
-                                            'engage_hard_filter_reason', sourced_candidates.data->>'engage_hard_filter_reason'
+                                            'engage_hard_filter_reason', sourced_candidates.data->>'engage_hard_filter_reason',
+                                            'engage_passed_email_sent',  sourced_candidates.data->'engage_passed_email_sent'
                                         )),
                                         status      = EXCLUDED.status,
                                         resume_match_percentage = EXCLUDED.resume_match_percentage,
