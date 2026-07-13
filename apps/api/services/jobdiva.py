@@ -21,14 +21,14 @@ from core import (
 logger = logging.getLogger(__name__)
 
 
-# --- JobDiva HTTP request/response logging to New Relic ------------------
+# --- JobDiva HTTP request/response logging to Sentry ---------------------
 # Every httpx.AsyncClient(...) constructed in this module is transparently
 # wrapped (via the _JDHttpxProxy shim below) so each JobDiva request emits
-# a New Relic custom event + message with the full response body and
+# a Sentry breadcrumb + capture_message with the full response body and
 # elapsed time. We do not modify the global httpx module — only the local
 # `httpx` name in this file's namespace.
 
-_JD_RESPONSE_BODY_LIMIT = 16000  # cap body bytes sent to New Relic per call
+_JD_RESPONSE_BODY_LIMIT = 16000  # cap body bytes sent to Sentry per call
 
 
 def _jd_redact_url(url: "_httpx_module.URL") -> str:
@@ -59,10 +59,15 @@ async def _jd_on_response(response: "_httpx_module.Response") -> None:
         was_truncated = body_size > len(body_truncated)
 
         try:
-            from core.newrelic import is_enabled, record_custom_event, record_message
+            from core.sentry import is_enabled
         except Exception:
             return
         if not is_enabled():
+            return
+
+        try:
+            import sentry_sdk
+        except Exception:
             return
 
         method = response.request.method
@@ -71,23 +76,45 @@ async def _jd_on_response(response: "_httpx_module.Response") -> None:
         status = response.status_code
 
         try:
-            event_data = {
-                "url": url_full,
-                "endpoint": url_path,
-                "method": method,
-                "status_code": status,
-                "elapsed_ms": elapsed_ms,
-                "response_size_bytes": body_size,
-                "truncated": was_truncated,
-                "response_body": body_truncated,
-            }
-            record_custom_event("JobDivaAPI", event_data)
-            level = "info" if 200 <= status < 400 else ("warning" if status < 500 else "error")
-            record_message(
-                f"JobDiva {method} {url_path} -> {status} ({elapsed_ms}ms)",
-                attributes=event_data,
-                level=level,
+            sentry_sdk.add_breadcrumb(
+                category="jobdiva.http",
+                level="info",
+                message=f"{method} {url_path} -> {status} ({elapsed_ms}ms)",
+                data={
+                    "url": url_full,
+                    "status_code": status,
+                    "elapsed_ms": elapsed_ms,
+                    "response_size_bytes": body_size,
+                },
             )
+        except Exception:
+            pass
+
+        try:
+            with sentry_sdk.new_scope() as scope:
+                scope.set_tag("jobdiva_api", "1")
+                scope.set_tag("jobdiva_endpoint", url_path)
+                scope.set_tag("http_method", method)
+                scope.set_tag("status_code", str(status))
+                if elapsed_ms is not None:
+                    scope.set_tag("elapsed_ms", str(elapsed_ms))
+                scope.set_context(
+                    "jobdiva_response",
+                    {
+                        "url": url_full,
+                        "method": method,
+                        "status_code": status,
+                        "elapsed_ms": elapsed_ms,
+                        "response_size_bytes": body_size,
+                        "truncated": was_truncated,
+                        "response_body": body_truncated,
+                    },
+                )
+                level = "info" if 200 <= status < 400 else ("warning" if status < 500 else "error")
+                sentry_sdk.capture_message(
+                    f"JobDiva {method} {url_path} -> {status} ({elapsed_ms}ms)",
+                    level=level,
+                )
         except Exception:
             pass
     except Exception:
@@ -107,7 +134,7 @@ class _JDAsyncClient(_httpx_module.AsyncClient):
 class _JDHttpxProxy:
     """Module-local stand-in for the `httpx` module.
 
-    AsyncClient is overridden to inject New Relic logging hooks; every other
+    AsyncClient is overridden to inject Sentry logging hooks; every other
     attribute (TimeoutException, ConnectError, Request, ...) falls through
     to the real httpx module untouched.
     """

@@ -13,7 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { API_BASE, authFetch } from "@/lib/api";
 import { logger } from "@/lib/logger";
-import { logStep } from "@/lib/newrelic";
+import * as Sentry from "@sentry/nextjs";
 import { useMsal } from "@azure/msal-react";
 
 export interface MissingPhoneCandidate {
@@ -195,15 +195,18 @@ export function MissingPhonesModal({
           <Button
             variant="outline"
             onClick={() => {
-              logStep("pair_launch_skipped_missing_phones", "info", {
-                username,
-                job_id: jobId,
-                job_diva_id: jobDivaId,
-                skipped_candidates: candidates.map((c) => ({
-                  candidate_id: c.candidate_id,
-                  name: c.name,
-                  jobdiva_id: c.jobdiva_id,
-                })),
+              Sentry.captureMessage("PAIR launch: candidates skipped (missing phones)", {
+                level: "info",
+                extra: {
+                  username,
+                  job_id: jobId,
+                  job_diva_id: jobDivaId,
+                  skipped_candidates: candidates.map((c) => ({
+                    candidate_id: c.candidate_id,
+                    name: c.name,
+                    jobdiva_id: c.jobdiva_id,
+                  })),
+                },
               });
               onClose();
             }}

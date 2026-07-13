@@ -5437,14 +5437,6 @@ class UnifiedCandidateSearch:
                             break
                     seen[key] = cand
                     
-        try:
-            from core.newrelic import record_custom_event
-            record_custom_event("CandidateSearchSummary", {
-                "total_unique_results": len(unique_results),
-            })
-        except Exception:
-            pass
-
         return unique_results
 
 unified_search_service = UnifiedCandidateSearch()

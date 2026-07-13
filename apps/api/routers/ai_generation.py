@@ -92,16 +92,6 @@ async def sync_to_jobdiva(req: JobDivaSyncRequest):
         "recruiter_email":     req.recruiterEmail,
     })
 
-    try:
-        from core.newrelic import record_custom_event
-        record_custom_event("JobDivaSync", {
-            "job_id": req.jobId,
-            "jobdiva_updated": jobdiva_ok,
-            "locally_tracked": local_ok,
-        })
-    except Exception:
-        pass
-
     return {
         "jobdiva_updated": jobdiva_ok,
         "locally_tracked": local_ok,

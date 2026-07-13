@@ -13,7 +13,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { API_BASE, authFetch } from "@/lib/api";
 import { logger } from "@/lib/logger";
-import { logStep } from "@/lib/newrelic";
+import * as Sentry from "@sentry/nextjs";
 import { useMsal } from "@azure/msal-react";
 
 export interface MissingContactCandidate {
@@ -481,17 +481,20 @@ export function MissingContactsModal({
           <Button
             variant="outline"
             onClick={() => {
-              logStep("pair_launch_skipped_missing_contacts", "info", {
-                username,
-                job_id: jobId,
-                job_diva_id: jobDivaId,
-                skipped_candidates: candidates.map((c) => ({
-                  candidate_id: c.candidate_id,
-                  name: c.name,
-                  jobdiva_id: c.jobdiva_id,
-                  needsPhone: c.needsPhone,
-                  needsEmail: c.needsEmail,
-                })),
+              Sentry.captureMessage("PAIR launch: candidates skipped (missing contacts)", {
+                level: "info",
+                extra: {
+                  username,
+                  job_id: jobId,
+                  job_diva_id: jobDivaId,
+                  skipped_candidates: candidates.map((c) => ({
+                    candidate_id: c.candidate_id,
+                    name: c.name,
+                    jobdiva_id: c.jobdiva_id,
+                    needsPhone: c.needsPhone,
+                    needsEmail: c.needsEmail,
+                  })),
+                },
               });
               onClose();
             }}
