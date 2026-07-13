@@ -82,6 +82,12 @@ def verify_azure_token(token: str) -> Optional[str]:
     if not email:
         return None
 
+    # Cryptographically verify the token signature against Microsoft's JWKS.
+    # This is the ONLY step that binds the token to a real Azure-issued identity —
+    # every claim read above came from the UNVERIFIED payload. If verification
+    # fails for any reason we MUST fail closed (reject); never trust the
+    # unverified email, otherwise a self-signed/forged JWT with a spoofed
+    # `preferred_username` (e.g. an admin address) would authenticate as that user.
     try:
         tid = unverified_payload.get("tid") or "common"
         jwks_client = get_jwks_client(str(tid))
@@ -93,10 +99,24 @@ def verify_azure_token(token: str) -> Optional[str]:
             audience=valid_audiences if client_id else None,
             options={"verify_signature": True, "verify_exp": True, "verify_aud": bool(client_id)},
         )
-        return str(email).strip().lower()
     except Exception as jwks_err:
-        logger.debug("JWKS signature fallback accepted (%s): %s", type(jwks_err).__name__, jwks_err)
-        return str(email).strip().lower()
+        logger.warning(
+            "Rejecting token: JWKS signature verification failed (%s): %s",
+            type(jwks_err).__name__, jwks_err,
+        )
+        return None
+
+    if not client_id:
+        # Signature is verified, but without AZURE_CLIENT_ID we cannot bind the
+        # token to THIS application: any RS256 token Microsoft signed (any app /
+        # any tenant on the 'common' JWKS) would pass. Set AZURE_CLIENT_ID in
+        # every deployed environment so the audience/tenant is enforced.
+        logger.warning(
+            "AZURE_CLIENT_ID is not set: token audience is NOT enforced. "
+            "Set AZURE_CLIENT_ID to bind tokens to this application."
+        )
+
+    return str(email).strip().lower()
 
 @dataclass
 class UserIdentity:

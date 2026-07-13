@@ -524,7 +524,18 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
                     if event.get("type") == "candidate":
                         cand = event.get("data") or {}
                         if isinstance(cand, dict):
-                            cand.update(await _extract_candidate_gender_fields_with_ai(cand))
+                            # Bound the name→gender inference so one slow
+                            # OpenAI call can't stall the whole candidate
+                            # stream; fall back to the non-AI gender fields.
+                            try:
+                                cand.update(
+                                    await asyncio.wait_for(
+                                        _extract_candidate_gender_fields_with_ai(cand),
+                                        timeout=8.0,
+                                    )
+                                )
+                            except asyncio.TimeoutError:
+                                cand.update(_extract_candidate_gender_fields(cand))
                     # Do not inject gender into candidate_detail patches.
                     # These patches often omit identity fields and would
                     # normalize to "default", unintentionally overwriting a
