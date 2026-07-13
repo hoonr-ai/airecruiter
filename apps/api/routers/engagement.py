@@ -917,7 +917,7 @@ def _persist_jobdiva_candidate_id(candidate_id_internal: str, cand_data: Dict[st
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE sourced_candidates SET data = %s WHERE candidate_id = %s",
+                "UPDATE sourced_candidates SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb WHERE candidate_id = %s",
                 (json.dumps(cand_data), candidate_id_internal),
             )
         conn.commit()
@@ -1226,7 +1226,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                         FROM sourced_candidates
                         WHERE candidate_id = ANY(%s)
                           AND (jobdiva_id = %s OR jobdiva_id = %s)
-                          AND data ->> 'engage_status' = 'sent'
+                          AND data ->> 'engage_status' IN ('sent', 'in_progress', 'Initiated')
                         """,
                         (
                             list(request.real_candidate_ids),
@@ -1754,7 +1754,7 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
                 """
                 SELECT 1 FROM sourced_candidates
                 WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                  AND data->>'engage_status' IN ('sent', 'pending', 'completed')
+                  AND COALESCE(data->>'engage_status', '') != ''
                 LIMIT 1
                 """,
                 (str(job_id), str(job_id)),
@@ -1790,7 +1790,7 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
                 WHERE candidate_id = ANY(%s)
                   AND (jobdiva_id = %s OR jobdiva_id = %s)
                   AND dnc_stopped_at IS NULL
-                  AND COALESCE(data->>'engage_status', '') NOT IN ('sent', 'pending', 'completed')
+                  AND COALESCE(data->>'engage_status', '') = ''
                 """,
                 (list(candidate_ids), str(job_id), str(job_id)),
             )
