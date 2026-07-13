@@ -1232,7 +1232,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             except Exception as _stop_check_err:
                 logger.warning(f"Could not check job metadata for job {job_id_from_payload}: {_stop_check_err}")
 
-        # Idempotency: drop candidates already at engage_status='sent' so retries
+        # Idempotency: drop candidates that already have an engage_status set so retries
         # or staged-launch races don't create duplicate interviews on the PAIR
         # side. We keep their candidate_ids in skipped_already_sent so the caller
         # can show them as already-launched in the UI.
@@ -1248,7 +1248,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                         FROM sourced_candidates
                         WHERE candidate_id = ANY(%s)
                           AND (jobdiva_id = %s OR jobdiva_id = %s)
-                          AND data ->> 'engage_status' IN ('sent', 'in_progress', 'Initiated')
+                          AND COALESCE(data ->> 'engage_status', '') != ''
                         """,
                         (
                             list(request.real_candidate_ids),
