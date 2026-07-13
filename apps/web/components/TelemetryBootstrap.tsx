@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { useMsal } from "@azure/msal-react";
 import { identifyUser, initAnalytics, trackEvent } from "@/lib/analytics";
+import { initNewRelic, captureException } from "@/lib/newrelic";
 
 export function TelemetryBootstrap() {
   const pathname = usePathname();
@@ -11,6 +12,7 @@ export function TelemetryBootstrap() {
 
   useEffect(() => {
     initAnalytics();
+    initNewRelic();
   }, []);
 
   useEffect(() => {
@@ -43,6 +45,9 @@ export function TelemetryBootstrap() {
         line: event.lineno,
         column: event.colno,
       });
+      if (event.error) {
+        captureException(event.error, { path: pathname });
+      }
     };
 
     const onUnhandledRejection = (event: PromiseRejectionEvent) => {
@@ -51,6 +56,7 @@ export function TelemetryBootstrap() {
         path: pathname,
         reason: reason?.message || String(reason),
       });
+      captureException(reason instanceof Error ? reason : new Error(String(reason)), { path: pathname });
     };
 
     window.addEventListener("error", onError);
