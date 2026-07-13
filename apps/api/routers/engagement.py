@@ -230,19 +230,33 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
         ]
         return " ".join(words).strip()
 
+    def _is_contiguous_sublist(needle: List[str], haystack: List[str]) -> bool:
+        # True if `needle` appears as a run of whole tokens inside `haystack`.
+        n = len(needle)
+        if not n or n > len(haystack):
+            return False
+        return any(haystack[i:i + n] == needle for i in range(len(haystack) - n + 1))
+
     client_norm = _norm(client_name)
+    client_tokens = client_norm.split()
 
     for comp in current_companies:
         comp_norm = _norm(comp)
         if not comp_norm:
             continue
-        if "pyramid" in comp_norm.split():
+        comp_tokens = comp_norm.split()
+        if "pyramid" in comp_tokens:
             return True, "Current Employee (Pyramid)"
+        # Match on whole-word tokens, not raw substrings: client "Meta"
+        # ("meta") must match "Meta Platforms" but NOT "Metadata Solutions"
+        # ("metadata"). A candidate is "employed by the hiring client" when the
+        # client name equals the company name, or one appears as a contiguous
+        # run of whole tokens within the other (e.g. "Meta" ⊂ "Meta Platforms").
         if client_norm and client_norm != "external" and len(client_norm) >= 3:
-            if comp_norm == client_norm or (
-                len(client_norm) >= 4
-                and len(comp_norm) >= 4
-                and (client_norm in comp_norm or comp_norm in client_norm)
+            if (
+                comp_tokens == client_tokens
+                or _is_contiguous_sublist(client_tokens, comp_tokens)
+                or _is_contiguous_sublist(comp_tokens, client_tokens)
             ):
                 return True, "Employed by Hiring Client"
 
@@ -712,11 +726,11 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 )
             }
 
-        # Build resumes list using raw_resume_text
-        final_resumes = []
-        for r in resumes:
-            candidate_name = r.get("name") or "Unknown"
-            candidate_email = str(r.get("email") or "").strip().lower()
+        # Resolve gender labels for the whole batch concurrently. Each
+        # infer_gender_from_name_ai call is cached and globally
+        # semaphore-bounded, so gathering avoids serializing the launch batch
+        # on N sequential OpenAI round-trips (the old per-resume `await` here).
+        async def _resolve_gender(r):
             gender = normalize_gender_prediction(
                 predicted_label=r.get("gender_label", "default"),
                 confidence=r.get("gender_confidence", 0.0),
@@ -724,10 +738,20 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 threshold=0.0,
                 updated_at=r.get("gender_updated_at"),
             )
+            candidate_name = r.get("name") or "Unknown"
             if gender.gender_label == "default" and candidate_name:
                 ai_gender = await infer_gender_from_name_ai(candidate_name)
                 if ai_gender.gender_label in {"male", "female"}:
-                    gender = ai_gender
+                    return ai_gender
+            return gender
+
+        resolved_genders = await asyncio.gather(*[_resolve_gender(r) for r in resumes])
+
+        # Build resumes list using raw_resume_text
+        final_resumes = []
+        for r, gender in zip(resumes, resolved_genders):
+            candidate_name = r.get("name") or "Unknown"
+            candidate_email = str(r.get("email") or "").strip().lower()
             final_resumes.append({
                 "source_candidate_id": r.get("source_candidate_id"),
                 "name": candidate_name,
@@ -873,7 +897,7 @@ async def _post_to_pairbot(
     last_exc: Optional[BaseException] = None
     last_response: Optional[httpx.Response] = None
     headers = {"Content-Type": "application/json"}
-    pair_api_key = os.getenv("PAIR_API_KEY", "pair_c2d0855ded28565926ead54a18aef873cc5d80111ae3c791fb7e26cf1cc4931d")
+    pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
     if pair_api_key:
         headers["Authorization"] = f"Bearer {pair_api_key}"
     for attempt in range(max_attempts):
@@ -2021,7 +2045,7 @@ async def get_assessment_data(interview_id: str):
 async def _proxy_get(path: str, params: dict = None):
     try:
         headers = {}
-        pair_api_key = os.getenv("PAIR_API_KEY", "pair_c2d0855ded28565926ead54a18aef873cc5d80111ae3c791fb7e26cf1cc4931d")
+        pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
         if pair_api_key:
             headers["Authorization"] = f"Bearer {pair_api_key}"
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -2035,7 +2059,7 @@ async def _proxy_get(path: str, params: dict = None):
 async def _proxy_post(path: str, json_data: dict = None):
     try:
         headers = {"Content-Type": "application/json"}
-        pair_api_key = os.getenv("PAIR_API_KEY", "pair_c2d0855ded28565926ead54a18aef873cc5d80111ae3c791fb7e26cf1cc4931d")
+        pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
         if pair_api_key:
             headers["Authorization"] = f"Bearer {pair_api_key}"
         async with httpx.AsyncClient(timeout=30.0) as client:

@@ -1615,10 +1615,14 @@ class JobDivaService:
         }
         # Structured zip-radius (swagger: TalentSearchDef.zipCode/withinMiles).
         # Harmless if the server ignores them; a real geo filter if honored.
-        # When the zip rides along, states is blanked: a border-metro radius
-        # legitimately spans states (NYC ↔ NJ), and for zip-bearing wizard
-        # locations production has never sent states anyway (the old parser
-        # dropped them), so this is the no-recall-regression choice.
+        # The zip rides ALONGSIDE any resolved states rather than replacing
+        # them: for an explicit-zip wizard location `states` is already empty
+        # (the parser dropped it), so keeping it is a no-op AND preserves the
+        # border-metro span (NYC ↔ NJ); but when the zip was SYNTHESIZED from a
+        # plain "City, ST" job (see unified_candidate_search.city_state_default_zip)
+        # the state IS the intended scope — blanking it there would fall back to
+        # nationwide results if the server ignores zipCode. Keeping states is
+        # the safe, no-broadening choice in both cases.
         # Skipped for multi-location searches: the structured field can only
         # carry ONE anchor, and pinning a `(A within 25 mi OR B within 25 mi)`
         # boolean to chip A's zip would exclude chip B's candidates
@@ -1638,7 +1642,6 @@ class JobDivaService:
             zip_radius_miles = max(1, min(100, int(within_miles or 25) * 2))
             talent_search_def["zipCode"] = zip5
             talent_search_def["withinMiles"] = zip_radius_miles
-            talent_search_def["states"] = ""
         payload = {"talentSearchDef": talent_search_def}
 
         logger.debug(
