@@ -19,4 +19,4 @@ python-multipart
 openpyxl
 rapidfuzz
 redis>=5.0.0
-sentry-sdk[fastapi]>=2.0.0
+newrelic>=9.8.0
