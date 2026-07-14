@@ -48,11 +48,17 @@ function emit(level: LogLevel, msg: string, ctx?: Context) {
 // endpoint (e.g. `/api/v1/logs/client`) on a debounce/flush schedule.
 // Deliberately a no-op for now — keeps this file free of fetch timing
 // concerns and failure modes.
+import { captureException, logStep } from "@/lib/newrelic";
+
 function remoteSink(_record: unknown) {
   const record = (_record ?? {}) as Record<string, unknown>;
   trackEvent("frontend_log", record);
+
+  logStep("FrontendLog", String(record.level ?? "info"), record, "frontend_logger");
+
   if (record.level === "error") {
     trackEvent("frontend_error_log", record);
+    captureException(new Error(String(record.msg ?? "Frontend error")), record);
   }
 }
 
