@@ -204,6 +204,20 @@ export async function bulkAddJobsToCampaign(
   return json<BulkAddResponse>(res, `POST /api/campaigns/${campaignId}/jobs/bulk`);
 }
 
+export async function removeJobFromCampaign(
+  campaignId: string,
+  jobId: string,
+  action: "detach" | "delete" = "detach",
+): Promise<void> {
+  const res = await fetch(
+    `${CAMPAIGNS_BASE}/${encodeURIComponent(campaignId)}/jobs/${encodeURIComponent(jobId)}?action=${action}`,
+    {
+      method: "DELETE",
+    },
+  );
+  await json<unknown>(res, `DELETE /api/campaigns/${campaignId}/jobs/${jobId}`);
+}
+
 // =====================================================
 // AI template generation — reuses the SAME backend endpoints the jobs wizard
 // calls, so the campaign template (JD / rubric / screening questions) is

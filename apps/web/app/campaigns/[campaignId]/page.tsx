@@ -14,6 +14,9 @@ import {
   Rocket,
   ArrowRight,
   ChevronRight,
+  Trash2,
+  MoreVertical,
+  Unlink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -31,6 +34,12 @@ import {
 import { CampaignForm } from "@/components/campaigns/CampaignForm";
 import { cn } from "@/lib/utils";
 import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
+import {
   Campaign,
   CampaignChildJob,
   CampaignCreatePayload,
@@ -38,6 +47,8 @@ import {
   bulkAddJobsToCampaign,
   getCampaign,
   updateCampaign,
+  deleteCampaign,
+  removeJobFromCampaign,
 } from "@/lib/campaigns";
 
 export default function CampaignDetailPage() {
@@ -62,6 +73,44 @@ export default function CampaignDetailPage() {
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
+
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [isDeletingCampaign, setIsDeletingCampaign] = useState(false);
+  const [jobToRemove, setJobToRemove] = useState<{ id: string; title: string; action: "detach" | "delete" } | null>(null);
+  const [isRemovingJob, setIsRemovingJob] = useState(false);
+
+  const handleDeleteCampaign = async () => {
+    setIsDeletingCampaign(true);
+    try {
+      await deleteCampaign(campaignId);
+      setToast({ message: "Campaign archived successfully", type: "success" });
+      router.push("/campaigns");
+    } catch (e) {
+      console.error("Failed to delete campaign", e);
+      setToast({ message: "Couldn't delete the campaign.", type: "error" });
+      setIsDeletingCampaign(false);
+      setDeleteConfirmOpen(false);
+    }
+  };
+
+  const handleConfirmRemoveJob = async () => {
+    if (!jobToRemove) return;
+    setIsRemovingJob(true);
+    try {
+      await removeJobFromCampaign(campaignId, jobToRemove.id, jobToRemove.action);
+      setJobToRemove(null);
+      await load();
+      setToast({
+        message: jobToRemove.action === "detach" ? "Job detached from campaign" : "Requirement deleted",
+        type: "success",
+      });
+    } catch (e) {
+      console.error("Failed to remove job from campaign", e);
+      setToast({ message: "Couldn't remove job from campaign.", type: "error" });
+    } finally {
+      setIsRemovingJob(false);
+    }
+  };
 
   const load = useCallback(async () => {
     setIsLoading(true);
@@ -227,10 +276,20 @@ export default function CampaignDetailPage() {
               <p className="text-sm text-slate-500 mt-1">{campaign.customer_name}</p>
             )}
           </div>
-          <Button variant="outline" onClick={() => setEditOpen(true)}>
-            <Pencil className="h-4 w-4 mr-1.5" />
-            Edit
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={() => setEditOpen(true)}>
+              <Pencil className="h-4 w-4 mr-1.5" />
+              Edit
+            </Button>
+            <Button
+              variant="outline"
+              className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200"
+              onClick={() => setDeleteConfirmOpen(true)}
+            >
+              <Trash2 className="h-4 w-4 mr-1.5" />
+              Delete Campaign
+            </Button>
+          </div>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
@@ -318,17 +377,60 @@ export default function CampaignDetailPage() {
                     )}
                   </div>
                   <LaunchBadge job={j} />
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      openSource(j);
-                    }}
-                    className="inline-flex items-center gap-1 text-sm text-primary hover:underline shrink-0"
-                  >
-                    {j.pair_launched_at ? "Review" : "Review & Launch"}
-                    <ArrowRight className="h-3.5 w-3.5" />
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openSource(j);
+                      }}
+                      className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+                    >
+                      {j.pair_launched_at ? "Review" : "Review & Launch"}
+                      <ArrowRight className="h-3.5 w-3.5" />
+                    </button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          type="button"
+                          onClick={(e) => e.stopPropagation()}
+                          className="p-1.5 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-600 transition-colors"
+                          title="Job actions"
+                        >
+                          <MoreVertical className="h-4 w-4" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setJobToRemove({
+                              id: j.job_id,
+                              title: j.enhanced_title || j.title || j.jobdiva_id || j.job_id,
+                              action: "detach",
+                            });
+                          }}
+                        >
+                          <Unlink className="h-4 w-4 mr-2" />
+                          Detach from Campaign
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          className="text-red-600 focus:text-red-600"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setJobToRemove({
+                              id: j.job_id,
+                              title: j.enhanced_title || j.title || j.jobdiva_id || j.job_id,
+                              action: "delete",
+                            });
+                          }}
+                        >
+                          <Trash2 className="h-4 w-4 mr-2" />
+                          Delete Requirement
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                  </div>
                 </div>
 
                 {isOpen && (
@@ -453,6 +555,78 @@ export default function CampaignDetailPage() {
             </Button>
             <Button onClick={handleAdd} disabled={isAdding}>
               {isAdding ? "Adding…" : addMode === "jobdiva" ? "Add Jobs" : "Add Job"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete campaign confirmation dialog */}
+      <Dialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete Campaign</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to archive this campaign? The child jobs and candidate history will
+              remain accessible in your main jobs portfolio.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2 mt-4">
+            <Button variant="outline" onClick={() => setDeleteConfirmOpen(false)} disabled={isDeletingCampaign}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDeleteCampaign}
+              disabled={isDeletingCampaign}
+              className="bg-red-600 hover:bg-red-700 text-white"
+            >
+              {isDeletingCampaign ? "Deleting..." : "Delete Campaign"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Remove job confirmation dialog */}
+      <Dialog
+        open={!!jobToRemove}
+        onOpenChange={(open) => {
+          if (!open) setJobToRemove(null);
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              {jobToRemove?.action === "detach" ? "Detach Job from Campaign" : "Delete Requirement"}
+            </DialogTitle>
+            <DialogDescription>
+              {jobToRemove?.action === "detach" ? (
+                <>
+                  Are you sure you want to detach <strong>{jobToRemove?.title}</strong> from this campaign?
+                  It will return to being a standalone job in your jobs portfolio without losing candidate data.
+                </>
+              ) : (
+                <>
+                  Are you sure you want to permanently delete requirement <strong>{jobToRemove?.title}</strong>?
+                  This action removes the job from monitoring.
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2 mt-4">
+            <Button variant="outline" onClick={() => setJobToRemove(null)} disabled={isRemovingJob}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleConfirmRemoveJob}
+              disabled={isRemovingJob}
+              className="bg-red-600 hover:bg-red-700 text-white"
+            >
+              {isRemovingJob
+                ? "Removing..."
+                : jobToRemove?.action === "detach"
+                ? "Detach Job"
+                : "Delete Requirement"}
             </Button>
           </div>
         </DialogContent>
