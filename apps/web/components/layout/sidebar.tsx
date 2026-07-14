@@ -2,16 +2,20 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Briefcase, Users, Settings } from "lucide-react";
+import { LayoutDashboard, Briefcase, Users, Settings, Megaphone } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AzureLoginButton } from "@/components/auth/AzureLoginButton";
+import { useUserRole } from "@/hooks/use-user-role";
 
 export function Sidebar() {
     const pathname = usePathname();
+    const { isAdmin } = useUserRole();
 
     const navItems = [
         { label: "Jobs", href: "/", icon: Briefcase, disabled: false },
+        { label: "Campaigns", href: "/campaigns", icon: Megaphone, disabled: false },
         { label: "Candidates", href: "/candidates", icon: Users, disabled: true },
+        ...(isAdmin ? [{ label: "Admin Analytics", href: "/admin/analytics", icon: LayoutDashboard, disabled: false }] : []),
         { label: "Settings", href: "/settings", icon: Settings, disabled: false },
     ];
 

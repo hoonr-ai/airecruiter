@@ -21,7 +21,7 @@ import {
 import { useAI } from "@/context/ai-context";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 
 type TiraMode = "chat" | "boolean" | "match" | "bug";
 
@@ -239,7 +239,7 @@ function BooleanMode() {
             const fd = new FormData();
             if (jdText.trim()) fd.append("jd_text", jdText.trim());
             if (file) fd.append("jd_file", file);
-            const res = await fetch(`${apiBase}/tira/boolean`, { method: "POST", body: fd });
+            const res = await authFetch(`${apiBase}/tira/boolean`, { method: "POST", body: fd });
             const data = await res.json();
             if (!res.ok) throw new Error(data?.detail || `Failed (${res.status})`);
             setResult(data as BooleanResult);
@@ -387,7 +387,7 @@ function MatchMode() {
             setJobsLoading(true);
             setJobsError(null);
             try {
-                const res = await fetch(`${apiBase}/jobs/monitored`);
+                const res = await authFetch(`${apiBase}/jobs/monitored`);
                 const data = await res.json();
                 if (cancelled) return;
                 const jobsDict = data?.jobs || {};
@@ -431,7 +431,7 @@ function MatchMode() {
             const fd = new FormData();
             fd.append("job_id", selectedJobId);
             fd.append("resume_file", file);
-            const res = await fetch(`${apiBase}/tira/match`, { method: "POST", body: fd });
+            const res = await authFetch(`${apiBase}/tira/match`, { method: "POST", body: fd });
             const data = await res.json();
             if (!res.ok) throw new Error(data?.detail || `Failed (${res.status})`);
             setResult(data as MatchResult);
@@ -592,7 +592,7 @@ function BugMode() {
             fd.append("page_url", typeof window !== "undefined" ? window.location.href : "");
             fd.append("user_agent", typeof navigator !== "undefined" ? navigator.userAgent : "");
             if (screenshot) fd.append("screenshot", screenshot);
-            const res = await fetch(`${apiBase}/tira/bug-report`, { method: "POST", body: fd });
+            const res = await authFetch(`${apiBase}/tira/bug-report`, { method: "POST", body: fd });
             const data = await res.json();
             if (!res.ok) throw new Error(data?.detail || `Failed (${res.status})`);
             setSuccess(data?.sent ? "sent" : "logged");

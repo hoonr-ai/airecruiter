@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { Loader2, Plus, ChevronLeft, ChevronRight, Wand2, X } from "lucide-react";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 
 interface Criterion {
   id?: string;
@@ -43,7 +43,7 @@ export default function SetCriteriaPage() {
 
   const fetchCriteria = async () => {
     try {
-      const response = await fetch(`${API_BASE}/api/jobs/${jobId}/criteria`);
+      const response = await authFetch(`${API_BASE}/api/jobs/${jobId}/criteria`);
       if (response.ok) {
         const data = await response.json();
         const sortedCriteria = (data.criteria || []).sort((a: any, b: any) => (b.priority_score || 0) - (a.priority_score || 0));
@@ -64,7 +64,7 @@ export default function SetCriteriaPage() {
   const handleSync = async () => {
     setSyncing(true);
     try {
-      const response = await fetch(`${API_BASE}/api/jobs/${jobId}/criteria/sync`, {
+      const response = await authFetch(`${API_BASE}/api/jobs/${jobId}/criteria/sync`, {
         method: 'POST'
       });
       if (response.ok) {
@@ -110,7 +110,7 @@ export default function SetCriteriaPage() {
   const handleSave = async () => {
     setSyncing(true);
     try {
-      const response = await fetch(`${API_BASE}/api/jobs/${jobId}/criteria`, {
+      const response = await authFetch(`${API_BASE}/api/jobs/${jobId}/criteria`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',

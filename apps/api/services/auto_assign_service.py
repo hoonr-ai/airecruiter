@@ -426,12 +426,13 @@ class AutoAssignService:
             resume_match_filters = []
             sourcing_filters = {}
             jobdiva_numeric_id = None
+            job_location_type = ""
 
             try:
                 with self._get_db_connection() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
-                            "SELECT resume_match_filters, sourcing_filters, jobdiva_id, status FROM monitored_jobs "
+                            "SELECT resume_match_filters, sourcing_filters, jobdiva_id, status, location_type, city FROM monitored_jobs "
                             "WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
                             (job_id, job_id)
                         )
@@ -441,6 +442,9 @@ class AutoAssignService:
                             sourcing_filters = row[1] if isinstance(row[1], dict) else (json.loads(row[1]) if row[1] else {})
                             jobdiva_ref_id = row[2]
                             job_status = row[3]
+                            job_location_type = str(row[4] or "").strip()
+                            if not job_location_type and str(row[5] or "").strip().upper() == "REMOTE":
+                                job_location_type = "Remote"
 
                             # Skip if job is clearly inactive
                             if job_status and job_status.lower() in ['closed', 'cancelled', 'filled', 'inactive']:
@@ -486,6 +490,7 @@ class AutoAssignService:
                 companies=sourcing_filters.get("companies") or [],
                 resume_match_filters=resume_match_filters,
                 location=primary_location,
+                location_type=job_location_type or "Unspecified",
                 # Capped at 100 (was 500). The 15-min auto-sync doesn't need
                 # to pull half a thousand applicants per cycle — JobDiva
                 # typically returns <50 fresh hits between cycles, and the
@@ -584,14 +589,15 @@ class AutoAssignService:
                                         location    = COALESCE(NULLIF(sc.location, ''), v.location),
                                         profile_url = COALESCE(NULLIF(sc.profile_url, ''), v.profile_url),
                                         resume_text = COALESCE(NULLIF(sc.resume_text, ''), v.resume_text),
-                                        data        = COALESCE(v.data, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
+                                        data        = COALESCE(sc.data, '{}'::jsonb) || COALESCE(v.data, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
                                             'engage_status',       sc.data->>'engage_status',
                                             'engage_interview_id', sc.data->>'engage_interview_id',
                                             'engage_score',        sc.data->'engage_score',
                                             'engage_updated_at',   sc.data->>'engage_updated_at',
                                             'engage_last_response',sc.data->'engage_last_response',
                                             'engage_hard_filter_status', sc.data->>'engage_hard_filter_status',
-                                            'engage_hard_filter_reason', sc.data->>'engage_hard_filter_reason'
+                                            'engage_hard_filter_reason', sc.data->>'engage_hard_filter_reason',
+                                            'engage_passed_email_sent',  sc.data->'engage_passed_email_sent'
                                         )),
                                         updated_at  = CURRENT_TIMESTAMP
                                     FROM (VALUES %s) AS v (
@@ -631,14 +637,15 @@ class AutoAssignService:
                                         location    = EXCLUDED.location,
                                         profile_url = EXCLUDED.profile_url,
                                         resume_text = EXCLUDED.resume_text,
-                                        data        = COALESCE(EXCLUDED.data, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
+                                        data        = COALESCE(sourced_candidates.data, '{}'::jsonb) || COALESCE(EXCLUDED.data, '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object(
                                             'engage_status',       sourced_candidates.data->>'engage_status',
                                             'engage_interview_id', sourced_candidates.data->>'engage_interview_id',
                                             'engage_score',        sourced_candidates.data->'engage_score',
                                             'engage_updated_at',   sourced_candidates.data->>'engage_updated_at',
                                             'engage_last_response',sourced_candidates.data->'engage_last_response',
                                             'engage_hard_filter_status', sourced_candidates.data->>'engage_hard_filter_status',
-                                            'engage_hard_filter_reason', sourced_candidates.data->>'engage_hard_filter_reason'
+                                            'engage_hard_filter_reason', sourced_candidates.data->>'engage_hard_filter_reason',
+                                            'engage_passed_email_sent',  sourced_candidates.data->'engage_passed_email_sent'
                                         )),
                                         status      = EXCLUDED.status,
                                         resume_match_percentage = EXCLUDED.resume_match_percentage,

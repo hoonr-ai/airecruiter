@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
@@ -15,6 +15,7 @@ from services.unipile import unipile_service
 from services.sourced_candidates_storage import sourced_candidates_storage
 from services.dnc_storage import load_dnc_phone_set
 from services.unified_candidate_search import SearchCriteria, unified_search_service
+from services.gender_logic import normalize_gender_prediction, to_gender_fields, infer_gender_from_name_ai
 from services import contact_enrichment
 from utils.phone import normalize_phone
 from models import (
@@ -22,6 +23,8 @@ from models import (
     CandidateAnalysisRequest, CandidateAnalysisResponse, CandidateFeedbackRequest,
 )
 from routers._helpers import get_db_connection
+from core.auth import get_current_user, UserIdentity
+from routers.jobs import _verify_job_access_by_id
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -114,7 +117,8 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT resume_match_filters, sourcing_filters, jobdiva_id, customer_name
+                    SELECT resume_match_filters, sourcing_filters, jobdiva_id, customer_name,
+                           location_type, city
                     FROM monitored_jobs
                     WHERE job_id = %s OR jobdiva_id = %s
                     LIMIT 1
@@ -132,6 +136,9 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
         resolved_job_ref = row[2] or job_ref
         customer_name = str(row[3] or "").strip() if len(row) > 3 else ""
         client_name = "" if customer_name.lower() in ("", "external", "unknown", "n/a") else customer_name
+        location_type = str(row[4] or "").strip() if len(row) > 4 else ""
+        if not location_type and len(row) > 5 and str(row[5] or "").strip().upper() == "REMOTE":
+            location_type = "Remote"
 
         title_criteria = [
             {
@@ -164,6 +171,7 @@ def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
             companies=sourcing_filters.get("companies") or [],
             resume_match_filters=resume_match_filters,
             location=primary_location,
+            location_type=location_type or "Unspecified",
             page_size=100,
             sources=["JobDiva"],
             bypass_screening=False,
@@ -266,6 +274,63 @@ def _candidate_to_persist_row(job_id: str, cand: Dict[str, Any]) -> Dict[str, An
     }
 
 
+def _extract_candidate_gender_fields(cand: Dict[str, Any]) -> Dict[str, Any]:
+    """Return canonical gender fields for API payloads.
+
+    Accepted input labels include legacy values (e.g. "else"), which are
+    normalized to "default".
+    """
+
+    data_blob = cand.get("data") if isinstance(cand.get("data"), dict) else _json_load_safe(cand.get("data"), {})
+    enhanced = cand.get("enhanced_info") if isinstance(cand.get("enhanced_info"), dict) else {}
+
+    raw_label = (
+        cand.get("gender_label")
+        or data_blob.get("gender_label")
+        or enhanced.get("gender_label")
+        or "default"
+    )
+    raw_conf = (
+        cand.get("gender_confidence")
+        if cand.get("gender_confidence") is not None
+        else data_blob.get("gender_confidence", 0.0)
+    )
+    raw_source = (
+        cand.get("gender_source")
+        or data_blob.get("gender_source")
+        or "unknown"
+    )
+    raw_updated = (
+        cand.get("gender_updated_at")
+        or data_blob.get("gender_updated_at")
+    )
+
+    normalized = normalize_gender_prediction(
+        predicted_label=raw_label,
+        confidence=raw_conf,
+        source=raw_source,
+        threshold=0.0,
+        updated_at=raw_updated,
+    )
+    return to_gender_fields(normalized)
+
+
+async def _extract_candidate_gender_fields_with_ai(cand: Dict[str, Any]) -> Dict[str, Any]:
+    fields = _extract_candidate_gender_fields(cand)
+    if fields.get("gender_label") in {"male", "female"}:
+        return fields
+
+    name = str(cand.get("name") or cand.get("person_name") or "").strip()
+    if not name:
+        return fields
+
+    ai_pred = await infer_gender_from_name_ai(name)
+    ai_fields = to_gender_fields(ai_pred)
+    if ai_fields.get("gender_label") in {"male", "female"}:
+        return ai_fields
+    return fields
+
+
 @router.post("/candidates/open-to-work-statuses")
 async def get_open_to_work_statuses(payload: Dict[str, Any]):
     """Poll-friendly read-only lookup for LinkedIn Open-to-Work status.
@@ -304,7 +369,7 @@ async def get_open_to_work_diag():
 
 
 @router.post("/candidates/search")
-async def search_jobdiva_candidates(request: CandidateSearchRequest):
+async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserIdentity = Depends(get_current_user)):
     """
     Unified candidate search with hierarchical skills/titles and intelligent resume processing.
 
@@ -322,6 +387,8 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
     if not request.job_id:
         return {"candidates": [], "message": "job_id required for candidate search"}
 
+    _verify_job_access_by_id(str(request.job_id), user)
+
     try:
         from services.unified_candidate_search import unified_search_service, SearchCriteria
 
@@ -335,6 +402,31 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             location = request.location
         elif request.locations:
             location = request.locations[0].value
+
+        # Work arrangement: request wins; else read monitored_jobs so Remote
+        # jobs skip the commute-radius constraint even when the caller
+        # doesn't send it. Handles the JobDiva quirk of location_type being
+        # empty with the literal string "REMOTE" in city.
+        location_type = (getattr(request, "location_type", "") or "").strip()
+        if location_type.lower() in ("", "unspecified"):
+            location_type = ""
+            try:
+                conn = get_db_connection()
+                try:
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            "SELECT location_type, city FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
+                            (request.job_id, request.job_id),
+                        )
+                        row = cursor.fetchone()
+                finally:
+                    conn.close()
+                if row:
+                    location_type = str(row[0] or "").strip()
+                    if not location_type and str(row[1] or "").strip().upper() == "REMOTE":
+                        location_type = "Remote"
+            except Exception as e:
+                logger.warning(f"Failed to load location_type for job {request.job_id}: {e}")
 
         effective_limit = int(request.limit or request.page_size or 100)
         require_resume = True if request.require_resume is None else bool(request.require_resume)
@@ -397,6 +489,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             keywords=request.keywords or [],
             resume_match_filters=resume_match_filters,
             location=location,
+            location_type=location_type or "Unspecified",
             within_miles=within_miles,
             companies=companies,
             page_size=effective_limit,
@@ -428,6 +521,25 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
             persist_tasks: List[asyncio.Task] = []
             try:
                 async for event in unified_search_service.search_candidates(criteria):
+                    if event.get("type") == "candidate":
+                        cand = event.get("data") or {}
+                        if isinstance(cand, dict):
+                            # Bound the name→gender inference so one slow
+                            # OpenAI call can't stall the whole candidate
+                            # stream; fall back to the non-AI gender fields.
+                            try:
+                                cand.update(
+                                    await asyncio.wait_for(
+                                        _extract_candidate_gender_fields_with_ai(cand),
+                                        timeout=8.0,
+                                    )
+                                )
+                            except asyncio.TimeoutError:
+                                cand.update(_extract_candidate_gender_fields(cand))
+                    # Do not inject gender into candidate_detail patches.
+                    # These patches often omit identity fields and would
+                    # normalize to "default", unintentionally overwriting a
+                    # previously inferred male/female label on the UI row.
                     yield json.dumps(event) + "\n"
                     if event.get("type") == "candidate":
                         cand = event.get("data") or {}
@@ -504,6 +616,7 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest):
                     keywords=request.keywords or [],
                     resume_match_filters=fallback_resume_match_filters,
                     location=fallback_location,
+                    location_type=location_type or "Unspecified",
                     within_miles=within_miles,
                     companies=request.companies or [],
                     page_size=effective_limit,
@@ -850,11 +963,13 @@ async def get_job_candidates(
     job_id_or_ref: str,
     limit: Optional[int] = Query(default=None, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    user: UserIdentity = Depends(get_current_user),
 ):
     """
     Fetches all sourced candidates tied to a specific job.
     Supports both numeric job_id and reference jobdiva_id.
     """
+    _verify_job_access_by_id(job_id_or_ref, user)
     try:
         from psycopg2.extras import RealDictCursor
 
@@ -1112,13 +1227,14 @@ async def get_job_candidates(
 
 
 @router.get("/jobs/{job_id_or_ref}/launched-candidate-keys")
-async def get_launched_candidate_keys(job_id_or_ref: str):
+async def get_launched_candidate_keys(job_id_or_ref: str, user: UserIdentity = Depends(get_current_user)):
     """
     Lightweight endpoint returning just (candidate_id, source) tuples for
     every candidate already in sourced_candidates for this job. The Step 5
     UI uses this to mark already-launched rows as disabled with an
     "Already Launched" badge, preventing duplicate Launch PAIR clicks.
     """
+    _verify_job_access_by_id(job_id_or_ref, user)
     try:
         conn = get_db_connection()
         try:
@@ -2942,6 +3058,14 @@ async def get_candidate_evaluation_report(
             "feedback_reason": data_blob.get("feedback_reason"),
             "feedback_at":     data_blob.get("feedback_at"),
         }
+        candidate_info.update(
+            await _extract_candidate_gender_fields_with_ai(
+                {
+                    "name": cand_row.get("name"),
+                    "data": data_blob,
+                }
+            )
+        )
 
         # Normalize engage_score to a 100-point scale if total_score is available
         display_engage_score = None

@@ -26,7 +26,7 @@ import {
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 
 interface Candidate {
     id: string;
@@ -109,7 +109,7 @@ export function CandidateTable({ candidates, onView, onSelectionChange, selected
         if (!currentCandidate) return;
         setSending(true);
         try {
-            const res = await fetch(`${API_BASE}/candidates/message`, {
+            const res = await authFetch(`${API_BASE}/candidates/message`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -232,7 +232,7 @@ function CandidateRow({
         e.stopPropagation();
         setEngaging(true);
         try {
-            const res = await fetch(`${API_BASE}/candidates/${candidate.id}/engage`, {
+            const res = await authFetch(`${API_BASE}/candidates/${candidate.id}/engage`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ candidate_id: candidate.id })
@@ -249,7 +249,7 @@ function CandidateRow({
         e.stopPropagation();
         setAssessing(true);
         try {
-            const res = await fetch(`${API_BASE}/candidates/${candidate.id}/assess`, {
+            const res = await authFetch(`${API_BASE}/candidates/${candidate.id}/assess`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ candidate_id: candidate.id })

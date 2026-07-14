@@ -43,10 +43,10 @@ from core.amplitude import track_event_async
 configure_logging()
 logger = logging.getLogger(__name__)
 
-# Initialise Sentry as early as possible so all subsequent import-time and
-# runtime errors are captured. Safe no-op when SENTRY_DSN is not set.
-from core.sentry import init as _sentry_init
-_sentry_init()
+# Initialise New Relic as early as possible so all subsequent import-time and
+# runtime errors are captured. Safe no-op when NEW_RELIC_LICENSE_KEY is not set.
+from core.newrelic import init as _newrelic_init, is_enabled as _newrelic_enabled
+_newrelic_init()
 
 from services.ai_service import ai_service
 from models import (
@@ -180,6 +180,16 @@ async def lifespan(app: FastAPI):
             logger.error("job_criteria_schema_init_timeout (10s); continuing")
         except Exception as e:
             logger.error(f"job_criteria_schema_init_failed: {e}; continuing")
+
+    # Provision the campaigns table. Runs after monitored_jobs (whose
+    # campaign_id column links child jobs to a campaign). Idempotent.
+    if campaigns_router is not None and hasattr(campaigns_router, "init_campaigns_schema"):
+        try:
+            await asyncio.wait_for(campaigns_router.init_campaigns_schema(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error("campaigns_schema_init_timeout (10s); continuing")
+        except Exception as e:
+            logger.error(f"campaigns_schema_init_failed: {e}; continuing")
 
     # 4b. Keep the /jobs/monitored cache warm. Per-worker in-memory cache
     # has a 30s TTL, but the live query can spike to 20-30s during
@@ -317,6 +327,8 @@ manual_candidates_router = _safe_import("manual_candidates")
 candidates_router = _safe_import("candidates")
 jobs_router = _safe_import("jobs")
 dnc_router = _safe_import("dnc")
+admin_analytics_router = _safe_import("admin_analytics")
+campaigns_router = _safe_import("campaigns")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
 # prod reverse proxy a 307 with the wrong scheme (when uvicorn isn't running
@@ -324,6 +336,14 @@ dnc_router = _safe_import("dnc")
 # http↔https loop via nginx. Failing loudly with 404 on slash mismatch is a
 # cheap fence around that whole class of misconfig.
 app = FastAPI(title="Hoonr.ai API", lifespan=lifespan, redirect_slashes=False)
+
+if _newrelic_enabled():
+    try:
+        import newrelic.agent
+        app = newrelic.agent.ASGIApplicationWrapper(app)
+    except Exception:
+        pass
+
 # Request-correlation middleware. Must wrap every route so downstream
 # handlers and services see the same request_id via contextvars.
 app.add_middleware(RequestIDMiddleware)
@@ -355,7 +375,15 @@ _mount(manual_candidates_router, "manual_candidates")
 _mount(candidates_router, "candidates")
 _mount(jobs_router, "jobs")
 _mount(dnc_router, "dnc")
+_mount(admin_analytics_router, "admin_analytics")
+# Mounted under /api so the existing nginx `location /api/` passthrough routes
+# it to the backend — avoids a collision with the frontend's /campaigns pages
+# (same trick keeps job_criteria under /api/jobs/...). No nginx changes needed.
+_mount(campaigns_router, "campaigns", prefix="/api")
 _mount(engagement, "engagement", prefix="/api/v1/engagement")
+
+from core.auth import auth_router
+app.include_router(auth_router)
 
 app.add_middleware(
     CORSMiddleware,

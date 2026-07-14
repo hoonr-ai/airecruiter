@@ -3,7 +3,7 @@ import logging
 import os
 import re
 from typing import List, Dict, Any, Optional, Tuple
-from core.config import EXA_API_KEY
+from core.config import EXA_API_KEY, EXA_CONTACT_ENRICH_ENABLED
 from exa_py import Exa
 from services.location import extract_us_location_from_text
 
@@ -155,56 +155,351 @@ def _extract_city_from_highlights(text: str) -> Tuple[str, str]:
     return "", ""
 
 
-def _exa_query_from_boolean(boolean_string: str, skills: List[str], location: str, role_hint: str = "") -> str:
-    """Build an Exa-friendly query.
+# Exa Search does NOT parse boolean operators (confirmed by Exa engineering,
+# 2026-07): AND/OR/NOT, parens, and quoted-phrase syntax are treated as plain
+# tokens at best and noise at worst. Queries must be natural-language
+# sentences, ONE ROLE PER SEARCH, e.g.
+#   "Senior Oracle PL/SQL developer with 5+ years of Autosys and performance
+#    tuning experience, based in Jersey City, NJ"
+# The helpers below compose those sentences from structured criteria and only
+# fall back to flattening a legacy boolean string when nothing structured is
+# available.
 
-    Exa's `type="auto"` handles a raw boolean string as free text reasonably
-    well — AND/OR/NOT survive as word tokens and quoted phrases still bias
-    matches. When no boolean is provided, fall back to the skills+location
-    heuristic that Dice/LinkedIn-Exa used previously.
 
-    When a boolean is provided we still re-append top must-have skills + the
-    primary location if they're missing from the boolean — defends against
-    upstream boolean builders that drop skills or location, which manifested
-    in production as Exa results ignoring the user's stated requirements.
+def _strip_zip_for_query(location: str) -> str:
+    """Drop zip codes from a location destined for Exa query/prompt text.
+
+    LinkedIn profile location lines never show zips ("Tempe, Arizona,
+    United States"), so a zip in the neural query is pure noise. The zip
+    still drives the offline radius post-filter — it just doesn't belong
+    in the NL text.
     """
-    bs = (boolean_string or "").strip()
-    if bs:
-        # Drop ` within N mi` radius hints — Exa can't act on them and they
-        # introduce noise. Location (if present) still appears as a quoted
-        # phrase elsewhere in the boolean.
-        cleaned = re.sub(r'\s+within\s+\d+\s*mi\b', '', bs, flags=re.IGNORECASE).strip()
-        lower_bs = cleaned.lower()
-        # Top-5 skills only — caps query length around Exa's quality knee
-        # (~512 chars). Skills already in the boolean are skipped to avoid
-        # duplication.
-        if skills:
-            for skill in skills[:5]:
-                if not skill:
-                    continue
-                token = skill.strip()
-                if not token:
-                    continue
-                if re.search(rf'\b{re.escape(token.lower())}\b', lower_bs):
-                    continue
-                cleaned = f'{cleaned} AND "{token}"'
-                lower_bs = cleaned.lower()
-        # Match the location only on its city portion (`split(",", 1)[0]`)
-        # so a boolean that already says "located in New York" won't get
-        # "New York, NY" appended on top of it.
-        loc = (location or "").strip()
-        if loc:
-            city_token = loc.split(",", 1)[0].strip().lower()
-            if city_token and city_token not in lower_bs:
-                cleaned = f'{cleaned} located in {loc}'
-        return cleaned
+    cleaned = re.sub(r"\b\d{5}(?:-\d{4})?\b", "", str(location or ""))
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+,", ",", cleaned)
+    cleaned = re.sub(r",\s*,", ",", cleaned)
+    return cleaned.strip(" ,")
 
-    skills_str = ", ".join(skills) if skills else ""
-    prefix = role_hint or "candidate"
-    query = f"{prefix} {skills_str}".strip()
-    if location:
-        query += f" located in {location}"
+
+_BOOLEAN_OPERATOR_RE = re.compile(r"^(?:AND|OR|NOT|W/\d+)$", re.IGNORECASE)
+# Filler words that survive flattening a boolean string but carry no signal
+# as standalone query terms.
+_BOOLEAN_STOPWORDS = {
+    "a", "an", "and", "or", "not", "the", "of", "in", "with",
+    "located", "based", "near", "within",
+}
+
+
+def _strip_boolean_not_groups(text: str) -> str:
+    """Remove `NOT (...)` / `NOT "term"` / `NOT term` exclusions — Exa has no
+    negation, so exclusion terms in the query would *attract* the profiles
+    they were meant to filter out. Downstream post-filtering still applies
+    the excludes."""
+    out = re.sub(r'\bNOT\s*\((?:[^()]|\([^()]*\))*\)', ' ', text, flags=re.IGNORECASE)
+    out = re.sub(r'\bNOT\s+"[^"]*"', ' ', out, flags=re.IGNORECASE)
+    out = re.sub(r'\bNOT\s+\S+', ' ', out, flags=re.IGNORECASE)
+    return out
+
+
+def _boolean_to_terms(boolean_string: str, cap: int = 8) -> List[str]:
+    """Flatten a boolean/ATS keyword string into plain phrases.
+
+    Pulls quoted phrases first (they carry the intent), then bare words,
+    dropping operators, parens, radius hints, exclusion groups, and filler
+    words. Used only as a fallback when no structured titles/skills exist.
+    """
+    text = (boolean_string or "").strip()
+    if not text or text == "*":
+        return []
+    text = re.sub(r'\s+within\s+\d+\s*mi\b', ' ', text, flags=re.IGNORECASE)
+    text = _strip_boolean_not_groups(text)
+
+    terms: List[str] = []
+    seen = set()
+
+    def _add(term: str) -> None:
+        t = re.sub(r"\s+", " ", term).strip(' .,;:*')
+        key = t.lower()
+        if (
+            t
+            and key not in seen
+            and key not in _BOOLEAN_STOPWORDS
+            and not _BOOLEAN_OPERATOR_RE.match(t)
+        ):
+            seen.add(key)
+            terms.append(t)
+
+    for quoted in re.findall(r'"([^"]+)"', text):
+        _add(quoted)
+    remainder = re.sub(r'"[^"]*"', ' ', text)
+    remainder = remainder.replace('(', ' ').replace(')', ' ')
+    for word in remainder.split():
+        _add(word)
+    return terms[:cap]
+
+
+def _split_role_hint(role_hint: str) -> List[str]:
+    """Split a legacy role-hint string ('"A" OR "B"' or plain text) into
+    individual role titles."""
+    hint = (role_hint or "").strip()
+    if not hint:
+        return []
+    quoted = [q.strip() for q in re.findall(r'"([^"]+)"', hint) if q.strip()]
+    if quoted:
+        return quoted
+    return [p.strip() for p in re.split(r"\bOR\b", hint, flags=re.IGNORECASE) if p.strip()]
+
+
+def _join_natural(items: List[str]) -> str:
+    """['a','b','c'] -> 'a, b and c' — reads as prose, not as a keyword list."""
+    items = [i for i in items if i]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def compose_people_query(
+    role: str,
+    skills: Optional[List[str]] = None,
+    location: str = "",
+    min_experience_years: Optional[int] = None,
+    companies: Optional[List[str]] = None,
+    keywords: Optional[List[str]] = None,
+) -> str:
+    """One natural-language people-search sentence for one role.
+
+    'Senior Oracle PL/SQL Developer with 5+ years of Autosys and performance
+    tuning experience, who has worked at Acme Corp, TS/SCI clearance, based
+    in Jersey City, NJ, United States'
+    """
+    role_clean = re.sub(r"\s+", " ", str(role or "")).strip().strip('"')
+    if not role_clean:
+        role_clean = "Experienced professional"
+    role_lower = role_clean.lower()
+
+    seen = set()
+
+    def _clean_terms(values: Optional[List[str]], cap: int, skip_in_role: bool) -> List[str]:
+        out: List[str] = []
+        for v in values or []:
+            t = re.sub(r"\s+", " ", str(v or "")).strip().strip('"')
+            key = t.lower()
+            if not t or key in seen:
+                continue
+            # Skip terms already named inside the role title ("Senior PL/SQL
+            # Developer" + skill "PL/SQL" reads badly twice). Word-boundary
+            # match, NOT substring — a plain `in` deleted "Java" for
+            # "JavaScript Developer" and "Go" for "Django Developer".
+            if skip_in_role and re.search(rf"(?<![a-z0-9]){re.escape(key)}(?![a-z0-9])", role_lower):
+                continue
+            seen.add(key)
+            out.append(t)
+            if len(out) >= cap:
+                break
+        return out
+
+    skill_list = _clean_terms(skills, cap=5, skip_in_role=True)
+    # Keywords/companies are cleaned AFTER skills but get their own sentence
+    # slots, so a job with 5+ skills can't silently truncate them away.
+    keyword_list = _clean_terms(keywords, cap=3, skip_in_role=True)
+    company_list = _clean_terms(companies, cap=2, skip_in_role=False)
+
+    years = min_experience_years if (min_experience_years or 0) > 0 else None
+    parts = [role_clean]
+    if years and skill_list:
+        parts.append(f"with {years}+ years of {_join_natural(skill_list)} experience")
+    elif skill_list:
+        parts.append(f"with {_join_natural(skill_list)} experience")
+    elif years:
+        parts.append(f"with {years}+ years of experience")
+
+    query = " ".join(parts)
+    if company_list:
+        query += f", who has worked at {_join_natural(company_list)}"
+    if keyword_list:
+        query += f", {_join_natural(keyword_list)}"
+    # Strip zips — LinkedIn location lines never show them, so a zip in the
+    # NL query is noise. The zip still drives the offline radius post-filter.
+    loc = _strip_zip_for_query(location)
+    if loc:
+        if loc.lower() == "united states":
+            loc = "the United States"
+        query += f", based in {loc}"
     return query
+
+
+def build_people_queries(
+    titles: Optional[List[str]] = None,
+    skills: Optional[List[str]] = None,
+    location: str = "",
+    min_experience_years: Optional[int] = None,
+    boolean_string: str = "",
+    role_hint: str = "",
+    max_queries: int = 3,
+    companies: Optional[List[str]] = None,
+    keywords: Optional[List[str]] = None,
+) -> List[str]:
+    """Natural-language Exa queries — one role per query (Exa guidance).
+
+    Priority for the role list: structured `titles` → legacy `role_hint`
+    ('"A" OR "B"') → first term of a flattened boolean string (recruiter-
+    edited booleans conventionally lead with the title group, and this is
+    the only place a recruiter-typed role that never made it into
+    title_criteria can surface). When no roles are derivable at all, emits
+    a single generic query anchored on skills + location so the search
+    still runs.
+    """
+    roles: List[str] = []
+    seen_roles = set()
+    for t in titles or []:
+        clean = re.sub(r"\s+", " ", str(t or "")).strip().strip('"')
+        key = clean.lower()
+        if clean and key not in seen_roles:
+            seen_roles.add(key)
+            roles.append(clean)
+    if not roles:
+        roles = _split_role_hint(role_hint)
+
+    skill_terms = [str(s or "").strip() for s in (skills or []) if str(s or "").strip()]
+
+    if not roles:
+        terms = _boolean_to_terms(boolean_string)
+        if terms:
+            # Boolean builders put the primary title group first; treat the
+            # leading term as the role. The remaining terms only fill the
+            # skill slot when no structured skills exist — structured chips
+            # are always the better signal.
+            roles = terms[:1]
+            if not skill_terms:
+                skill_terms = terms[1:6]
+
+    if not roles:
+        return [
+            compose_people_query(
+                "", skill_terms, location, min_experience_years,
+                companies=companies, keywords=keywords,
+            )
+        ]
+
+    return [
+        compose_people_query(
+            role, skill_terms, location, min_experience_years,
+            companies=companies, keywords=keywords,
+        )
+        for role in roles[:max_queries]
+    ]
+
+def build_deep_research_output_schema(include_contact_fields: Optional[bool] = None) -> Dict[str, Any]:
+    """Output schema for the Exa Agent deep-research run.
+
+    Contact fields carry `description`s because that's what activates the
+    Agent API's contact-enrichment tool (per Exa engineering) — a bare
+    {"type": "string"} is NOT enough. Billable per hit (email $0.02 / phone
+    $0.07), so gated behind the same flag as the per-candidate enrichment
+    path (defaults to EXA_CONTACT_ENRICH_ENABLED).
+    """
+    if include_contact_fields is None:
+        include_contact_fields = EXA_CONTACT_ENRICH_ENABLED
+
+    candidate_props: Dict[str, Any] = {
+        "linkedin_url": {"type": "string"},
+        "name": {"type": "string"},
+        "current_title": {"type": "string"},
+        "location": {
+            "type": "string",
+            "description": (
+                "Candidate's CURRENT residence from the LinkedIn profile's own "
+                "location line, e.g. 'Tempe, Arizona, United States' or 'Greater "
+                "Phoenix Area'. Not a company HQ, not a past position's city. "
+                "Empty string if the profile shows no location."
+            ),
+        },
+        "last_activity": {"type": ["string", "null"]},
+        "follower_count": {"type": ["integer", "null"]},
+        "recent_companies": {
+            "type": "array",
+            "maxItems": 2,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "company": {"type": "string"},
+                    "title": {"type": "string"},
+                    "start": {"type": "string"},
+                    "end": {"type": "string"},
+                },
+            },
+        },
+        "fit_rationale": {"type": "string"},
+    }
+    if include_contact_fields:
+        candidate_props["email"] = {
+            "type": ["string", "null"],
+            "description": (
+                "The candidate's best current email address "
+                "(work email preferred, personal email acceptable)."
+            ),
+        }
+        candidate_props["phone"] = {
+            "type": ["string", "null"],
+            "description": (
+                "The candidate's best direct phone number "
+                "(mobile preferred), including country code."
+            ),
+        }
+
+    return {
+        "type": "object",
+        "required": ["candidates"],
+        "properties": {
+            "candidates": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["linkedin_url", "fit_rationale"],
+                    "properties": candidate_props,
+                },
+            },
+        },
+    }
+
+
+def _common_people_fields(result: Any) -> Dict[str, Any]:
+    """Parse the source-agnostic fields off one Exa people-search result."""
+    title = getattr(result, "title", "Unknown Candidate")
+    url = getattr(result, "url", "")
+
+    # Often for people search, the title contains their name or headline.
+    name_parts = title.split(" - ")[0].split("|")[0].strip().split(" ")
+    first_name = name_parts[0] if name_parts else "Unknown"
+    last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else ""
+
+    highlights_text = ""
+    if getattr(result, "highlights", None):
+        highlights_text = "\n".join(result.highlights)
+
+    extracted_city, extracted_state = _extract_city_from_highlights(highlights_text)
+    extracted_location = extract_us_location_from_text(f"{title}\n{highlights_text}")
+    if not extracted_location and (extracted_city or extracted_state):
+        extracted_location = ", ".join(p for p in [extracted_city, extracted_state] if p)
+
+    return {
+        "firstName": first_name,
+        "lastName": last_name,
+        "email": "",
+        "city": extracted_city,
+        "state": extracted_state,
+        "location": extracted_location,
+        "title": title,
+        "match_score": 0,
+        "profile_url": url,
+        "image_url": "",
+        "open_to_relocation": _detect_relocation(highlights_text),
+        "resume_text": highlights_text,
+        "recruiter_candidate_id": None,
+    }
+
 
 class ExaService:
     def __init__(self):
@@ -216,94 +511,118 @@ class ExaService:
             except Exception as e:
                 logger.error(f"Failed to initialize Exa SDK: {e}")
 
-    async def search_candidates(self, skills: List[str], location: str, limit: int = 10, boolean_string: str = "", role_hint: str = "") -> List[Dict[str, Any]]:
+    async def _people_search_fanout(
+        self,
+        queries: List[str],
+        limit: int,
+        include_domains: Optional[List[str]] = None,
+    ) -> List[Any]:
+        """Run one Exa people search per query concurrently and merge.
+
+        Merging interleaves round-robin by rank so every role gets fair
+        representation in the capped result, then dedupes by normalised
+        profile URL (the same person often matches sibling role queries).
+        Per-query failures are logged and skipped — one bad query must not
+        sink the whole search.
+        """
+        loop = asyncio.get_event_loop()
+
+        def do_search(q: str):
+            kwargs: Dict[str, Any] = dict(
+                category="people",
+                type="auto",
+                num_results=limit,
+                highlights={"max_characters": 4000},
+            )
+            if include_domains:
+                kwargs["include_domains"] = include_domains
+            return self.exa.search_and_contents(q, **kwargs)
+
+        responses = await asyncio.gather(
+            *[loop.run_in_executor(None, do_search, q) for q in queries],
+            return_exceptions=True,
+        )
+
+        per_query: List[List[Any]] = []
+        for q, resp in zip(queries, responses):
+            if isinstance(resp, BaseException):
+                logger.warning("Exa people search failed for query %r: %s", q, resp)
+                continue
+            per_query.append(list(getattr(resp, "results", None) or []))
+
+        merged: List[Any] = []
+        seen = set()
+        for rank in range(max((len(r) for r in per_query), default=0)):
+            for results in per_query:
+                if rank >= len(results):
+                    continue
+                r = results[rank]
+                key = (
+                    _normalize_linkedin_url(getattr(r, "url", "") or "")
+                    or str(getattr(r, "id", "") or "")
+                    or f"anon_{len(merged)}"
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(r)
+        return merged[:limit]
+
+    async def search_candidates(
+        self,
+        skills: List[str],
+        location: str,
+        limit: int = 10,
+        boolean_string: str = "",
+        role_hint: str = "",
+        titles: Optional[List[str]] = None,
+        min_experience_years: Optional[int] = None,
+        companies: Optional[List[str]] = None,
+        keywords: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
         if not self.exa:
             logger.warning("Exa API key is not set. Skipping Exa search.")
             return []
 
         try:
-            query = _exa_query_from_boolean(
-                boolean_string, skills, location,
+            queries = build_people_queries(
+                titles=titles,
+                skills=skills,
+                location=location,
+                min_experience_years=min_experience_years,
+                boolean_string=boolean_string,
                 role_hint=role_hint,
+                companies=companies,
+                keywords=keywords,
             )
+            logger.info("Executing Exa people search with %d natural-language queries: %s", len(queries), queries)
 
-            logger.info(f"Executing Exa people search for query: {query}")
-            
-            # Note: the python SDK's search method supports synchronous wrapper? 
-            # If exa_py is sync, we should probably run it in an executor, but we can try it directly.
-            # Using type="auto" as recommended in the config for most queries
-            import asyncio
-            loop = asyncio.get_event_loop()
-            
-            def do_search():
-                return self.exa.search_and_contents(
-                    query,
-                    category="people",
-                    type="auto",
-                    num_results=limit,
-                    highlights={"max_characters": 4000}
-                )
+            search_results = await self._people_search_fanout(queries, limit)
 
-            # Wait for sync search call
-            response = await loop.run_in_executor(None, do_search)
-            
             results = []
-            if response and hasattr(response, 'results'):
-                for idx, result in enumerate(response.results):
-                    # Exa returns title, url, author, id. 
-                    # Often for people search, the title contains their name or headline.
-                    title = getattr(result, 'title', 'Unknown Candidate')
-                    url = getattr(result, 'url', '')
-                    
-                    # Try to separate first and last name from the title
-                    name_parts = title.split(" - ")[0].split("|")[0].strip().split(" ")
-                    first_name = name_parts[0] if len(name_parts) > 0 else "Unknown"
-                    last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else ""
-                    
-                    # Store highlights if any
-                    highlights_text = ""
-                    if getattr(result, 'highlights', None):
-                        highlights_text = "\n".join(result.highlights)
+            for idx, result in enumerate(search_results):
+                fields = _common_people_fields(result)
+                url = fields["profile_url"]
+                # Stable id: derived from the profile URL so the same
+                # LinkedIn profile returned at different result positions
+                # across runs upserts onto the same sourced_candidates row
+                # via UNIQUE(jobdiva_id, candidate_id, source).
+                stable_key = (
+                    _normalize_linkedin_url(url)
+                    or getattr(result, 'id', None)
+                    or f"exa_{idx}"
+                )
+                cand = {
+                    "id": f"exa_{stable_key}",
+                    "provider_id": getattr(result, 'id', f"exa_{idx}"),
+                    "source": "LinkedIn-Exa",
+                    # open_to_work intentionally omitted here — populated
+                    # asynchronously by services.apify_open_to_work via
+                    # unified_candidate_search._search_exa.
+                    **fields,
+                }
+                results.append(cand)
 
-                    extracted_city, extracted_state = _extract_city_from_highlights(highlights_text)
-                    extracted_location = extract_us_location_from_text(
-                        f"{title}\n{highlights_text}"
-                    )
-                    if not extracted_location and (extracted_city or extracted_state):
-                        extracted_location = ", ".join(p for p in [extracted_city, extracted_state] if p)
-
-                    # Stable id: derived from the profile URL so the same
-                    # LinkedIn profile returned at different result positions
-                    # across runs upserts onto the same sourced_candidates row
-                    # via UNIQUE(jobdiva_id, candidate_id, source).
-                    stable_key = (
-                        _normalize_linkedin_url(url)
-                        or getattr(result, 'id', None)
-                        or f"exa_{idx}"
-                    )
-                    cand = {
-                        "id": f"exa_{stable_key}",
-                        "provider_id": getattr(result, 'id', f"exa_{idx}"),
-                        "firstName": first_name,
-                        "lastName": last_name,
-                        "email": "",
-                        "city": extracted_city,
-                        "state": extracted_state,
-                        "location": extracted_location,
-                        "title": title,
-                        "source": "LinkedIn-Exa",
-                        "match_score": 0,
-                        "profile_url": url,
-                        "image_url": "",
-                        # open_to_work intentionally omitted here — populated
-                        # asynchronously by services.apify_open_to_work via
-                        # unified_candidate_search._search_exa.
-                        "open_to_relocation": _detect_relocation(highlights_text),
-                        "resume_text": highlights_text,
-                        "recruiter_candidate_id": None
-                    }
-                    results.append(cand)
-                    
             logger.info(f"Exa search returned {len(results)} candidates.")
             return results
 
@@ -381,6 +700,7 @@ class ExaService:
         skills: List[str],
         location: str,
         seed_urls: List[str],
+        within_miles: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Exa Agent API (Websets 2.0) pass — agentic enrichment + discovery.
 
@@ -423,10 +743,11 @@ class ExaService:
                 "EXA_AGENT_MODEL is set but ignored — Agent API uses EXA_AGENT_EFFORT instead."
             )
 
-        top_skills = ", ".join((skills or [])[:5]) or "(any)"
         seeds = [u for u in (seed_urls or []) if u][:max_input]
 
-        # Natural-language task. URLs go into `input.data`, not the query.
+        # Natural-language task (Exa doesn't parse boolean/ATS syntax — the
+        # role line is composed as a prose sentence). URLs go into
+        # `input.data`, not the query.
         #
         # Tone shift vs first version: every "or null" hint was making the
         # agent give up on follower_count / last_activity the moment they
@@ -436,9 +757,48 @@ class ExaService:
         # followers", etc.). Schema still allows null so the agent doesn't
         # fail validation when a profile genuinely doesn't expose the data,
         # but the prose strongly biases toward "go look".
+        # jd_role carries the fuller title list (callers join the top titles
+        # with " or "), so prefer it over the single-title jd_title — the
+        # other way around silently dropped every title after the first.
+        role_text = (jd_role or "").strip() or (jd_title or "").strip()
+        role_line = compose_people_query(role_text, skills, location)
+        include_contacts = EXA_CONTACT_ENRICH_ENABLED
+        contact_clause = (
+            "  5. email and phone: the candidate's best current email address "
+            "and direct phone number, using your contact enrichment tooling.\n"
+            if include_contacts
+            else ""
+        )
+        # Residency requirement: bias the agent toward candidates who actually
+        # live in/near the job location and to report the profile's true
+        # location (not a company HQ or a past job's city). Skipped for
+        # US-wide / remote searches.
+        query_location = _strip_zip_for_query(location)
+        radius_hint = ""
+        if query_location and query_location.lower() not in (
+            "united states", "the united states", "usa", "us",
+        ):
+            radius = max(1, min(100, int(within_miles or 25)))
+            radius_hint = (
+                f"LOCATION REQUIREMENT: candidates must CURRENTLY live in or within "
+                f"~{radius} miles of {query_location}. Verify against the LinkedIn "
+                "profile's own location line — a past job, employer HQ, or university "
+                "in that city does NOT count. Prefer verified-local candidates; if you "
+                "cannot verify, still include the candidate but report the location "
+                "string their profile actually shows. "
+            )
+        location_clause = (
+            "  6. location: the candidate's CURRENT residence exactly as the "
+            "LinkedIn profile's location line shows it (e.g. 'Tempe, Arizona, "
+            "United States' or 'Greater Phoenix Area'). Never substitute a "
+            "company HQ or a past position's city; leave empty only if the "
+            "profile shows no location at all.\n"
+        )
         query = (
-            f"Find LinkedIn profiles matching: title=\"{jd_title}\" | role=\"{jd_role}\" "
-            f"| skills=\"{top_skills}\" | location=\"{location}\". "
+            f"Find LinkedIn profiles of candidates matching this role: {role_line}. "
+            "Prefer candidates who are currently active in this role — skip retired "
+            "or long-inactive profiles. "
+            + radius_hint +
             "Also enrich every profile passed in `input.data`. "
             "For each candidate, you MUST attempt to extract ALL of the following — "
             "treat null as a last resort, not a default:\n"
@@ -455,7 +815,9 @@ class ExaService:
             "  3. recent_companies: last 2 positions, each with company, title, "
             "start (YYYY-MM), end (YYYY-MM or 'Present').\n"
             f"  4. fit_rationale: one sentence (≤300 chars) on why this candidate's "
-            f"titles fit the role \"{jd_role}\".\n"
+            f"titles fit the role \"{role_text or jd_role}\".\n"
+            f"{contact_clause}"
+            f"{location_clause}"
             "Return at least 30 candidates with linkedin_url populated. Do not "
             "drop candidates just because one field is hard to find — partial "
             "enrichment is better than skipping them."
@@ -467,41 +829,7 @@ class ExaService:
         if seeds:
             agent_input = {"data": [{"linkedin_url": u} for u in seeds]}
 
-        output_schema = {
-            "type": "object",
-            "required": ["candidates"],
-            "properties": {
-                "candidates": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "required": ["linkedin_url", "fit_rationale"],
-                        "properties": {
-                            "linkedin_url": {"type": "string"},
-                            "name": {"type": "string"},
-                            "current_title": {"type": "string"},
-                            "location": {"type": "string"},
-                            "last_activity": {"type": ["string", "null"]},
-                            "follower_count": {"type": ["integer", "null"]},
-                            "recent_companies": {
-                                "type": "array",
-                                "maxItems": 2,
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "company": {"type": "string"},
-                                        "title": {"type": "string"},
-                                        "start": {"type": "string"},
-                                        "end": {"type": "string"},
-                                    },
-                                },
-                            },
-                            "fit_rationale": {"type": "string"},
-                        },
-                    },
-                },
-            },
-        }
+        output_schema = build_deep_research_output_schema(include_contacts)
 
         loop = asyncio.get_event_loop()
         betas = ["agent-2026-05-07"]
@@ -581,7 +909,18 @@ class ExaService:
         logger.info("Exa Agent run_id=%s returned %d candidates", run_id, len(candidates))
         return candidates
 
-    async def search_dice_candidates(self, skills: List[str], location: str, limit: int = 10, boolean_string: str = "", role_hint: str = "") -> List[Dict[str, Any]]:
+    async def search_dice_candidates(
+        self,
+        skills: List[str],
+        location: str,
+        limit: int = 10,
+        boolean_string: str = "",
+        role_hint: str = "",
+        titles: Optional[List[str]] = None,
+        min_experience_years: Optional[int] = None,
+        companies: Optional[List[str]] = None,
+        keywords: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
         """
         Search Dice (dice.com) profiles via Exa with domain filtering.
         Dice hosts tech candidate profiles publicly indexable by Exa; we scope
@@ -592,63 +931,32 @@ class ExaService:
             return []
 
         try:
-            import asyncio
-            query = _exa_query_from_boolean(
-                boolean_string, skills, location,
-                role_hint=role_hint or "resume profile",
+            queries = build_people_queries(
+                titles=titles,
+                skills=skills,
+                location=location,
+                min_experience_years=min_experience_years,
+                boolean_string=boolean_string,
+                role_hint=role_hint,
+                companies=companies,
+                keywords=keywords,
+            )
+            logger.info("Executing Dice (via Exa) search with %d natural-language queries: %s", len(queries), queries)
+
+            search_results = await self._people_search_fanout(
+                queries, limit, include_domains=["dice.com"],
             )
 
-            logger.info(f"Executing Dice (via Exa) search for query: {query}")
-            loop = asyncio.get_event_loop()
-
-            def do_search():
-                return self.exa.search_and_contents(
-                    query,
-                    category="people",
-                    type="auto",
-                    num_results=limit,
-                    include_domains=["dice.com"],
-                    highlights={"max_characters": 4000},
-                )
-
-            response = await loop.run_in_executor(None, do_search)
-
             results = []
-            if response and hasattr(response, "results"):
-                for idx, result in enumerate(response.results):
-                    title = getattr(result, "title", "Unknown Candidate")
-                    url = getattr(result, "url", "")
-                    name_parts = title.split(" - ")[0].split("|")[0].strip().split(" ")
-                    first_name = name_parts[0] if name_parts else "Unknown"
-                    last_name = " ".join(name_parts[1:]) if len(name_parts) > 1 else ""
-                    highlights_text = ""
-                    if getattr(result, "highlights", None):
-                        highlights_text = "\n".join(result.highlights)
-                    extracted_city, extracted_state = _extract_city_from_highlights(highlights_text)
-                    extracted_location = extract_us_location_from_text(
-                        f"{title}\n{highlights_text}"
-                    )
-                    if not extracted_location and (extracted_city or extracted_state):
-                        extracted_location = ", ".join(p for p in [extracted_city, extracted_state] if p)
-                    results.append({
-                        "id": f"dice_{idx}_{getattr(result, 'id', idx)}",
-                        "provider_id": getattr(result, "id", f"dice_{idx}"),
-                        "firstName": first_name,
-                        "lastName": last_name,
-                        "email": "",
-                        "city": extracted_city,
-                        "state": extracted_state,
-                        "location": extracted_location,
-                        "title": title,
-                        "source": "Dice",
-                        "match_score": 0,
-                        "profile_url": url,
-                        "image_url": "",
-                        "open_to_work": False,
-                        "open_to_relocation": _detect_relocation(highlights_text),
-                        "resume_text": highlights_text,
-                        "recruiter_candidate_id": None,
-                    })
+            for idx, result in enumerate(search_results):
+                fields = _common_people_fields(result)
+                results.append({
+                    "id": f"dice_{idx}_{getattr(result, 'id', idx)}",
+                    "provider_id": getattr(result, "id", f"dice_{idx}"),
+                    "source": "Dice",
+                    "open_to_work": False,
+                    **fields,
+                })
 
             logger.info(f"Dice-via-Exa returned {len(results)} candidates.")
             return results

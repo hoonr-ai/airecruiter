@@ -13,7 +13,7 @@ Auto-creates the engage_interview_audit table on startup.
 import asyncio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List, Any, Dict
+from typing import Optional, List, Any, Dict, Tuple
 import psycopg2.extras
 import json
 import logging
@@ -30,6 +30,7 @@ from core.email import (
     _build_word_resume_document,
     resolve_app_base_url,
 )
+from services.gender_logic import normalize_gender_prediction, infer_gender_from_name_ai
 from services.jobdiva import jobdiva_service
 from services.auto_assign_service import auto_assign_service
 from core import (
@@ -78,13 +79,15 @@ ENGAGE_PASSED_STATUSES = os.getenv("ENGAGE_PASSED_STATUSES", "completed,passed")
 # slots (briefly, after Fix 1). 5 matches the scale jobdiva_ratelimit_probe.py
 # has been probing — tunable via env if JobDiva's rate budget changes.
 _PROVISION_CONCURRENCY = asyncio.Semaphore(int(os.getenv("PROVISION_CONCURRENCY", "5")))
-_SENTRY_RESPONSE_BODY_LIMIT = 16000
+_NR_RESPONSE_BODY_LIMIT = 16000
 
 
-def _log_generate_payload_response_to_sentry(response_obj: Dict[str, Any], *, level: str = "info") -> None:
-    """Best-effort Sentry logging for /engage/generate-payload responses."""
+def _log_generate_payload_response_to_newrelic(response_obj: Dict[str, Any], *, level: str = "info") -> None:
+    """Best-effort New Relic logging for /engage/generate-payload responses."""
     try:
-        import sentry_sdk
+        from core.newrelic import is_enabled, record_custom_event, record_message
+        if not is_enabled():
+            return
     except Exception:
         return
 
@@ -93,25 +96,21 @@ def _log_generate_payload_response_to_sentry(response_obj: Dict[str, Any], *, le
     except Exception:
         response_text = str(response_obj)
 
-    truncated = response_text[:_SENTRY_RESPONSE_BODY_LIMIT]
+    truncated = response_text[:_NR_RESPONSE_BODY_LIMIT]
     was_truncated = len(response_text) > len(truncated)
 
     try:
-        with sentry_sdk.new_scope() as scope:
-            scope.set_tag("api_endpoint", "/engage/generate-payload")
-            scope.set_tag("api_operation", "generate_payload")
-            scope.set_tag("truncated", str(was_truncated).lower())
-            scope.set_context(
-                "engage_generate_payload_response",
-                {
-                    "response_size_bytes": len(response_text),
-                    "truncated": was_truncated,
-                    "response": truncated,
-                },
-            )
-            sentry_sdk.capture_message("Engage generate-payload response", level=level)
+        event_data = {
+            "api_endpoint": "/engage/generate-payload",
+            "api_operation": "generate_payload",
+            "response_size_bytes": len(response_text),
+            "truncated": was_truncated,
+            "response": truncated,
+        }
+        record_custom_event("EngageGeneratePayload", event_data)
+        record_message("Engage generate-payload response", attributes=event_data, level=level)
     except Exception:
-        # Sentry logging must never affect the API path.
+        # New Relic logging must never affect the API path.
         return
 
 def _parse_json_list(val) -> list:
@@ -125,6 +124,143 @@ def _parse_json_list(val) -> list:
         except Exception:
             return [e.strip() for e in val.split(",") if e.strip()]
     return []
+
+
+def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str = "") -> Tuple[bool, str]:
+    """Check if a candidate should be excluded from PAIR outreach.
+
+    Excludes:
+      1. Current Employee / Working through Pyramid Consulting
+      2. Offer Extended
+      3. Offer Accepted
+      4. Current Employee of the hiring client
+    """
+    if not candidate or not isinstance(candidate, dict):
+        return False, ""
+
+    data = candidate.get("data") if isinstance(candidate.get("data"), dict) else candidate
+    enhanced = data.get("enhanced_info") if isinstance(data.get("enhanced_info"), dict) else {}
+
+    for avail_field in [data.get("available"), candidate.get("available")]:
+        if avail_field is False or str(avail_field).strip().lower() == "false":
+            return True, "Current Employee (Pyramid / Unavailable)"
+
+    quals = data.get("qualifications") or candidate.get("qualifications") or enhanced.get("qualifications") or []
+    if isinstance(quals, list):
+        for q in quals:
+            if not isinstance(q, dict):
+                continue
+            q_val = str(q.get("qualificationValue") or q.get("value") or "").strip()
+            q_val_lower = q_val.lower()
+            if "current employee" in q_val_lower:
+                return True, "Current Employee (Pyramid)"
+            if "offer extended" in q_val_lower or "offer - extended" in q_val_lower:
+                return True, "Offer Extended"
+            if "offer accepted" in q_val_lower or "offer - accepted" in q_val_lower or q_val_lower in {"placed", "hired"}:
+                return True, "Offer Accepted"
+
+    status_strs = [
+        str(data.get("employee_status") or "").strip(),
+        str(data.get("available") or "").strip(),
+        str(data.get("availability_status") or "").strip(),
+        str(data.get("status") or "").strip(),
+        str(candidate.get("status") or "").strip(),
+    ]
+
+    for st in status_strs:
+        if not st:
+            continue
+        st_lower = st.lower()
+        if "offer extended" in st_lower or "offer - extended" in st_lower:
+            return True, "Offer Extended"
+        if "offer accepted" in st_lower or "offer - accepted" in st_lower or st_lower in {"placed", "hired"}:
+            return True, "Offer Accepted"
+        if "current employee" in st_lower:
+            return True, "Current Employee (Pyramid)"
+
+    current_companies = []
+    for c_str in [
+        data.get("current_company"),
+        enhanced.get("current_company"),
+        data.get("company"),
+        data.get("company_name"),
+    ]:
+        if c_str and str(c_str).strip():
+            current_companies.append(str(c_str).strip())
+
+    exp_list = data.get("company_experience") or enhanced.get("company_experience") or []
+    if isinstance(exp_list, list):
+        for exp in exp_list:
+            if isinstance(exp, dict):
+                end_raw = str(exp.get("end_date") or exp.get("endDate") or exp.get("to") or "").strip()
+                is_curr = exp.get("is_current") is True or exp.get("current") is True or not end_raw or "present" in end_raw.lower() or "current" in end_raw.lower()
+                if is_curr:
+                    comp = exp.get("company") or exp.get("company_name") or exp.get("employer") or exp.get("name")
+                    if comp and str(comp).strip():
+                        current_companies.append(str(comp).strip())
+
+    def _norm(name: str) -> str:
+        s = name.lower()
+        for char in ".,-_'\"()/":
+            s = s.replace(char, " ")
+        words = [
+            w
+            for w in s.split()
+            if w
+            not in {
+                "inc",
+                "llc",
+                "ltd",
+                "corp",
+                "corporation",
+                "co",
+                "company",
+                "plc",
+                "pvt",
+                "private",
+                "limited",
+                "technologies",
+                "technology",
+                "solutions",
+                "consulting",
+                "services",
+                "group",
+                "holdings",
+            }
+        ]
+        return " ".join(words).strip()
+
+    def _is_contiguous_sublist(needle: List[str], haystack: List[str]) -> bool:
+        # True if `needle` appears as a run of whole tokens inside `haystack`.
+        n = len(needle)
+        if not n or n > len(haystack):
+            return False
+        return any(haystack[i:i + n] == needle for i in range(len(haystack) - n + 1))
+
+    client_norm = _norm(client_name)
+    client_tokens = client_norm.split()
+
+    for comp in current_companies:
+        comp_norm = _norm(comp)
+        if not comp_norm:
+            continue
+        comp_tokens = comp_norm.split()
+        if "pyramid" in comp_tokens:
+            return True, "Current Employee (Pyramid)"
+        # Match on whole-word tokens, not raw substrings: client "Meta"
+        # ("meta") must match "Meta Platforms" but NOT "Metadata Solutions"
+        # ("metadata"). A candidate is "employed by the hiring client" when the
+        # client name equals the company name, or one appears as a contiguous
+        # run of whole tokens within the other (e.g. "Meta" ⊂ "Meta Platforms").
+        if client_norm and client_norm != "external" and len(client_norm) >= 3:
+            if (
+                comp_tokens == client_tokens
+                or _is_contiguous_sublist(client_tokens, comp_tokens)
+                or _is_contiguous_sublist(comp_tokens, client_tokens)
+            ):
+                return True, "Employed by Hiring Client"
+
+    return False, ""
 
 
 def _format_normalized_score_100(score: Any, total: Any) -> Optional[str]:
@@ -366,6 +502,13 @@ class SendBulkInterviewRequest(BaseModel):
 # ---------------------------------------------------------------------------
 @router.post("/engage/generate-payload")
 async def generate_engage_payload(request: GeneratePayloadRequest):
+    """Thin HTTP wrapper. The QA/edit modal fetches an editable payload here;
+    the batched launch orchestrator (`/engage/launch`) calls
+    `_generate_payload_for` directly, with no browser round-trip."""
+    return await _generate_payload_for(request)
+
+
+async def _generate_payload_for(request: GeneratePayloadRequest):
     """
     Generate an interview payload for a candidate.
     Fetches candidate data from sourced_candidates and job data from monitored_jobs,
@@ -383,15 +526,27 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         candidate_phone = ""
         dnc_blocked_ids: List[str] = []
         for cid in request.candidate_ids:
-            cur.execute("""
-                SELECT candidate_id, name, email, phone, resume_text, headline, location, data
-                FROM sourced_candidates
-                WHERE candidate_id = %s
-                  AND dnc_stopped_at IS NULL
-                ORDER BY updated_at DESC
-                LIMIT 1
-            """, (cid,))
-            row = cur.fetchone()
+            try:
+                cur.execute("""
+                    SELECT candidate_id, name, email, phone, headline, location, data, resume_match_percentage
+                    FROM sourced_candidates
+                    WHERE candidate_id = %s
+                      AND dnc_stopped_at IS NULL
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                """, (cid,))
+                row = cur.fetchone()
+            except Exception:
+                cur.connection.rollback()
+                cur.execute("""
+                    SELECT candidate_id, name, email, phone, headline, location, data
+                    FROM sourced_candidates
+                    WHERE candidate_id = %s
+                      AND dnc_stopped_at IS NULL
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                """, (cid,))
+                row = cur.fetchone()
             if not row:
                 # Either the candidate isn't sourced for any job, or every
                 # row is dnc_stopped. Probe a second query to tell them
@@ -422,8 +577,6 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 digits = "".join(ch for ch in raw_phone if ch.isdigit())
                 phone = f"{plus}{digits}" if digits else ""
                 email = row.get("email", "") or ""
-                # Truncate resume to pairbot max_length=100000 chars.
-                resume_text = (row.get("resume_text", "") or "")[:100000]
 
                 if not candidate_phone and phone:
                     candidate_phone = phone
@@ -436,17 +589,45 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                     except Exception:
                         data_blob = {}
                 headline = row.get("headline") or data_blob.get("headline", "")
+                match_score = row.get("resume_match_percentage")
+                if match_score is None:
+                    match_score = data_blob.get("match_score")
+                if match_score is not None:
+                    try:
+                        match_score = float(match_score)
+                    except Exception:
+                        pass
 
                 resumes.append({
                     "source_candidate_id": row.get("candidate_id") or cid,
                     "name": name,
                     "email": email,
                     "phone": phone,  # already sanitized to digits only above
-                    # pairbotqa expects experience / summary / skills — map raw resume
-                    "experience": resume_text,
-                    "summary": headline,
-                    "skills": "",
-                    "education": "",
+                    "gender_label": (
+                        row.get("gender_label")
+                        or data_blob.get("gender_label")
+                        or "default"
+                    ),
+                    "gender_confidence": (
+                        row.get("gender_confidence")
+                        if row.get("gender_confidence") is not None
+                        else data_blob.get("gender_confidence", 0.0)
+                    ),
+                    "gender_source": (
+                        row.get("gender_source")
+                        or data_blob.get("gender_source")
+                        or "unknown"
+                    ),
+                    "gender_updated_at": (
+                        row.get("gender_updated_at")
+                        or data_blob.get("gender_updated_at")
+                    ),
+                    # NOTE: résumé/experience/summary/skills/education are intentionally
+                    # NOT built here — the emitted payload uses `final_resumes` below,
+                    # which carries only unique per-candidate identity + scores. Pairbot
+                    # does not receive résumé content, so fetching it was dead work.
+                    "match_score": match_score,
+                    "resume_screening_score": match_score,
                 })
             else:
                 # Fallback for candidates not found in DB
@@ -455,10 +636,6 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                     "name": "Unknown Candidate",
                     "email": "",
                     "phone": "",
-                    "experience": "",
-                    "summary": "",
-                    "skills": "",
-                    "education": "",
                 })
 
         # ----- Fetch job data -----
@@ -516,14 +693,13 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
 
         # Build JD block with structured context and rubric
         if job_row:
+            # De-dup: title/customer_name/city/state/location_type live ONLY in
+            # `context` (matches samplepayload.json). They were previously also
+            # copied to the jd top level — redundant payload. Pairbot reads them
+            # from context.
             jd = {
                 "job_id": job_row.get("job_id") or request.job_id,
                 "jobdiva_id": job_row.get("jobdiva_id") or "",
-                "title": job_row.get("enhanced_title") or job_row.get("title", ""),
-                "customer_name": job_row.get("customer_name") or "Unknown",
-                "city": job_row.get("city") or "TBD",
-                "state": job_row.get("state") or "",
-                "location_type": job_row.get("location_type") or "Onsite",
                 "context": {
                     "title": job_row.get("enhanced_title") or job_row.get("title", ""),
                     "customer_name": job_row.get("customer_name") or "Unknown",
@@ -549,16 +725,40 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 )
             }
 
+        # Resolve gender labels for the whole batch concurrently. Each
+        # infer_gender_from_name_ai call is cached and globally
+        # semaphore-bounded, so gathering avoids serializing the launch batch
+        # on N sequential OpenAI round-trips (the old per-resume `await` here).
+        async def _resolve_gender(r):
+            gender = normalize_gender_prediction(
+                predicted_label=r.get("gender_label", "default"),
+                confidence=r.get("gender_confidence", 0.0),
+                source=r.get("gender_source", "unknown"),
+                threshold=0.0,
+                updated_at=r.get("gender_updated_at"),
+            )
+            candidate_name = r.get("name") or "Unknown"
+            if gender.gender_label == "default" and candidate_name:
+                ai_gender = await infer_gender_from_name_ai(candidate_name)
+                if ai_gender.gender_label in {"male", "female"}:
+                    return ai_gender
+            return gender
+
+        resolved_genders = await asyncio.gather(*[_resolve_gender(r) for r in resumes])
+
         # Build resumes list using raw_resume_text
         final_resumes = []
-        for r in resumes:
+        for r, gender in zip(resumes, resolved_genders):
             candidate_name = r.get("name") or "Unknown"
             candidate_email = str(r.get("email") or "").strip().lower()
             final_resumes.append({
                 "source_candidate_id": r.get("source_candidate_id"),
                 "name": candidate_name,
                 "email": candidate_email,
-                "phone": r.get("phone")
+                "phone": r.get("phone"),
+                "gender_label": gender.gender_label,
+                "match_score": r.get("match_score"),
+                "resume_screening_score": r.get("resume_screening_score"),
             })
 
         # Assemble final payload matching pairbotqa /api/bulk-interviews schema
@@ -579,11 +779,11 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
             "dnc_blocked_count": len(dnc_blocked_ids),
             "dnc_blocked_ids": dnc_blocked_ids,
         }
-        _log_generate_payload_response_to_sentry(response_body, level="info")
+        _log_generate_payload_response_to_newrelic(response_body, level="info")
         return response_body
 
     except Exception as e:
-        _log_generate_payload_response_to_sentry(
+        _log_generate_payload_response_to_newrelic(
             {
                 "success": False,
                 "error": str(e),
@@ -695,13 +895,17 @@ async def _post_to_pairbot(
     """
     last_exc: Optional[BaseException] = None
     last_response: Optional[httpx.Response] = None
+    headers = {"Content-Type": "application/json"}
+    pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
+    if pair_api_key:
+        headers["Authorization"] = f"Bearer {pair_api_key}"
     for attempt in range(max_attempts):
         try:
             async with httpx.AsyncClient(timeout=timeout_seconds) as client:
                 response = await client.post(
                     url,
                     json=payload_obj,
-                    headers={"Content-Type": "application/json"},
+                    headers=headers,
                 )
             if response.status_code < 500:
                 return response
@@ -734,7 +938,7 @@ def _persist_jobdiva_candidate_id(candidate_id_internal: str, cand_data: Dict[st
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "UPDATE sourced_candidates SET data = %s WHERE candidate_id = %s",
+                "UPDATE sourced_candidates SET data = COALESCE(data, '{}'::jsonb) || %s::jsonb WHERE candidate_id = %s",
                 (json.dumps(cand_data), candidate_id_internal),
             )
         conn.commit()
@@ -970,6 +1174,13 @@ async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_int
 
 @router.post("/engage/send-bulk-interview")
 async def send_bulk_interview(request: SendBulkInterviewRequest):
+    """Thin HTTP wrapper — the QA/edit modal and rankings Engage clicks call
+    this. The batched launch orchestrator calls `_send_bulk_interview_core`
+    directly, once per internal batch."""
+    return await _send_bulk_interview_core(request)
+
+
+async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
     """
     Send the (potentially edited) interview payload to the PAIR bulk-interviews API.
     Saves the request and response to engage_interview_audit for traceability.
@@ -1027,9 +1238,12 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             except Exception as _stop_check_err:
                 logger.warning(f"Could not check job metadata for job {job_id_from_payload}: {_stop_check_err}")
 
-        # Idempotency: drop candidates already at engage_status='sent' so retries
-        # or staged-launch races don't create duplicate interviews on the PAIR
-        # side. We keep their candidate_ids in skipped_already_sent so the caller
+        # Idempotency: drop candidates that already have a *successful* engage_status
+        # so retries or staged-launch races don't create duplicate interviews on the
+        # PAIR side. Crucially, 'failed' is NOT treated as already-sent — a candidate
+        # PAIR accepted but returned no interview_id for (or that erred) must remain
+        # retryable, otherwise a transient miss would silently skip them forever.
+        # We keep the skipped candidate_ids in skipped_already_sent so the caller
         # can show them as already-launched in the UI.
         skipped_already_sent: List[str] = []
         if request.real_candidate_ids:
@@ -1043,7 +1257,7 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                         FROM sourced_candidates
                         WHERE candidate_id = ANY(%s)
                           AND (jobdiva_id = %s OR jobdiva_id = %s)
-                          AND data ->> 'engage_status' = 'sent'
+                          AND COALESCE(data ->> 'engage_status', '') NOT IN ('', 'failed')
                         """,
                         (
                             list(request.real_candidate_ids),
@@ -1070,6 +1284,86 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
             logger.info(
                 f"engage idempotency: skipped {len(skipped_already_sent)} already-sent candidates for job {job_id_from_payload}"
             )
+
+        if request.real_candidate_ids:
+            excluded_candidate_ids = set()
+            try:
+                _excl_conn = _get_db_connection()
+                try:
+                    _excl_cur = _excl_conn.cursor()
+                    _excl_cur.execute(
+                        """
+                        SELECT customer_name
+                        FROM monitored_jobs
+                        WHERE job_id = %s OR jobdiva_id = %s
+                        LIMIT 1
+                        """,
+                        (str(job_id_from_payload or ""), str(job_id_from_payload or "")),
+                    )
+                    _excl_client_row = _excl_cur.fetchone()
+                    _excl_client = (
+                        str(_excl_client_row[0])
+                        if _excl_client_row and _excl_client_row[0]
+                        else ""
+                    )
+
+                    _excl_cur.execute(
+                        """
+                        SELECT candidate_id, data
+                        FROM sourced_candidates
+                        WHERE candidate_id = ANY(%s)
+                          AND (jobdiva_id = %s OR jobdiva_id = %s)
+                        """,
+                        (
+                            list(request.real_candidate_ids),
+                            str(job_id_from_payload or ""),
+                            str(payload_obj.get("jd", {}).get("jobdiva_id") or ""),
+                        ),
+                    )
+                    for _row in _excl_cur.fetchall() or []:
+                        _cdata = _row[1] or {}
+                        if isinstance(_cdata, str):
+                            try:
+                                _cdata = json.loads(_cdata)
+                            except Exception:
+                                _cdata = {}
+                        _is_excl, _excl_reason = is_candidate_excluded_from_pair(
+                            _cdata, _excl_client
+                        )
+                        if _is_excl:
+                            logger.info(
+                                "send_bulk_interview skipping excluded candidate %s reason: %s",
+                                _row[0],
+                                _excl_reason,
+                            )
+                            excluded_candidate_ids.add(_row[0])
+                    _excl_cur.close()
+                finally:
+                    _excl_conn.close()
+            except Exception as _excl_err:
+                logger.warning(
+                    f"candidate exclusion check failed for job {job_id_from_payload}: {_excl_err}"
+                )
+
+            if excluded_candidate_ids:
+                kept_indices = [
+                    idx
+                    for idx, cid in enumerate(request.real_candidate_ids)
+                    if cid not in excluded_candidate_ids
+                ]
+                request.real_candidate_ids = [
+                    request.real_candidate_ids[i] for i in kept_indices
+                ]
+                existing_resumes = (
+                    payload_obj.get("resumes")
+                    if isinstance(payload_obj, dict)
+                    else None
+                )
+                if (
+                    isinstance(existing_resumes, list)
+                    and len(existing_resumes) >= max(kept_indices, default=-1) + 1
+                ):
+                    payload_obj["resumes"] = [existing_resumes[i] for i in kept_indices]
 
         if not request.real_candidate_ids:
             return {
@@ -1376,6 +1670,16 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                         app_base_url=request.app_base_url,
                     )
                 )
+            try:
+                from core.newrelic import record_custom_event
+                record_custom_event("EngageSendBulkInterview", {
+                    "success": True,
+                    "bulk_id": response_data.get("bulk_id"),
+                    "count": len(interview_results),
+                    "skipped_count": len(skipped_already_sent),
+                })
+            except Exception:
+                pass
             return {
                 "success": True,
                 "message": "Interview(s) sent successfully",
@@ -1385,6 +1689,14 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 "raw_response": response_data
             }
         else:
+            try:
+                from core.newrelic import record_custom_event
+                record_custom_event("EngageSendBulkInterview", {
+                    "success": False,
+                    "status_code": response.status_code,
+                })
+            except Exception:
+                pass
             return {
                 "success": False,
                 "message": _extract_pair_error_message(response_data, response.status_code),
@@ -1432,6 +1744,227 @@ async def stream_engagement_status(bulk_id: str):
                 yield b"data: {\"status\": \"error\"}\n\n"
                 
     return StreamingResponse(proxy_stream(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# Backend-owned Launch PAIR orchestration (single call + SSE)
+# ---------------------------------------------------------------------------
+class LaunchRequest(BaseModel):
+    """IDs-only launch request. Résumés do NOT ride here — they are persisted
+    separately via /candidates/save — so this body stays small and is not
+    nginx body-limit sensitive."""
+    job_id: str
+    candidate_ids: List[str]
+    is_initial_launch: bool = False
+    notify_recruiters: bool = False
+    send_job_posting_email: Optional[bool] = None
+    app_base_url: str = ""
+    batch_size: Optional[int] = None
+
+
+# Backend batch size for the launch orchestrator's per-batch Pairbot calls.
+# Decoupled from the FE /candidates/save batch (which IS nginx body-limit
+# bound because it carries resume_text): the /engage/launch request carries
+# only candidate_ids, so this is tuned for Pairbot throughput + failure
+# granularity, not payload size.
+_LAUNCH_PAIRBOT_BATCH_SIZE = 75
+_LAUNCH_BATCH_DELAY_SECONDS = 0.35
+
+
+@router.post("/engage/launch")
+async def launch_bulk_interviews(request: LaunchRequest):
+    """Single-call, backend-owned Launch PAIR orchestration.
+
+    Replaces the frontend's per-batch generate -> send -> SSE loop: the browser
+    sends candidate_ids + job/options ONCE, and this endpoint streams aggregated
+    progress (SSE) while batching to Pairbot server-side. It reuses the exact
+    per-batch logic (`_generate_payload_for` + `_send_bulk_interview_core`), so
+    idempotency / DNC / audit / status write-through behave identically to the
+    old flow.
+
+    Difference from the old flow (intentional de-dup): the recruiter launch
+    email and applicant sync fire ONCE per launch here, instead of once per
+    batch. Per-batch calls suppress them (is_initial_launch / notify_recruiters
+    / send_job_posting_email = False) and the orchestrator fires them a single
+    time after the loop.
+    """
+    from fastapi.responses import StreamingResponse
+
+    def _sse(obj: Dict[str, Any]) -> str:
+        return f"data: {json.dumps(obj)}\n\n"
+
+    async def _gen():
+        ids = [str(c) for c in (request.candidate_ids or []) if str(c).strip()]
+        batch_size = max(1, int(request.batch_size or _LAUNCH_PAIRBOT_BATCH_SIZE))
+        batches = [ids[i:i + batch_size] for i in range(0, len(ids), batch_size)]
+
+        yield _sse({
+            "type": "start",
+            "total_candidates": len(ids),
+            "total_batches": len(batches),
+            "batch_size": batch_size,
+        })
+
+        totals = {"sent": 0, "already_sent": 0, "failed_batches": 0, "no_interview": 0}
+        all_skipped: List[str] = []
+        failed_candidate_ids: List[str] = []
+        aborted = False
+        side_effects_fired = {"done": False}
+
+        def _fire_once_side_effects() -> None:
+            # Recruiter launch email + applicant sync fire ONCE per launch.
+            # Invoked from the finally below so a client disconnect (generator
+            # cancellation) mid-stream still fires them for candidates that were
+            # already engaged. Guarded so it runs at most once.
+            if side_effects_fired["done"]:
+                return
+            side_effects_fired["done"] = True
+            if totals["sent"] <= 0:
+                return
+            try:
+                if request.is_initial_launch:
+                    logger.info(
+                        "launch: initial launch for job %s -> applicant sync", request.job_id
+                    )
+                    asyncio.create_task(
+                        auto_assign_service.synchronize_job_applicants(request.job_id)
+                    )
+                if request.is_initial_launch or request.notify_recruiters:
+                    requested_job_posting = (
+                        request.send_job_posting_email
+                        if request.send_job_posting_email is not None
+                        else request.is_initial_launch
+                    )
+                    # Public job-board posting only on a fully clean launch (no
+                    # failed/aborted batches) — matches the old
+                    # `i == last && totalFailedBatches == 0` gate.
+                    send_job_posting = bool(
+                        requested_job_posting and not aborted and totals["failed_batches"] == 0
+                    )
+                    asyncio.create_task(
+                        _send_pair_launch_email(
+                            job_id=request.job_id,
+                            candidate_count=totals["sent"],
+                            send_job_posting=send_job_posting,
+                            app_base_url=request.app_base_url,
+                        )
+                    )
+            except Exception as _se_err:
+                logger.warning("launch: side-effect firing failed: %s", _se_err)
+
+        try:
+            for idx, batch in enumerate(batches):
+                if idx > 0:
+                    await asyncio.sleep(_LAUNCH_BATCH_DELAY_SECONDS)
+                try:
+                    gp = await _generate_payload_for(
+                        GeneratePayloadRequest(candidate_ids=batch, job_id=request.job_id)
+                    )
+                    payload_str = gp.get("payload") if isinstance(gp, dict) else None
+                    if not payload_str:
+                        raise RuntimeError("generate-payload returned no payload")
+
+                    # Keep real_candidate_ids aligned with the payload's resumes:
+                    # generate drops DNC-stopped candidates from resumes, so drop
+                    # them from real_candidate_ids too — otherwise the positional
+                    # matching in _send_bulk_interview_core misaligns.
+                    dnc_blocked = (
+                        set(gp.get("dnc_blocked_ids") or []) if isinstance(gp, dict) else set()
+                    )
+                    real_ids = [c for c in batch if c not in dnc_blocked] if dnc_blocked else batch
+
+                    send_req = SendBulkInterviewRequest(
+                        payload=payload_str,
+                        real_candidate_ids=real_ids,
+                        is_initial_launch=False,       # fired once after the loop
+                        dry_run=False,
+                        notify_recruiters=False,       # fired once after the loop
+                        send_job_posting_email=False,  # fired once after the loop
+                        app_base_url=request.app_base_url,
+                    )
+                    res = await _send_bulk_interview_core(send_req)
+
+                    skipped = res.get("skipped_already_sent") or []
+                    all_skipped.extend(skipped)
+
+                    if res.get("success"):
+                        rows = res.get("data") or []
+                        # Only rows PAIR actually created an interview for count as
+                        # "sent". Rows returned without an interview_id were written
+                        # engage_status='failed' (and stay retryable) — surface them
+                        # as no_interview instead of inflating the sent tally.
+                        sent = sum(1 for r in rows if isinstance(r, dict) and r.get("interview_id"))
+                        no_interview = len(rows) - sent
+                        totals["sent"] += sent
+                        totals["already_sent"] += len(skipped)
+                        totals["no_interview"] += no_interview
+                        yield _sse({
+                            "type": "batch",
+                            "index": idx,
+                            "status": "completed",
+                            "sent": sent,
+                            "no_interview": no_interview,
+                            "already_sent": len(skipped),
+                            "bulk_id": res.get("bulk_id"),
+                        })
+                    else:
+                        totals["failed_batches"] += 1
+                        failed_candidate_ids.extend(batch)
+                        yield _sse({
+                            "type": "batch",
+                            "index": idx,
+                            "status": "failed",
+                            "error": res.get("message") or "send failed",
+                            "candidate_ids": batch,
+                        })
+                except HTTPException as he:
+                    # 409 = outreach stopped for this job -> abort the whole
+                    # launch. Record the aborting batch AND all remaining
+                    # (never-processed) batches so the caller's failed CSV is
+                    # complete, and surface those ids on the error event.
+                    if getattr(he, "status_code", None) == 409:
+                        aborted = True
+                        remaining = [c for b in batches[idx:] for c in b]
+                        totals["failed_batches"] += 1
+                        failed_candidate_ids.extend(remaining)
+                        yield _sse({
+                            "type": "error",
+                            "status_code": 409,
+                            "message": str(he.detail),
+                            "index": idx,
+                            "candidate_ids": remaining,
+                        })
+                        break
+                    totals["failed_batches"] += 1
+                    failed_candidate_ids.extend(batch)
+                    yield _sse({
+                        "type": "batch", "index": idx, "status": "failed",
+                        "error": str(he.detail), "candidate_ids": batch,
+                    })
+                except Exception as e:
+                    logger.error("launch batch %d failed: %s", idx, e, exc_info=True)
+                    totals["failed_batches"] += 1
+                    failed_candidate_ids.extend(batch)
+                    yield _sse({
+                        "type": "batch", "index": idx, "status": "failed",
+                        "error": str(e), "candidate_ids": batch,
+                    })
+        finally:
+            # Fire once even if the client disconnected mid-stream (generator
+            # cancelled) so already-engaged candidates still get the recruiter
+            # email + applicant sync.
+            _fire_once_side_effects()
+
+        yield _sse({
+            "type": "done",
+            "aborted": aborted,
+            "totals": totals,
+            "skipped_already_sent": all_skipped,
+            "failed_candidate_ids": failed_candidate_ids,
+        })
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
+
 
 # Hard cap so a single sync run can never blast more than this many
 # candidates at pairbot, even if the job's filters are loose. The auto-sync
@@ -1491,7 +2024,7 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
                 """
                 SELECT 1 FROM sourced_candidates
                 WHERE (jobdiva_id = %s OR jobdiva_id = %s)
-                  AND data->>'engage_status' IN ('sent', 'pending', 'completed')
+                  AND COALESCE(data->>'engage_status', '') != ''
                 LIMIT 1
                 """,
                 (str(job_id), str(job_id)),
@@ -1510,16 +2043,40 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
             # with a manual Engage click.
             cur.execute(
                 """
-                SELECT candidate_id
+                SELECT customer_name
+                FROM monitored_jobs
+                WHERE job_id = %s OR jobdiva_id = %s
+                LIMIT 1
+                """,
+                (str(job_id), str(job_id)),
+            )
+            client_row = cur.fetchone()
+            client_name = str(client_row["customer_name"]) if client_row and client_row.get("customer_name") else ""
+
+            cur.execute(
+                """
+                SELECT candidate_id, data
                 FROM sourced_candidates
                 WHERE candidate_id = ANY(%s)
                   AND (jobdiva_id = %s OR jobdiva_id = %s)
                   AND dnc_stopped_at IS NULL
-                  AND COALESCE(data->>'engage_status', '') NOT IN ('sent', 'pending', 'completed')
+                  AND COALESCE(data->>'engage_status', '') = ''
                 """,
                 (list(candidate_ids), str(job_id), str(job_id)),
             )
-            eligible_ids = [str(r["candidate_id"]) for r in cur.fetchall()]
+            eligible_ids = []
+            for r in cur.fetchall():
+                c_data = r.get("data") or {}
+                if isinstance(c_data, str):
+                    try:
+                        c_data = json.loads(c_data)
+                    except Exception:
+                        c_data = {}
+                excluded, reason = is_candidate_excluded_from_pair(c_data, client_name)
+                if excluded:
+                    logger.info("auto_launch_skip candidate=%s job_id=%s reason=%s", r["candidate_id"], job_id, reason)
+                else:
+                    eligible_ids.append(str(r["candidate_id"]))
         finally:
             cur.close()
             conn.close()
@@ -1717,8 +2274,12 @@ async def get_assessment_data(interview_id: str):
 # ---------------------------------------------------------------------------
 async def _proxy_get(path: str, params: dict = None):
     try:
+        headers = {}
+        pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
+        if pair_api_key:
+            headers["Authorization"] = f"Bearer {pair_api_key}"
         async with httpx.AsyncClient(timeout=30.0) as client:
-            res = await client.get(f"{EXTERNAL_INTERVIEW_API_URL}{path}", params=params)
+            res = await client.get(f"{EXTERNAL_INTERVIEW_API_URL}{path}", params=params, headers=headers)
             res.raise_for_status()
             return res.json()
     except Exception as e:
@@ -1727,8 +2288,12 @@ async def _proxy_get(path: str, params: dict = None):
 
 async def _proxy_post(path: str, json_data: dict = None):
     try:
+        headers = {"Content-Type": "application/json"}
+        pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
+        if pair_api_key:
+            headers["Authorization"] = f"Bearer {pair_api_key}"
         async with httpx.AsyncClient(timeout=30.0) as client:
-            res = await client.post(f"{EXTERNAL_INTERVIEW_API_URL}{path}", json=json_data)
+            res = await client.post(f"{EXTERNAL_INTERVIEW_API_URL}{path}", json=json_data, headers=headers)
             res.raise_for_status()
             return res.json()
     except Exception as e:

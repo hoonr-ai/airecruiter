@@ -11,9 +11,9 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 import { logger } from "@/lib/logger";
-import * as Sentry from "@sentry/nextjs";
+import { logStep } from "@/lib/newrelic";
 import { useMsal } from "@azure/msal-react";
 
 export interface MissingPhoneCandidate {
@@ -97,7 +97,7 @@ export function MissingPhonesModal({
     if (!persist) return true;
     setSaving((prev) => ({ ...prev, [cand.candidate_id]: true }));
     try {
-      const res = await fetch(`${API_BASE}/candidates/${encodeURIComponent(cand.candidate_id)}/phone`, {
+      const res = await authFetch(`${API_BASE}/candidates/${encodeURIComponent(cand.candidate_id)}/phone`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone, jobdiva_id: cand.jobdiva_id }),
@@ -195,18 +195,15 @@ export function MissingPhonesModal({
           <Button
             variant="outline"
             onClick={() => {
-              Sentry.captureMessage("PAIR launch: candidates skipped (missing phones)", {
-                level: "info",
-                extra: {
-                  username,
-                  job_id: jobId,
-                  job_diva_id: jobDivaId,
-                  skipped_candidates: candidates.map((c) => ({
-                    candidate_id: c.candidate_id,
-                    name: c.name,
-                    jobdiva_id: c.jobdiva_id,
-                  })),
-                },
+              logStep("pair_launch_skipped_missing_phones", "info", {
+                username,
+                job_id: jobId,
+                job_diva_id: jobDivaId,
+                skipped_candidates: candidates.map((c) => ({
+                  candidate_id: c.candidate_id,
+                  name: c.name,
+                  jobdiva_id: c.jobdiva_id,
+                })),
               });
               onClose();
             }}

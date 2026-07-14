@@ -3,6 +3,7 @@
 import { useState, useEffect, useEffectEvent, useCallback, useMemo, useRef, Suspense, type ReactNode } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import type { Step, ScreeningLevel, RegenerateDifficulty, EmploymentType, ScreenQuestion, WizardMode } from "@/lib/jobs/wizard-types";
 import {
   History,
   Plus,
@@ -88,7 +89,7 @@ import {
 } from "@/components/launch-pair-progress-modal";
 import { normalizePhone } from "@/lib/phone";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 import { trackEvent } from "@/lib/analytics";
 import { logger } from "@/lib/logger";
 
@@ -277,22 +278,9 @@ function isRecruiterSource(source: string | null | undefined): boolean {
   return (source || "").toLowerCase() === "recruiter";
 }
 
-type Step = 1 | 2 | 3 | 4 | 5;
-type ScreeningLevel = "L1" | "L1.5" | "L2";
-type RegenerateDifficulty = "easy" | "medium" | "hard";
-type EmploymentType = "W2" | "1099" | "C2C" | "Full-Time";
-type ScreenQuestion = {
-  id: number;
-  question_text: string;
-  pass_criteria: string;
-  is_default: boolean;
-  category: string;
-  order_index: number;
-  // 4.3: onsite/hybrid arrangement must knock candidates out automatically
-  // when they say no. Persisted per-question so non-default recruiter-authored
-  // questions can also be marked as hard filters.
-  is_hard_filter?: boolean;
-};
+// Step / ScreeningLevel / RegenerateDifficulty / EmploymentType / ScreenQuestion /
+// WizardMode are now shared via @/lib/jobs/wizard-types (imported above) so the
+// campaign wizard can reuse the same step components + state container.
 
 // F2: availability screening question needs a date-aware control, not free text.
 // The default question is generated with category "default" (not a dedicated
@@ -635,7 +623,7 @@ export default function NewJobPage() {
   );
 }
 
-type WizardMode = 'edit' | 'source' | 'view';
+// WizardMode moved to @/lib/jobs/wizard-types (imported at top).
 
 function NewJobPageContent() {
   const router = useRouter();
@@ -762,7 +750,7 @@ function NewJobPageContent() {
   // Function to fetch candidate resume if not available - only real JobDiva resumes
   const fetchCandidateResume = async (candidateId: string) => {
     try {
-      const response = await fetch(`${API_BASE}/candidates/${candidateId}/resume`);
+      const response = await authFetch(`${API_BASE}/candidates/${candidateId}/resume`);
       const data = await response.json();
 
       // Check if the API returned an error or no real resume
@@ -997,10 +985,12 @@ function NewJobPageContent() {
   const [isEnrichingContacts, setIsEnrichingContacts] = useState(false);
   const [missingContactsOpen, setMissingContactsOpen] = useState(false);
   // Realtime progress for the batched Launch PAIR flow (enrichment + per-batch
-  // save/engage). Batches of 20 keep individual payloads small enough for the
-  // backend; the modal surfaces per-batch status so the recruiter can see
-  // what's happening on long runs.
-  const LAUNCH_BATCH_SIZE = 20;
+  // save/engage). Batches of 75 keep individual /candidates/save payloads
+  // manageable (each candidate carries full resume_text, gated by nginx
+  // client_max_body_size — see nginx.conf) while cutting the number of
+  // save+engage round-trips; the modal surfaces per-batch status so the
+  // recruiter can see what's happening on long runs.
+  const LAUNCH_BATCH_SIZE = 75;
 
   // Pace between batches so save+engage calls don't fire faster than nginx's
   // pair_batch_limit zone can sustain on large launches (seen: 26-30 batches
@@ -1073,7 +1063,7 @@ function NewJobPageContent() {
     if (!candId) return false;
     try {
       const apiUrl = API_BASE;
-      const res = await fetch(`${apiUrl}/candidates/${encodeURIComponent(candId)}/profile-url`);
+      const res = await authFetch(`${apiUrl}/candidates/${encodeURIComponent(candId)}/profile-url`);
       if (!res.ok) return false;
       const data = await res.json();
       const url = (data?.profile_url || "").trim();
@@ -1350,6 +1340,86 @@ function NewJobPageContent() {
     return shorter.length >= 4 && (cand.includes(client) || client.includes(cand));
   };
 
+  const getCandidateExclusionReason = (c: any): string => {
+    if (!c) return "";
+    const ei = c?.enhanced_info || c?.data?.enhanced_info || {};
+    const data = c?.data || c;
+
+    const offerStatus = String(c?.offer_status || data?.offer_status || "");
+    if (offerStatus.toLowerCase().includes("offer accepted")) return "Offer Accepted";
+    if (offerStatus.toLowerCase().includes("offer extended")) return "Offer Extended";
+
+    const actionTypes = c?.action_types || data?.action_types || [];
+    if (Array.isArray(actionTypes)) {
+      for (const at of actionTypes) {
+        const atLow = String(at).toLowerCase();
+        if (atLow.includes("offer accepted") || ["placed", "hired"].includes(atLow)) return "Offer Accepted";
+        if (atLow.includes("offer extended")) return "Offer Extended";
+      }
+    }
+
+    if (
+      c?.available === false ||
+      data?.available === false ||
+      String(c?.available).toLowerCase() === "false" ||
+      String(data?.available).toLowerCase() === "false"
+    ) {
+      return "Current Employee (Pyramid / Unavailable)";
+    }
+
+    const quals = data?.qualifications || c?.qualifications || ei?.qualifications || c?.data?.qualifications || [];
+    if (Array.isArray(quals)) {
+      for (const q of quals) {
+        if (!q || typeof q !== "object") continue;
+        // Check both camelCase (from some sources) and UPPERCASE (from BI endpoint)
+        const qVal = `${q.qualificationValue || ''} ${q.QUALVALUE || ''} ${q.value || ''} ${q.name || ''} ${q.QUALNAME || ''}`.toLowerCase();
+        if (qVal.includes("current employee")) return "Current Employee (Pyramid)";
+        if (qVal.includes("offer extended") || qVal.includes("offer - extended")) return "Offer Extended";
+        if (qVal.includes("offer accepted") || qVal.includes("offer - accepted") || ["placed", "hired"].includes(qVal)) {
+          return "Offer Accepted";
+        }
+      }
+    }
+
+    // JobDiva API: status=1 means Current Employee, status=2 means Past Employee
+    const numStatus = c?.status ?? data?.status;
+    if (numStatus === 1 || numStatus === "1") return "Current Employee (Pyramid)";
+
+    const statusStrs = [
+      String(c?.employee_status || ""),
+      String(data?.employee_status || ""),
+      String(c?.available || ""),
+      String(data?.available || ""),
+      String(c?.availability_status || ""),
+      String(data?.availability_status || ""),
+    ];
+    for (const st of statusStrs) {
+      if (!st) continue;
+      const stLower = st.toLowerCase();
+      if (stLower.includes("offer extended") || stLower.includes("offer - extended")) return "Offer Extended";
+      if (
+        stLower.includes("offer accepted") ||
+        stLower.includes("offer - accepted") ||
+        ["placed", "hired"].includes(stLower)
+      ) {
+        return "Offer Accepted";
+      }
+      if (stLower.includes("current employee")) return "Current Employee (Pyramid)";
+    }
+
+    const currComp = normalizeCompanyName(getCandidateCurrentCompany(c));
+
+    if (currComp && currComp.includes("pyramid")) {
+      return "Current Employee (Pyramid)";
+    }
+
+    if (isEmployedByClient(c)) {
+      return "Employed by Hiring Client";
+    }
+
+    return "";
+  };
+
   const sortedCandidates = useMemo(() => {
     const trimmedQuery = candidateSearchQuery.trim().toLowerCase();
     const sourcePriority = (c: any) => {
@@ -1368,6 +1438,7 @@ function NewJobPageContent() {
       // candidate_id so source-string drift between sourcing runs can't let a
       // launched candidate re-surface.
       if (launchedCandidateKeys.has(key) || launchedCandidateIds.has(String(candId))) return false;
+      if (getCandidateExclusionReason(c)) return false;
       if (!matchesSourceFilter(c)) return false;
       // Progressive rows (agent_result / details_loaded) bypass score &
       // location filters so they stay visible while shimmering. Once the
@@ -1632,7 +1703,7 @@ function NewJobPageContent() {
     const ref = jobdivaId || numericJobId;
     if (!ref) return;
     try {
-      const res = await fetch(`${API_BASE}/jobs/${ref}/launched-candidate-keys`);
+      const res = await authFetch(`${API_BASE}/jobs/${ref}/launched-candidate-keys`);
       if (!res.ok) return;
       const json = await res.json();
       const keys = new Set<string>();
@@ -1665,7 +1736,7 @@ function NewJobPageContent() {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/dnc/keys`);
+        const res = await authFetch(`${API_BASE}/dnc/keys`);
         if (!res.ok) return;
         const json = await res.json();
         if (cancelled) return;
@@ -1719,7 +1790,7 @@ function NewJobPageContent() {
     let cancelled = false;
     const poll = async () => {
       try {
-        const resp = await fetch(`${API_BASE}/candidates/open-to-work-statuses`, {
+        const resp = await authFetch(`${API_BASE}/candidates/open-to-work-statuses`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ links: pendingUrls }),
@@ -1786,7 +1857,7 @@ function NewJobPageContent() {
       const apiUrl = API_BASE;
 
       // 1. Fetch the basic draft info from monitored_jobs
-      const draftResponse = await fetch(`${apiUrl}/jobs/${jobIdToLoad}/draft`);
+      const draftResponse = await authFetch(`${apiUrl}/jobs/${jobIdToLoad}/draft`);
       if (!draftResponse.ok) {
         console.error("Draft fetch HTTP error:", draftResponse.status);
         return false;
@@ -1821,7 +1892,7 @@ function NewJobPageContent() {
         // Cold path: no persisted job_details yet (e.g. the user pasted a
         // JobDiva ID but hasn't saved the job). Fall back to the old JobDiva
         // fetch so the first-time flow still works.
-        const detailsResponse = await fetch(`${apiUrl}/jobs/fetch`, {
+        const detailsResponse = await authFetch(`${apiUrl}/jobs/fetch`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ job_id: jobIdToLoad.trim() })
@@ -1842,7 +1913,7 @@ function NewJobPageContent() {
       // 2. Restore specialized data for later steps (Rubric, Filters, etc.)
       // Always check for existing rubric regardless of current step to prevent redundant AI generation
       try {
-        const rubricRes = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobIdToLoad}/rubric`);
+        const rubricRes = await authFetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobIdToLoad}/rubric`);
         if (rubricRes.ok) {
           const rData = await rubricRes.json();
           // Only pre-load if it's an actual populated rubric, not an empty shell
@@ -2006,7 +2077,7 @@ function NewJobPageContent() {
     setIsCreatingExternal(true);
     try {
       const apiUrl = API_BASE;
-      const createRes = await fetch(`${apiUrl}/jobs/external/create`, {
+      const createRes = await authFetch(`${apiUrl}/jobs/external/create`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2043,7 +2114,7 @@ function NewJobPageContent() {
 
       // Fire rubric extraction in the background — same endpoint JobDiva flow uses.
       try {
-        const rubricRes = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
+        const rubricRes = await authFetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -2088,7 +2159,7 @@ function NewJobPageContent() {
     setIsSavingPasteResume(true);
     try {
       const apiUrl = API_BASE;
-      const res = await fetch(`${apiUrl}/jobs/${encodeURIComponent(jobRef)}/manual-candidate`, {
+      const res = await authFetch(`${apiUrl}/jobs/${encodeURIComponent(jobRef)}/manual-candidate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2139,7 +2210,7 @@ function NewJobPageContent() {
       const apiUrl = API_BASE;
       const formData = new FormData();
       bulkFiles.forEach(f => formData.append("files", f));
-      const res = await fetch(`${apiUrl}/jobs/${encodeURIComponent(jobRef)}/bulk-resumes`, {
+      const res = await authFetch(`${apiUrl}/jobs/${encodeURIComponent(jobRef)}/bulk-resumes`, {
         method: "POST",
         body: formData,
       });
@@ -2200,7 +2271,7 @@ function NewJobPageContent() {
 
     try {
       const apiUrl = API_BASE;
-      const response = await fetch(`${apiUrl}/jobs/fetch`, {
+      const response = await authFetch(`${apiUrl}/jobs/fetch`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ job_id: searchId })
@@ -2343,7 +2414,7 @@ function NewJobPageContent() {
       has_notes_override: notesOverride !== undefined,
     });
     try {
-      const response = await fetch(`${API_BASE}/api/v1/ai-generation/jobs/${numericJobId || jobdivaId || 'new'}/generate-description`, {
+      const response = await authFetch(`${API_BASE}/api/v1/ai-generation/jobs/${numericJobId || jobdivaId || 'new'}/generate-description`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2461,7 +2532,7 @@ function NewJobPageContent() {
     });
     try {
       const apiUrl = API_BASE;
-      const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-title`, {
+      const res = await authFetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-title`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -2599,7 +2670,7 @@ function NewJobPageContent() {
     try {
       const apiUrl = API_BASE;
       // Use the new endpoint that saves directly to monitored_jobs
-      const response = await fetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/save`, {
+      const response = await authFetch(`${apiUrl}/jobs/${numericJobId || jobdivaId}/save`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: saveController.signal,
@@ -4529,7 +4600,7 @@ function NewJobPageContent() {
       if (opts.difficultyMode) {
         requestBody.difficulty_mode = opts.difficultyMode;
       }
-      const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobRef}/screening-questions/generate`, {
+      const res = await authFetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobRef}/screening-questions/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(requestBody),
@@ -5024,7 +5095,7 @@ function NewJobPageContent() {
     const checkJobdivaCriteria = async () => {
       setIsCheckingJobdivaCriteria(true);
       try {
-        const res = await fetch(`${API_BASE}/candidates/jobdiva/${encodeURIComponent(jobRef)}/criteria-status`);
+        const res = await authFetch(`${API_BASE}/candidates/jobdiva/${encodeURIComponent(jobRef)}/criteria-status`);
         if (!res.ok) throw new Error(`criteria status check failed (${res.status})`);
 
         const data = await res.json();
@@ -5620,6 +5691,10 @@ function NewJobPageContent() {
       resume_match_filters: activeResumeFilters,
       location: primaryLocation?.value || "",
       within_miles: withinMiles,
+      // Work arrangement — Remote jobs skip the commute-radius constraint
+      // server-side (backend also falls back to monitored_jobs.location_type
+      // when omitted; sending it saves that lookup and handles unsaved jobs).
+      location_type: isRemoteJob(jobData) ? "Remote" : (jobData?.location_type || undefined),
       sources: selectedSourcesArray,
       boolean_string: booleanString,
       // 5.6 / 5.10 plumbing — backend honors these in
@@ -5696,7 +5771,7 @@ function NewJobPageContent() {
     searchAbortRef.current = controller;
     let response: Response;
     try {
-      response = await fetch(`${apiUrl}/candidates/search`, {
+      response = await authFetch(`${apiUrl}/candidates/search`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -6667,7 +6742,7 @@ function NewJobPageContent() {
       // hiring client company are withheld from /candidates/save (even via the
       // second MissingContactsModal pass). Low score / thin profile / location
       // are NOT skip reasons — everyone else stays launchable.
-      .filter(c => !isEmployedByClient(c))
+      .filter(c => !getCandidateExclusionReason(c))
       .filter(c => {
         if (dncPhones.size === 0) return true;
         const np = normalizePhone(c.phone);
@@ -6816,11 +6891,19 @@ function NewJobPageContent() {
 
     let totalSaved = 0;
     let totalEngaged = 0;
+    let totalAlreadySent = 0;
     let totalDncSkipped = 0;
     let totalFailedBatches = 0;
     let engageFailureMessage: string | null = null;
     let skippedCandidateNames: string[] = [];
+    // Ids of candidates whose save batch succeeded — the single launch call
+    // below engages exactly these (in order).
+    const savedCandidateIds: string[] = [];
 
+    // ── SAVE PHASE ──────────────────────────────────────────────────────
+    // Résumés must be persisted to sourced_candidates (candidate-details view
+    // and engage read them from there), so saves stay FE-batched under the
+    // nginx body limit. This is the only hop that still carries resume_text.
     for (let i = 0; i < batches.length; i++) {
       
       if (i > 0) {
@@ -6828,7 +6911,6 @@ function NewJobPageContent() {
       }
 
       const batch = batches[i];
-      const batchIds = batch.map(c => c.candidate_id);
 
       setLaunchProgress(prev => ({ ...prev, currentBatchIndex: i }));
       updateBatch(i, { status: "saving" });
@@ -6838,7 +6920,7 @@ function NewJobPageContent() {
       let batchSavedCount = 0;
       let batchDncSkipped = 0;
       try {
-        const response = await fetch(`${API_BASE}/candidates/save`, {
+        const response = await authFetch(`${API_BASE}/candidates/save`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -6877,113 +6959,184 @@ function NewJobPageContent() {
 
       totalSaved += batchSavedCount;
       totalDncSkipped += batchDncSkipped;
+      for (const c of batch) savedCandidateIds.push(c.candidate_id);
+      // "engaging" here = saved, awaiting the single launch stream below.
       updateBatch(i, {
         status: "engaging",
         savedCount: batchSavedCount,
         dncSkipped: batchDncSkipped,
       });
 
-      // ── Engage batch ─────────────────────────────────────────────────
-      let batchEngageSent = 0;
-      let batchAlreadySent = 0;
-      let batchEngageError: string | null = null;
+      setLaunchProgress(prev => ({ ...prev, totalSaved, totalFailedBatches }));
+    }
+
+    // == LAUNCH PHASE (single backend-orchestrated call + one SSE) ========
+    // Replaces the old per-batch generate -> send -> bulk-status round-trips.
+    // The browser sends only candidate ids; the backend batches to Pairbot
+    // server-side and streams aggregated progress. Resumes never cross this
+    // call, and the recruiter launch email / applicant sync fire once
+    // (server-side), not per batch.
+    if (savedCandidateIds.length > 0) {
+      // Map a saved id back to its in-memory candidate so a failed launch batch
+      // exports to the same CSV as before (the SSE carries ids, not full rows).
+      const recordLaunchFailures = (ids: string[], errorMsg: string) => {
+        for (const id of ids) {
+          const c: any = candidates.find(
+            (cand: any) => (cand.candidate_id || cand.jobdiva_candidate_id || cand.id) === id
+          );
+          const skillNames = c && Array.isArray(c.skills)
+            ? c.skills
+                .map((s: any) => (typeof s === "string" ? s : s?.name || s?.skill || ""))
+                .filter(Boolean)
+                .join("; ")
+            : "";
+          failedLaunchCandidates.push({
+            candidate_id: id,
+            name: c ? (c.name || [c.firstName, c.lastName].filter(Boolean).join(" ") || id) : id,
+            email: c ? (getCandidateLaunchEmail(c) || null) : null,
+            phone: c ? (getCandidateLaunchPhone(c) || null) : null,
+            source: c?.source || "",
+            headline: c?.title || c?.headline || "",
+            location: c?.location || "",
+            experience_years: c?.yearsExtracted || c?.experience_years || 0,
+            match_score: typeof c?.match_score === "number" ? c.match_score : 0,
+            skills: skillNames,
+            matched_skills: Array.isArray(c?.matched_skills) ? c.matched_skills.join("; ") : "",
+            resume_id: String(c?.resumeId || c?.resume_id || ""),
+            profile_url: c?.profile_url || null,
+            batch_index: 0,
+            failure_stage: "engage",
+            error_message: errorMsg,
+          });
+        }
+      };
+
+      // Track which saved ids the backend actually reported on (a batch event
+      // arrived) so a 409 abort / mid-stream disconnect records ONLY the
+      // un-launched remainder as failed -- never re-recording an already-engaged
+      // candidate.
+      const accountedIds = new Set<string>();
+      // Launch batches are indexed 0..M-1 by the backend; display rows are
+      // offset by the count of save-failed rows we keep visible above them.
+      const launchIndexOffset = totalFailedBatches;
+      let launchBatchSize = LAUNCH_BATCH_SIZE;
+      const idsForLaunchBatch = (j: number): string[] =>
+        savedCandidateIds.slice(j * launchBatchSize, (j + 1) * launchBatchSize);
+
       try {
-        const engageData = await engagement.generatePayload({
-          candidateIds: batchIds,
-          jobId: jobIdForEngage,
-        });
-        if (engageData?.payload) {
-          const engageRes = await engagement.sendBulkInterview({
-            payload: engageData.payload,
-            realCandidateIds: batchIds,
+        await engagement.launch(
+          {
+            jobId: jobIdForEngage,
+            candidateIds: savedCandidateIds,
             isInitialLaunch: wizardMode !== 'source',
             notifyRecruiters: true,
-            sendJobPostingEmail: i === batches.length - 1 && totalFailedBatches === 0 && selectedJobBoards.length > 0,
-          });
-          if (engageRes.success) {
-            batchEngageSent = Array.isArray(engageRes.data) ? engageRes.data.length : batchIds.length;
-            batchAlreadySent = Array.isArray(engageRes.skipped_already_sent)
-              ? engageRes.skipped_already_sent.length
-              : 0;
-
-            if (Array.isArray(engageRes.skipped_already_sent) && engageRes.skipped_already_sent.length > 0) {
-              const skippedNames = engageRes.skipped_already_sent.map((id: string) => {
-                const c = candidates.find(cand => (cand.candidate_id || cand.id) === id);
-                if (c) {
-                  return c.name || [c.firstName, c.lastName].filter(Boolean).join(" ") || c.email || id;
-                }
-                return id;
-              }).filter(Boolean);
-              skippedCandidateNames.push(...skippedNames);
-            }
-            
-            if (engageRes.bulk_id && batchEngageSent > 0) {
-              updateBatch(i, { status: "engaging", message: "Waiting for background processing..." });
-              try {
-                await new Promise<void>((resolve, reject) => {
-                  const eventSource = new EventSource(`${API_BASE}/api/v1/engagement/engage/bulk-status/stream?bulk_id=${engageRes.bulk_id}`);
-                  eventSource.onmessage = (event) => {
-                    try {
-                      const data = JSON.parse(event.data);
-                      if (data.status === "completed") {
-                        eventSource.close();
-                        resolve();
-                      } else if (data.status === "error") {
-                        eventSource.close();
-                        reject(new Error(data.message || "Background processing failed"));
-                      } else if (data.status === "processing") {
-                        updateBatch(i, { status: "engaging", message: `Processing ${data.pending} candidates...` });
-                      }
-                    } catch (e) {
-                      eventSource.close();
-                      reject(e);
-                    }
-                  };
-                  eventSource.onerror = (error) => {
-                    eventSource.close();
-                    reject(new Error("Lost connection to background processing status stream"));
-                  };
+            sendJobPostingEmail: selectedJobBoards.length > 0,
+            appBaseUrl: typeof window !== "undefined" ? window.location.origin : "",
+            batchSize: LAUNCH_BATCH_SIZE,
+          },
+          (evt) => {
+            if (evt.type === "start") {
+              launchBatchSize = evt.batch_size || LAUNCH_BATCH_SIZE;
+              // Preserve any save-failed rows (re-indexed) and append the
+              // backend's launch batches after them.
+              setLaunchProgress(prev => {
+                const failedRows = prev.batches
+                  .filter(b => b.status === "failed")
+                  .map((b, k) => ({ ...b, index: k }));
+                const launchRows: LaunchBatchInfo[] = Array.from(
+                  { length: evt.total_batches },
+                  (_, j) => ({
+                    index: failedRows.length + j,
+                    size: Math.max(0, Math.min(launchBatchSize, savedCandidateIds.length - j * launchBatchSize)),
+                    status: "engaging" as const,
+                    savedCount: 0,
+                    dncSkipped: 0,
+                    engageSent: 0,
+                    alreadySent: 0,
+                  })
+                );
+                return {
+                  ...prev,
+                  batchSize: evt.batch_size,
+                  batches: [...failedRows, ...launchRows],
+                  currentBatchIndex: failedRows.length,
+                };
+              });
+            } else if (evt.type === "batch") {
+              const ids = idsForLaunchBatch(evt.index);
+              ids.forEach((id) => accountedIds.add(id));
+              if (evt.status === "completed") {
+                const sent = evt.sent || 0;
+                const already = evt.already_sent || 0;
+                totalEngaged += sent;
+                totalAlreadySent += already;
+                updateBatch(launchIndexOffset + evt.index, {
+                  status: "completed",
+                  engageSent: sent,
+                  alreadySent: already,
+                  savedCount: sent + already,
                 });
-              } catch (streamErr) {
-                console.warn(`Batch ${i + 1} SSE stream error:`, streamErr);
+              } else {
+                const msg = evt.error || "Launch failed";
+                engageFailureMessage = msg;
+                totalFailedBatches += 1;
+                recordLaunchFailures(ids, msg);
+                updateBatch(launchIndexOffset + evt.index, {
+                  status: "failed",
+                  errorMessage: `Engage failed: ${msg}`,
+                });
               }
+              setLaunchProgress(prev => ({
+                ...prev,
+                currentBatchIndex: launchIndexOffset + evt.index,
+                totalEngaged,
+                totalFailedBatches,
+              }));
+            } else if (evt.type === "error") {
+              // 409 outreach-stopped / fatal abort. The un-launched remainder is
+              // reconciled after the stream ends (below) via accountedIds.
+              engageFailureMessage = evt.message || "Launch aborted";
+              totalFailedBatches += 1;
+            } else if (evt.type === "done") {
+              const skipped = evt.skipped_already_sent || [];
+              skippedCandidateNames = skipped
+                .map((id) => {
+                  const c: any = candidates.find(
+                    (cand: any) => (cand.candidate_id || cand.id) === id
+                  );
+                  return c
+                    ? (c.name || [c.firstName, c.lastName].filter(Boolean).join(" ") || c.email || id)
+                    : id;
+                })
+                .filter(Boolean);
             }
-          } else {
-            batchEngageError = engageRes.message || "PAIR rejected the batch";
           }
-        } else {
-          batchEngageError = "Engagement payload missing";
-        }
-      } catch (engageErr) {
-        batchEngageError = engageErr instanceof Error ? engageErr.message : "Engagement call failed";
-        console.warn(`Batch ${i + 1} engage failed:`, engageErr);
+        );
+      } catch (launchErr) {
+        // Hard failure (non-ok response or the stream dropped). The unengaged
+        // remainder is recorded by the reconciliation below.
+        engageFailureMessage = launchErr instanceof Error ? launchErr.message : "Launch failed";
       }
 
-      if (batchEngageError) {
-        updateBatch(i, {
-          status: "failed",
-          engageSent: batchEngageSent,
-          alreadySent: batchAlreadySent,
-          errorMessage: `Engage failed: ${batchEngageError}`,
-        });
-        totalFailedBatches += 1;
-        engageFailureMessage = batchEngageError;
-        recordFailedBatch(batch, "engage", batchEngageError, i);
-      } else {
-        totalEngaged += batchEngageSent;
-        updateBatch(i, {
-          status: "completed",
-          engageSent: batchEngageSent,
-          alreadySent: batchAlreadySent,
-        });
+      // Reconcile: any saved candidate the backend never reported on (409 abort
+      // remainder, mid-stream disconnect, or a hard failure) is un-launched.
+      // accountedIds guarantees an already-engaged candidate is never recorded.
+      const unaccounted = savedCandidateIds.filter((id) => !accountedIds.has(id));
+      if (unaccounted.length > 0) {
+        if (totalFailedBatches === 0) totalFailedBatches = 1;
+        recordLaunchFailures(unaccounted, engageFailureMessage || "Not launched (interrupted)");
+        // Flip any launch rows still mid-flight to failed so the modal doesn't
+        // leave spinners running.
+        setLaunchProgress(prev => ({
+          ...prev,
+          totalFailedBatches,
+          batches: prev.batches.map((b) =>
+            b.status === "engaging" || b.status === "saving"
+              ? { ...b, status: "failed", errorMessage: b.errorMessage || "Not launched" }
+              : b
+          ),
+        }));
       }
-
-      setLaunchProgress(prev => ({
-        ...prev,
-        totalSaved,
-        totalEngaged,
-        totalFailedBatches,
-      }));
     }
 
     if (skippedCandidateNames.length > 0) {
@@ -7000,16 +7153,31 @@ function NewJobPageContent() {
       );
     }
 
-    const success = totalSaved > 0 && totalFailedBatches === 0;
-    const partial = totalSaved > 0 && totalFailedBatches > 0;
+    // Classify on what actually happened to candidates, not the saved count
+    // (save and launch are decoupled now). "Handled" = newly engaged OR already
+    // launched — both mean the candidate is in PAIR. already-sent counts as
+    // success, not failure (fixes a false "Launch PAIR failed" on a fully
+    // idempotent re-launch where every candidate was already sent).
+    const totalHandled = totalEngaged + totalAlreadySent;
+    const success = totalHandled > 0 && totalFailedBatches === 0;
+    const partial = totalHandled > 0 && totalFailedBatches > 0;
+    const cleanNoop = totalHandled === 0 && totalFailedBatches === 0; // all skipped/blocked, nothing failed
 
     if (success) {
-      showToast(`Launched PAIR for ${totalSaved} candidate${totalSaved === 1 ? "" : "s"}`, "success");
+      if (totalEngaged > 0) {
+        showToast(`Launched PAIR for ${totalEngaged} candidate${totalEngaged === 1 ? "" : "s"}`, "success");
+      } else {
+        // Everyone was already launched — the "Already Launched" info toast above
+        // already named them; confirm the no-op succeeded rather than erroring.
+        showToast(`All selected candidates were already launched`, "success");
+      }
     } else if (partial) {
       showToast(
-        `Launched ${totalSaved} · ${totalFailedBatches} batch${totalFailedBatches === 1 ? "" : "es"} failed${engageFailureMessage ? ` (${engageFailureMessage})` : ""}`,
+        `Launched ${totalEngaged} · ${totalFailedBatches} batch${totalFailedBatches === 1 ? "" : "es"} failed${engageFailureMessage ? ` (${engageFailureMessage})` : ""}`,
         "info",
       );
+    } else if (cleanNoop) {
+      showToast(`No candidates were launched (all were skipped or blocked)`, "info");
     } else {
       showToast(
         `Launch PAIR failed${engageFailureMessage ? `: ${engageFailureMessage}` : ""}`,
@@ -7019,7 +7187,7 @@ function NewJobPageContent() {
 
     setLaunchProgress(prev => ({
       ...prev,
-      phase: totalFailedBatches === 0 ? "completed" : (totalSaved > 0 ? "completed" : "failed"),
+      phase: totalFailedBatches === 0 ? "completed" : (totalHandled > 0 ? "completed" : "failed"),
       totalSaved,
       totalEngaged,
       totalFailedBatches,
@@ -7027,12 +7195,12 @@ function NewJobPageContent() {
       finalMessage: engageFailureMessage ?? undefined,
     }));
 
-    // After a successful launch, redirect to this job's rank list. The
-    // just-launched candidates now live there; to launch PAIR for the
-    // remaining candidates the recruiter re-opens the job in source mode
-    // ("Source Candidates"), where already-launched people are filtered out
-    // of Step 5 so only the remaining ones can be selected and launched.
-    if (totalSaved > 0 && !options?.skipRedirect) {
+    // Redirect to the rank list only on a clean run (no failed candidates), so
+    // any launch with failures keeps the modal — and its failed-candidate CSV
+    // export — on screen for the recruiter. The just-launched candidates now
+    // live in rankings; to launch the rest, the recruiter re-opens the job in
+    // source mode where already-launched people are filtered out of Step 5.
+    if (failedLaunchCandidates.length === 0 && totalSaved > 0 && !options?.skipRedirect) {
       setTimeout(() => {
         setLaunchProgress(initialLaunchProgress);
         if (jobIdForEngage) {
@@ -7069,7 +7237,7 @@ function NewJobPageContent() {
     for (const c of candidates) {
       const id = String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
       if (!id || !selectedCandidates.has(id)) continue;
-      if (isEmployedByClient(c)) {
+      if (getCandidateExclusionReason(c)) {
         hardFilterSkipIds.add(id);
         hardFilterSkippedNames.push(getCandidateDisplayName(c) || c.name || "Unnamed");
       }
@@ -7198,7 +7366,7 @@ function NewJobPageContent() {
         }
 
         try {
-          const res = await fetch(`${API_BASE}/candidates/enrich-contact`, {
+          const res = await authFetch(`${API_BASE}/candidates/enrich-contact`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -8584,7 +8752,7 @@ function NewJobPageContent() {
                         const firstN = candidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                            return !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
+                            return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
                           })
                           .slice(0, n);
 
@@ -8617,7 +8785,7 @@ function NewJobPageContent() {
                         const firstN = candidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                            return !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
+                            return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
                           })
                           .slice(0, n);
                         const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.jobdiva_candidate_id || c.id));
@@ -8655,24 +8823,32 @@ function NewJobPageContent() {
                       onClick={() => {
                         const eligible = candidates.filter(c => {
                           const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                          return !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
+                          return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
                         });
                         const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
 
                         if (allSelected) {
-                          // Deselect all
-                          setSelectedCandidates(new Set());
+                          // Deselect all within active tab
+                          setSelectedCandidates(prev => {
+                            const next = new Set(prev);
+                            allIds.forEach(id => next.delete(id));
+                            return next;
+                          });
                         } else {
-                          // Select all (skipping already-launched and DNC)
-                          setSelectedCandidates(new Set(allIds));
+                          // Select all within active tab (skipping already-launched and DNC)
+                          setSelectedCandidates(prev => {
+                            const next = new Set(prev);
+                            allIds.forEach(id => next.add(id));
+                            return next;
+                          });
                         }
                       }}
                     >
                       {(() => {
                         const eligible = candidates.filter(c => {
                           const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                          return !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
+                          return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
                         });
                         const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
@@ -9069,19 +9245,37 @@ function NewJobPageContent() {
                     </span>
                   </button>
                 )}
-                <Button
-                  className="h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98] disabled:bg-slate-300 disabled:cursor-not-allowed disabled:hover:translate-y-0"
-                  onClick={handleLaunchPairClick}
-                  disabled={isSearching || isEnrichingContacts || isViewOnly || launchProgress.open}
-                  title={isViewOnly ? "Job activity has been stopped" : undefined}
-                >
-                  {isEnrichingContacts ? (
-                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  ) : (
-                    <Rocket className="w-4 h-4 fill-white" />
-                  )}
-                  {isEnrichingContacts ? "Enriching Contacts..." : "Launch PAIR"}
-                </Button>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-[42px] px-4 font-semibold text-[14px] rounded-xl flex items-center gap-2 border-slate-300 text-slate-700 hover:bg-slate-50"
+                    onClick={() => window.open("/", "_blank", "noopener,noreferrer")}
+                    title="Open the Curate home page in a new tab so you can keep working while sourcing runs"
+                  >
+                    <ExternalLink className="w-4 h-4" />
+                    New tab
+                  </Button>
+                  <Button
+                    className="h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98] disabled:bg-slate-300 disabled:cursor-not-allowed disabled:hover:translate-y-0"
+                    onClick={handleLaunchPairClick}
+                    disabled={isSearching || isEnrichingContacts || isViewOnly || launchProgress.open || candidates.length === 0}
+                    title={
+                      isViewOnly
+                        ? "Job activity has been stopped"
+                        : candidates.length === 0
+                          ? "Source at least one candidate before launching PAIR"
+                          : undefined
+                    }
+                  >
+                    {isEnrichingContacts ? (
+                      <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    ) : (
+                      <Rocket className="w-4 h-4 fill-white" />
+                    )}
+                    {isEnrichingContacts ? "Enriching Contacts..." : "Launch PAIR"}
+                  </Button>
+                </div>
               </div>
             </div>
           </div>
@@ -9259,7 +9453,7 @@ return (
                     setIsGeneratingRubric(true);
                     try {
                       const apiUrl = API_BASE;
-                      const res = await fetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
+                      const res = await authFetch(`${apiUrl}/api/v1/ai-generation/jobs/generate-rubric`, {
                         method: "POST",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({

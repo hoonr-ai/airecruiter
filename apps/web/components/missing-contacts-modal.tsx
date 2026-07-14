@@ -11,9 +11,9 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 import { logger } from "@/lib/logger";
-import * as Sentry from "@sentry/nextjs";
+import { logStep } from "@/lib/newrelic";
 import { useMsal } from "@azure/msal-react";
 
 export interface MissingContactCandidate {
@@ -199,7 +199,7 @@ export function MissingContactsModal({
     });
     setSavingPhone(prev => ({ ...prev, [cand.candidate_id]: true }));
     try {
-      const res = await fetch(
+      const res = await authFetch(
         `${API_BASE}/candidates/phone`,
         {
           method: "PATCH",
@@ -238,7 +238,7 @@ export function MissingContactsModal({
     });
     setSavingEmail(prev => ({ ...prev, [cand.candidate_id]: true }));
     try {
-      const res = await fetch(
+      const res = await authFetch(
         `${API_BASE}/candidates/email`,
         {
           method: "PATCH",
@@ -322,7 +322,7 @@ export function MissingContactsModal({
     }
 
     try {
-      const res = await fetch(`${API_BASE}/candidates/bulk-contacts`, {
+      const res = await authFetch(`${API_BASE}/candidates/bulk-contacts`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ updates })
@@ -481,20 +481,17 @@ export function MissingContactsModal({
           <Button
             variant="outline"
             onClick={() => {
-              Sentry.captureMessage("PAIR launch: candidates skipped (missing contacts)", {
-                level: "info",
-                extra: {
-                  username,
-                  job_id: jobId,
-                  job_diva_id: jobDivaId,
-                  skipped_candidates: candidates.map((c) => ({
-                    candidate_id: c.candidate_id,
-                    name: c.name,
-                    jobdiva_id: c.jobdiva_id,
-                    needsPhone: c.needsPhone,
-                    needsEmail: c.needsEmail,
-                  })),
-                },
+              logStep("pair_launch_skipped_missing_contacts", "info", {
+                username,
+                job_id: jobId,
+                job_diva_id: jobDivaId,
+                skipped_candidates: candidates.map((c) => ({
+                  candidate_id: c.candidate_id,
+                  name: c.name,
+                  jobdiva_id: c.jobdiva_id,
+                  needsPhone: c.needsPhone,
+                  needsEmail: c.needsEmail,
+                })),
               });
               onClose();
             }}

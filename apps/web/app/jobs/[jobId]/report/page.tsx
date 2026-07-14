@@ -29,7 +29,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface TranscriptionItem {
@@ -53,6 +53,10 @@ interface EvaluationReport {
     name: string;
     email: string;
     phone: string;
+    gender_label?: "male" | "female" | "default" | string;
+    gender_confidence?: number;
+    gender_source?: string;
+    gender_updated_at?: string;
     headline: string;
     location: string;
     availability: string;
@@ -124,7 +128,7 @@ export default function CandidateEvaluationReportPage() {
       try {
         setIsLoading(true);
         // Use query parameter to avoid URL encoding issues on QA
-        const res = await fetch(`${API_BASE}/candidates/evaluation-report?candidate_id=${encodeURIComponent(candidateId as string)}&job_id=${jobId}`);
+        const res = await authFetch(`${API_BASE}/candidates/evaluation-report?candidate_id=${encodeURIComponent(candidateId as string)}&job_id=${jobId}`);
         if (!res.ok) throw new Error("Failed to fetch evaluation report");
         const json = await res.json();
         setData(json);
@@ -152,7 +156,7 @@ export default function CandidateEvaluationReportPage() {
     if (candidateId) {
       setSyncingCandidateId(candidateId);
       try {
-        const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates/${candidateId}/feedback`, {
+        const response = await authFetch(`${API_BASE}/jobs/${jobId}/candidates/${candidateId}/feedback`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ feedback_type: 'Submit' })
@@ -189,7 +193,7 @@ export default function CandidateEvaluationReportPage() {
     if (candidateId && rejectReason) {
       setSyncingCandidateId(candidateId);
       try {
-        const response = await fetch(`${API_BASE}/jobs/${jobId}/candidates/${candidateId}/feedback`, {
+        const response = await authFetch(`${API_BASE}/jobs/${jobId}/candidates/${candidateId}/feedback`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -308,7 +312,6 @@ export default function CandidateEvaluationReportPage() {
     { label: "Phone", value: candidate.phone || "No data available" },
     { label: "Available", value: formatAvailability(candidate.availability, pair.interview?.completed_at) },
   ];
-
   return (
     <div className="min-h-screen bg-[#f8fafc] font-sans pb-20 text-[#1e293b]">
       <style jsx global>{`

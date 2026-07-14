@@ -1,5 +1,5 @@
 import asyncio
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Body, Query, UploadFile, File
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Body, Query, UploadFile, File, Depends
 from typing import List, Dict, Any, Optional
 import json
 import logging
@@ -26,6 +26,7 @@ from models import (
     ExternalJobCreateRequest,
 )
 from routers._helpers import get_db_connection, get_dict_cursor_connection
+from core.auth import get_current_user, UserIdentity, verify_job_access
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -202,12 +203,22 @@ def _ensure_monitored_jobs_schema() -> None:
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS screening_level TEXT",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS pair_enabled BOOLEAN DEFAULT FALSE",
 
+            # Campaigns: group multiple jobs under one parent campaign that
+            # holds shared common properties + a reusable JD/rubric/questions
+            # template. Logical link only (no FK, matching every other
+            # cross-table relationship here); child jobs are stamped with
+            # campaign_id at row birth in services.jobdiva.monitor_job_locally.
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS campaign_id TEXT",
+
             # v28: hot-path read optimizations for GET /jobs/monitored
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_active_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS NOT TRUE",
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_archived_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS TRUE",
             # v29: direct job-scoped lookup indexes for /jobs/{id}/... APIs
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_job_id_lookup ON monitored_jobs (job_id)",
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_jobdiva_id_lookup ON monitored_jobs (jobdiva_id)",
+            "CREATE TABLE IF NOT EXISTS user_roles (email TEXT PRIMARY KEY, role TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+            # Campaign detail page lists a campaign's child jobs by this column.
+            "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_campaign_id ON monitored_jobs (campaign_id)",
         ):
             try:
                 cur.execute(stmt)
@@ -840,12 +851,51 @@ def persist_rubric_background_task(jobdiva_id: str, rubric: Any, recruiter_notes
     except Exception as e:
         logger.error(f"❌ [Background] Failed to persist rubric for {jobdiva_id}: {e}")
 
+def _verify_job_access_by_id(job_id: str, user: UserIdentity, allow_not_found: bool = False) -> None:
+    if user.is_admin:
+        return
+    try:
+        job_dict = _get_job_draft_sync(job_id)
+        if job_dict.get("status") == "success" and job_dict.get("data"):
+            verify_job_access(job_dict["data"], user)
+            return
+        elif allow_not_found and job_dict.get("status") == "error" and "No data found" in str(job_dict.get("message", "")):
+            return
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise
+        logger.error(f"Error verifying job access for job_id={job_id}: {e}")
+
+    raise HTTPException(
+        status_code=403,
+        detail="Access denied. You do not have permission to access or modify this job."
+    )
+
+def _ensure_user_in_recruiter_emails(draft_data: Any, user: UserIdentity) -> None:
+    if user.is_admin or not user.email:
+        return
+    if not hasattr(draft_data, "recruiter_emails"):
+        return
+    current = draft_data.recruiter_emails or []
+    if isinstance(current, str):
+        try: current = json.loads(current)
+        except: current = [current] if current else []
+    elif not isinstance(current, list):
+        current = []
+    clean = [str(e).strip().lower() for e in current if e]
+    if user.email not in clean:
+        current.append(user.email)
+        draft_data.recruiter_emails = current
+
+
 @router.post("/jobs/{job_id}/save")
-async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks: BackgroundTasks):
+async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks: BackgroundTasks, user: UserIdentity = Depends(get_current_user)):
     """
     Save or update job data with real database persistence.
     Consolidated into monitored_jobs using the reference number as job_id.
     """
+    _verify_job_access_by_id(job_id, user, allow_not_found=True)
+    _ensure_user_in_recruiter_emails(draft_data, user)
     try:
         import json
         import psycopg2.extras
@@ -1030,7 +1080,7 @@ async def save_job_draft(job_id: str, draft_data: JobDraftData, background_tasks
         raise HTTPException(status_code=500, detail=f"Failed to save: {str(e)}")
 
 @router.post("/jobs/external/create")
-async def create_external_job(req: ExternalJobCreateRequest):
+async def create_external_job(req: ExternalJobCreateRequest, user: UserIdentity = Depends(get_current_user)):
     """
     Create a non-JobDiva ("External") job.
     Allocates a negative job_id so the sentinel is obvious downstream,
@@ -1055,12 +1105,14 @@ async def create_external_job(req: ExternalJobCreateRequest):
         new_job_id = min(current_min, 0) - 1  # -1, -2, -3, ...
         new_ref = f"EXT-{abs(new_job_id)}"
 
+        emails_list = [user.email] if (user.email and not user.is_admin) else ([user.email] if user.email else [])
+
         cursor.execute("""
             INSERT INTO monitored_jobs (
                 job_id, jobdiva_id, title, enhanced_title, ai_description,
                 recruiter_notes, customer_name, processing_status, current_step,
-                created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                recruiter_emails, created_at, updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
         """, (
             str(new_job_id),
             new_ref,
@@ -1071,6 +1123,7 @@ async def create_external_job(req: ExternalJobCreateRequest):
             (req.customer_name or "").strip() or "External",
             "step_1_complete",
             1,
+            json.dumps(emails_list),
         ))
         conn.commit()
         cursor.close()
@@ -1155,7 +1208,8 @@ def _get_job_draft_sync(job_id: str) -> dict:
 
 
 @router.get("/jobs/{job_id}/draft")
-async def get_job_draft(job_id: str, user_session: str = "default"):
+async def get_job_draft(job_id: str, user_session: str = "default", user: UserIdentity = Depends(get_current_user)):
+    _verify_job_access_by_id(job_id, user, allow_not_found=False)
     try:
         return await asyncio.to_thread(_get_job_draft_sync, job_id)
     except Exception as e:
@@ -1165,10 +1219,12 @@ async def get_job_draft(job_id: str, user_session: str = "default"):
         return {"status": "error", "message": str(e)}
 
 @router.post("/jobs/{job_id}/save-step")
-async def save_step_progress(job_id: str, step: int, draft_data: JobDraftData, background_tasks: BackgroundTasks):
+async def save_step_progress(job_id: str, step: int, draft_data: JobDraftData, background_tasks: BackgroundTasks, user: UserIdentity = Depends(get_current_user)):
     """
     Auto-save progress when user navigates between steps.
     """
+    _verify_job_access_by_id(job_id, user, allow_not_found=True)
+    _ensure_user_in_recruiter_emails(draft_data, user)
     try:
         draft_data.current_step = step
         draft_data.is_auto_saved = True
@@ -1182,7 +1238,7 @@ async def save_step_progress(job_id: str, step: int, draft_data: JobDraftData, b
             draft_data.step3_completed = True
         
         # Reuse the save_job_draft logic
-        result = await save_job_draft(job_id, draft_data, background_tasks)
+        result = await save_job_draft(job_id, draft_data, background_tasks, user)
         
         logger.info(f"🔄 Auto-saved progress for job {job_id} at step {step}")
         return result
@@ -1192,11 +1248,13 @@ async def save_step_progress(job_id: str, step: int, draft_data: JobDraftData, b
         raise HTTPException(status_code=500, detail=f"Failed to auto-save step: {str(e)}")
 
 @router.post("/jobs/{job_id}/monitor")
-async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData):
+async def save_job_to_monitored_jobs_only(job_id: str, draft_data: JobDraftData, user: UserIdentity = Depends(get_current_user)):
     """
     Save job data directly to monitored_jobs table without touching drafts table.
     This is used when the user wants form data to go straight to monitoring.
     """
+    _verify_job_access_by_id(job_id, user, allow_not_found=True)
+    _ensure_user_in_recruiter_emails(draft_data, user)
     try:
         import json
         
@@ -1497,10 +1555,11 @@ async def save_draft_requirements(job_id: str, requirements_data: JobDraftRequir
         raise HTTPException(status_code=500, detail=f"Failed to save requirements: {str(e)}")
 
 @router.get("/jobs/{job_id}/monitored-data")
-async def get_monitored_job_data(job_id: str):
+async def get_monitored_job_data(job_id: str, user: UserIdentity = Depends(get_current_user)):
     """
     Get current data from monitored_jobs table for verification.
     """
+    _verify_job_access_by_id(job_id, user, allow_not_found=False)
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -2221,10 +2280,37 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
         conn.close()
 
 
+def _filter_jobs_for_user(payload: Dict[str, Any], user: UserIdentity) -> Dict[str, Any]:
+    if user.is_admin or not payload or "jobs" not in payload:
+        return payload
+    
+    filtered_jobs = {}
+    for jid, job in payload["jobs"].items():
+        raw_emails = job.get("recruiter_emails", [])
+        if isinstance(raw_emails, str):
+            try:
+                emails = json.loads(raw_emails) if raw_emails.strip().startswith("[") else [raw_emails]
+            except Exception:
+                emails = [raw_emails] if raw_emails else []
+        elif isinstance(raw_emails, list):
+            emails = raw_emails
+        else:
+            emails = []
+        clean_emails = [str(e).strip().lower() for e in emails if e]
+        if user.email in clean_emails:
+            filtered_jobs[jid] = job
+            
+    res = dict(payload)
+    res["jobs"] = filtered_jobs
+    res["total_count"] = len(filtered_jobs)
+    return res
+
+
 @router.get("/jobs/monitored")
 async def get_monitored_jobs(
     include_archived: bool = False,
-    view: str = Query("summary", pattern="^(summary|full)$")
+    view: str = Query("summary", pattern="^(summary|full)$"),
+    user: UserIdentity = Depends(get_current_user)
 ):
     """
     Get all jobs currently being monitored from the database.
@@ -2233,7 +2319,7 @@ async def get_monitored_jobs(
     cached = _get_cached_monitored_jobs(include_archived, view)
     if cached is not None:
         cached["source"] = "cache"
-        return cached
+        return _filter_jobs_for_user(cached, user)
 
     try:
         # Hard wall-clock cap of 7s on the live query path. The inner
@@ -2249,7 +2335,7 @@ async def get_monitored_jobs(
             timeout=7.0,
         )
         _set_cached_monitored_jobs(include_archived, view, payload)
-        return payload
+        return _filter_jobs_for_user(payload, user)
     except (asyncio.TimeoutError, Exception) as e:
         if isinstance(e, asyncio.TimeoutError):
             logger.error(f"monitored_jobs wall-clock timeout (7s) — include_archived={include_archived}")
@@ -2261,7 +2347,7 @@ async def get_monitored_jobs(
         if stale_cached is not None:
             stale_cached["source"] = "cache_stale"
             stale_cached["warning"] = "Returned stale cache due DB contention"
-            return stale_cached
+            return _filter_jobs_for_user(stale_cached, user)
 
         # Both DB and cache are unavailable. Returning 503 here would cause
         # the dashboard to render blank with an AbortError toast — the
@@ -2273,12 +2359,12 @@ async def get_monitored_jobs(
         # exception is already logged above (logger.error at the top of
         # this except), so schema mismatches and other root causes remain
         # debuggable from the API logs.
-        return {
+        return _filter_jobs_for_user({
             "jobs": {},
             "total_count": 0,
             "source": "error",
             "warning": f"Monitored jobs temporarily unavailable: {e}",
-        }
+        }, user)
 
 @router.post("/jobs/poll-now")
 async def trigger_manual_poll(background_tasks: BackgroundTasks):

@@ -21,14 +21,14 @@ from core import (
 logger = logging.getLogger(__name__)
 
 
-# --- JobDiva HTTP request/response logging to Sentry ---------------------
+# --- JobDiva HTTP request/response logging to New Relic ------------------
 # Every httpx.AsyncClient(...) constructed in this module is transparently
 # wrapped (via the _JDHttpxProxy shim below) so each JobDiva request emits
-# a Sentry breadcrumb + capture_message with the full response body and
+# a New Relic custom event + message with the full response body and
 # elapsed time. We do not modify the global httpx module — only the local
 # `httpx` name in this file's namespace.
 
-_JD_RESPONSE_BODY_LIMIT = 16000  # cap body bytes sent to Sentry per call
+_JD_RESPONSE_BODY_LIMIT = 16000  # cap body bytes sent to New Relic per call
 
 
 def _jd_redact_url(url: "_httpx_module.URL") -> str:
@@ -59,15 +59,10 @@ async def _jd_on_response(response: "_httpx_module.Response") -> None:
         was_truncated = body_size > len(body_truncated)
 
         try:
-            from core.sentry import is_enabled
+            from core.newrelic import is_enabled, record_custom_event, record_message
         except Exception:
             return
         if not is_enabled():
-            return
-
-        try:
-            import sentry_sdk
-        except Exception:
             return
 
         method = response.request.method
@@ -76,45 +71,23 @@ async def _jd_on_response(response: "_httpx_module.Response") -> None:
         status = response.status_code
 
         try:
-            sentry_sdk.add_breadcrumb(
-                category="jobdiva.http",
-                level="info",
-                message=f"{method} {url_path} -> {status} ({elapsed_ms}ms)",
-                data={
-                    "url": url_full,
-                    "status_code": status,
-                    "elapsed_ms": elapsed_ms,
-                    "response_size_bytes": body_size,
-                },
+            event_data = {
+                "url": url_full,
+                "endpoint": url_path,
+                "method": method,
+                "status_code": status,
+                "elapsed_ms": elapsed_ms,
+                "response_size_bytes": body_size,
+                "truncated": was_truncated,
+                "response_body": body_truncated,
+            }
+            record_custom_event("JobDivaAPI", event_data)
+            level = "info" if 200 <= status < 400 else ("warning" if status < 500 else "error")
+            record_message(
+                f"JobDiva {method} {url_path} -> {status} ({elapsed_ms}ms)",
+                attributes=event_data,
+                level=level,
             )
-        except Exception:
-            pass
-
-        try:
-            with sentry_sdk.new_scope() as scope:
-                scope.set_tag("jobdiva_api", "1")
-                scope.set_tag("jobdiva_endpoint", url_path)
-                scope.set_tag("http_method", method)
-                scope.set_tag("status_code", str(status))
-                if elapsed_ms is not None:
-                    scope.set_tag("elapsed_ms", str(elapsed_ms))
-                scope.set_context(
-                    "jobdiva_response",
-                    {
-                        "url": url_full,
-                        "method": method,
-                        "status_code": status,
-                        "elapsed_ms": elapsed_ms,
-                        "response_size_bytes": body_size,
-                        "truncated": was_truncated,
-                        "response_body": body_truncated,
-                    },
-                )
-                level = "info" if 200 <= status < 400 else ("warning" if status < 500 else "error")
-                sentry_sdk.capture_message(
-                    f"JobDiva {method} {url_path} -> {status} ({elapsed_ms}ms)",
-                    level=level,
-                )
         except Exception:
             pass
     except Exception:
@@ -134,7 +107,7 @@ class _JDAsyncClient(_httpx_module.AsyncClient):
 class _JDHttpxProxy:
     """Module-local stand-in for the `httpx` module.
 
-    AsyncClient is overridden to inject Sentry logging hooks; every other
+    AsyncClient is overridden to inject New Relic logging hooks; every other
     attribute (TimeoutException, ConnectError, Request, ...) falls through
     to the real httpx module untouched.
     """
@@ -994,6 +967,8 @@ class JobDivaService:
         countries: Optional[List[str]] = None,
         states: Optional[List[str]] = None,
         page_number: int = 0,
+        zip_code: str = "",
+        within_miles: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search for candidates.
@@ -1025,6 +1000,8 @@ class JobDivaService:
             countries=countries or [],
             states=states or [],
             page_number=page_number or 0,
+            zip_code=zip_code or "",
+            within_miles=within_miles,
         )
 
     async def _search_job_applicants(self, job_id: str, limit: int, token: str, skills: List[Any] = None, location: str = "") -> List[Dict[str, Any]]:
@@ -1099,6 +1076,7 @@ class JobDivaService:
                         
                         home_city = get_field(c, ["CITY", "city", "locationCity"]) or ""
                         home_state = get_field(c, ["STATE", "state", "locationState"]) or ""
+                        home_zip = get_field(c, ["ZIPCODE", "zipcode", "ZIP", "zip", "postalCode", "POSTALCODE"]) or ""
                         work_city = get_field(c, ["workCity", "WORKCITY"]) or ""
                         work_state = get_field(c, ["workState", "WORKSTATE"]) or ""
                         work_location_str = ", ".join(p for p in [work_city, work_state] if p).strip()
@@ -1115,6 +1093,7 @@ class JobDivaService:
                             "email": _get_candidate_email(c),
                             "city": home_city,
                             "state": home_state,
+                            "zipcode": home_zip,
                             "location": home_location_str,
                             "work_city": work_city,
                             "work_state": work_state,
@@ -1127,7 +1106,9 @@ class JobDivaService:
                             "resume_text": self._extract_resume_text(c),
                             "resume_id": get_field(c, ["RESUMEID", "resumeId", "resume_id"]),
                             "received": get_field(c, ["RECEIVED", "received"]),
-                            "available": get_field(c, ["AVAILABLE", "available"]),
+                            "available": get_field(c, ["AVAILABLE", "available", "STATUS", "status"]),
+                            "availability_status": get_field(c, ["AVAILABLE", "available", "STATUS", "status"]),
+                            "employee_status": get_field(c, ["EMPLOYEESTATUS", "employeeStatus", "CURRENTEMPLOYEE", "currentEmployee", "ASSIGNMENTSTATUS", "assignmentStatus"]),
                             "lastnote": get_field(c, ["LASTNOTE", "lastNote"]),
                             "phone": _get_candidate_phone(c)
                         })
@@ -1372,6 +1353,8 @@ class JobDivaService:
             return [], criteria_unconfigured
 
         _norm_t0 = time.perf_counter()
+        if candidates:
+            logger.info(f"JobAgentSearch RAW CANDIDATE KEYS: {list(candidates[0].keys())}")
         for api_rank, c in enumerate(candidates):
             candidate_id = str(
                 get_field(c, ["candidateId", "CANDIDATEID", "id", "ID"]) or ""
@@ -1381,6 +1364,11 @@ class JobDivaService:
 
             first_name = get_field(c, ["firstName", "firstname", "FIRSTNAME"]) or "Unknown"
             last_name = get_field(c, ["lastName", "lastname", "LASTNAME"]) or "Candidate"
+
+            # Targeted debug for Carol Lynn
+            if "carol" in first_name.lower() and "lynn" in last_name.lower():
+                logger.info(f"CAROL_LYNN_RAW candidate_id={candidate_id} raw_keys={list(c.keys())} status={c.get('status')} available={c.get('available')} qualifications={c.get('qualifications')}")
+
             if not is_valid_candidate_name(first_name, last_name):
                 logger.warning("Dropping JobAgent candidate with invalid name: first=%r last=%r id=%r", first_name, last_name, candidate_id)
                 continue
@@ -1431,10 +1419,36 @@ class JobDivaService:
                 "received": get_field(c, ["received", "RECEIVED"]),
                 "available": get_field(c, ["available", "AVAILABLE"]) or "",
                 "availability_status": get_field(c, ["available", "AVAILABLE"]) or "",
+                "employee_status": get_field(
+                    c,
+                    [
+                        "EMPLOYEESTATUS",
+                        "employeeStatus",
+                        "CURRENTEMPLOYEE",
+                        "currentEmployee",
+                        "ASSIGNMENTSTATUS",
+                        "assignmentStatus",
+                    ],
+                ),
+                "qualifications": get_field(c, ["qualifications", "QUALIFICATIONS"]) or [],
                 "abstract": abstract,
                 "lastnote": get_field(c, ["lastNote", "LASTNOTE"]),
                 "phone": _get_candidate_phone(c),
             }
+
+            # Map the numeric status field to employee_status string:
+            # 0 = normal, 1 = Current Employee, 2 = Past Employee
+            raw_status = get_field(c, ["status", "STATUS"])
+            if raw_status is not None:
+                try:
+                    status_int = int(raw_status)
+                    if status_int == 1 and not record.get("employee_status"):
+                        record["employee_status"] = "Current Employee"
+                        logger.info(f"JobAgent status=1 → marking candidate {candidate_id} as Current Employee")
+                    elif status_int == 2 and not record.get("employee_status"):
+                        record["employee_status"] = "Past Employee"
+                except (ValueError, TypeError):
+                    pass
 
             if require_resume and not has_resume:
                 dropped_no_resume += 1
@@ -1531,6 +1545,8 @@ class JobDivaService:
         countries: Optional[List[str]] = None,
         states: Optional[List[str]] = None,
         page_number: int = 0,
+        zip_code: str = "",
+        within_miles: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search JobDiva Talent Search using the generated Boolean string.
@@ -1551,13 +1567,18 @@ class JobDivaService:
         from services.jobdiva_boolean_translator import (
             translate_for_jobdiva,
             extract_skill_years,
+            rewrite_location_clauses_to_zip_dialect,
+            count_location_clauses,
         )
+        from core import sourcing_config as _sc
 
         jd_results = []
         raw_search_value = (
             boolean_string.strip()
             if boolean_string
-            else self._build_talent_boolean(skills, location)
+            else self._build_talent_boolean(
+                skills, location, zip_code=zip_code, within_miles=within_miles
+            )
         )
 
         # Pull { skill: years } hints from the passed `skills` payload so
@@ -1573,24 +1594,62 @@ class JobDivaService:
             recent_days=recent_days,
         )
 
+        # Optional: turn quoted frontend location clauses into JobDiva's
+        # native zip-radius dialect. Off by default — probe-gated.
+        if getattr(_sc, "JOBDIVA_BOOLEAN_ZIP_DIALECT_ENABLED", False):
+            translated_search_value = rewrite_location_clauses_to_zip_dialect(
+                translated_search_value
+            )
+
         url = f"{self.api_url}/apiv2/jobdiva/TalentSearch"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         skills_value = translated_search_value or raw_search_value
         countries_str = ",".join([c for c in (countries or []) if c]).strip()
         states_str = ",".join([s for s in (states or []) if s]).strip()
-        payload = {
-            "talentSearchDef": {
-                "skills": skills_value,
-                "countries": countries_str,
-                "states": states_str,
-                "pageNumber": int(page_number or 0),
-                "pageSize": limit,
-            }
+        talent_search_def: Dict[str, Any] = {
+            "skills": skills_value,
+            "countries": countries_str,
+            "states": states_str,
+            "pageNumber": int(page_number or 0),
+            "pageSize": limit,
         }
+        # Structured zip-radius (swagger: TalentSearchDef.zipCode/withinMiles).
+        # Harmless if the server ignores them; a real geo filter if honored.
+        # The zip rides ALONGSIDE any resolved states rather than replacing
+        # them: for an explicit-zip wizard location `states` is already empty
+        # (the parser dropped it), so keeping it is a no-op AND preserves the
+        # border-metro span (NYC ↔ NJ); but when the zip was SYNTHESIZED from a
+        # plain "City, ST" job (see unified_candidate_search.city_state_default_zip)
+        # the state IS the intended scope — blanking it there would fall back to
+        # nationwide results if the server ignores zipCode. Keeping states is
+        # the safe, no-broadening choice in both cases.
+        # Skipped for multi-location searches: the structured field can only
+        # carry ONE anchor, and pinning a `(A within 25 mi OR B within 25 mi)`
+        # boolean to chip A's zip would exclude chip B's candidates
+        # server-side. Geo stays in the boolean for those.
+        zip_radius_miles = 0
+        zip5 = str(zip_code or "").strip()
+        if (
+            getattr(_sc, "JOBDIVA_ZIP_RADIUS_ENABLED", True)
+            and len(zip5) == 5 and zip5.isdigit()
+            and count_location_clauses(raw_search_value) < 2
+        ):
+            # 2x headroom: the server-side filter (if honored) is a COARSE
+            # recall gate — it must not empty the UI's BEYOND-radius
+            # soft-keep bucket. The client-side verdict still measures true
+            # distance against the recruiter's exact radius; this just cuts
+            # the wrong-coast noise while keeping the near-miss band.
+            zip_radius_miles = max(1, min(100, int(within_miles or 25) * 2))
+            talent_search_def["zipCode"] = zip5
+            talent_search_def["withinMiles"] = zip_radius_miles
+        payload = {"talentSearchDef": talent_search_def}
 
         logger.debug(
             f"JobDiva Talent Search — skills: {skills_value!r} | "
-            f"countries={countries_str!r} states={states_str!r} "
+            f"countries={talent_search_def['countries']!r} "
+            f"states={talent_search_def['states']!r} "
+            f"zipCode={talent_search_def.get('zipCode', '')!r} "
+            f"withinMiles={zip_radius_miles or ''} "
             f"pageNumber={page_number} pageSize={limit} | "
             f"raw: {raw_search_value!r}"
         )
@@ -1688,6 +1747,7 @@ class JobDivaService:
 
                     city = get_field(c, ["city", "locationCity", "CITY"]) or ""
                     state = get_field(c, ["state", "locationState", "STATE"]) or ""
+                    zipcode = get_field(c, ["zipcode", "ZIPCODE", "zip", "ZIP", "postalCode", "POSTALCODE"]) or ""
                     location_str = ", ".join([p for p in [city, state] if p]).strip()
 
                     # Abstract: prefer an explicit summary/comments field if JobDiva
@@ -1739,6 +1799,7 @@ class JobDivaService:
                         "email": get_field(c, ["email", "EMAIL"]) or "",
                         "city": city,
                         "state": state,
+                        "zipcode": zipcode,
                         "location": location_str,
                         "work_city": "",
                         "work_state": "",
@@ -1754,6 +1815,17 @@ class JobDivaService:
                         "recent_availability": recent_availability,
                         "available": availability_status,
                         "availability_status": availability_status,
+                        "employee_status": get_field(
+                            c,
+                            [
+                                "EMPLOYEESTATUS",
+                                "employeeStatus",
+                                "CURRENTEMPLOYEE",
+                                "currentEmployee",
+                                "ASSIGNMENTSTATUS",
+                                "assignmentStatus",
+                            ],
+                        ),
                         "abstract": raw_abstract,
                         "profile_url": profile_url,
                         "lastnote": get_field(c, ["lastNote", "LASTNOTE"]),
@@ -1910,6 +1982,13 @@ class JobDivaService:
             candidate["address1"] = addr
             counters["address1"] = counters.get("address1", 0) + 1
 
+        # Zip: detail wins (same rationale as city/state below) — feeds the
+        # offline zip-radius match in unified_candidate_search.
+        detail_zip = take(["zipcode", "ZIPCODE", "zip", "ZIP", "postalCode", "POSTALCODE", "postal_code"])
+        if detail_zip and detail_zip != candidate.get("zipcode"):
+            candidate["zipcode"] = detail_zip
+            counters["zipcode"] = counters.get("zipcode", 0) + 1
+
         linkedin = take(["linkedinUrl", "LINKEDINURL", "linkedin", "LINKEDIN", "linkedIn", "LINKEDIN_URL"])
         if linkedin:
             candidate["linkedin_url"] = linkedin
@@ -1958,9 +2037,41 @@ class JobDivaService:
         if city_changed or state_changed:
             counters["location"] = counters.get("location", 0) + 1
 
-    def _build_talent_boolean(self, skills: List[Any], location: str) -> str:
+        emp_status = take([
+            "EMPLOYEESTATUS",
+            "employeeStatus",
+            "CURRENTEMPLOYEE",
+            "currentEmployee",
+            "ASSIGNMENTSTATUS",
+            "assignmentStatus",
+        ])
+        if emp_status and not candidate.get("employee_status"):
+            candidate["employee_status"] = emp_status
+
+        avail_val = take(["AVAILABLE", "available", "STATUS", "status"])
+        if avail_val and not candidate.get("available"):
+            candidate["available"] = avail_val
+            candidate["availability_status"] = avail_val
+
+        quals = detail.get("qualifications") or detail.get("QUALIFICATIONS") or []
+        if isinstance(quals, list) and quals and not candidate.get("qualifications"):
+            candidate["qualifications"] = quals
+            for q in quals:
+                if isinstance(q, dict):
+                    qval = str(q.get("qualificationValue") or q.get("value") or "").strip()
+                    if "current employee" in qval.lower():
+                        candidate["employee_status"] = "Current Employee"
+
+    def _build_talent_boolean(
+        self,
+        skills: List[Any],
+        location: str,
+        zip_code: str = "",
+        within_miles: Optional[int] = None,
+    ) -> str:
         terms = []
         excludes = []
+        geo_clause = ""
         for skill in skills or []:
             name = skill.get("value") if isinstance(skill, dict) else str(skill)
             match_type = skill.get("match_type", "must") if isinstance(skill, dict) else "must"
@@ -1972,10 +2083,23 @@ class JobDivaService:
             else:
                 terms.append(term)
         if location and location.strip():
-            terms.append(f'"{location.strip()}"')
+            from core import sourcing_config as _sc
+            if (
+                getattr(_sc, "JOBDIVA_BOOLEAN_ZIP_DIALECT_ENABLED", False)
+                and zip_code and str(zip_code).strip().isdigit()
+            ):
+                # Native geo dialect instead of a location keyword — the
+                # quoted form only matches resumes containing the literal
+                # string (probe-gated, same flag as the translator rewrite).
+                miles = max(1, min(100, int(within_miles or 25)))
+                geo_clause = f"Within {miles} miles of {str(zip_code).strip()}"
+            else:
+                terms.append(f'"{location.strip()}"')
         search_value = " AND ".join(terms) if terms else "*"
         if excludes:
             search_value = f"{search_value} NOT ({' OR '.join(excludes)})"
+        if geo_clause:
+            search_value = f"{search_value} {geo_clause}"
         return search_value
 
     def _calculate_match_score(self, candidate: Dict[str, Any], required_skills: List[Any] = None) -> int:
@@ -2316,6 +2440,47 @@ class JobDivaService:
             len(ids), len(chunks), chunk_size, conc, len(results), _det_ms,
         )
         return results
+
+    async def _fetch_candidate_notes_action_types_batch(
+        self,
+        token: str,
+        candidate_ids: List[str],
+        chunk_size: int = 50,
+    ) -> Dict[str, List[str]]:
+        """Fetch CandidateNotesListDetail for candidates and extract their ACTIONTYPEs."""
+        ids = [str(cid).strip() for cid in (candidate_ids or []) if cid and str(cid).strip()]
+        if not ids:
+            return {}
+
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        endpoint = f"{self.api_url}/apiv2/bi/CandidateNotesListDetail"
+        chunks = [ids[i:i + chunk_size] for i in range(0, len(ids), chunk_size)]
+        results: Dict[str, List[str]] = {}
+
+        for chunk in chunks:
+            try:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.get(
+                        endpoint,
+                        params={"candidateIds": chunk},
+                        headers=headers,
+                    )
+                if response.status_code == 200:
+                    data = response.json()
+                    payload = data.get("data") if isinstance(data, dict) else data
+                    if isinstance(payload, list):
+                        for note_row in payload:
+                            if not isinstance(note_row, dict): continue
+                            cid = str(note_row.get("CONTACTID") or note_row.get("CANDIDATEID") or "")
+                            action_type = str(note_row.get("ACTIONTYPE") or "").strip()
+                            if cid and action_type:
+                                if cid not in results:
+                                    results[cid] = []
+                                results[cid].append(action_type)
+            except Exception as e:
+                logger.warning(f"CandidateNotesListDetail fetch failed: {e}")
+        return results
+
 
     async def _fetch_resume_text_batch(
         self,
@@ -3419,9 +3584,13 @@ class JobDivaService:
                         "selected_job_boards", "selected_employment_types", "recruiter_emails",
                         
                         # Metrics fields for UI display
-                        "candidates_sourced", "resumes_shortlisted", "complete_submissions", 
+                        "candidates_sourced", "resumes_shortlisted", "complete_submissions",
                         "pass_submissions", "pair_external_subs", "feedback_completed", "time_to_first_pass",
-                        "pair_launched_at"
+                        "pair_launched_at",
+
+                        # Campaign grouping + phone-screen intro (inherited from a
+                        # campaign when a job is added under one).
+                        "campaign_id", "bot_introduction",
                     ]
                     
                     # Fields where an empty string IS a valid intentional value (cleared UDFs or optional fields)
@@ -3512,7 +3681,12 @@ class JobDivaService:
                         "selected_job_boards": json.dumps(data.get("selected_job_boards", [])),
                         "screening_level": data.get("screening_level", "L1.5"),
                         "processing_status": data.get("processing_status", "pending"),
-                        
+
+                        # Phone-screen intro + campaign grouping (both plain TEXT
+                        # columns; campaign_id is NULL for standalone jobs).
+                        "bot_introduction": data.get("bot_introduction") or "",
+                        "campaign_id": data.get("campaign_id"),
+
                         # Identification
                         "job_id": job_id,
                         "jobdiva_id": data.get("jobdiva_id") or "",
@@ -4541,7 +4715,62 @@ class JobDivaService:
             logger.error(f"❌ get_job_submittals exception: {e}")
         return []
 
-    async def get_candidate_qualifications(self, candidate_id) -> List[Dict[str, Any]]:
+    async def _fetch_candidate_qualifications_batch(
+        self,
+        token: str,
+        candidate_ids: List[str],
+        chunk_size: int = 50,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Fetch CandidatesQualificationsDetail in batch and group by candidate ID."""
+        ids = [str(cid).strip() for cid in (candidate_ids or []) if cid and str(cid).strip()]
+        if not ids:
+            return {}
+
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        endpoint = f"{self.api_url}/apiv2/bi/CandidatesQualificationsDetail"
+        chunks = [ids[i:i + chunk_size] for i in range(0, len(ids), chunk_size)]
+        results: Dict[str, List[Dict[str, Any]]] = {}
+
+        for chunk in chunks:
+            try:
+                numeric_ids = [int(cid) for cid in chunk if cid.isdigit()]
+                if not numeric_ids:
+                    continue
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    response = await client.get(
+                        endpoint,
+                        params={"candidateIds": numeric_ids},
+                        headers=headers,
+                    )
+                if response.status_code == 200:
+                    data = response.json()
+                    payload = data if isinstance(data, list) else (data.get("data") or [])
+                    if payload and len(payload) > 0:
+                        sample = payload[0] if isinstance(payload[0], dict) else {}
+                        logger.info(f"CandidatesQualificationsDetail sample keys: {list(sample.keys())[:10]}")
+                    for q_row in payload:
+                        if not isinstance(q_row, dict): continue
+                        # Try every possible candidate ID key JobDiva might use
+                        cid = str(
+                            q_row.get("CANDIDATEID") or
+                            q_row.get("candidateId") or
+                            q_row.get("CONTACTID") or
+                            q_row.get("contactId") or
+                            q_row.get("ID") or
+                            q_row.get("id") or ""
+                        )
+                        if cid:
+                            if cid not in results:
+                                results[cid] = []
+                            results[cid].append(q_row)
+                else:
+                    logger.warning(f"CandidatesQualificationsDetail HTTP {response.status_code} for ids={chunk[:3]}")
+            except Exception as e:
+                logger.warning(f"CandidatesQualificationsDetail batch fetch failed: {e}")
+        logger.info(f"CandidatesQualificationsDetail: fetched qualifications for {len(results)} candidates out of {len(ids)} requested")
+        return results
+
+    async def get_candidate_qualifications(self, candidate_id: str) -> List[Dict[str, Any]]:
         """
         Fetch qualification history for a candidate from JobDiva BI endpoint.
         Uses /apiv2/bi/CandidatesQualificationsDetail.

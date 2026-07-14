@@ -90,6 +90,10 @@ async def _score_and_save_resume(job_row: dict, name: str, email: str, phone: st
         elif isinstance(first_loc, str):
             location_val = first_loc
 
+    job_location_type = str(job_row.get("location_type") or "").strip()
+    if not job_location_type and str(job_row.get("city") or "").strip().upper() == "REMOTE":
+        job_location_type = "Remote"
+
     criteria = SearchCriteria(
         job_id=str(job_row.get("job_id")),
         titles=[c.get("value", "") for c in title_criteria if c.get("value")],
@@ -99,6 +103,7 @@ async def _score_and_save_resume(job_row: dict, name: str, email: str, phone: st
         keywords=keywords,
         resume_match_filters=resume_match_filters if isinstance(resume_match_filters, list) else [],
         location=location_val,
+        location_type=job_location_type or "Unspecified",
         sources=[source],
     )
     score_result = unified_search_service._score_candidate(candidate, criteria)
@@ -232,7 +237,7 @@ async def add_manual_candidate(job_id: str, req: ManualCandidateRequest):
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute(
-            "SELECT job_id, jobdiva_id, sourcing_filters, resume_match_filters, title FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
+            "SELECT job_id, jobdiva_id, sourcing_filters, resume_match_filters, title, location_type, city FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
             (job_id, job_id)
         )
         job_row = cursor.fetchone()
@@ -276,7 +281,7 @@ async def bulk_upload_resumes(job_id: str, files: List[UploadFile] = File(...)):
         conn = get_db_connection()
         cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         cursor.execute(
-            "SELECT job_id, jobdiva_id, sourcing_filters, resume_match_filters, title FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
+            "SELECT job_id, jobdiva_id, sourcing_filters, resume_match_filters, title, location_type, city FROM monitored_jobs WHERE job_id = %s OR jobdiva_id = %s LIMIT 1",
             (job_id, job_id)
         )
         job_row = cursor.fetchone()

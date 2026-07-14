@@ -10,6 +10,7 @@ cloud-sql-python-connector
 pg8000
 sqlalchemy
 cryptography
+PyJWT>=2.8.0
 apscheduler
 exa_py>=2.13.0  # 2.13.0 exposes exa.beta.agent.runs (Websets 2.0 Agent API)
 pypdf
@@ -18,4 +19,4 @@ python-multipart
 openpyxl
 rapidfuzz
 redis>=5.0.0
-sentry-sdk[fastapi]>=2.0.0
+newrelic>=9.8.0

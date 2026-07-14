@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Phone, Loader2, Check, X as XIcon } from "lucide-react";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 import { logger } from "@/lib/logger";
 
 interface PhoneIndicatorProps {
@@ -99,7 +99,7 @@ export function PhoneIndicator({
     try {
       let normalised = trimmed;
       if (persist) {
-        const res = await fetch(
+        const res = await authFetch(
           `${API_BASE}/candidates/${encodeURIComponent(candidateId)}/phone`,
           {
             method: "PATCH",

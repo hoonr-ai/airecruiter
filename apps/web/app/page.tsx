@@ -22,7 +22,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Users } from "lucide-react";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 
 interface Job {
   id: string;
@@ -116,7 +116,7 @@ export default function DashboardPage() {
     const timeoutId = setTimeout(() => controller.abort(), 15000);
     try {
       const includeArchived = activeTab === "archived";
-      const response = await fetch(
+      const response = await authFetch(
         `${API_BASE}/jobs/monitored?include_archived=${includeArchived}`,
         { signal: controller.signal },
       );
@@ -330,7 +330,7 @@ export default function DashboardPage() {
   const SortableHeader = ({ field, children, className = "" }: { field: keyof Job; children: React.ReactNode; className?: string }) => {
     const isActive = sortField === field;
     return (
-      <th className={`px-6 py-4 text-center text-[12.5px] font-bold uppercase tracking-wide border-b border-slate-100 whitespace-nowrap transition-colors ${isActive ? "text-[#4f46e5] bg-indigo-50" : "text-slate-500 bg-[#fcfdfd]"} ${className}`}>
+      <th className={`px-6 py-4 text-center text-[12px] font-bold uppercase tracking-wider border-b border-slate-100 whitespace-nowrap transition-colors ${isActive ? "text-[#4f46e5] bg-indigo-50" : "text-slate-500 bg-[#fcfdfd]"} ${className}`}>
         <div className="flex items-center justify-center gap-1.5 cursor-pointer hover:text-[#4f46e5] transition-colors" onClick={() => handleSort(field)}>
           {children}
           {isActive
@@ -512,7 +512,7 @@ export default function DashboardPage() {
                 <SortableHeader field="pairExternalSubs">HOONR-CURATE EXTERNAL SUBS</SortableHeader>
                 <SortableHeader field="feedbackCompleted">FEEDBACK COMPLETED</SortableHeader>
                 <SortableHeader field="timeToFirstPass">TIME TO FIRST PASS</SortableHeader>
-                <th className="px-6 py-4 text-center text-[12.5px] font-bold text-slate-500 uppercase tracking-wide border-b border-l border-slate-100/50 sticky right-0 bg-[#fcfdfd] z-30 shadow-[-10px_0_15px_-5px_rgba(0,0,0,0.03)] whitespace-nowrap">
+                <th className="px-6 py-4 text-center text-[12px] font-bold uppercase tracking-wider text-slate-500 border-b border-l border-slate-100/50 sticky right-0 bg-[#fcfdfd] z-30 shadow-[-10px_0_15px_-5px_rgba(0,0,0,0.03)] whitespace-nowrap">
                   ACTIONS
                 </th>
               </tr>
@@ -777,7 +777,7 @@ export default function DashboardPage() {
                 if (!jobToArchive) return;
                 setIsArchiving(true);
                 try {
-                  const response = await fetch(
+                  const response = await authFetch(
                     `${API_BASE}/jobs/${jobToArchive.jobdiva_id || jobToArchive.id}/archive`,
                     {
                       method: "PUT",
@@ -853,7 +853,7 @@ export default function DashboardPage() {
                 if (!jobToStop) return;
                 setIsStopping(true);
                 try {
-                  const response = await fetch(
+                  const response = await authFetch(
                     `${API_BASE}/jobs/${jobToStop.jobdiva_id || jobToStop.id}/stop-activity`,
                     {
                       method: "POST",
@@ -927,7 +927,7 @@ export default function DashboardPage() {
                 setIsCreatingVersion(true);
                 try {
                   const ref = jobToEditVersion.jobdiva_id || jobToEditVersion.id;
-                  const response = await fetch(
+                  const response = await authFetch(
                     `${API_BASE}/jobs/${encodeURIComponent(ref)}/new-version`,
                     {
                       method: "POST",
@@ -1002,7 +1002,7 @@ export default function DashboardPage() {
                 if (!jobToUnarchive) return;
                 setIsUnarchiving(true);
                 try {
-                  const response = await fetch(
+                  const response = await authFetch(
                     `${API_BASE}/jobs/${jobToUnarchive.jobdiva_id || jobToUnarchive.id}/unarchive`,
                     {
                       method: "PUT",
