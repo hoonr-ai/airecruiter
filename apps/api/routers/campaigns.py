@@ -28,6 +28,7 @@ import time
 
 from models import CampaignData, CampaignAddJobRequest, CampaignBulkAddRequest
 from routers._helpers import get_db_connection, get_dict_cursor_connection
+from routers.jobs import invalidate_monitored_jobs_cache
 from services.jobdiva import jobdiva_service
 
 router = APIRouter()
@@ -268,6 +269,7 @@ async def delete_campaign(campaign_id: str):
                     (campaign_id,),
                 )
                 conn.commit()
+        invalidate_monitored_jobs_cache()
         return {"status": "success", "campaign_id": campaign_id}
     except HTTPException:
         raise
@@ -411,6 +413,7 @@ async def add_job_to_campaign(campaign_id: str, req: CampaignAddJobRequest):
         )
         if not result["ok"]:
             raise HTTPException(status_code=500, detail="Failed to create job under campaign")
+        invalidate_monitored_jobs_cache()
         return {"status": "success", "campaign_id": campaign_id, **result}
     except HTTPException:
         raise
@@ -454,6 +457,8 @@ async def bulk_add_jobs_to_campaign(campaign_id: str, req: CampaignBulkAddReques
 
         added = sum(1 for r in results if r.get("ok"))
         fetched = sum(1 for r in results if r.get("fetched"))
+        if added > 0:
+            invalidate_monitored_jobs_cache()
         return {
             "status": "success",
             "campaign_id": campaign_id,
@@ -467,3 +472,62 @@ async def bulk_add_jobs_to_campaign(campaign_id: str, req: CampaignBulkAddReques
     except Exception as e:
         logger.error(f"bulk_add_jobs_to_campaign failed for {campaign_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to add jobs to campaign")
+
+
+@router.delete("/campaigns/{campaign_id}/jobs/{job_id}")
+async def remove_job_from_campaign(
+    campaign_id: str,
+    job_id: str,
+    action: str = Query("detach", pattern="^(detach|delete)$"),
+):
+    """Remove or detach a child job from a campaign.
+    
+    If action='detach' (default): clears monitored_jobs.campaign_id, returning the job to standalone status in /jobs while keeping all candidate and screening data intact.
+    If action='delete': completely deletes the requirement from monitored_jobs (and satellite tables) if it was added by mistake.
+    """
+    try:
+        campaign = _get_campaign_row(campaign_id)
+        if not campaign:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+            
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                # First check if the job belongs to this campaign
+                cur.execute(
+                    "SELECT job_id, jobdiva_id FROM monitored_jobs WHERE (job_id::text = %s OR jobdiva_id::text = %s) AND campaign_id = %s LIMIT 1",
+                    (job_id, job_id, campaign_id),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise HTTPException(status_code=404, detail="Job not found in this campaign")
+                
+                actual_job_id, actual_jobdiva_id = row[0], row[1]
+                
+                if action == "detach":
+                    cur.execute(
+                        "UPDATE monitored_jobs SET campaign_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE job_id = %s",
+                        (actual_job_id,),
+                    )
+                    conn.commit()
+                    logger.info(f"Detached job {actual_job_id} ({actual_jobdiva_id}) from campaign {campaign_id}")
+                else:
+                    # action == "delete": delete from monitored_jobs and associated satellite tables
+                    job_ref = str(actual_jobdiva_id or actual_job_id or "")
+                    cur.execute("DELETE FROM job_skills WHERE jobdiva_id = %s", (job_ref,))
+                    cur.execute("DELETE FROM job_education WHERE jobdiva_id = %s", (job_ref,))
+                    cur.execute("DELETE FROM job_titles WHERE jobdiva_id = %s", (job_ref,))
+                    cur.execute("DELETE FROM job_customer_requirements WHERE jobdiva_id = %s", (job_ref,))
+                    cur.execute("DELETE FROM job_other_requirements WHERE jobdiva_id = %s", (job_ref,))
+                    cur.execute("DELETE FROM job_screen_questions WHERE jobdiva_id = %s", (job_ref,))
+                    cur.execute("DELETE FROM monitored_jobs WHERE job_id = %s", (actual_job_id,))
+                    conn.commit()
+                    logger.info(f"Deleted requirement {actual_job_id} ({actual_jobdiva_id}) from campaign {campaign_id}")
+                    
+        invalidate_monitored_jobs_cache()
+        return {"status": "success", "campaign_id": campaign_id, "job_id": job_id, "action": action}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"remove_job_from_campaign failed for campaign {campaign_id}, job {job_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to remove job from campaign")
+

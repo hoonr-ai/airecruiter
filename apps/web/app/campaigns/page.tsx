@@ -2,11 +2,18 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { Plus, Megaphone, Briefcase, AlertTriangle } from "lucide-react";
+import { Plus, Megaphone, Briefcase, AlertTriangle, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Campaign, listCampaigns } from "@/lib/campaigns";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
+import { Campaign, listCampaigns, deleteCampaign } from "@/lib/campaigns";
 
 export default function CampaignsPage() {
   const router = useRouter();
@@ -14,6 +21,25 @@ export default function CampaignsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [loadFailed, setLoadFailed] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
+
+  const [campaignToDelete, setCampaignToDelete] = useState<{ id: string; name: string } | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+
+  const handleDeleteCampaign = async () => {
+    if (!campaignToDelete) return;
+    setIsDeleting(true);
+    try {
+      await deleteCampaign(campaignToDelete.id);
+      setCampaignToDelete(null);
+      await load();
+      setToast({ message: "Campaign archived successfully", type: "success" });
+    } catch (e) {
+      console.error("Failed to delete campaign", e);
+      setToast({ message: "Couldn't delete the campaign.", type: "error" });
+    } finally {
+      setIsDeleting(false);
+    }
+  };
 
   const load = useCallback(async () => {
     setIsLoading(true);
@@ -83,16 +109,27 @@ export default function CampaignsPage() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {campaigns.map((c) => (
-            <button
+            <div
               key={c.campaign_id}
               onClick={() => router.push(`/campaigns/${c.campaign_id}`)}
-              className="text-left bg-white border border-slate-200 rounded-xl p-5 hover:border-primary/40 hover:shadow-md transition-all"
+              className="text-left bg-white border border-slate-200 rounded-xl p-5 hover:border-primary/40 hover:shadow-md transition-all cursor-pointer relative group"
             >
               <div className="flex items-start justify-between gap-3">
                 <h3 className="font-semibold text-slate-900 line-clamp-2">{c.name}</h3>
-                <Badge variant="secondary" className="shrink-0">
-                  {c.screening_level}
-                </Badge>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <Badge variant="secondary">{c.screening_level}</Badge>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setCampaignToDelete({ id: c.campaign_id, name: c.name });
+                    }}
+                    className="p-1.5 hover:bg-red-50 text-slate-400 hover:text-red-600 rounded transition-colors"
+                    title="Delete Campaign"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
               {c.customer_name && <p className="text-sm text-slate-500 mt-1">{c.customer_name}</p>}
               <div className="flex items-center gap-2 mt-4 text-sm text-slate-600">
@@ -108,10 +145,41 @@ export default function CampaignsPage() {
                   ))}
                 </div>
               )}
-            </button>
+            </div>
           ))}
         </div>
       )}
+
+      {/* Delete confirmation dialog */}
+      <Dialog
+        open={!!campaignToDelete}
+        onOpenChange={(open) => {
+          if (!open) setCampaignToDelete(null);
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete Campaign</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to archive <strong>{campaignToDelete?.name}</strong>? The child jobs and
+              candidate history will remain accessible in your main jobs portfolio.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2 mt-4">
+            <Button variant="outline" onClick={() => setCampaignToDelete(null)} disabled={isDeleting}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDeleteCampaign}
+              disabled={isDeleting}
+              className="bg-red-600 hover:bg-red-700 text-white"
+            >
+              {isDeleting ? "Deleting..." : "Delete Campaign"}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {toast && (
         <div
