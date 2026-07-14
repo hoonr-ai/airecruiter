@@ -20,16 +20,22 @@ colliding with the frontend's /campaigns pages (mirrors the /jobs page vs
 /jobs/monitored API split).
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from typing import List, Dict, Any, Optional
 import logging
 import json
 import time
+import uuid
 
 from models import CampaignData, CampaignAddJobRequest, CampaignBulkAddRequest
 from routers._helpers import get_db_connection, get_dict_cursor_connection
 from routers.jobs import invalidate_monitored_jobs_cache
 from services.jobdiva import jobdiva_service
+from core.auth import get_current_user, UserIdentity, verify_job_access
+
+# Cap on ids accepted by the bulk-add endpoint (each id is a synchronous
+# JobDiva fetch + DB write; keep the request bounded).
+_MAX_BULK_JOBS = 200
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -133,11 +139,37 @@ def _get_campaign_row(campaign_id: str) -> Optional[Dict[str, Any]]:
             return _parse_row(row) if row else None
 
 
-@router.post("/campaigns")
-async def create_campaign(campaign: CampaignData):
-    """Create (or upsert) a campaign. Generates a CMP_{ts} id when absent."""
+def _user_can_access_campaign(campaign: Dict[str, Any], user: UserIdentity) -> bool:
+    """Boolean form of the ownership check for list filtering. Mirrors jobs'
+    model via verify_job_access: admins always; recruiters when assigned in the
+    campaign's recruiter_emails, or when the campaign has no assigned recruiters
+    (legacy/unassigned)."""
     try:
-        campaign_id = campaign.campaign_id or f"CMP_{int(time.time() * 1000)}"
+        verify_job_access(campaign, user)
+        return True
+    except HTTPException:
+        return False
+
+
+def _ensure_campaign_access(campaign: Dict[str, Any], user: UserIdentity) -> None:
+    """Raise 403 unless the user may access/modify this campaign. Reuses the same
+    recruiter_emails ownership rule enforced for jobs (verify_job_access)."""
+    verify_job_access(campaign, user)
+
+
+@router.post("/campaigns")
+async def create_campaign(campaign: CampaignData, user: UserIdentity = Depends(get_current_user)):
+    """Create (or upsert) a campaign. Generates a collision-resistant CMP_ id
+    when absent."""
+    try:
+        campaign_id = campaign.campaign_id or f"CMP_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
+        # POST is an upsert (ON CONFLICT DO UPDATE). If an id was supplied and a
+        # campaign already exists under it, the caller must be allowed to modify
+        # it — otherwise this endpoint would let anyone overwrite any campaign.
+        if campaign.campaign_id:
+            existing = _get_campaign_row(campaign_id)
+            if existing:
+                _ensure_campaign_access(existing, user)
         data = campaign.dict()
         data["campaign_id"] = campaign_id
 
@@ -162,6 +194,8 @@ async def create_campaign(campaign: CampaignData):
 
         created = _get_campaign_row(campaign_id)
         return {"status": "success", "campaign_id": campaign_id, "campaign": created}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"create_campaign failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to create campaign")
@@ -171,8 +205,11 @@ async def create_campaign(campaign: CampaignData):
 async def list_campaigns(
     include_archived: bool = False,
     view: str = Query("summary", pattern="^(summary|full)$"),
+    user: UserIdentity = Depends(get_current_user),
 ):
-    """List campaigns (active by default), each with a live child job_count."""
+    """List campaigns (active by default), each with a live child job_count.
+    Non-admins only see campaigns they're assigned to (or unassigned ones),
+    matching the jobs ownership model."""
     try:
         where = "" if include_archived else "WHERE c.status != 'archived'"
         with get_dict_cursor_connection() as conn:
@@ -192,6 +229,10 @@ async def list_campaigns(
         campaigns = []
         for row in rows:
             parsed = _parse_row(row)
+            # Ownership filter uses the full recruiter_emails list, so run it
+            # before the summary view drops any fields.
+            if not user.is_admin and not _user_can_access_campaign(parsed, user):
+                continue
             if view == "summary":
                 # Drop the heavy template blobs from the list payload.
                 for f in _JSONB_FIELDS + ("template_ai_description",):
@@ -204,12 +245,13 @@ async def list_campaigns(
 
 
 @router.get("/campaigns/{campaign_id}")
-async def get_campaign(campaign_id: str):
+async def get_campaign(campaign_id: str, user: UserIdentity = Depends(get_current_user)):
     """Campaign detail + its child jobs."""
     try:
         campaign = _get_campaign_row(campaign_id)
         if not campaign:
             raise HTTPException(status_code=404, detail="Campaign not found")
+        _ensure_campaign_access(campaign, user)
 
         with get_dict_cursor_connection() as conn:
             with conn.cursor() as cur:
@@ -246,22 +288,30 @@ async def get_campaign(campaign_id: str):
 
 
 @router.put("/campaigns/{campaign_id}")
-async def update_campaign(campaign_id: str, campaign: CampaignData):
+async def update_campaign(
+    campaign_id: str,
+    campaign: CampaignData,
+    user: UserIdentity = Depends(get_current_user),
+):
     """Update a campaign's common props + template. Does NOT re-propagate to
     existing child jobs (they copied their values at creation)."""
-    if not _get_campaign_row(campaign_id):
+    existing = _get_campaign_row(campaign_id)
+    if not existing:
         raise HTTPException(status_code=404, detail="Campaign not found")
+    _ensure_campaign_access(existing, user)
     campaign.campaign_id = campaign_id
-    return await create_campaign(campaign)
+    return await create_campaign(campaign, user)
 
 
 @router.delete("/campaigns/{campaign_id}")
-async def delete_campaign(campaign_id: str):
+async def delete_campaign(campaign_id: str, user: UserIdentity = Depends(get_current_user)):
     """Soft-delete: mark archived. Child jobs keep their campaign_id + rows
     (they may be mid-PAIR and are needed for history)."""
     try:
-        if not _get_campaign_row(campaign_id):
+        existing = _get_campaign_row(campaign_id)
+        if not existing:
             raise HTTPException(status_code=404, detail="Campaign not found")
+        _ensure_campaign_access(existing, user)
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -393,7 +443,11 @@ async def _create_campaign_job(
 
 
 @router.post("/campaigns/{campaign_id}/jobs")
-async def add_job_to_campaign(campaign_id: str, req: CampaignAddJobRequest):
+async def add_job_to_campaign(
+    campaign_id: str,
+    req: CampaignAddJobRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
     """Add a single job under a campaign (JobDiva import or external requirement),
     inheriting common props + JD/rubric/questions template and stamped with
     campaign_id."""
@@ -401,6 +455,7 @@ async def add_job_to_campaign(campaign_id: str, req: CampaignAddJobRequest):
         campaign = _get_campaign_row(campaign_id)
         if not campaign:
             raise HTTPException(status_code=404, detail="Campaign not found")
+        _ensure_campaign_access(campaign, user)
         if not req.jobdiva_id and not (req.title and req.description):
             raise HTTPException(
                 status_code=400,
@@ -423,7 +478,11 @@ async def add_job_to_campaign(campaign_id: str, req: CampaignAddJobRequest):
 
 
 @router.post("/campaigns/{campaign_id}/jobs/bulk")
-async def bulk_add_jobs_to_campaign(campaign_id: str, req: CampaignBulkAddRequest):
+async def bulk_add_jobs_to_campaign(
+    campaign_id: str,
+    req: CampaignBulkAddRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
     """Add many JobDiva requirements at once. Accepts a list of ids (the frontend
     splits the comma-separated input). Each id is fetched from JobDiva and created
     under the campaign, inheriting the template. Returns a per-id result list so
@@ -432,6 +491,7 @@ async def bulk_add_jobs_to_campaign(campaign_id: str, req: CampaignBulkAddReques
         campaign = _get_campaign_row(campaign_id)
         if not campaign:
             raise HTTPException(status_code=404, detail="Campaign not found")
+        _ensure_campaign_access(campaign, user)
 
         # Accept a raw comma/newline string too, for robustness.
         raw_ids: List[str] = []
@@ -446,6 +506,11 @@ async def bulk_add_jobs_to_campaign(campaign_id: str, req: CampaignBulkAddReques
                 ids.append(v)
         if not ids:
             raise HTTPException(status_code=400, detail="Provide at least one JobDiva Job ID")
+        if len(ids) > _MAX_BULK_JOBS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Too many jobs in one request ({len(ids)}); the maximum is {_MAX_BULK_JOBS}.",
+            )
 
         results = []
         for jid in ids:
@@ -479,30 +544,42 @@ async def remove_job_from_campaign(
     campaign_id: str,
     job_id: str,
     action: str = Query("detach", pattern="^(detach|delete)$"),
+    user: UserIdentity = Depends(get_current_user),
 ):
     """Remove or detach a child job from a campaign.
-    
+
     If action='detach' (default): clears monitored_jobs.campaign_id, returning the job to standalone status in /jobs while keeping all candidate and screening data intact.
-    If action='delete': completely deletes the requirement from monitored_jobs (and satellite tables) if it was added by mistake.
+    If action='delete': completely deletes the requirement from monitored_jobs (and satellite tables) if it was added by mistake. Refused once the job has any sourced/launched candidates — detach instead so that history is preserved.
     """
     try:
         campaign = _get_campaign_row(campaign_id)
         if not campaign:
             raise HTTPException(status_code=404, detail="Campaign not found")
-            
+        _ensure_campaign_access(campaign, user)
+
         with get_db_connection() as conn:
             with conn.cursor() as cur:
-                # First check if the job belongs to this campaign
+                # First check if the job belongs to this campaign. Pull the
+                # launch/sourcing markers too so a destructive delete can be
+                # refused for jobs that already have candidate history.
                 cur.execute(
-                    "SELECT job_id, jobdiva_id FROM monitored_jobs WHERE (job_id::text = %s OR jobdiva_id::text = %s) AND campaign_id = %s LIMIT 1",
+                    """
+                    SELECT job_id, jobdiva_id, pair_launched_at,
+                           COALESCE(NULLIF(candidates_launched::text, '')::int, 0) AS cand_launched,
+                           COALESCE(NULLIF(candidates_sourced::text, '')::int, 0) AS cand_sourced
+                    FROM monitored_jobs
+                    WHERE (job_id::text = %s OR jobdiva_id::text = %s) AND campaign_id = %s
+                    LIMIT 1
+                    """,
                     (job_id, job_id, campaign_id),
                 )
                 row = cur.fetchone()
                 if not row:
                     raise HTTPException(status_code=404, detail="Job not found in this campaign")
-                
+
                 actual_job_id, actual_jobdiva_id = row[0], row[1]
-                
+                pair_launched_at, cand_launched, cand_sourced = row[2], row[3], row[4]
+
                 if action == "detach":
                     cur.execute(
                         "UPDATE monitored_jobs SET campaign_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE job_id = %s",
@@ -511,7 +588,15 @@ async def remove_job_from_campaign(
                     conn.commit()
                     logger.info(f"Detached job {actual_job_id} ({actual_jobdiva_id}) from campaign {campaign_id}")
                 else:
-                    # action == "delete": delete from monitored_jobs and associated satellite tables
+                    # action == "delete": hard-delete the requirement + satellites.
+                    # Refuse when the job has candidate history — deleting it would
+                    # orphan sourced_candidates / interview rows (logical links, no
+                    # FK cascade) and irreversibly lose the requirement record.
+                    if pair_launched_at is not None or (cand_launched or 0) > 0 or (cand_sourced or 0) > 0:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Cannot delete a requirement that has sourced or launched candidates. Detach it from the campaign instead to preserve its history.",
+                        )
                     job_ref = str(actual_jobdiva_id or actual_job_id or "")
                     cur.execute("DELETE FROM job_skills WHERE jobdiva_id = %s", (job_ref,))
                     cur.execute("DELETE FROM job_education WHERE jobdiva_id = %s", (job_ref,))

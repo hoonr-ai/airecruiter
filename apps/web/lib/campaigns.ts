@@ -7,7 +7,7 @@
 // `${API_BASE}/api/campaigns` — this avoids colliding with the /campaigns
 // frontend pages.
 
-import { API_BASE } from "@/lib/api";
+import { API_BASE, authFetch } from "@/lib/api";
 
 export type ScreeningLevel = "L1" | "L1.5" | "L2";
 export type EmploymentType = "W2" | "1099" | "C2C" | "Full-Time";
@@ -133,7 +133,7 @@ async function json<T>(res: Response, label: string): Promise<T> {
 }
 
 export async function listCampaigns(includeArchived = false): Promise<Campaign[]> {
-  const res = await fetch(`${CAMPAIGNS_BASE}?include_archived=${includeArchived}&view=summary`, {
+  const res = await authFetch(`${CAMPAIGNS_BASE}?include_archived=${includeArchived}&view=summary`, {
     cache: "no-store",
   });
   const data = await json<{ campaigns: Campaign[] }>(res, "GET /api/campaigns");
@@ -141,7 +141,7 @@ export async function listCampaigns(includeArchived = false): Promise<Campaign[]
 }
 
 export async function getCampaign(campaignId: string): Promise<Campaign> {
-  const res = await fetch(`${CAMPAIGNS_BASE}/${encodeURIComponent(campaignId)}`, {
+  const res = await authFetch(`${CAMPAIGNS_BASE}/${encodeURIComponent(campaignId)}`, {
     cache: "no-store",
   });
   return json<Campaign>(res, `GET /api/campaigns/${campaignId}`);
@@ -150,7 +150,7 @@ export async function getCampaign(campaignId: string): Promise<Campaign> {
 export async function createCampaign(
   payload: CampaignCreatePayload,
 ): Promise<{ campaign_id: string; campaign: Campaign }> {
-  const res = await fetch(CAMPAIGNS_BASE, {
+  const res = await authFetch(CAMPAIGNS_BASE, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -162,7 +162,7 @@ export async function updateCampaign(
   campaignId: string,
   payload: CampaignCreatePayload,
 ): Promise<{ campaign_id: string; campaign: Campaign }> {
-  const res = await fetch(`${CAMPAIGNS_BASE}/${encodeURIComponent(campaignId)}`, {
+  const res = await authFetch(`${CAMPAIGNS_BASE}/${encodeURIComponent(campaignId)}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -171,7 +171,7 @@ export async function updateCampaign(
 }
 
 export async function deleteCampaign(campaignId: string): Promise<void> {
-  const res = await fetch(`${CAMPAIGNS_BASE}/${encodeURIComponent(campaignId)}`, {
+  const res = await authFetch(`${CAMPAIGNS_BASE}/${encodeURIComponent(campaignId)}`, {
     method: "DELETE",
   });
   await json<unknown>(res, `DELETE /api/campaigns/${campaignId}`);
@@ -181,7 +181,7 @@ export async function addJobToCampaign(
   campaignId: string,
   payload: AddJobPayload,
 ): Promise<{ job_id: string; jobdiva_id: string; ref: string }> {
-  const res = await fetch(`${CAMPAIGNS_BASE}/${encodeURIComponent(campaignId)}/jobs`, {
+  const res = await authFetch(`${CAMPAIGNS_BASE}/${encodeURIComponent(campaignId)}/jobs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -196,7 +196,7 @@ export async function bulkAddJobsToCampaign(
   campaignId: string,
   jobdivaIds: string[],
 ): Promise<BulkAddResponse> {
-  const res = await fetch(`${CAMPAIGNS_BASE}/${encodeURIComponent(campaignId)}/jobs/bulk`, {
+  const res = await authFetch(`${CAMPAIGNS_BASE}/${encodeURIComponent(campaignId)}/jobs/bulk`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ jobdiva_ids: jobdivaIds }),
@@ -209,7 +209,7 @@ export async function removeJobFromCampaign(
   jobId: string,
   action: "detach" | "delete" = "detach",
 ): Promise<void> {
-  const res = await fetch(
+  const res = await authFetch(
     `${CAMPAIGNS_BASE}/${encodeURIComponent(campaignId)}/jobs/${encodeURIComponent(jobId)}?action=${action}`,
     {
       method: "DELETE",
@@ -272,7 +272,7 @@ export async function generateJobDescription(input: {
   jobDescription?: string;
   workArrangement?: string;
 }): Promise<string> {
-  const res = await fetch(`${AI_BASE}/jobs/new/generate-description`, {
+  const res = await authFetch(`${AI_BASE}/jobs/new/generate-description`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -295,7 +295,7 @@ export async function generateRubric(input: {
   // jobId/jobdivaId left blank on purpose: the endpoint skips persisting to the
   // job_* satellite tables when jobId is empty, so this returns a fresh rubric
   // for the campaign template without writing per-job rows.
-  const res = await fetch(`${AI_BASE}/jobs/generate-rubric`, {
+  const res = await authFetch(`${AI_BASE}/jobs/generate-rubric`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -317,7 +317,7 @@ export async function generateScreeningQuestions(input: {
   jobDescription?: string;
   customerName?: string;
 }): Promise<TemplateQuestion[]> {
-  const res = await fetch(`${AI_BASE}/jobs/new/screening-questions/generate`, {
+  const res = await authFetch(`${AI_BASE}/jobs/new/screening-questions/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

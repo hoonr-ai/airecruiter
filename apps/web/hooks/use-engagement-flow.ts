@@ -75,6 +75,9 @@ export type LaunchEvent =
       index: number;
       status: "completed" | "failed";
       sent?: number;
+      // Candidates PAIR accepted but returned no interview_id for. They are NOT
+      // counted as sent and remain retryable on a subsequent launch.
+      no_interview?: number;
       already_sent?: number;
       bulk_id?: string;
       error?: string;
@@ -84,7 +87,7 @@ export type LaunchEvent =
   | {
       type: "done";
       aborted: boolean;
-      totals: { sent: number; already_sent: number; failed_batches: number };
+      totals: { sent: number; already_sent: number; failed_batches: number; no_interview?: number };
       skipped_already_sent: string[];
       failed_candidate_ids: string[];
     };

@@ -1238,9 +1238,12 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
             except Exception as _stop_check_err:
                 logger.warning(f"Could not check job metadata for job {job_id_from_payload}: {_stop_check_err}")
 
-        # Idempotency: drop candidates that already have an engage_status set so retries
-        # or staged-launch races don't create duplicate interviews on the PAIR
-        # side. We keep their candidate_ids in skipped_already_sent so the caller
+        # Idempotency: drop candidates that already have a *successful* engage_status
+        # so retries or staged-launch races don't create duplicate interviews on the
+        # PAIR side. Crucially, 'failed' is NOT treated as already-sent — a candidate
+        # PAIR accepted but returned no interview_id for (or that erred) must remain
+        # retryable, otherwise a transient miss would silently skip them forever.
+        # We keep the skipped candidate_ids in skipped_already_sent so the caller
         # can show them as already-launched in the UI.
         skipped_already_sent: List[str] = []
         if request.real_candidate_ids:
@@ -1254,7 +1257,7 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                         FROM sourced_candidates
                         WHERE candidate_id = ANY(%s)
                           AND (jobdiva_id = %s OR jobdiva_id = %s)
-                          AND COALESCE(data ->> 'engage_status', '') != ''
+                          AND COALESCE(data ->> 'engage_status', '') NOT IN ('', 'failed')
                         """,
                         (
                             list(request.real_candidate_ids),
@@ -1802,7 +1805,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
             "batch_size": batch_size,
         })
 
-        totals = {"sent": 0, "already_sent": 0, "failed_batches": 0}
+        totals = {"sent": 0, "already_sent": 0, "failed_batches": 0, "no_interview": 0}
         all_skipped: List[str] = []
         failed_candidate_ids: List[str] = []
         aborted = False
@@ -1885,14 +1888,22 @@ async def launch_bulk_interviews(request: LaunchRequest):
                     all_skipped.extend(skipped)
 
                     if res.get("success"):
-                        sent = len(res.get("data") or [])
+                        rows = res.get("data") or []
+                        # Only rows PAIR actually created an interview for count as
+                        # "sent". Rows returned without an interview_id were written
+                        # engage_status='failed' (and stay retryable) — surface them
+                        # as no_interview instead of inflating the sent tally.
+                        sent = sum(1 for r in rows if isinstance(r, dict) and r.get("interview_id"))
+                        no_interview = len(rows) - sent
                         totals["sent"] += sent
                         totals["already_sent"] += len(skipped)
+                        totals["no_interview"] += no_interview
                         yield _sse({
                             "type": "batch",
                             "index": idx,
                             "status": "completed",
                             "sent": sent,
+                            "no_interview": no_interview,
                             "already_sent": len(skipped),
                             "bulk_id": res.get("bulk_id"),
                         })
