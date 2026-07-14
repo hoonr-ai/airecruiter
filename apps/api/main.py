@@ -43,10 +43,10 @@ from core.amplitude import track_event_async
 configure_logging()
 logger = logging.getLogger(__name__)
 
-# Initialise Sentry as early as possible so all subsequent import-time and
-# runtime errors are captured. Safe no-op when SENTRY_DSN is not set.
-from core.sentry import init as _sentry_init
-_sentry_init()
+# Initialise New Relic as early as possible so all subsequent import-time and
+# runtime errors are captured. Safe no-op when NEW_RELIC_LICENSE_KEY is not set.
+from core.newrelic import init as _newrelic_init, is_enabled as _newrelic_enabled
+_newrelic_init()
 
 from services.ai_service import ai_service
 from models import (
@@ -325,6 +325,14 @@ admin_analytics_router = _safe_import("admin_analytics")
 # http↔https loop via nginx. Failing loudly with 404 on slash mismatch is a
 # cheap fence around that whole class of misconfig.
 app = FastAPI(title="Hoonr.ai API", lifespan=lifespan, redirect_slashes=False)
+
+if _newrelic_enabled():
+    try:
+        import newrelic.agent
+        app = newrelic.agent.ASGIApplicationWrapper(app)
+    except Exception:
+        pass
+
 # Request-correlation middleware. Must wrap every route so downstream
 # handlers and services see the same request_id via contextvars.
 app.add_middleware(RequestIDMiddleware)

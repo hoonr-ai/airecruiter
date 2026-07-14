@@ -79,13 +79,15 @@ ENGAGE_PASSED_STATUSES = os.getenv("ENGAGE_PASSED_STATUSES", "completed,passed")
 # slots (briefly, after Fix 1). 5 matches the scale jobdiva_ratelimit_probe.py
 # has been probing — tunable via env if JobDiva's rate budget changes.
 _PROVISION_CONCURRENCY = asyncio.Semaphore(int(os.getenv("PROVISION_CONCURRENCY", "5")))
-_SENTRY_RESPONSE_BODY_LIMIT = 16000
+_NR_RESPONSE_BODY_LIMIT = 16000
 
 
-def _log_generate_payload_response_to_sentry(response_obj: Dict[str, Any], *, level: str = "info") -> None:
-    """Best-effort Sentry logging for /engage/generate-payload responses."""
+def _log_generate_payload_response_to_newrelic(response_obj: Dict[str, Any], *, level: str = "info") -> None:
+    """Best-effort New Relic logging for /engage/generate-payload responses."""
     try:
-        import sentry_sdk
+        from core.newrelic import is_enabled, record_custom_event, record_message
+        if not is_enabled():
+            return
     except Exception:
         return
 
@@ -94,25 +96,21 @@ def _log_generate_payload_response_to_sentry(response_obj: Dict[str, Any], *, le
     except Exception:
         response_text = str(response_obj)
 
-    truncated = response_text[:_SENTRY_RESPONSE_BODY_LIMIT]
+    truncated = response_text[:_NR_RESPONSE_BODY_LIMIT]
     was_truncated = len(response_text) > len(truncated)
 
     try:
-        with sentry_sdk.new_scope() as scope:
-            scope.set_tag("api_endpoint", "/engage/generate-payload")
-            scope.set_tag("api_operation", "generate_payload")
-            scope.set_tag("truncated", str(was_truncated).lower())
-            scope.set_context(
-                "engage_generate_payload_response",
-                {
-                    "response_size_bytes": len(response_text),
-                    "truncated": was_truncated,
-                    "response": truncated,
-                },
-            )
-            sentry_sdk.capture_message("Engage generate-payload response", level=level)
+        event_data = {
+            "api_endpoint": "/engage/generate-payload",
+            "api_operation": "generate_payload",
+            "response_size_bytes": len(response_text),
+            "truncated": was_truncated,
+            "response": truncated,
+        }
+        record_custom_event("EngageGeneratePayload", event_data)
+        record_message("Engage generate-payload response", attributes=event_data, level=level)
     except Exception:
-        # Sentry logging must never affect the API path.
+        # New Relic logging must never affect the API path.
         return
 
 def _parse_json_list(val) -> list:
@@ -782,11 +780,11 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
             "dnc_blocked_count": len(dnc_blocked_ids),
             "dnc_blocked_ids": dnc_blocked_ids,
         }
-        _log_generate_payload_response_to_sentry(response_body, level="info")
+        _log_generate_payload_response_to_newrelic(response_body, level="info")
         return response_body
 
     except Exception as e:
-        _log_generate_payload_response_to_sentry(
+        _log_generate_payload_response_to_newrelic(
             {
                 "success": False,
                 "error": str(e),
@@ -1663,6 +1661,16 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                         app_base_url=request.app_base_url,
                     )
                 )
+            try:
+                from core.newrelic import record_custom_event
+                record_custom_event("EngageSendBulkInterview", {
+                    "success": True,
+                    "bulk_id": response_data.get("bulk_id"),
+                    "count": len(interview_results),
+                    "skipped_count": len(skipped_already_sent),
+                })
+            except Exception:
+                pass
             return {
                 "success": True,
                 "message": "Interview(s) sent successfully",
@@ -1672,6 +1680,14 @@ async def send_bulk_interview(request: SendBulkInterviewRequest):
                 "raw_response": response_data
             }
         else:
+            try:
+                from core.newrelic import record_custom_event
+                record_custom_event("EngageSendBulkInterview", {
+                    "success": False,
+                    "status_code": response.status_code,
+                })
+            except Exception:
+                pass
             return {
                 "success": False,
                 "message": _extract_pair_error_message(response_data, response.status_code),
