@@ -502,6 +502,13 @@ class SendBulkInterviewRequest(BaseModel):
 # ---------------------------------------------------------------------------
 @router.post("/engage/generate-payload")
 async def generate_engage_payload(request: GeneratePayloadRequest):
+    """Thin HTTP wrapper. The QA/edit modal fetches an editable payload here;
+    the batched launch orchestrator (`/engage/launch`) calls
+    `_generate_payload_for` directly, with no browser round-trip."""
+    return await _generate_payload_for(request)
+
+
+async def _generate_payload_for(request: GeneratePayloadRequest):
     """
     Generate an interview payload for a candidate.
     Fetches candidate data from sourced_candidates and job data from monitored_jobs,
@@ -521,7 +528,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
         for cid in request.candidate_ids:
             try:
                 cur.execute("""
-                    SELECT candidate_id, name, email, phone, resume_text, headline, location, data, resume_match_percentage
+                    SELECT candidate_id, name, email, phone, headline, location, data, resume_match_percentage
                     FROM sourced_candidates
                     WHERE candidate_id = %s
                       AND dnc_stopped_at IS NULL
@@ -532,7 +539,7 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
             except Exception:
                 cur.connection.rollback()
                 cur.execute("""
-                    SELECT candidate_id, name, email, phone, resume_text, headline, location, data
+                    SELECT candidate_id, name, email, phone, headline, location, data
                     FROM sourced_candidates
                     WHERE candidate_id = %s
                       AND dnc_stopped_at IS NULL
@@ -570,8 +577,6 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                 digits = "".join(ch for ch in raw_phone if ch.isdigit())
                 phone = f"{plus}{digits}" if digits else ""
                 email = row.get("email", "") or ""
-                # Truncate resume to pairbot max_length=100000 chars.
-                resume_text = (row.get("resume_text", "") or "")[:100000]
 
                 if not candidate_phone and phone:
                     candidate_phone = phone
@@ -617,11 +622,10 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                         row.get("gender_updated_at")
                         or data_blob.get("gender_updated_at")
                     ),
-                    # pairbotqa expects experience / summary / skills — map raw resume
-                    "experience": resume_text,
-                    "summary": headline,
-                    "skills": "",
-                    "education": "",
+                    # NOTE: résumé/experience/summary/skills/education are intentionally
+                    # NOT built here — the emitted payload uses `final_resumes` below,
+                    # which carries only unique per-candidate identity + scores. Pairbot
+                    # does not receive résumé content, so fetching it was dead work.
                     "match_score": match_score,
                     "resume_screening_score": match_score,
                 })
@@ -632,10 +636,6 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
                     "name": "Unknown Candidate",
                     "email": "",
                     "phone": "",
-                    "experience": "",
-                    "summary": "",
-                    "skills": "",
-                    "education": "",
                 })
 
         # ----- Fetch job data -----
@@ -693,14 +693,13 @@ async def generate_engage_payload(request: GeneratePayloadRequest):
 
         # Build JD block with structured context and rubric
         if job_row:
+            # De-dup: title/customer_name/city/state/location_type live ONLY in
+            # `context` (matches samplepayload.json). They were previously also
+            # copied to the jd top level — redundant payload. Pairbot reads them
+            # from context.
             jd = {
                 "job_id": job_row.get("job_id") or request.job_id,
                 "jobdiva_id": job_row.get("jobdiva_id") or "",
-                "title": job_row.get("enhanced_title") or job_row.get("title", ""),
-                "customer_name": job_row.get("customer_name") or "Unknown",
-                "city": job_row.get("city") or "TBD",
-                "state": job_row.get("state") or "",
-                "location_type": job_row.get("location_type") or "Onsite",
                 "context": {
                     "title": job_row.get("enhanced_title") or job_row.get("title", ""),
                     "customer_name": job_row.get("customer_name") or "Unknown",
@@ -1175,6 +1174,13 @@ async def _provision_candidate_to_jobdiva(candidate_id_internal: str, job_id_int
 
 @router.post("/engage/send-bulk-interview")
 async def send_bulk_interview(request: SendBulkInterviewRequest):
+    """Thin HTTP wrapper — the QA/edit modal and rankings Engage clicks call
+    this. The batched launch orchestrator calls `_send_bulk_interview_core`
+    directly, once per internal batch."""
+    return await _send_bulk_interview_core(request)
+
+
+async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
     """
     Send the (potentially edited) interview payload to the PAIR bulk-interviews API.
     Saves the request and response to engage_interview_audit for traceability.
@@ -1735,6 +1741,219 @@ async def stream_engagement_status(bulk_id: str):
                 yield b"data: {\"status\": \"error\"}\n\n"
                 
     return StreamingResponse(proxy_stream(), media_type="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# Backend-owned Launch PAIR orchestration (single call + SSE)
+# ---------------------------------------------------------------------------
+class LaunchRequest(BaseModel):
+    """IDs-only launch request. Résumés do NOT ride here — they are persisted
+    separately via /candidates/save — so this body stays small and is not
+    nginx body-limit sensitive."""
+    job_id: str
+    candidate_ids: List[str]
+    is_initial_launch: bool = False
+    notify_recruiters: bool = False
+    send_job_posting_email: Optional[bool] = None
+    app_base_url: str = ""
+    batch_size: Optional[int] = None
+
+
+# Backend batch size for the launch orchestrator's per-batch Pairbot calls.
+# Decoupled from the FE /candidates/save batch (which IS nginx body-limit
+# bound because it carries resume_text): the /engage/launch request carries
+# only candidate_ids, so this is tuned for Pairbot throughput + failure
+# granularity, not payload size.
+_LAUNCH_PAIRBOT_BATCH_SIZE = 75
+_LAUNCH_BATCH_DELAY_SECONDS = 0.35
+
+
+@router.post("/engage/launch")
+async def launch_bulk_interviews(request: LaunchRequest):
+    """Single-call, backend-owned Launch PAIR orchestration.
+
+    Replaces the frontend's per-batch generate -> send -> SSE loop: the browser
+    sends candidate_ids + job/options ONCE, and this endpoint streams aggregated
+    progress (SSE) while batching to Pairbot server-side. It reuses the exact
+    per-batch logic (`_generate_payload_for` + `_send_bulk_interview_core`), so
+    idempotency / DNC / audit / status write-through behave identically to the
+    old flow.
+
+    Difference from the old flow (intentional de-dup): the recruiter launch
+    email and applicant sync fire ONCE per launch here, instead of once per
+    batch. Per-batch calls suppress them (is_initial_launch / notify_recruiters
+    / send_job_posting_email = False) and the orchestrator fires them a single
+    time after the loop.
+    """
+    from fastapi.responses import StreamingResponse
+
+    def _sse(obj: Dict[str, Any]) -> str:
+        return f"data: {json.dumps(obj)}\n\n"
+
+    async def _gen():
+        ids = [str(c) for c in (request.candidate_ids or []) if str(c).strip()]
+        batch_size = max(1, int(request.batch_size or _LAUNCH_PAIRBOT_BATCH_SIZE))
+        batches = [ids[i:i + batch_size] for i in range(0, len(ids), batch_size)]
+
+        yield _sse({
+            "type": "start",
+            "total_candidates": len(ids),
+            "total_batches": len(batches),
+            "batch_size": batch_size,
+        })
+
+        totals = {"sent": 0, "already_sent": 0, "failed_batches": 0}
+        all_skipped: List[str] = []
+        failed_candidate_ids: List[str] = []
+        aborted = False
+        side_effects_fired = {"done": False}
+
+        def _fire_once_side_effects() -> None:
+            # Recruiter launch email + applicant sync fire ONCE per launch.
+            # Invoked from the finally below so a client disconnect (generator
+            # cancellation) mid-stream still fires them for candidates that were
+            # already engaged. Guarded so it runs at most once.
+            if side_effects_fired["done"]:
+                return
+            side_effects_fired["done"] = True
+            if totals["sent"] <= 0:
+                return
+            try:
+                if request.is_initial_launch:
+                    logger.info(
+                        "launch: initial launch for job %s -> applicant sync", request.job_id
+                    )
+                    asyncio.create_task(
+                        auto_assign_service.synchronize_job_applicants(request.job_id)
+                    )
+                if request.is_initial_launch or request.notify_recruiters:
+                    requested_job_posting = (
+                        request.send_job_posting_email
+                        if request.send_job_posting_email is not None
+                        else request.is_initial_launch
+                    )
+                    # Public job-board posting only on a fully clean launch (no
+                    # failed/aborted batches) — matches the old
+                    # `i == last && totalFailedBatches == 0` gate.
+                    send_job_posting = bool(
+                        requested_job_posting and not aborted and totals["failed_batches"] == 0
+                    )
+                    asyncio.create_task(
+                        _send_pair_launch_email(
+                            job_id=request.job_id,
+                            candidate_count=totals["sent"],
+                            send_job_posting=send_job_posting,
+                            app_base_url=request.app_base_url,
+                        )
+                    )
+            except Exception as _se_err:
+                logger.warning("launch: side-effect firing failed: %s", _se_err)
+
+        try:
+            for idx, batch in enumerate(batches):
+                if idx > 0:
+                    await asyncio.sleep(_LAUNCH_BATCH_DELAY_SECONDS)
+                try:
+                    gp = await _generate_payload_for(
+                        GeneratePayloadRequest(candidate_ids=batch, job_id=request.job_id)
+                    )
+                    payload_str = gp.get("payload") if isinstance(gp, dict) else None
+                    if not payload_str:
+                        raise RuntimeError("generate-payload returned no payload")
+
+                    # Keep real_candidate_ids aligned with the payload's resumes:
+                    # generate drops DNC-stopped candidates from resumes, so drop
+                    # them from real_candidate_ids too — otherwise the positional
+                    # matching in _send_bulk_interview_core misaligns.
+                    dnc_blocked = (
+                        set(gp.get("dnc_blocked_ids") or []) if isinstance(gp, dict) else set()
+                    )
+                    real_ids = [c for c in batch if c not in dnc_blocked] if dnc_blocked else batch
+
+                    send_req = SendBulkInterviewRequest(
+                        payload=payload_str,
+                        real_candidate_ids=real_ids,
+                        is_initial_launch=False,       # fired once after the loop
+                        dry_run=False,
+                        notify_recruiters=False,       # fired once after the loop
+                        send_job_posting_email=False,  # fired once after the loop
+                        app_base_url=request.app_base_url,
+                    )
+                    res = await _send_bulk_interview_core(send_req)
+
+                    skipped = res.get("skipped_already_sent") or []
+                    all_skipped.extend(skipped)
+
+                    if res.get("success"):
+                        sent = len(res.get("data") or [])
+                        totals["sent"] += sent
+                        totals["already_sent"] += len(skipped)
+                        yield _sse({
+                            "type": "batch",
+                            "index": idx,
+                            "status": "completed",
+                            "sent": sent,
+                            "already_sent": len(skipped),
+                            "bulk_id": res.get("bulk_id"),
+                        })
+                    else:
+                        totals["failed_batches"] += 1
+                        failed_candidate_ids.extend(batch)
+                        yield _sse({
+                            "type": "batch",
+                            "index": idx,
+                            "status": "failed",
+                            "error": res.get("message") or "send failed",
+                            "candidate_ids": batch,
+                        })
+                except HTTPException as he:
+                    # 409 = outreach stopped for this job -> abort the whole
+                    # launch. Record the aborting batch AND all remaining
+                    # (never-processed) batches so the caller's failed CSV is
+                    # complete, and surface those ids on the error event.
+                    if getattr(he, "status_code", None) == 409:
+                        aborted = True
+                        remaining = [c for b in batches[idx:] for c in b]
+                        totals["failed_batches"] += 1
+                        failed_candidate_ids.extend(remaining)
+                        yield _sse({
+                            "type": "error",
+                            "status_code": 409,
+                            "message": str(he.detail),
+                            "index": idx,
+                            "candidate_ids": remaining,
+                        })
+                        break
+                    totals["failed_batches"] += 1
+                    failed_candidate_ids.extend(batch)
+                    yield _sse({
+                        "type": "batch", "index": idx, "status": "failed",
+                        "error": str(he.detail), "candidate_ids": batch,
+                    })
+                except Exception as e:
+                    logger.error("launch batch %d failed: %s", idx, e, exc_info=True)
+                    totals["failed_batches"] += 1
+                    failed_candidate_ids.extend(batch)
+                    yield _sse({
+                        "type": "batch", "index": idx, "status": "failed",
+                        "error": str(e), "candidate_ids": batch,
+                    })
+        finally:
+            # Fire once even if the client disconnected mid-stream (generator
+            # cancelled) so already-engaged candidates still get the recruiter
+            # email + applicant sync.
+            _fire_once_side_effects()
+
+        yield _sse({
+            "type": "done",
+            "aborted": aborted,
+            "totals": totals,
+            "skipped_already_sent": all_skipped,
+            "failed_candidate_ids": failed_candidate_ids,
+        })
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
+
 
 # Hard cap so a single sync run can never blast more than this many
 # candidates at pairbot, even if the job's filters are loose. The auto-sync
