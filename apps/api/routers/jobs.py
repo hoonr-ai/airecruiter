@@ -203,6 +203,13 @@ def _ensure_monitored_jobs_schema() -> None:
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS screening_level TEXT",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS pair_enabled BOOLEAN DEFAULT FALSE",
 
+            # Campaigns: group multiple jobs under one parent campaign that
+            # holds shared common properties + a reusable JD/rubric/questions
+            # template. Logical link only (no FK, matching every other
+            # cross-table relationship here); child jobs are stamped with
+            # campaign_id at row birth in services.jobdiva.monitor_job_locally.
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS campaign_id TEXT",
+
             # v28: hot-path read optimizations for GET /jobs/monitored
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_active_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS NOT TRUE",
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_archived_created_at ON monitored_jobs (created_at DESC) WHERE is_archived IS TRUE",
@@ -210,6 +217,8 @@ def _ensure_monitored_jobs_schema() -> None:
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_job_id_lookup ON monitored_jobs (job_id)",
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_jobdiva_id_lookup ON monitored_jobs (jobdiva_id)",
             "CREATE TABLE IF NOT EXISTS user_roles (email TEXT PRIMARY KEY, role TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+            # Campaign detail page lists a campaign's child jobs by this column.
+            "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_campaign_id ON monitored_jobs (campaign_id)",
         ):
             try:
                 cur.execute(stmt)

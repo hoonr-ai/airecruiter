@@ -181,6 +181,16 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"job_criteria_schema_init_failed: {e}; continuing")
 
+    # Provision the campaigns table. Runs after monitored_jobs (whose
+    # campaign_id column links child jobs to a campaign). Idempotent.
+    if campaigns_router is not None and hasattr(campaigns_router, "init_campaigns_schema"):
+        try:
+            await asyncio.wait_for(campaigns_router.init_campaigns_schema(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.error("campaigns_schema_init_timeout (10s); continuing")
+        except Exception as e:
+            logger.error(f"campaigns_schema_init_failed: {e}; continuing")
+
     # 4b. Keep the /jobs/monitored cache warm. Per-worker in-memory cache
     # has a 30s TTL, but the live query can spike to 20-30s during
     # poll-loop lock contention — long enough that the frontend's 8s
@@ -318,6 +328,7 @@ candidates_router = _safe_import("candidates")
 jobs_router = _safe_import("jobs")
 dnc_router = _safe_import("dnc")
 admin_analytics_router = _safe_import("admin_analytics")
+campaigns_router = _safe_import("campaigns")
 
 # redirect_slashes=False: never auto-307 between `/foo` and `/foo/`. Behind the
 # prod reverse proxy a 307 with the wrong scheme (when uvicorn isn't running
@@ -365,6 +376,10 @@ _mount(candidates_router, "candidates")
 _mount(jobs_router, "jobs")
 _mount(dnc_router, "dnc")
 _mount(admin_analytics_router, "admin_analytics")
+# Mounted under /api so the existing nginx `location /api/` passthrough routes
+# it to the backend — avoids a collision with the frontend's /campaigns pages
+# (same trick keeps job_criteria under /api/jobs/...). No nginx changes needed.
+_mount(campaigns_router, "campaigns", prefix="/api")
 _mount(engagement, "engagement", prefix="/api/v1/engagement")
 
 from core.auth import auth_router
