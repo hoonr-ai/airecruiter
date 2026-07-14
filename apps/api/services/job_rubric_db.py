@@ -281,21 +281,24 @@ class JobRubricDB:
                     cur.execute(
                         """
                         WITH job AS (
-                            SELECT domains, bot_introduction
+                            SELECT jobdiva_id, job_id, domains, bot_introduction
                             FROM monitored_jobs
                             WHERE (jobdiva_id = %s OR job_id = %s)
                             LIMIT 1
+                        ),
+                        keys AS (
+                            SELECT DISTINCT id FROM (VALUES (%s), ((SELECT jobdiva_id FROM job)), ((SELECT job_id FROM job))) AS t(id) WHERE id IS NOT NULL AND id != ''
                         )
                         SELECT
                             (SELECT domains FROM job) AS domains,
                             (SELECT bot_introduction FROM job) AS bot_introduction,
-                            COALESCE((SELECT jsonb_agg(to_jsonb(s)) FROM job_skills s WHERE jobdiva_id = %s), '[]'::jsonb) AS skills_rows,
-                            COALESCE((SELECT jsonb_agg(to_jsonb(t)) FROM job_titles t WHERE jobdiva_id = %s), '[]'::jsonb) AS title_rows,
-                            COALESCE((SELECT jsonb_agg(to_jsonb(e)) FROM job_education e WHERE jobdiva_id = %s), '[]'::jsonb) AS education_rows,
-                            COALESCE((SELECT jsonb_agg(to_jsonb(c)) FROM job_customer_requirements c WHERE jobdiva_id = %s), '[]'::jsonb) AS customer_rows,
-                            COALESCE((SELECT jsonb_agg(to_jsonb(o)) FROM job_other_requirements o WHERE jobdiva_id = %s), '[]'::jsonb) AS other_rows
+                            COALESCE((SELECT jsonb_agg(to_jsonb(s)) FROM job_skills s WHERE jobdiva_id IN (SELECT id FROM keys)), '[]'::jsonb) AS skills_rows,
+                            COALESCE((SELECT jsonb_agg(to_jsonb(t)) FROM job_titles t WHERE jobdiva_id IN (SELECT id FROM keys)), '[]'::jsonb) AS title_rows,
+                            COALESCE((SELECT jsonb_agg(to_jsonb(e)) FROM job_education e WHERE jobdiva_id IN (SELECT id FROM keys)), '[]'::jsonb) AS education_rows,
+                            COALESCE((SELECT jsonb_agg(to_jsonb(c)) FROM job_customer_requirements c WHERE jobdiva_id IN (SELECT id FROM keys)), '[]'::jsonb) AS customer_rows,
+                            COALESCE((SELECT jsonb_agg(to_jsonb(o)) FROM job_other_requirements o WHERE jobdiva_id IN (SELECT id FROM keys)), '[]'::jsonb) AS other_rows
                         """,
-                        (jobdiva_id, jobdiva_id, jobdiva_id, jobdiva_id, jobdiva_id, jobdiva_id, jobdiva_id),
+                        (jobdiva_id, jobdiva_id, jobdiva_id),
                     )
                     row = cur.fetchone()
                     if not row:
@@ -398,12 +401,21 @@ class JobRubricDB:
         """Internal helper to fetch screen questions using an existing cursor."""
         self._ensure_hard_filter_column(cur)
         cur.execute("""
+            WITH job AS (
+                SELECT jobdiva_id, job_id
+                FROM monitored_jobs
+                WHERE (jobdiva_id = %s OR job_id = %s)
+                LIMIT 1
+            ),
+            keys AS (
+                SELECT DISTINCT id FROM (VALUES (%s), ((SELECT jobdiva_id FROM job)), ((SELECT job_id FROM job))) AS t(id) WHERE id IS NOT NULL AND id != ''
+            )
             SELECT question_text, pass_criteria, is_default, category, order_index,
                    COALESCE(is_hard_filter, FALSE) AS is_hard_filter
             FROM job_screen_questions
-            WHERE jobdiva_id = %s
+            WHERE jobdiva_id IN (SELECT id FROM keys)
             ORDER BY order_index
-        """, (jobdiva_id,))
+        """, (jobdiva_id, jobdiva_id, jobdiva_id))
         return [{
             "question_text": r['question_text'],
             "pass_criteria": r['pass_criteria'],

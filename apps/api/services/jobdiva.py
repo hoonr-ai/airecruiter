@@ -3591,6 +3591,7 @@ class JobDivaService:
                         # Campaign grouping + phone-screen intro (inherited from a
                         # campaign when a job is added under one).
                         "campaign_id", "bot_introduction",
+                        "sourcing_filters", "resume_match_filters",
                     ]
                     
                     # Fields where an empty string IS a valid intentional value (cleared UDFs or optional fields)
@@ -3620,7 +3621,7 @@ class JobDivaService:
 
                                     
                             update_parts.append(f"{k} = :{k}")
-                            if k in ["selected_employment_types", "selected_job_boards", "recruiter_emails", "enhancement_metadata"]:
+                            if k in ["selected_employment_types", "selected_job_boards", "recruiter_emails", "enhancement_metadata", "sourcing_filters", "resume_match_filters"]:
                                 if isinstance(v, (list, dict)):
                                     params[k] = json.dumps(v)
                                 else:
@@ -3695,6 +3696,10 @@ class JobDivaService:
                         "created_at": data.get("created_at") or readable_ist_now(),
                         "updated_at": readable_ist_now()
                     }
+                    if data.get("sourcing_filters") is not None:
+                        params["sourcing_filters"] = json.dumps(data.get("sourcing_filters")) if isinstance(data.get("sourcing_filters"), (list, dict)) else data.get("sourcing_filters")
+                    if data.get("resume_match_filters") is not None:
+                        params["resume_match_filters"] = json.dumps(data.get("resume_match_filters")) if isinstance(data.get("resume_match_filters"), (list, dict)) else data.get("resume_match_filters")
                     
                     # Build INSERT query dynamically based on available fields
                     columns = list(params.keys())
