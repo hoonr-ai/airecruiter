@@ -395,39 +395,13 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str) -> None:
                     work_arrangement=loc_type,
                     city=city,
                 )
-                # Filter: keep only technical/role-specific questions from the generated set.
-                # Exclude generic front-matter and logistics categories.
-                _EXCLUDE_CATS = {"default", "work-arrangement", "intro", "logistics"}
+                # Keep only technical/role-specific questions from the generated set
                 tech_only = [
                     q for q in (tech_questions or [])
-                    if str((q or {}).get("category", "")).lower() not in _EXCLUDE_CATS
+                    if str((q or {}).get("category", "")).lower() not in ("default", "work-arrangement", "intro", "logistics")
                 ]
                 logger.info(f"Generated {len(tech_only)} custom technical questions for child job {canonical_ref}.")
-
-                # Target order (mirrors job wizard):
-                #   [default / intro / work-arrangement]
-                #   → [role-specific from template]
-                #   → [generated tech]          ← insert here
-                #   → [logistics tail: availability, compensation, work-auth]
-                #
-                # Find the first "logistics" question in the template (the tail).
-                # default/intro/work-arrangement are NOT part of the tail — they go first.
-                _TAIL_CATS = {"logistics"}
-                insert_at = len(template_questions)  # default: append
-                for _i, _q in enumerate(template_questions):
-                    if str((_q or {}).get("category", "")).lower() in _TAIL_CATS:
-                        insert_at = _i
-                        break
-                template_questions = (
-                    template_questions[:insert_at]
-                    + tech_only
-                    + template_questions[insert_at:]
-                )
-
-                # Re-index the full merged list sequentially to avoid order_index
-                # collisions between template questions and generated question indices.
-                for _i, _q in enumerate(template_questions):
-                    _q["order_index"] = _i
+                template_questions.extend(tech_only)
         except Exception as gen_err:
             logger.warning(f"Technical question generation failed for child job {canonical_ref}: {gen_err}")
 
