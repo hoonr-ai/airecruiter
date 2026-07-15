@@ -323,6 +323,7 @@ export async function generateScreeningQuestions(input: {
   workArrangement?: string;
   city?: string;
   totalYears?: number;
+}): Promise<TemplateQuestion[]> {
   const isRemote =
     /remote/i.test(input.workArrangement ?? "") ||
     /remote/i.test(input.city ?? "") ||
@@ -377,50 +378,5 @@ export async function generateScreeningQuestions(input: {
     is_hard_filter: !!q.is_hard_filter,
   }));
 
-  const res = await authFetch(`${AI_BASE}/jobs/new/screening-questions/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jobTitle: input.jobTitle,
-      rubric: input.rubric,
-      screeningLevel: screeningLevelToDepth(input.screeningLevel),
-      jobDescription: input.jobDescription ?? "",
-      customerName: input.customerName ?? "",
-      difficulty_mode: input.difficultyMode,
-      leniency_mode: input.leniencyMode,
-      workArrangement: input.workArrangement ?? "",
-      city: input.city ?? "",
-      totalYears: input.totalYears ?? (input.rubric?.total_years as number) ?? 0,
-    }),
-  });
-  const data = await json<{ questions: TemplateQuestion[] }>(
-    res,
-    "POST screening-questions/generate"
-  );
-  const raw = Array.isArray(data?.questions) ? data.questions : [];
-  const targetCount =
-    input.screeningLevel === "L1" ? 3 : input.screeningLevel === "L2" ? 7 : 5;
-
-  const roleSpecific: TemplateQuestion[] = raw
-    .filter((q) => {
-      const cat = String(q?.category || "").toLowerCase();
-      return (
-        cat !== "default" &&
-        cat !== "work-arrangement" &&
-        cat !== "intro" &&
-        cat !== "logistics"
-      );
-    })
-    .slice(0, targetCount)
-    .map((q, i) => ({
-      id: defaults.length + i + 1,
-      question_text: q.question_text || "",
-      pass_criteria: q.pass_criteria || "",
-      is_default: false,
-      category: "role-specific",
-      order_index: defaults.length + i,
-      is_hard_filter: false,
-    }));
-
-  return [...defaults, ...roleSpecific];
+  return defaults;
 }

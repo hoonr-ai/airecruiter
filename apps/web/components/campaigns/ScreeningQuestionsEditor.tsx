@@ -40,20 +40,19 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-interface ScreeningQuestionsEditorProps {
-  questions: TemplateQuestion[];
-  onChange: (q: TemplateQuestion[]) => void;
-  isGenerating?: boolean;
-  onRegenerate?: (difficulty: string) => void;
-}
+  interface ScreeningQuestionsEditorProps {
+    questions: TemplateQuestion[];
+    onChange: (q: TemplateQuestion[]) => void;
+    isGenerating?: boolean;
+    onRegenerate?: () => void;
+  }
 
-export function ScreeningQuestionsEditor({
-  questions,
-  onChange,
-  isGenerating = false,
-  onRegenerate,
-}: ScreeningQuestionsEditorProps) {
-  const [difficulty, setDifficulty] = useState<string>("medium");
+  export function ScreeningQuestionsEditor({
+    questions,
+    onChange,
+    isGenerating = false,
+    onRegenerate,
+  }: ScreeningQuestionsEditorProps) {
 
   // ── Drag reorder ────────────────────────────────────────────────────────────
   const move = (from: number, to: number) => {
@@ -205,41 +204,26 @@ export function ScreeningQuestionsEditor({
         </Button>
 
         {onRegenerate && (
-          <>
-            <div className="min-w-[170px]">
-              <select
-                value={difficulty}
-                onChange={(e) => setDifficulty(e.target.value)}
-                disabled={isGenerating}
-                className="h-[34px] w-full rounded-lg border border-slate-200 bg-white px-2.5 text-[13px] font-medium text-slate-700 outline-none focus:ring-2 focus:ring-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                aria-label="Select regenerate difficulty"
-              >
-                <option value="easy">Easy (Beginner)</option>
-                <option value="medium">Medium (Intermediate)</option>
-                <option value="hard">Hard (Expert)</option>
-              </select>
-            </div>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => onRegenerate(difficulty)}
-              disabled={isGenerating}
-              className="border-slate-200 text-slate-600 bg-white hover:bg-slate-50 font-medium text-[13px] rounded-lg shadow-none h-[34px] px-3 border transition-all disabled:opacity-50"
-            >
-              {isGenerating ? (
-                <>
-                  <div className="w-3.5 h-3.5 mr-1.5 border-2 border-slate-400 border-t-slate-600 rounded-full animate-spin" />
-                  Regenerating...
-                </>
-              ) : (
-                <>
-                  <RotateCw className="w-3.5 h-3.5 mr-1.5" />
-                  Regenerate
-                </>
-              )}
-            </Button>
-          </>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => onRegenerate()}
+            disabled={isGenerating}
+            className="border-slate-200 text-slate-600 bg-white hover:bg-slate-50 font-medium text-[13px] rounded-lg shadow-none h-[34px] px-3 border transition-all disabled:opacity-50"
+          >
+            {isGenerating ? (
+              <>
+                <div className="w-3.5 h-3.5 mr-1.5 border-2 border-slate-400 border-t-slate-600 rounded-full animate-spin" />
+                Regenerating...
+              </>
+            ) : (
+              <>
+                <RotateCw className="w-3.5 h-3.5 mr-1.5" />
+                Regenerate Defaults
+              </>
+            )}
+          </Button>
         )}
       </div>
     </div>
