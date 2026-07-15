@@ -395,13 +395,24 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str) -> None:
                     work_arrangement=loc_type,
                     city=city,
                 )
-                # Keep only technical/role-specific questions from the generated set
+                # Filter: keep only technical/role-specific questions from the generated set.
+                # Exclude generic front-matter and logistics categories that come from the LLM.
+                _EXCLUDE_CATS = {"default", "work-arrangement", "intro", "logistics"}
                 tech_only = [
                     q for q in (tech_questions or [])
-                    if str((q or {}).get("category", "")).lower() not in ("default", "work-arrangement", "intro", "logistics")
+                    if str((q or {}).get("category", "")).lower() not in _EXCLUDE_CATS
                 ]
                 logger.info(f"Generated {len(tech_only)} custom technical questions for child job {canonical_ref}.")
-                template_questions.extend(tech_only)
+
+                # Target order:
+                #   [default / intro / behavioral]   ← campaign template questions
+                #   [logistics tail]                  ← availability, compensation, work-auth
+                #   [role-specific tech]              ← always at the very end
+                template_questions = template_questions + tech_only
+
+                # Re-index the full merged list sequentially to avoid order_index collisions.
+                for _i, _q in enumerate(template_questions):
+                    _q["order_index"] = _i
         except Exception as gen_err:
             logger.warning(f"Technical question generation failed for child job {canonical_ref}: {gen_err}")
 
