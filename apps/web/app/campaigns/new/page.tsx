@@ -400,8 +400,6 @@ export default function NewCampaignPage() {
             <ScreeningQuestionsEditor
               questions={questions}
               onChange={setQuestions}
-              isGenerating={isGeneratingQuestions}
-              onRegenerate={runGenerateQuestions}
             />
           )}
         </div>
