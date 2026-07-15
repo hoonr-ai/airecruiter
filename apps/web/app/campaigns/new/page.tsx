@@ -159,7 +159,7 @@ export default function NewCampaignPage() {
     }
   };
 
-  const runGenerateQuestions = async (difficulty?: string) => {
+  const runGenerateQuestions = async () => {
     setIsGeneratingQuestions(true);
     try {
       const qs = await generateScreeningQuestions({
@@ -168,7 +168,6 @@ export default function NewCampaignPage() {
         screeningLevel,
         jobDescription,
         customerName,
-        difficultyMode: typeof difficulty === "string" ? difficulty : "medium",
         totalYears: rubric?.total_years,
       });
       setQuestions(qs);
