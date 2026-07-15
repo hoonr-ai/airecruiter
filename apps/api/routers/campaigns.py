@@ -336,13 +336,12 @@ async def delete_campaign(campaign_id: str, user: UserIdentity = Depends(get_cur
         raise HTTPException(status_code=500, detail="Failed to delete campaign")
 
 
-def _seed_job_rubric(campaign: Dict[str, Any], ref: str) -> None:
+async def _seed_job_rubric(campaign: Dict[str, Any], ref: str) -> None:
     """Seed a child job's rubric + screening-questions satellite tables from the
-    campaign template. save_full_rubric accepts the same dict shape
-    generate-rubric produces (which template_rubric holds) and persists
-    screen_questions when embedded. Keyed by the job's reference string. Non-fatal."""
+    campaign template. Generates custom technical questions for the specific job description
+    and merges them with campaign baseline defaults before persisting."""
     template_rubric = campaign.get("template_rubric") or {}
-    template_questions = campaign.get("template_screen_questions") or []
+    template_questions = list(campaign.get("template_screen_questions") or [])
     template_sourcing = campaign.get("template_sourcing_filters") or {}
     if not (template_rubric or template_questions or template_sourcing):
         return
@@ -352,19 +351,59 @@ def _seed_job_rubric(campaign: Dict[str, Any], ref: str) -> None:
         import json
 
         # Always resolve to the *canonical* jobdiva_id stored in monitored_jobs
-        # (the 26-XXXXX string). If we were called with the numeric job_id,
-        # save_full_rubric would write rows under a different key, producing
-        # duplicates when the job is opened in the wizard later.
+        # and retrieve child-job details to generate tailored questions.
         canonical_ref = ref
+        job_title = ""
+        job_desc = ""
+        city = ""
+        loc_type = "Onsite"
+        screening_lvl = "L1.5"
+
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT jobdiva_id FROM monitored_jobs WHERE jobdiva_id = %s OR job_id = %s LIMIT 1",
+                    """
+                    SELECT jobdiva_id, title, jobdiva_description, city, location_type, screening_level 
+                    FROM monitored_jobs WHERE jobdiva_id = %s OR job_id = %s LIMIT 1
+                    """,
                     (ref, ref),
                 )
                 row = cur.fetchone()
-                if row and row[0]:
-                    canonical_ref = row[0]
+                if row:
+                    canonical_ref = row[0] or ref
+                    job_title = row[1] or ""
+                    job_desc = row[2] or ""
+                    city = row[3] or ""
+                    loc_type = row[4] or "Onsite"
+                    screening_lvl = row[5] or "L1.5"
+
+        # Generate dynamic technical/role-specific questions for this job description
+        try:
+            from services.openai_client import get_openai_client
+            from services.screening_question_generator import generate_screening_questions
+            openai_client = get_openai_client()
+            if openai_client:
+                logger.info(f"Generating custom technical questions for child job {canonical_ref}...")
+                tech_questions = await generate_screening_questions(
+                    openai_client=openai_client,
+                    model="gpt-4o-mini",
+                    job_title=job_title,
+                    rubric=template_rubric,
+                    screening_level=screening_lvl,
+                    customer_name=campaign.get("customer_name") or "",
+                    job_description=job_desc,
+                    work_arrangement=loc_type,
+                    city=city,
+                )
+                # Keep only technical/role-specific questions from the generated set
+                tech_only = [
+                    q for q in (tech_questions or [])
+                    if str((q or {}).get("category", "")).lower() not in ("default", "work-arrangement", "intro", "logistics")
+                ]
+                logger.info(f"Generated {len(tech_only)} custom technical questions for child job {canonical_ref}.")
+                template_questions.extend(tech_only)
+        except Exception as gen_err:
+            logger.warning(f"Technical question generation failed for child job {canonical_ref}: {gen_err}")
 
         rubric_payload = dict(template_rubric)
         if template_questions:
@@ -541,9 +580,9 @@ async def _create_campaign_job(
 
     ok = jobdiva_service.monitor_job_locally(data["job_id"], data)
     if ok:
-        _seed_job_rubric(campaign, ref)
+        await _seed_job_rubric(campaign, ref)
         if ref != str(data["job_id"]):
-            _seed_job_rubric(campaign, str(data["job_id"]))
+            await _seed_job_rubric(campaign, str(data["job_id"]))
 
     return {
         "jobdiva_id": jobdiva_id or "",
