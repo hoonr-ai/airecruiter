@@ -318,7 +318,65 @@ export async function generateScreeningQuestions(input: {
   screeningLevel: string;
   jobDescription?: string;
   customerName?: string;
-}): Promise<TemplateQuestion[]> {
+  difficultyMode?: string;
+  leniencyMode?: boolean;
+  workArrangement?: string;
+  city?: string;
+  totalYears?: number;
+  const isRemote =
+    /remote/i.test(input.workArrangement ?? "") ||
+    /remote/i.test(input.city ?? "") ||
+    /remote/i.test(input.jobTitle ?? "");
+  const arrangementLabel = (input.workArrangement ?? "").toLowerCase().includes("hybrid")
+    ? "a hybrid"
+    : "an onsite";
+
+  const defaultQs: Array<{ text: string; criteria: string; is_hard_filter?: boolean }> = [
+    {
+      text: "Are you open to exploring new job opportunities?",
+      criteria: "Must be open to new job opportunities",
+    },
+    {
+      text: "What is your current or most recent role and key responsibilities?",
+      criteria: "",
+    },
+    { text: "What is your current location?", criteria: "" },
+  ];
+  if (!isRemote) {
+    defaultQs.push({
+      text: `This role follows ${arrangementLabel} work arrangement${
+        input.city ? ` based in ${input.city}` : ""
+      }. Are you open to working in this setup?`,
+      criteria: `Must be open to ${arrangementLabel} work arrangement`,
+    });
+  }
+  defaultQs.push(
+    { text: "What is your earliest availability to start a new role?", criteria: "" },
+    { text: "What is your expected compensation for this role?", criteria: "" },
+    {
+      text: "Which types of working arrangements are you open to and eligible for? Select all that apply: W2 Employee, Subcontractor to Pyramid through your current employer, Independent Contractor",
+      criteria: "",
+    },
+    {
+      text: "Are you authorized to work indefinitely for any employer in the United States?",
+      criteria: "",
+    },
+    {
+      text: "Will you now or in the future require visa sponsorship to continue working in the United States?",
+      criteria: "",
+    }
+  );
+
+  const defaults: TemplateQuestion[] = defaultQs.map((q, index) => ({
+    id: index + 1,
+    question_text: q.text,
+    pass_criteria: q.criteria,
+    is_default: true,
+    category: "default",
+    order_index: index,
+    is_hard_filter: !!q.is_hard_filter,
+  }));
+
   const res = await authFetch(`${AI_BASE}/jobs/new/screening-questions/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -328,8 +386,41 @@ export async function generateScreeningQuestions(input: {
       screeningLevel: screeningLevelToDepth(input.screeningLevel),
       jobDescription: input.jobDescription ?? "",
       customerName: input.customerName ?? "",
+      difficulty_mode: input.difficultyMode,
+      leniency_mode: input.leniencyMode,
+      workArrangement: input.workArrangement ?? "",
+      city: input.city ?? "",
+      totalYears: input.totalYears ?? (input.rubric?.total_years as number) ?? 0,
     }),
   });
-  const data = await json<{ questions: TemplateQuestion[] }>(res, "POST screening-questions/generate");
-  return data.questions ?? [];
+  const data = await json<{ questions: TemplateQuestion[] }>(
+    res,
+    "POST screening-questions/generate"
+  );
+  const raw = Array.isArray(data?.questions) ? data.questions : [];
+  const targetCount =
+    input.screeningLevel === "L1" ? 3 : input.screeningLevel === "L2" ? 7 : 5;
+
+  const roleSpecific: TemplateQuestion[] = raw
+    .filter((q) => {
+      const cat = String(q?.category || "").toLowerCase();
+      return (
+        cat !== "default" &&
+        cat !== "work-arrangement" &&
+        cat !== "intro" &&
+        cat !== "logistics"
+      );
+    })
+    .slice(0, targetCount)
+    .map((q, i) => ({
+      id: defaults.length + i + 1,
+      question_text: q.question_text || "",
+      pass_criteria: q.pass_criteria || "",
+      is_default: false,
+      category: "role-specific",
+      order_index: defaults.length + i,
+      is_hard_filter: false,
+    }));
+
+  return [...defaults, ...roleSpecific];
 }

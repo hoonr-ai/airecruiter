@@ -159,7 +159,7 @@ export default function NewCampaignPage() {
     }
   };
 
-  const runGenerateQuestions = async () => {
+  const runGenerateQuestions = async (difficulty?: string) => {
     setIsGeneratingQuestions(true);
     try {
       const qs = await generateScreeningQuestions({
@@ -168,6 +168,8 @@ export default function NewCampaignPage() {
         screeningLevel,
         jobDescription,
         customerName,
+        difficultyMode: typeof difficulty === "string" ? difficulty : "medium",
+        totalYears: rubric?.total_years,
       });
       setQuestions(qs);
     } catch {
@@ -384,16 +386,24 @@ export default function NewCampaignPage() {
       {step === 3 && (
         <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-3">
           <div className="flex items-center justify-between">
-            <Label>Screening Questions</Label>
-            <Button type="button" variant="outline" size="sm" onClick={runGenerateQuestions} disabled={isGeneratingQuestions}>
-              {isGeneratingQuestions ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-              <span className="ml-1.5">Regenerate</span>
-            </Button>
+            <div>
+              <Label>Screening Questions</Label>
+              {questions.length > 0 && (
+                <span className="ml-2 text-[12px] font-normal text-slate-500">
+                  {questions.length} question{questions.length !== 1 ? "s" : ""}
+                </span>
+              )}
+            </div>
           </div>
           {isGeneratingQuestions && questions.length === 0 ? (
             <p className="text-sm text-slate-400">Generating questions…</p>
           ) : (
-            <ScreeningQuestionsEditor questions={questions} onChange={setQuestions} />
+            <ScreeningQuestionsEditor
+              questions={questions}
+              onChange={setQuestions}
+              isGenerating={isGeneratingQuestions}
+              onRegenerate={runGenerateQuestions}
+            />
           )}
         </div>
       )}
