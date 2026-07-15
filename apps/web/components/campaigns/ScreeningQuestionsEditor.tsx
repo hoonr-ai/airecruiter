@@ -43,15 +43,11 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
   interface ScreeningQuestionsEditorProps {
     questions: TemplateQuestion[];
     onChange: (q: TemplateQuestion[]) => void;
-    isGenerating?: boolean;
-    onRegenerate?: () => void;
   }
 
   export function ScreeningQuestionsEditor({
     questions,
     onChange,
-    isGenerating = false,
-    onRegenerate,
   }: ScreeningQuestionsEditorProps) {
 
   // ── Drag reorder ────────────────────────────────────────────────────────────
@@ -202,29 +198,6 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
           <Plus className="w-3.5 h-3.5 mr-1.5" />
           Add Question
         </Button>
-
-        {onRegenerate && (
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            onClick={() => onRegenerate()}
-            disabled={isGenerating}
-            className="border-slate-200 text-slate-600 bg-white hover:bg-slate-50 font-medium text-[13px] rounded-lg shadow-none h-[34px] px-3 border transition-all disabled:opacity-50"
-          >
-            {isGenerating ? (
-              <>
-                <div className="w-3.5 h-3.5 mr-1.5 border-2 border-slate-400 border-t-slate-600 rounded-full animate-spin" />
-                Regenerating...
-              </>
-            ) : (
-              <>
-                <RotateCw className="w-3.5 h-3.5 mr-1.5" />
-                Regenerate Defaults
-              </>
-            )}
-          </Button>
-        )}
       </div>
     </div>
   );
