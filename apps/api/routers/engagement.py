@@ -700,6 +700,7 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
             jd = {
                 "job_id": job_row.get("job_id") or request.job_id,
                 "jobdiva_id": job_row.get("jobdiva_id") or "",
+                "campaign_id": job_row.get("campaign_id") or "0",
                 "context": {
                     "title": job_row.get("enhanced_title") or job_row.get("title", ""),
                     "customer_name": job_row.get("customer_name") or "Unknown",
