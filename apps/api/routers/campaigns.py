@@ -379,7 +379,7 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str) -> None:
 
         # Generate dynamic technical/role-specific questions for this job description
         try:
-            from services.openai_client import get_openai_client
+            from core.llm_client import get_openai_client
             from services.screening_question_generator import generate_screening_questions
             openai_client = get_openai_client()
             if openai_client:
