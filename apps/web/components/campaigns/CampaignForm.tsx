@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { CampaignTemplateCard } from "@/components/campaigns/CampaignTemplateCard";
 import {
   Campaign,
   CampaignCreatePayload,
@@ -77,6 +78,11 @@ export function CampaignForm({
   const [screeningLevel, setScreeningLevel] = useState<string>(initial?.screening_level ?? "L1.5");
   const [jobBoards, setJobBoards] = useState<string[]>(initial?.selected_job_boards ?? []);
   const [botIntro, setBotIntro] = useState(initial?.bot_introduction ?? "");
+  const [outreachDelayMins, setOutreachDelayMins] = useState<string>(
+    initial?.outreach_delay_mins !== null && initial?.outreach_delay_mins !== undefined
+      ? initial.outreach_delay_mins.toString()
+      : ""
+  );
   const [recruiterNotes, setRecruiterNotes] = useState(initial?.recruiter_notes ?? "");
   const [nameError, setNameError] = useState<string | null>(null);
 
@@ -104,6 +110,7 @@ export function CampaignForm({
       setNameError("Campaign name is required");
       return;
     }
+    const parsedDelay = outreachDelayMins.trim() ? parseInt(outreachDelayMins.trim(), 10) : undefined;
     onSubmit({
       name: name.trim(),
       customer_name: customerName.trim() || undefined,
@@ -112,6 +119,7 @@ export function CampaignForm({
       screening_level: screeningLevel,
       selected_job_boards: jobBoards,
       bot_introduction: botIntro.trim() || undefined,
+      outreach_delay_mins: parsedDelay !== undefined && !isNaN(parsedDelay) ? parsedDelay : undefined,
       recruiter_notes: recruiterNotes.trim() || undefined,
     });
   };
@@ -208,6 +216,21 @@ export function CampaignForm({
       </div>
 
       <div className="space-y-1.5">
+        <Label htmlFor="campaign-outreach-delay">Outreach Frequency (Minutes)</Label>
+        <Input
+          id="campaign-outreach-delay"
+          type="number"
+          min={0}
+          value={outreachDelayMins}
+          onChange={(e) => setOutreachDelayMins(e.target.value)}
+          placeholder="e.g. 30 (Leaves empty for default delay)"
+        />
+        <p className="text-xs text-slate-500">
+          Minutes to wait after sending initial Email/SMS before the AI bot dials the candidate.
+        </p>
+      </div>
+
+      <div className="space-y-1.5">
         <Label>Publish To (Job Boards)</Label>
         <div className="flex flex-wrap gap-2">
           {JOB_BOARDS.map((b) => (
@@ -238,6 +261,10 @@ export function CampaignForm({
           placeholder="Notes shared across all jobs in this campaign"
           rows={2}
         />
+      </div>
+
+      <div className="pt-2">
+        <CampaignTemplateCard campaign={initial} />
       </div>
 
       <div className="flex justify-end gap-2 pt-2">

@@ -51,6 +51,7 @@ _COLUMNS = (
     "campaign_id", "name", "customer_name",
     "recruiter_emails", "selected_employment_types", "screening_level",
     "recruiter_notes", "work_authorization", "selected_job_boards", "bot_introduction",
+    "outreach_delay_mins",
     "template_enhanced_title", "template_ai_description",
     "template_rubric", "template_screen_questions", "template_sourcing_filters",
     "pair_enabled", "status", "user_session",
@@ -75,6 +76,7 @@ async def init_campaigns_schema():
                         work_authorization        TEXT,
                         selected_job_boards       TEXT,
                         bot_introduction          TEXT,
+                        outreach_delay_mins       INTEGER DEFAULT NULL,
                         template_enhanced_title   TEXT,
                         template_ai_description   TEXT,
                         template_rubric           JSONB,
@@ -86,6 +88,12 @@ async def init_campaigns_schema():
                         created_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE campaigns
+                    ADD COLUMN IF NOT EXISTS outreach_delay_mins INTEGER DEFAULT NULL;
                     """
                 )
                 conn.commit()
@@ -335,20 +343,119 @@ def _seed_job_rubric(campaign: Dict[str, Any], ref: str) -> None:
     screen_questions when embedded. Keyed by the job's reference string. Non-fatal."""
     template_rubric = campaign.get("template_rubric") or {}
     template_questions = campaign.get("template_screen_questions") or []
-    if not (template_rubric or template_questions):
+    template_sourcing = campaign.get("template_sourcing_filters") or {}
+    if not (template_rubric or template_questions or template_sourcing):
         return
     try:
         from services.job_rubric_db import JobRubricDB
+        from routers._helpers import get_db_connection
+        import json
+
+        # Always resolve to the *canonical* jobdiva_id stored in monitored_jobs
+        # (the 26-XXXXX string). If we were called with the numeric job_id,
+        # save_full_rubric would write rows under a different key, producing
+        # duplicates when the job is opened in the wizard later.
+        canonical_ref = ref
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT jobdiva_id FROM monitored_jobs WHERE jobdiva_id = %s OR job_id = %s LIMIT 1",
+                    (ref, ref),
+                )
+                row = cur.fetchone()
+                if row and row[0]:
+                    canonical_ref = row[0]
 
         rubric_payload = dict(template_rubric)
         if template_questions:
             rubric_payload["screen_questions"] = template_questions
         JobRubricDB().save_full_rubric(
-            jobdiva_id=ref,
+            jobdiva_id=canonical_ref,
             rubric_obj=rubric_payload,
             recruiter_notes=campaign.get("recruiter_notes"),
             bot_introduction=campaign.get("bot_introduction"),
         )
+
+        sourcing_payload = dict(template_sourcing) if isinstance(template_sourcing, dict) and template_sourcing else {}
+        if not sourcing_payload and template_rubric:
+            titles = [
+                {
+                    "id": i + 1,
+                    "value": t.get("value", ""),
+                    "matchType": "must" if t.get("required") == "Required" else "can",
+                    "years": t.get("minYears", 0),
+                    "recent": False,
+                    "similarCount": "0",
+                    "similarTitles": [],
+                    "fromRubric": True,
+                }
+                for i, t in enumerate(template_rubric.get("titles") or [])
+            ]
+            skills = [
+                {
+                    "id": i + 1,
+                    "value": s.get("value", ""),
+                    "matchType": "must" if s.get("required") == "Required" else "can",
+                    "years": s.get("minYears", 0),
+                    "recent": False,
+                    "similarCount": "0",
+                    "similarSkills": [],
+                    "fromRubric": True,
+                }
+                for i, s in enumerate(template_rubric.get("skills") or [])
+            ]
+            sourcing_payload = {
+                "sources": {"jobdiva": True, "linkedin": False, "dice": False, "exa": False},
+                "titles": titles,
+                "skills": skills,
+                "locations": [],
+                "companies": [],
+                "keywords": [],
+                "recentDaysFilter": 90,
+                "includeNoResume": False,
+            }
+
+        resume_filters = []
+        filter_id = 1
+        for title in (template_rubric.get("titles") or []):
+            is_req = title.get("required") == "Required"
+            cat = "Required Title" if is_req else "Preferred Title"
+            val = title.get("value", "")
+            display = f"{val} — {title.get('minYears', 0)}+ yrs, {title.get('matchType', 'broad')} match"
+            resume_filters.append({
+                "id": filter_id, "category": cat, "value": display, "active": is_req, "ai": True, "fromRubric": True, "rubricKey": f"{cat}:{val.split('—')[0].strip().lower()}", "weight": 1
+            })
+            filter_id += 1
+        for skill in (template_rubric.get("skills") or []):
+            is_req = skill.get("required") == "Required"
+            cat = "Required Skill" if is_req else "Preferred Skill"
+            val = skill.get("value", "")
+            display = f"{val} — {skill.get('minYears', 0)}+ yrs, {skill.get('matchType', 'broad')} match"
+            resume_filters.append({
+                "id": filter_id, "category": cat, "value": display, "active": is_req, "ai": True, "fromRubric": True, "rubricKey": f"{cat}:{val.split('—')[0].strip().lower()}", "weight": 1
+            })
+            filter_id += 1
+        for edu in (template_rubric.get("education") or []):
+            is_req = edu.get("required") == "Required"
+            display = f"{edu.get('degree', '')}{' in ' + edu.get('field', '') if edu.get('field') else ''}"
+            resume_filters.append({
+                "id": filter_id, "category": "Education", "value": display, "active": is_req, "ai": True, "fromRubric": True, "rubricKey": f"Education:{display.split('—')[0].strip().lower()}", "weight": 1
+            })
+            filter_id += 1
+
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE monitored_jobs
+                    SET sourcing_filters = CASE
+                            WHEN sourcing_filters IS NULL OR sourcing_filters::text IN ('null', '[]', '{}') OR (jsonb_typeof(sourcing_filters->'skills') = 'array' AND jsonb_array_length(sourcing_filters->'skills') = 0)
+                            THEN %s::jsonb ELSE sourcing_filters END,
+                        resume_match_filters = CASE
+                            WHEN resume_match_filters IS NULL OR resume_match_filters::text IN ('null', '[]') OR (jsonb_typeof(resume_match_filters) = 'array' AND jsonb_array_length(resume_match_filters) = 0)
+                            THEN %s::jsonb ELSE resume_match_filters END
+                    WHERE jobdiva_id = %s OR job_id = %s
+                """, (json.dumps(sourcing_payload), json.dumps(resume_filters), ref, ref))
+            conn.commit()
     except Exception as e:
         logger.warning(f"template rubric seed failed for {ref}: {e}")
 
@@ -367,6 +474,9 @@ async def _create_campaign_job(
     requirements) fall back to the campaign's JD template. Common props + JD +
     campaign_id are always inherited; rubric/questions are seeded from the
     template. Returns a per-job result dict."""
+    from services.jobdiva import jobdiva_service
+    import time
+
     fetched = None
     if jobdiva_id:
         try:
@@ -426,11 +536,14 @@ async def _create_campaign_job(
         "screening_level": screening_level or campaign.get("screening_level") or "L1.5",
         "bot_introduction": campaign.get("bot_introduction") or "",
         "processing_status": "campaign_created",
+        "sourcing_filters": campaign.get("template_sourcing_filters") or None,
     })
 
     ok = jobdiva_service.monitor_job_locally(data["job_id"], data)
     if ok:
         _seed_job_rubric(campaign, ref)
+        if ref != str(data["job_id"]):
+            _seed_job_rubric(campaign, str(data["job_id"]))
 
     return {
         "jobdiva_id": jobdiva_id or "",

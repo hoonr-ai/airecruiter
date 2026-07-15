@@ -71,6 +71,7 @@ export interface Campaign {
   work_authorization?: string | null;
   selected_job_boards: string[];
   bot_introduction?: string | null;
+  outreach_delay_mins?: number | null;
   template_enhanced_title?: string | null;
   template_ai_description?: string | null;
   template_rubric?: Record<string, unknown> | null;
@@ -96,6 +97,7 @@ export interface CampaignCreatePayload {
   work_authorization?: string;
   selected_job_boards?: string[];
   bot_introduction?: string;
+  outreach_delay_mins?: number;
   // Template fields (populated by the campaign wizard in Phase 3)
   template_enhanced_title?: string;
   template_ai_description?: string;

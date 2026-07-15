@@ -32,6 +32,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { CampaignForm } from "@/components/campaigns/CampaignForm";
+import { CampaignTemplateCard } from "@/components/campaigns/CampaignTemplateCard";
 import { cn } from "@/lib/utils";
 import {
   DropdownMenu,
@@ -318,6 +319,8 @@ export default function CampaignDetailPage() {
           </div>
         )}
       </div>
+
+      <CampaignTemplateCard campaign={campaign} />
 
       {/* Jobs */}
       <div className="flex items-center justify-between mb-3">
