@@ -78,6 +78,12 @@ export interface Campaign {
   selected_job_boards: string[];
   bot_introduction?: string | null;
   outreach_delay_mins?: number | null;
+  phase1_6hr_reminder_hours?: number | null;
+  phase1_to_phase2_hours?: number | null;
+  phase2_to_phase3_hours?: number | null;
+  phase1_6hr_call_delay_mins?: number | null;
+  phase2_call_delay_mins?: number | null;
+  phase3_call_delay_mins?: number | null;
   template_enhanced_title?: string | null;
   template_ai_description?: string | null;
   template_rubric?: Record<string, unknown> | null;
@@ -103,7 +109,13 @@ export interface CampaignCreatePayload {
   work_authorization?: string;
   selected_job_boards?: string[];
   bot_introduction?: string;
-  outreach_delay_mins?: number;
+  outreach_delay_mins?: number | null;
+  phase1_6hr_reminder_hours?: number | null;
+  phase1_to_phase2_hours?: number | null;
+  phase2_to_phase3_hours?: number | null;
+  phase1_6hr_call_delay_mins?: number | null;
+  phase2_call_delay_mins?: number | null;
+  phase3_call_delay_mins?: number | null;
   // Template fields (populated by the campaign wizard in Phase 3)
   template_enhanced_title?: string;
   template_ai_description?: string;

@@ -91,6 +91,24 @@ export function CampaignForm({
       ? (initial.template_screen_questions as TemplateQuestion[])
       : getDefaultCampaignScreeningQuestions()
   );
+  const [phase1ReminderHours, setPhase1ReminderHours] = useState<string>(
+    initial?.phase1_6hr_reminder_hours?.toString() ?? ""
+  );
+  const [phase1To2Hours, setPhase1To2Hours] = useState<string>(
+    initial?.phase1_to_phase2_hours?.toString() ?? ""
+  );
+  const [phase2To3Hours, setPhase2To3Hours] = useState<string>(
+    initial?.phase2_to_phase3_hours?.toString() ?? ""
+  );
+  const [phase1ReminderCallDelayMins, setPhase1ReminderCallDelayMins] = useState<string>(
+    initial?.phase1_6hr_call_delay_mins?.toString() ?? ""
+  );
+  const [phase2CallDelayMins, setPhase2CallDelayMins] = useState<string>(
+    initial?.phase2_call_delay_mins?.toString() ?? ""
+  );
+  const [phase3CallDelayMins, setPhase3CallDelayMins] = useState<string>(
+    initial?.phase3_call_delay_mins?.toString() ?? ""
+  );
   const [nameError, setNameError] = useState<string | null>(null);
 
   const addEmail = () => {
@@ -112,6 +130,13 @@ export function CampaignForm({
   const toggle = (list: string[], setList: (v: string[]) => void, value: string) =>
     setList(list.includes(value) ? list.filter((v) => v !== value) : [...list, value]);
 
+  const parseNum = (val: string, isFloat = false): number | undefined => {
+    const trimmed = val.trim();
+    if (!trimmed) return undefined;
+    const num = isFloat ? parseFloat(trimmed) : parseInt(trimmed, 10);
+    return !isNaN(num) ? num : undefined;
+  };
+
   const handleSubmit = () => {
     if (!name.trim() || !customerName.trim() || emails.length === 0 || empTypes.length === 0) {
       setNameError("Campaign Name, Customer, at least one Recruiter Email, and Employment Type are required");
@@ -127,7 +152,13 @@ export function CampaignForm({
       screening_level: screeningLevel,
       selected_job_boards: jobBoards,
       bot_introduction: botIntro.trim() || undefined,
-      outreach_delay_mins: parsedDelay !== undefined && !isNaN(parsedDelay) ? parsedDelay : undefined,
+      outreach_delay_mins: parseNum(outreachDelayMins),
+      phase1_6hr_reminder_hours: parseNum(phase1ReminderHours, true),
+      phase1_to_phase2_hours: parseNum(phase1To2Hours, true),
+      phase2_to_phase3_hours: parseNum(phase2To3Hours, true),
+      phase1_6hr_call_delay_mins: parseNum(phase1ReminderCallDelayMins),
+      phase2_call_delay_mins: parseNum(phase2CallDelayMins),
+      phase3_call_delay_mins: parseNum(phase3CallDelayMins),
       recruiter_notes: recruiterNotes.trim() || undefined,
       template_screen_questions: questions,
     });
@@ -247,21 +278,6 @@ export function CampaignForm({
       </div>
 
       <div className="space-y-1.5">
-        <Label htmlFor="campaign-outreach-delay">Outreach Frequency (Minutes)</Label>
-        <Input
-          id="campaign-outreach-delay"
-          type="number"
-          min={0}
-          value={outreachDelayMins}
-          onChange={(e) => setOutreachDelayMins(e.target.value)}
-          placeholder="e.g. 30 (Leaves empty for default delay)"
-        />
-        <p className="text-xs text-slate-500">
-          Minutes to wait after sending initial Email/SMS before the AI bot dials the candidate.
-        </p>
-      </div>
-
-      <div className="space-y-1.5">
         <Label>Publish To (Job Boards)</Label>
         <div className="flex flex-wrap gap-2">
           {JOB_BOARDS.map((b) => (
@@ -269,6 +285,114 @@ export function CampaignForm({
               {b}
             </PillToggle>
           ))}
+        </div>
+      </div>
+
+      <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-900 font-outfit">Outreach Frequencies & Call Delays</h3>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Configure timing for reminder messages and automated phone calls. Enter <span className="font-semibold text-slate-700">-1</span> to disable/skip a step, or <span className="font-semibold text-slate-700">0</span> / leave empty to use default system environment values.
+          </p>
+        </div>
+
+        <div className="space-y-3 pt-1">
+          <div className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Outreach Frequencies (Hours)</div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="space-y-1">
+              <Label htmlFor="rem-6hr" className="text-xs">Phase 1 Reminder Delay</Label>
+              <Input
+                id="rem-6hr"
+                type="number"
+                step="0.1"
+                min={-1}
+                value={phase1ReminderHours}
+                onChange={(e) => setPhase1ReminderHours(e.target.value)}
+                placeholder="e.g. 6.0 (env default)"
+                className="bg-white text-sm"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="rem-p1-p2" className="text-xs">Phase 1 → 2 Transition</Label>
+              <Input
+                id="rem-p1-p2"
+                type="number"
+                step="0.1"
+                min={-1}
+                value={phase1To2Hours}
+                onChange={(e) => setPhase1To2Hours(e.target.value)}
+                placeholder="e.g. 16.0 (env default)"
+                className="bg-white text-sm"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="rem-p2-p3" className="text-xs">Phase 2 → 3 Transition</Label>
+              <Input
+                id="rem-p2-p3"
+                type="number"
+                step="0.1"
+                min={-1}
+                value={phase2To3Hours}
+                onChange={(e) => setPhase2To3Hours(e.target.value)}
+                placeholder="e.g. 24.0 (env default)"
+                className="bg-white text-sm"
+              />
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-3 pt-2 border-t border-slate-200/80">
+          <div className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Call Delays After Email/SMS (Minutes)</div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="space-y-1">
+              <Label htmlFor="call-p1" className="text-xs">Phase 1 Initial Call</Label>
+              <Input
+                id="call-p1"
+                type="number"
+                min={-1}
+                value={outreachDelayMins}
+                onChange={(e) => setOutreachDelayMins(e.target.value)}
+                placeholder="e.g. 30 (env default)"
+                className="bg-white text-sm"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="call-p1-6hr" className="text-xs">Phase 1 Reminder Call</Label>
+              <Input
+                id="call-p1-6hr"
+                type="number"
+                min={-1}
+                value={phase1ReminderCallDelayMins}
+                onChange={(e) => setPhase1ReminderCallDelayMins(e.target.value)}
+                placeholder="e.g. 30 (env default)"
+                className="bg-white text-sm"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="call-p2" className="text-xs">Phase 2 Call Delay</Label>
+              <Input
+                id="call-p2"
+                type="number"
+                min={-1}
+                value={phase2CallDelayMins}
+                onChange={(e) => setPhase2CallDelayMins(e.target.value)}
+                placeholder="e.g. 30 (env default)"
+                className="bg-white text-sm"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="call-p3" className="text-xs">Phase 3 Call Delay</Label>
+              <Input
+                id="call-p3"
+                type="number"
+                min={-1}
+                value={phase3CallDelayMins}
+                onChange={(e) => setPhase3CallDelayMins(e.target.value)}
+                placeholder="e.g. 30 (env default)"
+                className="bg-white text-sm"
+              />
+            </div>
+          </div>
         </div>
       </div>
 

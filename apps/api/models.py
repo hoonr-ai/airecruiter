@@ -322,6 +322,13 @@ class CampaignData(BaseModel):
     work_authorization: Optional[str] = None
     selected_job_boards: List[str] = []
     bot_introduction: Optional[str] = None
+    outreach_delay_mins: Optional[int] = None
+    phase1_6hr_reminder_hours: Optional[float] = None
+    phase1_to_phase2_hours: Optional[float] = None
+    phase2_to_phase3_hours: Optional[float] = None
+    phase1_6hr_call_delay_mins: Optional[int] = None
+    phase2_call_delay_mins: Optional[int] = None
+    phase3_call_delay_mins: Optional[int] = None
 
     # Shared JD/rubric/questions/sourcing template child jobs seed from
     template_enhanced_title: Optional[str] = None
