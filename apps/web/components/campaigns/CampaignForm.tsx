@@ -7,6 +7,7 @@
 import { useState } from "react";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
@@ -80,34 +81,75 @@ export function CampaignForm({
   const [jobBoards, setJobBoards] = useState<string[]>(initial?.selected_job_boards ?? []);
   const defaultBotIntro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a {{job_title}} in {{job_location}}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
   const [botIntro, setBotIntro] = useState(initial?.bot_introduction?.trim() ? initial.bot_introduction : defaultBotIntro);
+  const [recruiterNotes, setRecruiterNotes] = useState(initial?.recruiter_notes ?? "");
+
+  // Outreach 1
+  const [outreach1CallEnabled, setOutreach1CallEnabled] = useState(
+    initial?.outreach_delay_mins !== -1
+  );
   const [outreachDelayMins, setOutreachDelayMins] = useState<string>(
     initial?.outreach_delay_mins !== null && initial?.outreach_delay_mins !== undefined
-      ? initial.outreach_delay_mins.toString()
-      : ""
+      ? initial.outreach_delay_mins === -1 ? "10" : initial.outreach_delay_mins.toString()
+      : "10"
   );
-  const [recruiterNotes, setRecruiterNotes] = useState(initial?.recruiter_notes ?? "");
+
+  // Outreach 2
+  const [outreach2Enabled, setOutreach2Enabled] = useState(
+    initial?.phase1_6hr_reminder_hours !== -1
+  );
   const [questions, setQuestions] = useState<TemplateQuestion[]>(
     initial?.template_screen_questions && initial.template_screen_questions.length > 0
       ? (initial.template_screen_questions as TemplateQuestion[])
       : getDefaultCampaignScreeningQuestions()
   );
   const [phase1ReminderHours, setPhase1ReminderHours] = useState<string>(
-    initial?.phase1_6hr_reminder_hours?.toString() ?? ""
+    initial?.phase1_6hr_reminder_hours !== null && initial?.phase1_6hr_reminder_hours !== undefined
+      ? initial.phase1_6hr_reminder_hours === -1 ? "1.0" : initial.phase1_6hr_reminder_hours.toString()
+      : "1.0"
   );
-  const [phase1To2Hours, setPhase1To2Hours] = useState<string>(
-    initial?.phase1_to_phase2_hours?.toString() ?? ""
-  );
-  const [phase2To3Hours, setPhase2To3Hours] = useState<string>(
-    initial?.phase2_to_phase3_hours?.toString() ?? ""
+  const [outreach2CallEnabled, setOutreach2CallEnabled] = useState(
+    initial?.phase1_6hr_call_delay_mins !== -1
   );
   const [phase1ReminderCallDelayMins, setPhase1ReminderCallDelayMins] = useState<string>(
-    initial?.phase1_6hr_call_delay_mins?.toString() ?? ""
+    initial?.phase1_6hr_call_delay_mins !== null && initial?.phase1_6hr_call_delay_mins !== undefined
+      ? initial.phase1_6hr_call_delay_mins === -1 ? "10" : initial.phase1_6hr_call_delay_mins.toString()
+      : "10"
+  );
+
+  // Outreach 3
+  const [outreach3Enabled, setOutreach3Enabled] = useState(
+    initial?.phase1_to_phase2_hours !== -1
+  );
+  const [phase1To2Hours, setPhase1To2Hours] = useState<string>(
+    initial?.phase1_to_phase2_hours !== null && initial?.phase1_to_phase2_hours !== undefined
+      ? initial.phase1_to_phase2_hours === -1 ? "2.0" : initial.phase1_to_phase2_hours.toString()
+      : "2.0"
+  );
+  const [outreach3CallEnabled, setOutreach3CallEnabled] = useState(
+    initial?.phase2_call_delay_mins !== -1
   );
   const [phase2CallDelayMins, setPhase2CallDelayMins] = useState<string>(
-    initial?.phase2_call_delay_mins?.toString() ?? ""
+    initial?.phase2_call_delay_mins !== null && initial?.phase2_call_delay_mins !== undefined
+      ? initial.phase2_call_delay_mins === -1 ? "10" : initial.phase2_call_delay_mins.toString()
+      : "10"
+  );
+
+  // Outreach 4
+  const [outreach4Enabled, setOutreach4Enabled] = useState(
+    initial?.phase2_to_phase3_hours !== -1
+  );
+  const [phase2To3Hours, setPhase2To3Hours] = useState<string>(
+    initial?.phase2_to_phase3_hours !== null && initial?.phase2_to_phase3_hours !== undefined
+      ? initial.phase2_to_phase3_hours === -1 ? "6.0" : initial.phase2_to_phase3_hours.toString()
+      : "6.0"
+  );
+  const [outreach4CallEnabled, setOutreach4CallEnabled] = useState(
+    initial?.phase3_call_delay_mins !== -1
   );
   const [phase3CallDelayMins, setPhase3CallDelayMins] = useState<string>(
-    initial?.phase3_call_delay_mins?.toString() ?? ""
+    initial?.phase3_call_delay_mins !== null && initial?.phase3_call_delay_mins !== undefined
+      ? initial.phase3_call_delay_mins === -1 ? "10" : initial.phase3_call_delay_mins.toString()
+      : "10"
   );
   const [nameError, setNameError] = useState<string | null>(null);
 
@@ -143,7 +185,6 @@ export function CampaignForm({
       return;
     }
     setNameError(null);
-    const parsedDelay = outreachDelayMins.trim() ? parseInt(outreachDelayMins.trim(), 10) : undefined;
     onSubmit({
       name: name.trim(),
       customer_name: customerName.trim() || undefined,
@@ -152,13 +193,13 @@ export function CampaignForm({
       screening_level: screeningLevel,
       selected_job_boards: jobBoards,
       bot_introduction: botIntro.trim() || undefined,
-      outreach_delay_mins: parseNum(outreachDelayMins),
-      phase1_6hr_reminder_hours: parseNum(phase1ReminderHours, true),
-      phase1_to_phase2_hours: parseNum(phase1To2Hours, true),
-      phase2_to_phase3_hours: parseNum(phase2To3Hours, true),
-      phase1_6hr_call_delay_mins: parseNum(phase1ReminderCallDelayMins),
-      phase2_call_delay_mins: parseNum(phase2CallDelayMins),
-      phase3_call_delay_mins: parseNum(phase3CallDelayMins),
+      outreach_delay_mins: outreach1CallEnabled ? (parseNum(outreachDelayMins) ?? 0) : -1,
+      phase1_6hr_reminder_hours: outreach2Enabled ? (parseNum(phase1ReminderHours, true) ?? 0) : -1,
+      phase1_to_phase2_hours: outreach3Enabled ? (parseNum(phase1To2Hours, true) ?? 0) : -1,
+      phase2_to_phase3_hours: outreach4Enabled ? (parseNum(phase2To3Hours, true) ?? 0) : -1,
+      phase1_6hr_call_delay_mins: outreach2Enabled && outreach2CallEnabled ? (parseNum(phase1ReminderCallDelayMins) ?? 0) : -1,
+      phase2_call_delay_mins: outreach3Enabled && outreach3CallEnabled ? (parseNum(phase2CallDelayMins) ?? 0) : -1,
+      phase3_call_delay_mins: outreach4Enabled && outreach4CallEnabled ? (parseNum(phase3CallDelayMins) ?? 0) : -1,
       recruiter_notes: recruiterNotes.trim() || undefined,
       template_screen_questions: questions,
     });
@@ -290,110 +331,146 @@ export function CampaignForm({
 
       <div className="space-y-4 rounded-xl border border-slate-200 bg-slate-50/70 p-4">
         <div>
-          <h3 className="text-sm font-semibold text-slate-900 font-outfit">Outreach Frequencies & Call Delays</h3>
+          <h3 className="text-sm font-semibold text-slate-900 font-outfit">Outreach Schedule</h3>
           <p className="text-xs text-slate-500 mt-0.5">
-            Configure timing for reminder messages and automated phone calls. Enter <span className="font-semibold text-slate-700">-1</span> to disable/skip a step, or <span className="font-semibold text-slate-700">0</span> / leave empty to use default system environment values.
+            Configure the 4 outreach steps. Uncheck a step to skip it (<span className="font-semibold text-slate-700">-1</span> saved internally). Default values from environment are used when 0 or left as-is.
           </p>
         </div>
 
-        <div className="space-y-3 pt-1">
-          <div className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Outreach Frequencies (Hours)</div>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div className="space-y-1">
-              <Label htmlFor="rem-6hr" className="text-xs">Phase 1 Reminder Delay</Label>
-              <Input
-                id="rem-6hr"
-                type="number"
-                step="0.1"
-                min={-1}
-                value={phase1ReminderHours}
-                onChange={(e) => setPhase1ReminderHours(e.target.value)}
-                placeholder="e.g. 6.0 (env default)"
-                className="bg-white text-sm"
-              />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="rem-p1-p2" className="text-xs">Phase 1 → 2 Transition</Label>
-              <Input
-                id="rem-p1-p2"
-                type="number"
-                step="0.1"
-                min={-1}
-                value={phase1To2Hours}
-                onChange={(e) => setPhase1To2Hours(e.target.value)}
-                placeholder="e.g. 16.0 (env default)"
-                className="bg-white text-sm"
-              />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="rem-p2-p3" className="text-xs">Phase 2 → 3 Transition</Label>
-              <Input
-                id="rem-p2-p3"
-                type="number"
-                step="0.1"
-                min={-1}
-                value={phase2To3Hours}
-                onChange={(e) => setPhase2To3Hours(e.target.value)}
-                placeholder="e.g. 24.0 (env default)"
-                className="bg-white text-sm"
-              />
-            </div>
-          </div>
+        {/* Header row */}
+        <div className="grid grid-cols-[20px_1fr_120px_120px] gap-2 items-center px-1">
+          <span />
+          <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide">Outreach Step</span>
+          <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide text-center">Msg Delay</span>
+          <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide text-center">Call Delay</span>
         </div>
 
-        <div className="space-y-3 pt-2 border-t border-slate-200/80">
-          <div className="text-xs font-semibold text-slate-700 uppercase tracking-wide">Call Delays After Email/SMS (Minutes)</div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div className="space-y-1">
-              <Label htmlFor="call-p1" className="text-xs">Phase 1 Initial Call</Label>
-              <Input
-                id="call-p1"
-                type="number"
-                min={-1}
-                value={outreachDelayMins}
-                onChange={(e) => setOutreachDelayMins(e.target.value)}
-                placeholder="e.g. 30 (env default)"
-                className="bg-white text-sm"
-              />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="call-p1-6hr" className="text-xs">Phase 1 Reminder Call</Label>
-              <Input
-                id="call-p1-6hr"
-                type="number"
-                min={-1}
-                value={phase1ReminderCallDelayMins}
-                onChange={(e) => setPhase1ReminderCallDelayMins(e.target.value)}
-                placeholder="e.g. 30 (env default)"
-                className="bg-white text-sm"
-              />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="call-p2" className="text-xs">Phase 2 Call Delay</Label>
-              <Input
-                id="call-p2"
-                type="number"
-                min={-1}
-                value={phase2CallDelayMins}
-                onChange={(e) => setPhase2CallDelayMins(e.target.value)}
-                placeholder="e.g. 30 (env default)"
-                className="bg-white text-sm"
-              />
-            </div>
-            <div className="space-y-1">
-              <Label htmlFor="call-p3" className="text-xs">Phase 3 Call Delay</Label>
-              <Input
-                id="call-p3"
-                type="number"
-                min={-1}
-                value={phase3CallDelayMins}
-                onChange={(e) => setPhase3CallDelayMins(e.target.value)}
-                placeholder="e.g. 30 (env default)"
-                className="bg-white text-sm"
-              />
-            </div>
-          </div>
+        {/* Outreach 1 — Initial */}
+        <div className={cn("grid grid-cols-[20px_1fr_120px_120px] gap-2 items-center rounded-lg border p-2 transition-colors", outreach1CallEnabled ? "bg-white border-slate-200" : "bg-slate-100 border-slate-200 opacity-60")}>
+          <Checkbox
+            id="o1-enabled"
+            checked={outreach1CallEnabled}
+            onCheckedChange={(v) => setOutreach1CallEnabled(!!v)}
+          />
+          <label htmlFor="o1-enabled" className="text-sm font-medium text-slate-700 cursor-pointer select-none">
+            Outreach 1 <span className="text-xs text-slate-400 font-normal">· Initial (immediate)</span>
+          </label>
+          <div className="text-center text-xs text-slate-400 italic">Immediate</div>
+          <Input
+            id="call-p1"
+            type="number"
+            min={0}
+            disabled={!outreach1CallEnabled}
+            value={outreachDelayMins}
+            onChange={(e) => setOutreachDelayMins(e.target.value)}
+            placeholder="10 min"
+            className="text-xs h-8 text-center bg-white"
+          />
         </div>
+
+        {/* Outreach 2 — Reminder 1 */}
+        <div className={cn("grid grid-cols-[20px_1fr_120px_120px] gap-2 items-center rounded-lg border p-2 transition-colors", outreach2Enabled ? "bg-white border-slate-200" : "bg-slate-100 border-slate-200 opacity-60")}>
+          <Checkbox
+            id="o2-enabled"
+            checked={outreach2Enabled}
+            onCheckedChange={(v) => setOutreach2Enabled(!!v)}
+          />
+          <label htmlFor="o2-enabled" className="text-sm font-medium text-slate-700 cursor-pointer select-none">
+            Outreach 2 <span className="text-xs text-slate-400 font-normal">· Reminder 1</span>
+          </label>
+          <Input
+            id="rem-6hr"
+            type="number"
+            step="0.1"
+            min={0}
+            disabled={!outreach2Enabled}
+            value={phase1ReminderHours}
+            onChange={(e) => setPhase1ReminderHours(e.target.value)}
+            placeholder="1.0 hr"
+            className="text-xs h-8 text-center bg-white"
+          />
+          <Input
+            id="call-p1-6hr"
+            type="number"
+            min={0}
+            disabled={!outreach2Enabled || !outreach2CallEnabled}
+            value={phase1ReminderCallDelayMins}
+            onChange={(e) => setPhase1ReminderCallDelayMins(e.target.value)}
+            placeholder="10 min"
+            className="text-xs h-8 text-center bg-white"
+          />
+        </div>
+
+        {/* Outreach 3 — Reminder 2 */}
+        <div className={cn("grid grid-cols-[20px_1fr_120px_120px] gap-2 items-center rounded-lg border p-2 transition-colors", outreach3Enabled ? "bg-white border-slate-200" : "bg-slate-100 border-slate-200 opacity-60")}>
+          <Checkbox
+            id="o3-enabled"
+            checked={outreach3Enabled}
+            onCheckedChange={(v) => setOutreach3Enabled(!!v)}
+          />
+          <label htmlFor="o3-enabled" className="text-sm font-medium text-slate-700 cursor-pointer select-none">
+            Outreach 3 <span className="text-xs text-slate-400 font-normal">· Reminder 2</span>
+          </label>
+          <Input
+            id="rem-p1-p2"
+            type="number"
+            step="0.1"
+            min={0}
+            disabled={!outreach3Enabled}
+            value={phase1To2Hours}
+            onChange={(e) => setPhase1To2Hours(e.target.value)}
+            placeholder="2.0 hr"
+            className="text-xs h-8 text-center bg-white"
+          />
+          <Input
+            id="call-p2"
+            type="number"
+            min={0}
+            disabled={!outreach3Enabled || !outreach3CallEnabled}
+            value={phase2CallDelayMins}
+            onChange={(e) => setPhase2CallDelayMins(e.target.value)}
+            placeholder="10 min"
+            className="text-xs h-8 text-center bg-white"
+          />
+        </div>
+
+        {/* Outreach 4 — Reminder 3 */}
+        <div className={cn("grid grid-cols-[20px_1fr_120px_120px] gap-2 items-center rounded-lg border p-2 transition-colors", outreach4Enabled ? "bg-white border-slate-200" : "bg-slate-100 border-slate-200 opacity-60")}>
+          <Checkbox
+            id="o4-enabled"
+            checked={outreach4Enabled}
+            onCheckedChange={(v) => setOutreach4Enabled(!!v)}
+          />
+          <label htmlFor="o4-enabled" className="text-sm font-medium text-slate-700 cursor-pointer select-none">
+            Outreach 4 <span className="text-xs text-slate-400 font-normal">· Reminder 3</span>
+          </label>
+          <Input
+            id="rem-p2-p3"
+            type="number"
+            step="0.1"
+            min={0}
+            disabled={!outreach4Enabled}
+            value={phase2To3Hours}
+            onChange={(e) => setPhase2To3Hours(e.target.value)}
+            placeholder="6.0 hr"
+            className="text-xs h-8 text-center bg-white"
+          />
+          <Input
+            id="call-p3"
+            type="number"
+            min={0}
+            disabled={!outreach4Enabled || !outreach4CallEnabled}
+            value={phase3CallDelayMins}
+            onChange={(e) => setPhase3CallDelayMins(e.target.value)}
+            placeholder="10 min"
+            className="text-xs h-8 text-center bg-white"
+          />
+        </div>
+
+        <p className="text-[11px] text-slate-400 pt-1">
+          <span className="font-semibold text-slate-500">Msg Delay</span>: hours after previous outreach to send next message. &nbsp;
+          <span className="font-semibold text-slate-500">Call Delay</span>: minutes after message to initiate AI phone call.
+        </p>
       </div>
 
       <div className="space-y-1.5">
