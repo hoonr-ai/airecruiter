@@ -192,7 +192,7 @@ export default function NewCampaignPage() {
   const goToStep3 = async () => {
     setStep(3);
     if (!botIntro.trim()) {
-      const defaultCampaignIntro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with ${customerName.trim() || "{{customer_name}}"}. We are helping our client recruit for a {{job_title}} in {{job_location}}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+      const defaultCampaignIntro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a {{job_title}} in {{job_location}}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
       setBotIntro(defaultCampaignIntro);
     }
     if (questions.length === 0) await runGenerateQuestions();
