@@ -586,12 +586,13 @@ async def _create_campaign_job(
         if not title:
             return "role"
         import re
-        cleaned = re.sub(r'^(?:US|USA|CAN|CANADA|UK|INDIA|MEX|APAC|EMEA|LATAM|[A-Z]{2,3}(?:\/[A-Z]{2,3})?)\s*[-:/|]\s*', '', str(title), flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r'^(?:(?:US|USA|CAN|CANADA|UK|INDIA|MEX|APAC|EMEA|LATAM|[A-Z]{2,3}(?:\/[A-Z]{2,3})?)\s*[-:/|]\s*)+', '', str(title), flags=re.IGNORECASE).strip()
         return cleaned or "role"
 
     raw_intro = campaign.get("bot_introduction") or ""
-    enhanced_title_val = (campaign.get("template_enhanced_title") or data.get("title") or "").strip()
-    raw_title_str = (enhanced_title_val or data.get("title") or "role").strip()
+    child_job_title = (data.get("title") or "").strip()
+    campaign_seed_title = (campaign.get("template_enhanced_title") or "").strip()
+    raw_title_str = child_job_title or campaign_seed_title or "role"
     job_title_str = _clean_job_title_for_intro(raw_title_str)
     job_location_str = (
         f"{data.get('city')}, {data.get('state')}".strip(", ")
@@ -611,13 +612,16 @@ async def _create_campaign_job(
         raw_intro = re.sub(r'\{\{\s*(?:job_title|title)\s*\}\}|\{\s*(?:job_title|title)\s*\}', job_title_str, raw_intro, flags=re.IGNORECASE)
         raw_intro = re.sub(r'\{\{\s*(?:job_location|location)\s*\}\}|\{\s*(?:job_location|location)\s*\}', job_location_str, raw_intro, flags=re.IGNORECASE)
         raw_intro = re.sub(r'\{\{\s*(?:customer_name|company)\s*\}\}|\{\s*(?:customer_name|company)\s*\}', 'Pyramid Consulting', raw_intro, flags=re.IGNORECASE)
-        seed_title = (campaign.get("template_enhanced_title") or "").strip()
+        seed_title = campaign_seed_title
         if seed_title and seed_title in raw_intro and seed_title != job_title_str and job_title_str:
             raw_intro = raw_intro.replace(seed_title, job_title_str)
+        campaign_name = (campaign.get("name") or "").strip()
+        if campaign_name and campaign_name in raw_intro and campaign_name != job_title_str and job_title_str:
+            raw_intro = re.sub(r'(recruit\s+for\s+a(?:n)?\s+)' + re.escape(campaign_name), r'\1' + job_title_str, raw_intro, flags=re.IGNORECASE)
 
     data.update({
         "campaign_id": campaign_id,
-        "enhanced_title": campaign.get("template_enhanced_title") or data.get("title") or "",
+        "enhanced_title": job_title_str if child_job_title else campaign_seed_title,
         "ai_description": campaign.get("template_ai_description") or "",
         "recruiter_notes": campaign.get("recruiter_notes") or "",
         "work_authorization": campaign.get("work_authorization") or data.get("work_authorization") or "",
