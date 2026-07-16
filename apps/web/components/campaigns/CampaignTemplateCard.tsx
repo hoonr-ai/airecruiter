@@ -8,6 +8,7 @@ import { useState } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import { Label } from "@/components/ui/label";
 import { Campaign } from "@/lib/campaigns";
+import { AIPostingJobDescription } from "@/components/jobs/AIPostingJobDescription";
 
 function summarizeRow(row: Record<string, unknown>): string {
   const primary =
@@ -118,8 +119,8 @@ export function CampaignTemplateCard({
                 )}
               </div>
               {showJD && campaign.template_ai_description && (
-                <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 text-sm text-slate-700 whitespace-pre-wrap max-h-72 overflow-y-auto">
-                  {campaign.template_ai_description}
+                <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 text-sm text-slate-700 max-h-72 overflow-y-auto">
+                  <AIPostingJobDescription text={campaign.template_ai_description} />
                 </div>
               )}
             </div>
@@ -128,11 +129,19 @@ export function CampaignTemplateCard({
           {/* Rubric */}
           {rubricSections.length > 0 && (
             <div className="px-6 py-5 space-y-4">
-              <Label>Grading Rubric</Label>
+              <Label className="flex items-center gap-1.5">
+                Grading Rubric
+                <span className="text-xs font-normal text-slate-400">
+                  ({rubricSections.reduce((acc, s) => acc + s.items.length, 0)})
+                </span>
+              </Label>
               <div className="space-y-3">
                 {rubricSections.map(({ label, items }) => (
                   <div key={label} className="space-y-1.5">
-                    <Label className="text-slate-500">{label}</Label>
+                    <Label className="text-slate-500 flex items-center gap-1.5">
+                      {label}
+                      <span className="text-xs font-normal text-slate-400">({items.length})</span>
+                    </Label>
                     <div className="flex flex-wrap gap-1.5">
                       {items.map((it, i) => (
                         <span

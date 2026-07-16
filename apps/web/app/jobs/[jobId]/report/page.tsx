@@ -31,6 +31,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { API_BASE, authFetch } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { AIPostingJobDescription } from "@/components/jobs/AIPostingJobDescription";
 
 interface TranscriptionItem {
   question: string;
@@ -884,61 +885,4 @@ function StatusPill({ status, type }: { status: string; type: "success" | "dange
   );
 }
 
-function AIPostingJobDescription({ text }: { text: string }) {
-  const renderInline = (content: string) => {
-    const parts = content.split(/(\[.*?\]\(.*?\)+|\*\*.*?\*\*|\*(?!\*).*?\*(?!\*))/g);
-    return parts.map((part, i) => {
-      if (part.startsWith('[') && part.includes('](') && part.endsWith(')')) {
-        const match = part.match(/\[(.*?)\]\((.*?)\)/);
-        if (match) {
-          return (
-            <a key={i} href={match[2]} target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">
-              {match[1]}
-            </a>
-          );
-        }
-      } else if (part.startsWith('**') && part.endsWith('**')) {
-        return <strong key={i} className="font-bold text-slate-900">{part.slice(2, -2)}</strong>;
-      } else if (part.startsWith('*') && part.endsWith('*')) {
-        return <em key={i} className="italic text-slate-800">{part.slice(1, -1)}</em>;
-      }
-      return <span key={i}>{part}</span>;
-    });
-  };
 
-  const formatLines = (rawText: string) => {
-    if (!rawText) return null;
-    return rawText.split('\n').map((line, index) => {
-      const trimmedLine = line.trim();
-      if (!trimmedLine) return <div key={index} className="h-2" />;
-
-      const isHeader = /^\*\*[A-Z\s]+\*\*$/.test(trimmedLine) || /^[A-Z\s]{3,25}$/.test(trimmedLine);
-      if (isHeader) {
-        const title = trimmedLine.replace(/\*\*/g, '').trim();
-        return (
-          <div key={index} className="text-[14px] font-bold text-slate-900 mt-5 mb-2 first:mt-0 uppercase tracking-tight">
-            {title}
-          </div>
-        );
-      }
-
-      if (trimmedLine.startsWith('•') || trimmedLine.startsWith('-')) {
-        const content = trimmedLine.replace(/^[•-]\s*/, '').trim();
-        return (
-          <div key={index} className="flex gap-2.5 ml-1 my-1.5 items-start">
-            <span className="text-slate-400 mt-1">•</span>
-            <div className="flex-1 text-[14px]">{renderInline(content)}</div>
-          </div>
-        );
-      }
-
-      return (
-        <div key={index} className="mb-2 text-slate-600 leading-relaxed text-[14px]">
-          {renderInline(trimmedLine)}
-        </div>
-      );
-    });
-  };
-
-  return <div className="text-[14px] font-medium leading-relaxed">{formatLines(text)}</div>;
-}

@@ -70,7 +70,10 @@ export function RubricEditor({
       {EDITABLE.map(({ key, label }) => (
         <div key={key} className="space-y-2">
           <div className="flex items-center justify-between">
-            <Label>{label}</Label>
+            <Label className="flex items-center gap-1.5">
+              {label}
+              <span className="text-xs font-normal text-slate-400">({rows(key).length})</span>
+            </Label>
             <button
               type="button"
               onClick={() => addRow(key)}
@@ -133,7 +136,10 @@ export function RubricEditor({
         if (items.length === 0) return null;
         return (
           <div key={String(key)} className="space-y-1.5">
-            <Label className="text-slate-500">{label}</Label>
+            <Label className="text-slate-500 flex items-center gap-1.5">
+              {label}
+              <span className="text-xs font-normal text-slate-400">({items.length})</span>
+            </Label>
             <div className="flex flex-wrap gap-1.5">
               {items.map((it, i) => (
                 <span key={i} className="text-xs bg-slate-100 text-slate-600 rounded px-2 py-1">
