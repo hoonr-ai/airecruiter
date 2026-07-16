@@ -106,10 +106,11 @@ export function CampaignForm({
     setList(list.includes(value) ? list.filter((v) => v !== value) : [...list, value]);
 
   const handleSubmit = () => {
-    if (!name.trim()) {
-      setNameError("Campaign name is required");
+    if (!name.trim() || !customerName.trim() || emails.length === 0 || empTypes.length === 0) {
+      setNameError("Campaign Name, Customer, at least one Recruiter Email, and Employment Type are required");
       return;
     }
+    setNameError(null);
     const parsedDelay = outreachDelayMins.trim() ? parseInt(outreachDelayMins.trim(), 10) : undefined;
     onSubmit({
       name: name.trim(),
@@ -127,7 +128,9 @@ export function CampaignForm({
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <Label htmlFor="campaign-name">Campaign Name *</Label>
+        <Label htmlFor="campaign-name">
+          Campaign Name <span className="text-red-500">*</span>
+        </Label>
         <Input
           id="campaign-name"
           value={name}
@@ -141,7 +144,9 @@ export function CampaignForm({
       </div>
 
       <div className="space-y-1.5">
-        <Label htmlFor="campaign-customer">Customer</Label>
+        <Label htmlFor="campaign-customer">
+          Customer <span className="text-red-500">*</span>
+        </Label>
         <Input
           id="campaign-customer"
           value={customerName ?? ""}
@@ -151,7 +156,9 @@ export function CampaignForm({
       </div>
 
       <div className="space-y-1.5">
-        <Label>Recruiter Email(s)</Label>
+        <Label>
+          Recruiter Email(s) <span className="text-red-500">*</span>
+        </Label>
         <div className="flex flex-wrap gap-2">
           {emails.map((email) => (
             <span
@@ -189,7 +196,9 @@ export function CampaignForm({
       </div>
 
       <div className="space-y-1.5">
-        <Label>Employment Type</Label>
+        <Label>
+          Employment Type <span className="text-red-500">*</span>
+        </Label>
         <div className="flex flex-wrap gap-2">
           {EMPLOYMENT_TYPES.map((t) => (
             <PillToggle key={t} active={empTypes.includes(t)} onClick={() => toggle(empTypes, setEmpTypes, t)}>

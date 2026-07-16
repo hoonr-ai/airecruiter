@@ -179,8 +179,8 @@ export default function NewCampaignPage() {
   };
 
   const goToStep2 = async () => {
-    if (!name.trim() || !jobTitle.trim()) {
-      setSetupError("Campaign name and a seed role/title are required.");
+    if (!name.trim() || !jobTitle.trim() || !customerName.trim() || emails.length === 0 || empTypes.length === 0) {
+      setSetupError("Campaign Name, Seed Role/Title, Customer, at least one Recruiter Email, and Employment Type are required.");
       return;
     }
     setSetupError(null);
@@ -195,6 +195,11 @@ export default function NewCampaignPage() {
   };
 
   const handleCreate = async () => {
+    if (!name.trim() || !jobTitle.trim() || !customerName.trim() || emails.length === 0 || empTypes.length === 0) {
+      setStep(1);
+      setSetupError("Campaign Name, Seed Role/Title, Customer, at least one Recruiter Email, and Employment Type are required.");
+      return;
+    }
     setSaving(true);
     try {
       const payload: CampaignCreatePayload = {
@@ -271,21 +276,29 @@ export default function NewCampaignPage() {
       {step === 1 && (
         <div className="space-y-5 bg-white border border-slate-200 rounded-xl p-6">
           <div className="space-y-1.5">
-            <Label htmlFor="c-name">Campaign Name *</Label>
+            <Label htmlFor="c-name">
+              Campaign Name <span className="text-red-500">*</span>
+            </Label>
             <Input id="c-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Q3 Java Backend — 10 seats" />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="c-title">Seed Role / Title *</Label>
+            <Label htmlFor="c-title">
+              Seed Role / Title <span className="text-red-500">*</span>
+            </Label>
             <Input id="c-title" value={jobTitle} onChange={(e) => setJobTitle(e.target.value)} placeholder="e.g. Senior Java Engineer" />
             <p className="text-xs text-slate-400">The AI drafts the template JD, rubric, and questions from this.</p>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="c-customer">Customer</Label>
+            <Label htmlFor="c-customer">
+              Customer <span className="text-red-500">*</span>
+            </Label>
             <Input id="c-customer" value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="Hiring client / account" />
           </div>
 
           <div className="space-y-1.5">
-            <Label>Recruiter Email(s)</Label>
+            <Label>
+              Recruiter Email(s) <span className="text-red-500">*</span>
+            </Label>
             <div className="flex flex-wrap gap-2">
               {emails.map((email) => (
                 <span key={email} className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-700">
@@ -307,7 +320,9 @@ export default function NewCampaignPage() {
           </div>
 
           <div className="space-y-1.5">
-            <Label>Employment Type</Label>
+            <Label>
+              Employment Type <span className="text-red-500">*</span>
+            </Label>
             <div className="flex flex-wrap gap-2">
               {EMPLOYMENT_TYPES.map((t) => (
                 <Pill key={t} active={empTypes.includes(t)} onClick={() => toggle(empTypes, setEmpTypes, t)}>{t}</Pill>
