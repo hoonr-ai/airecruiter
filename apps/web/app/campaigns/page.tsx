@@ -13,7 +13,7 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { Campaign, listCampaigns, deleteCampaign } from "@/lib/campaigns";
+import { Campaign, listCampaigns, deleteCampaign, formatScreeningLevel } from "@/lib/campaigns";
 
 export default function CampaignsPage() {
   const router = useRouter();
@@ -117,7 +117,7 @@ export default function CampaignsPage() {
               <div className="flex items-start justify-between gap-3">
                 <h3 className="font-semibold text-slate-900 line-clamp-2">{c.name}</h3>
                 <div className="flex items-center gap-1.5 shrink-0">
-                  <Badge variant="secondary">{c.screening_level}</Badge>
+                  <Badge variant="secondary">{formatScreeningLevel(c.screening_level)}</Badge>
                   <button
                     type="button"
                     onClick={(e) => {

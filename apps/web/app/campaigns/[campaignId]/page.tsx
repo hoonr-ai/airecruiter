@@ -50,6 +50,7 @@ import {
   updateCampaign,
   deleteCampaign,
   removeJobFromCampaign,
+  formatScreeningLevel,
 } from "@/lib/campaigns";
 
 export default function CampaignDetailPage() {
@@ -295,7 +296,7 @@ export default function CampaignDetailPage() {
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
           <Stat icon={<ShieldCheck className="h-4 w-4" />} label="Screening">
-            {campaign.screening_level}
+            {formatScreeningLevel(campaign.screening_level)}
           </Stat>
           <Stat icon={<Briefcase className="h-4 w-4" />} label="Employment">
             {campaign.selected_employment_types?.length
@@ -447,7 +448,7 @@ export default function CampaignDetailPage() {
                       {j.location_type ? ` · ${j.location_type}` : ""}
                     </Field>
                     <Field label="Employment">{j.employment_type || "—"}</Field>
-                    <Field label="Screening">{j.screening_level || "—"}</Field>
+                    <Field label="Screening">{formatScreeningLevel(j.screening_level)}</Field>
                     <Field label="Pay Rate">{j.pay_rate || "—"}</Field>
                     <Field label="Openings">{j.openings ? String(j.openings) : "—"}</Field>
                     <Field label="Candidates">
