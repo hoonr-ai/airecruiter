@@ -77,7 +77,8 @@ export function CampaignForm({
   const [empTypes, setEmpTypes] = useState<string[]>(initial?.selected_employment_types ?? []);
   const [screeningLevel, setScreeningLevel] = useState<string>(initial?.screening_level ?? "L1.5");
   const [jobBoards, setJobBoards] = useState<string[]>(initial?.selected_job_boards ?? []);
-  const [botIntro, setBotIntro] = useState(initial?.bot_introduction ?? "");
+  const defaultBotIntro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with ${initial?.customer_name || "{{customer_name}}"}. We are helping our client recruit for a {{job_title}} in {{job_location}}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+  const [botIntro, setBotIntro] = useState(initial?.bot_introduction?.trim() ? initial.bot_introduction : defaultBotIntro);
   const [outreachDelayMins, setOutreachDelayMins] = useState<string>(
     initial?.outreach_delay_mins !== null && initial?.outreach_delay_mins !== undefined
       ? initial.outreach_delay_mins.toString()

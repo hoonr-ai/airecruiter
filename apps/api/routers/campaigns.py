@@ -181,6 +181,15 @@ async def create_campaign(campaign: CampaignData, user: UserIdentity = Depends(g
         data = campaign.dict()
         data["campaign_id"] = campaign_id
 
+        if not (data.get("bot_introduction") or "").strip():
+            cust = data.get("customer_name") or "our client"
+            data["bot_introduction"] = (
+                f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with {cust}. "
+                f"We are helping our client recruit for a {{{{job_title}}}} in {{{{job_location}}}}, "
+                f"and you seem to be a good fit for the role. Please note that conversation may be recorded "
+                f"for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
+            )
+
         values = [_param_value(col, data.get(col)) for col in _COLUMNS]
         placeholders = ", ".join(["%s"] * len(_COLUMNS))
         update_set = ", ".join(
@@ -570,8 +579,32 @@ async def _create_campaign_job(
             "jobdiva_description": description or "",
         }
 
-    # Overlay campaign-inherited common props + template + campaign_id.
-    # Raw Python lists — monitor_job_locally json.dumps them exactly once.
+    # Resolve Bot Introduction: use campaign template or default standard intro,
+    # then interpolate job-specific details when the job is added under the campaign.
+    raw_intro = campaign.get("bot_introduction") or ""
+    job_title_str = data.get("enhanced_title") or data.get("title") or campaign.get("template_enhanced_title") or ""
+    job_location_str = (
+        f"{data.get('city')}, {data.get('state')}".strip(", ")
+        if (data.get("city") and data.get("state"))
+        else (data.get("city") or data.get("state") or "United States")
+    )
+    customer_str = data.get("customer_name") or campaign.get("customer_name") or "our client"
+
+    if not raw_intro.strip():
+        raw_intro = (
+            f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with {customer_str}. "
+            f"We are helping our client recruit for a {job_title_str} in {job_location_str}, "
+            f"and you seem to be a good fit for the role. Please note that conversation may be recorded "
+            f"for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
+        )
+    else:
+        raw_intro = raw_intro.replace("{{job_title}}", job_title_str).replace("{{title}}", job_title_str)
+        raw_intro = raw_intro.replace("{{job_location}}", job_location_str).replace("{{location}}", job_location_str)
+        raw_intro = raw_intro.replace("{{customer_name}}", customer_str).replace("{{company}}", customer_str)
+        seed_title = campaign.get("template_enhanced_title") or ""
+        if seed_title and seed_title in raw_intro and seed_title != job_title_str and job_title_str:
+            raw_intro = raw_intro.replace(seed_title, job_title_str)
+
     data.update({
         "campaign_id": campaign_id,
         "enhanced_title": campaign.get("template_enhanced_title") or data.get("title") or "",
@@ -584,7 +617,7 @@ async def _create_campaign_job(
             selected_job_boards if selected_job_boards is not None else (campaign.get("selected_job_boards") or [])
         ),
         "screening_level": screening_level or campaign.get("screening_level") or "L1.5",
-        "bot_introduction": campaign.get("bot_introduction") or "",
+        "bot_introduction": raw_intro,
         "processing_status": "campaign_created",
         "sourcing_filters": campaign.get("template_sourcing_filters") or None,
     })
