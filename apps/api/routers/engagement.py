@@ -764,7 +764,15 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
 
         raw_company_intro = (job_row.get("bot_introduction") or "") if job_row else ""
         if job_row:
-            job_t = (job_row.get("enhanced_title") or job_row.get("title") or "role").strip()
+            def _clean_job_title_for_intro(title: str) -> str:
+                if not title:
+                    return "role"
+                import re
+                cleaned = re.sub(r'^(?:US|USA|CAN|CANADA|UK|INDIA|MEX|APAC|EMEA|LATAM|[A-Z]{2,3}(?:\/[A-Z]{2,3})?)\s*[-:/|]\s*', '', str(title), flags=re.IGNORECASE).strip()
+                return cleaned or "role"
+
+            raw_title_str = (job_row.get("enhanced_title") or job_row.get("title") or "role").strip()
+            job_t = _clean_job_title_for_intro(raw_title_str)
             job_l = f"{job_row.get('city') or ''}, {job_row.get('state') or ''}".strip(", ") or "your area"
             if not raw_company_intro.strip():
                 raw_company_intro = (

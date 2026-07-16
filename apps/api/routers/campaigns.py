@@ -580,9 +580,17 @@ async def _create_campaign_job(
 
     # Resolve Bot Introduction: use campaign template or default standard intro,
     # then interpolate job-specific details when the child job is added under the campaign.
-    # Matching the job wizard: enhanced_title is prioritized over title, and staffing agency is always Pyramid Consulting.
+    # Matching the job wizard: enhanced_title is prioritized over title, location prefixes are stripped, and staffing agency is always Pyramid Consulting.
+    def _clean_job_title_for_intro(title: str) -> str:
+        if not title:
+            return "role"
+        import re
+        cleaned = re.sub(r'^(?:US|USA|CAN|CANADA|UK|INDIA|MEX|APAC|EMEA|LATAM|[A-Z]{2,3}(?:\/[A-Z]{2,3})?)\s*[-:/|]\s*', '', str(title), flags=re.IGNORECASE).strip()
+        return cleaned or "role"
+
     raw_intro = campaign.get("bot_introduction") or ""
-    job_title_str = (data.get("enhanced_title") or data.get("title") or campaign.get("template_enhanced_title") or "role").strip()
+    raw_title_str = (data.get("enhanced_title") or data.get("title") or campaign.get("template_enhanced_title") or "role").strip()
+    job_title_str = _clean_job_title_for_intro(raw_title_str)
     job_location_str = (
         f"{data.get('city')}, {data.get('state')}".strip(", ")
         if (data.get("city") and data.get("state"))
