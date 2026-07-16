@@ -20,6 +20,12 @@ export const SCREENING_LEVELS: { value: ScreeningLevel; label: string; hint: str
   { value: "L2", label: "L2", hint: "Deep Screen" },
 ];
 
+export function formatScreeningLevel(level?: string | null): string {
+  if (!level) return "—";
+  const found = SCREENING_LEVELS.find((s) => s.value === level);
+  return found ? `${found.label} · ${found.hint}` : level;
+}
+
 export const JOB_BOARDS = ["LinkedIn", "Indeed", "Dice", "Monster", "CareerBuilder"];
 
 export interface CampaignChildJob {
