@@ -344,7 +344,7 @@ async def delete_campaign(campaign_id: str, user: UserIdentity = Depends(get_cur
         raise HTTPException(status_code=500, detail="Failed to delete campaign")
 
 
-async def _seed_job_rubric(campaign: Dict[str, Any], ref: str) -> None:
+async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction: Optional[str] = None) -> None:
     """Seed a child job's rubric + screening-questions satellite tables from the
     campaign template. Generates custom technical questions for the specific job description
     and merges them with campaign baseline defaults before persisting."""
@@ -431,7 +431,7 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str) -> None:
             jobdiva_id=canonical_ref,
             rubric_obj=rubric_payload,
             recruiter_notes=campaign.get("recruiter_notes"),
-            bot_introduction=campaign.get("bot_introduction"),
+            bot_introduction=bot_introduction,
         )
 
         sourcing_payload = dict(template_sourcing) if isinstance(template_sourcing, dict) and template_sourcing else {}
@@ -605,9 +605,10 @@ async def _create_campaign_job(
             f"for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
         )
     else:
-        raw_intro = raw_intro.replace("{{job_title}}", job_title_str).replace("{{title}}", job_title_str)
-        raw_intro = raw_intro.replace("{{job_location}}", job_location_str).replace("{{location}}", job_location_str)
-        raw_intro = raw_intro.replace("{{customer_name}}", "Pyramid Consulting").replace("{{company}}", "Pyramid Consulting")
+        import re
+        raw_intro = re.sub(r'\{\{\s*(?:job_title|title)\s*\}\}|\{\s*(?:job_title|title)\s*\}', job_title_str, raw_intro, flags=re.IGNORECASE)
+        raw_intro = re.sub(r'\{\{\s*(?:job_location|location)\s*\}\}|\{\s*(?:job_location|location)\s*\}', job_location_str, raw_intro, flags=re.IGNORECASE)
+        raw_intro = re.sub(r'\{\{\s*(?:customer_name|company)\s*\}\}|\{\s*(?:customer_name|company)\s*\}', 'Pyramid Consulting', raw_intro, flags=re.IGNORECASE)
         seed_title = (campaign.get("template_enhanced_title") or "").strip()
         if seed_title and seed_title in raw_intro and seed_title != job_title_str and job_title_str:
             raw_intro = raw_intro.replace(seed_title, job_title_str)
@@ -631,9 +632,9 @@ async def _create_campaign_job(
 
     ok = jobdiva_service.monitor_job_locally(data["job_id"], data)
     if ok:
-        await _seed_job_rubric(campaign, ref)
+        await _seed_job_rubric(campaign, ref, bot_introduction=raw_intro)
         if ref != str(data["job_id"]):
-            await _seed_job_rubric(campaign, str(data["job_id"]))
+            await _seed_job_rubric(campaign, str(data["job_id"]), bot_introduction=raw_intro)
 
     return {
         "jobdiva_id": jobdiva_id or "",
