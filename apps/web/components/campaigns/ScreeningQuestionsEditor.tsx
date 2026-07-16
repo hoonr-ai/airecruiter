@@ -86,7 +86,7 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
     <div className="space-y-3">
       {/* Column headers — mirrors job wizard */}
       {questions.length > 0 && (
-        <div className="flex items-center gap-3 text-[11px] font-bold uppercase tracking-wider text-slate-500 pb-2 border-b-2 border-slate-200">
+        <div className="flex items-center gap-3 text-[11px] font-bold uppercase tracking-wider text-slate-500 pb-2 border-b-2 border-slate-200 mb-2">
           <div className="w-5 flex-shrink-0" />
           <div className="w-8 flex-shrink-0">#</div>
           <div className="flex-1">Question</div>
@@ -141,7 +141,6 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
             <textarea
               value={q.question_text ?? ""}
               onChange={(e) => update(index, { question_text: e.target.value })}
-              placeholder="Question the screening bot asks"
               rows={3}
               className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium resize-none whitespace-pre-wrap break-words"
             />
@@ -169,11 +168,6 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
                 role-specific
               </span>
             )}
-            {q.category === "default" && (
-              <span className="bg-slate-50 text-slate-500 text-[9px] font-bold px-1.5 py-0.5 rounded border border-slate-200 whitespace-nowrap mb-1">
-                default
-              </span>
-            )}
             <button
               type="button"
               onClick={() => remove(index)}
@@ -186,7 +180,7 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
         </div>
       ))}
 
-      {/* Toolbar — Add + Regenerate */}
+      {/* Toolbar — Add Question */}
       <div className="flex gap-2 mt-3 items-start flex-wrap">
         <Button
           type="button"

@@ -220,7 +220,7 @@ export default function NewCampaignPage() {
   };
 
   return (
-    <div className="max-w-3xl mx-auto pb-24">
+    <div className="max-w-6xl mx-auto pb-24">
       <Link
         href="/campaigns"
         className="inline-flex items-center text-sm text-slate-500 hover:text-slate-800 mb-4"
