@@ -351,8 +351,6 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
     template_rubric = campaign.get("template_rubric") or {}
     template_questions = list(campaign.get("template_screen_questions") or [])
     template_sourcing = campaign.get("template_sourcing_filters") or {}
-    if not (template_rubric or template_questions or template_sourcing):
-        return
     try:
         from services.job_rubric_db import JobRubricDB
         from routers._helpers import get_db_connection
@@ -371,7 +369,7 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT jobdiva_id, title, jobdiva_description, city, location_type, screening_level 
+                    SELECT jobdiva_id, title, jobdiva_description, city, location_type, screening_level, enhanced_title 
                     FROM monitored_jobs WHERE jobdiva_id = %s OR job_id = %s LIMIT 1
                     """,
                     (ref, ref),
@@ -379,11 +377,14 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
                 row = cur.fetchone()
                 if row:
                     canonical_ref = row[0] or ref
-                    job_title = row[1] or ""
+                    job_title = (row[6] or row[1] or "").strip()
                     job_desc = row[2] or ""
                     city = row[3] or ""
                     loc_type = row[4] or "Onsite"
                     screening_lvl = row[5] or "L1.5"
+
+        if not (template_rubric or template_questions or template_sourcing or bot_introduction or campaign.get("template_enhanced_title") or campaign.get("template_ai_description") or job_title or job_desc):
+            return
 
         # Generate dynamic technical/role-specific questions for this job description
         try:
@@ -589,7 +590,8 @@ async def _create_campaign_job(
         return cleaned or "role"
 
     raw_intro = campaign.get("bot_introduction") or ""
-    raw_title_str = (data.get("enhanced_title") or data.get("title") or campaign.get("template_enhanced_title") or "role").strip()
+    enhanced_title_val = (campaign.get("template_enhanced_title") or data.get("title") or "").strip()
+    raw_title_str = (enhanced_title_val or data.get("title") or "role").strip()
     job_title_str = _clean_job_title_for_intro(raw_title_str)
     job_location_str = (
         f"{data.get('city')}, {data.get('state')}".strip(", ")
