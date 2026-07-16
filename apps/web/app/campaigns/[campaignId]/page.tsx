@@ -304,11 +304,17 @@ export default function CampaignDetailPage() {
               : "—"}
           </Stat>
           <Stat icon={<Mail className="h-4 w-4" />} label="Recruiters">
-            <span className="block truncate" title={campaign.recruiter_emails?.join(", ")}>
-              {campaign.recruiter_emails?.length
-                ? campaign.recruiter_emails.join(", ")
-                : "—"}
-            </span>
+            {campaign.recruiter_emails?.length ? (
+              <div className="space-y-0.5">
+                {campaign.recruiter_emails.map((email) => (
+                  <span key={email} className="block truncate" title={email}>
+                    {email}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              "—"
+            )}
           </Stat>
           <Stat icon={<Briefcase className="h-4 w-4" />} label="Job Boards">
             {campaign.selected_job_boards?.length ? campaign.selected_job_boards.join(", ") : "—"}
@@ -696,7 +702,7 @@ function Stat({
         {icon}
         {label}
       </div>
-      <p className="text-sm text-slate-800 mt-1 font-medium">{children}</p>
+      <div className="text-sm text-slate-800 mt-1 font-medium">{children}</div>
     </div>
   );
 }
