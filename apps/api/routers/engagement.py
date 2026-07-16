@@ -782,9 +782,9 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                     f"Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
                 )
             else:
-                raw_company_intro = raw_company_intro.replace("{{job_title}}", job_t).replace("{{title}}", job_t)
-                raw_company_intro = raw_company_intro.replace("{{job_location}}", job_l).replace("{{location}}", job_l)
-                raw_company_intro = raw_company_intro.replace("{{customer_name}}", "Pyramid Consulting").replace("{{company}}", "Pyramid Consulting")
+                raw_company_intro = re.sub(r'\{\{\s*(?:job_title|title)\s*\}\}|\{\s*(?:job_title|title)\s*\}', job_t, raw_company_intro, flags=re.IGNORECASE)
+                raw_company_intro = re.sub(r'\{\{\s*(?:job_location|location)\s*\}\}|\{\s*(?:job_location|location)\s*\}', job_l, raw_company_intro, flags=re.IGNORECASE)
+                raw_company_intro = re.sub(r'\{\{\s*(?:customer_name|company)\s*\}\}|\{\s*(?:customer_name|company)\s*\}', 'Pyramid Consulting', raw_company_intro, flags=re.IGNORECASE)
 
         # Assemble final payload matching pairbotqa /api/bulk-interviews schema
         payload = {
