@@ -303,7 +303,11 @@ export default function CampaignDetailPage() {
               : "—"}
           </Stat>
           <Stat icon={<Mail className="h-4 w-4" />} label="Recruiters">
-            {campaign.recruiter_emails?.length ?? 0}
+            <span className="block truncate" title={campaign.recruiter_emails?.join(", ")}>
+              {campaign.recruiter_emails?.length
+                ? campaign.recruiter_emails.join(", ")
+                : "—"}
+            </span>
           </Stat>
           <Stat icon={<Briefcase className="h-4 w-4" />} label="Job Boards">
             {campaign.selected_job_boards?.length ? campaign.selected_job_boards.join(", ") : "—"}
