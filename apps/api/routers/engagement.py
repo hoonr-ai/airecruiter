@@ -764,12 +764,11 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
 
         raw_company_intro = (job_row.get("bot_introduction") or "") if job_row else ""
         if job_row:
-            job_t = job_row.get("enhanced_title") or job_row.get("title") or ""
+            job_t = (job_row.get("enhanced_title") or job_row.get("title") or "role").strip()
             job_l = f"{job_row.get('city') or ''}, {job_row.get('state') or ''}".strip(", ") or "your area"
-            job_c = job_row.get("customer_name") or "our client"
             if not raw_company_intro.strip():
                 raw_company_intro = (
-                    f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with {job_c}. "
+                    f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with Pyramid Consulting. "
                     f"We are helping our client recruit for a {job_t} in {job_l}, and you seem to be a good fit for the role. "
                     f"Please note that conversation may be recorded for verification and quality purposes. "
                     f"Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
@@ -777,7 +776,7 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
             else:
                 raw_company_intro = raw_company_intro.replace("{{job_title}}", job_t).replace("{{title}}", job_t)
                 raw_company_intro = raw_company_intro.replace("{{job_location}}", job_l).replace("{{location}}", job_l)
-                raw_company_intro = raw_company_intro.replace("{{customer_name}}", job_c).replace("{{company}}", job_c)
+                raw_company_intro = raw_company_intro.replace("{{customer_name}}", "Pyramid Consulting").replace("{{company}}", "Pyramid Consulting")
 
         # Assemble final payload matching pairbotqa /api/bulk-interviews schema
         payload = {

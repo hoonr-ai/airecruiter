@@ -182,9 +182,8 @@ async def create_campaign(campaign: CampaignData, user: UserIdentity = Depends(g
         data["campaign_id"] = campaign_id
 
         if not (data.get("bot_introduction") or "").strip():
-            cust = data.get("customer_name") or "our client"
             data["bot_introduction"] = (
-                f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with {cust}. "
+                f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with Pyramid Consulting. "
                 f"We are helping our client recruit for a {{{{job_title}}}} in {{{{job_location}}}}, "
                 f"and you seem to be a good fit for the role. Please note that conversation may be recorded "
                 f"for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
@@ -580,19 +579,19 @@ async def _create_campaign_job(
         }
 
     # Resolve Bot Introduction: use campaign template or default standard intro,
-    # then interpolate job-specific details when the job is added under the campaign.
+    # then interpolate job-specific details when the child job is added under the campaign.
+    # Matching the job wizard: enhanced_title is prioritized over title, and staffing agency is always Pyramid Consulting.
     raw_intro = campaign.get("bot_introduction") or ""
-    job_title_str = data.get("enhanced_title") or data.get("title") or campaign.get("template_enhanced_title") or ""
+    job_title_str = (data.get("enhanced_title") or data.get("title") or campaign.get("template_enhanced_title") or "role").strip()
     job_location_str = (
         f"{data.get('city')}, {data.get('state')}".strip(", ")
         if (data.get("city") and data.get("state"))
-        else (data.get("city") or data.get("state") or "United States")
+        else (data.get("city") or data.get("state") or "your area")
     )
-    customer_str = data.get("customer_name") or campaign.get("customer_name") or "our client"
 
     if not raw_intro.strip():
         raw_intro = (
-            f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with {customer_str}. "
+            f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with Pyramid Consulting. "
             f"We are helping our client recruit for a {job_title_str} in {job_location_str}, "
             f"and you seem to be a good fit for the role. Please note that conversation may be recorded "
             f"for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
@@ -600,8 +599,8 @@ async def _create_campaign_job(
     else:
         raw_intro = raw_intro.replace("{{job_title}}", job_title_str).replace("{{title}}", job_title_str)
         raw_intro = raw_intro.replace("{{job_location}}", job_location_str).replace("{{location}}", job_location_str)
-        raw_intro = raw_intro.replace("{{customer_name}}", customer_str).replace("{{company}}", customer_str)
-        seed_title = campaign.get("template_enhanced_title") or ""
+        raw_intro = raw_intro.replace("{{customer_name}}", "Pyramid Consulting").replace("{{company}}", "Pyramid Consulting")
+        seed_title = (campaign.get("template_enhanced_title") or "").strip()
         if seed_title and seed_title in raw_intro and seed_title != job_title_str and job_title_str:
             raw_intro = raw_intro.replace(seed_title, job_title_str)
 
