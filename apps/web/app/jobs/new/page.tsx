@@ -221,10 +221,17 @@ function buildAutoBotIntroduction({
   country: string;
   location: string;
 }): string {
-  const introTitle = (title || "role").trim() || "role";
+  const introTitle = cleanJobTitleForIntro(title);
   return isRemote
     ? `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a remote ${introTitle} based in ${country}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`
     : `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+}
+
+function cleanJobTitleForIntro(title: string): string {
+  if (!title) return "role";
+  let cleaned = title.trim();
+  cleaned = cleaned.replace(/^(?:US|USA|CAN|CANADA|UK|INDIA|MEX|APAC|EMEA|LATAM|[A-Z]{2,3}(?:\/[A-Z]{2,3})?)\s*[-:/|]\s*/i, "").trim();
+  return cleaned || "role";
 }
 
 function matchesAutoBotIntroductionTemplate({
@@ -246,13 +253,19 @@ function matchesAutoBotIntroductionTemplate({
     const candidateTitle = (rawTitle || "").trim() || "role";
     if (seen.has(candidateTitle)) continue;
     seen.add(candidateTitle);
-    const template = buildAutoBotIntroduction({
+    const templateRaw = buildAutoBotIntroduction({
       title: candidateTitle,
       isRemote,
       country,
       location,
     }).trim().replace(/\s+/g, " ");
-    if (normalizedIntro === template) return true;
+    const templateCleaned = buildAutoBotIntroduction({
+      title: cleanJobTitleForIntro(candidateTitle),
+      isRemote,
+      country,
+      location,
+    }).trim().replace(/\s+/g, " ");
+    if (normalizedIntro === templateRaw || normalizedIntro === templateCleaned) return true;
   }
   return false;
 }
@@ -4527,11 +4540,11 @@ function NewJobPageContent() {
     );
 
     // 1. Bot Introduction
-    const introTitle = (enhancedTitle || jobTitle || "role").trim();
+    const introTitle = cleanJobTitleForIntro(enhancedTitle || jobTitle || "role");
     const intro = isRemote
       ? `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a remote ${introTitle} based in ${country}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`
       : `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
-    setBotIntroduction(prev => (prev && prev.trim().length > 0 ? prev : intro));
+    setBotIntroduction(prev => (prev && prev.trim().length > 0 && botIntroductionEditedRef.current ? prev : intro));
 
     // 2. Default Questions — arrangement-aware, address-aware. The onsite/hybrid
     // question is a preference check, not a hard filter; recruiters can flip
