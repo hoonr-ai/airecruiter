@@ -80,7 +80,8 @@ export default function NewCampaignPage() {
   const [empTypes, setEmpTypes] = useState<string[]>([]);
   const [screeningLevel, setScreeningLevel] = useState("L1.5");
   const [jobBoards, setJobBoards] = useState<string[]>([]);
-  const [botIntro, setBotIntro] = useState("");
+  const defaultBotIntro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a {{job_title}} in {{job_location}}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+  const [botIntro, setBotIntro] = useState(defaultBotIntro);
   const [recruiterNotes, setRecruiterNotes] = useState("");
   const [jobTitle, setJobTitle] = useState("");
   const [seedNotes, setSeedNotes] = useState("");
