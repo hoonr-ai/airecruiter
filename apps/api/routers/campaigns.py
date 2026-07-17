@@ -189,6 +189,9 @@ async def create_campaign(campaign: CampaignData, user: UserIdentity = Depends(g
                 f"for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
             )
 
+        if not data.get("template_screen_questions"):
+            data["template_screen_questions"] = _get_default_campaign_questions()
+
         values = [_param_value(col, data.get(col)) for col in _COLUMNS]
         placeholders = ", ".join(["%s"] * len(_COLUMNS))
         update_set = ", ".join(
@@ -344,32 +347,125 @@ async def delete_campaign(campaign_id: str, user: UserIdentity = Depends(get_cur
         raise HTTPException(status_code=500, detail="Failed to delete campaign")
 
 
+def _get_default_campaign_questions() -> List[Dict[str, Any]]:
+    """Return the standard 8-9 default non-role-specific screening questions exactly matching the Job Wizard,
+    automatically seeded onto every campaign and inherited by all child jobs before role-specific questions are appended."""
+    return [
+        {
+            "question_text": "Are you open to exploring new job opportunities?",
+            "pass_criteria": "Must be open to new job opportunities",
+            "category": "default",
+            "related_skill": "",
+            "is_default": True,
+            "is_hard_filter": False,
+            "order_index": 0,
+        },
+        {
+            "question_text": "What is your current or most recent role and key responsibilities?",
+            "pass_criteria": "",
+            "category": "default",
+            "related_skill": "",
+            "is_default": True,
+            "is_hard_filter": False,
+            "order_index": 1,
+        },
+        {
+            "question_text": "What is your current location?",
+            "pass_criteria": "",
+            "category": "default",
+            "related_skill": "",
+            "is_default": True,
+            "is_hard_filter": False,
+            "order_index": 2,
+        },
+        {
+            "question_text": "This role follows an onsite/hybrid work arrangement based in the job location. Are you open to working in this setup?",
+            "pass_criteria": "Must be open to onsite/hybrid work arrangement",
+            "category": "work-arrangement",
+            "related_skill": "",
+            "is_default": True,
+            "is_hard_filter": True,
+            "order_index": 3,
+        },
+        {
+            "question_text": "What is your earliest availability to start a new role?",
+            "pass_criteria": "",
+            "category": "logistics",
+            "related_skill": "",
+            "is_default": True,
+            "is_hard_filter": False,
+            "order_index": 4,
+        },
+        {
+            "question_text": "What is your expected compensation for this role?",
+            "pass_criteria": "",
+            "category": "logistics",
+            "related_skill": "",
+            "is_default": True,
+            "is_hard_filter": False,
+            "order_index": 5,
+        },
+        {
+            "question_text": "Which types of working arrangements are you open to and eligible for? Select all that apply: W2 Employee, Subcontractor to Pyramid through your current employer, Independent Contractor",
+            "pass_criteria": "",
+            "category": "logistics",
+            "related_skill": "",
+            "is_default": True,
+            "is_hard_filter": False,
+            "order_index": 6,
+        },
+        {
+            "question_text": "Are you authorized to work indefinitely for any employer in the United States?",
+            "pass_criteria": "",
+            "category": "logistics",
+            "related_skill": "",
+            "is_default": True,
+            "is_hard_filter": False,
+            "order_index": 7,
+        },
+        {
+            "question_text": "Will you now or in the future require visa sponsorship to continue working in the United States?",
+            "pass_criteria": "",
+            "category": "logistics",
+            "related_skill": "",
+            "is_default": True,
+            "is_hard_filter": False,
+            "order_index": 8,
+        },
+    ]
+
+
 async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction: Optional[str] = None) -> None:
-    """Seed a child job's rubric + screening-questions satellite tables from the
-    campaign template. Generates custom technical questions for the specific job description
-    and merges them with campaign baseline defaults before persisting."""
-    template_rubric = campaign.get("template_rubric") or {}
-    template_questions = list(campaign.get("template_screen_questions") or [])
-    template_sourcing = campaign.get("template_sourcing_filters") or {}
+    """Seed a child job's AI JD (Step 2), Rubric (Step 3), and Screening Questions (Step 4)
+    automatically when added to a campaign, so when Review & Launch is clicked, all data
+    is 100% ready for candidate sourcing & launching."""
+    template_questions = list(campaign.get("template_screen_questions") or _get_default_campaign_questions())
     try:
         from services.job_rubric_db import JobRubricDB
         from routers._helpers import get_db_connection
         import json
+        from core.llm_client import get_openai_client
+        from core.config import OPENAI_API_KEY
+        from services.job_skills_extractor import JobSkillsExtractor
+        from dataclasses import asdict
 
-        # Always resolve to the *canonical* jobdiva_id stored in monitored_jobs
-        # and retrieve child-job details to generate tailored questions.
         canonical_ref = ref
         job_title = ""
         job_desc = ""
         city = ""
+        state = ""
         loc_type = "Onsite"
         screening_lvl = "L1.5"
+        job_recruiter_notes = None
+        ai_description = ""
+        customer_name = campaign.get("customer_name") or ""
+        numeric_job_id = ""
 
         with get_db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT jobdiva_id, title, jobdiva_description, city, location_type, screening_level, enhanced_title 
+                    SELECT jobdiva_id, title, jobdiva_description, city, location_type, screening_level, enhanced_title, recruiter_notes, ai_description, state, customer_name, job_id
                     FROM monitored_jobs WHERE jobdiva_id = %s OR job_id = %s LIMIT 1
                     """,
                     (ref, ref),
@@ -382,61 +478,233 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
                     city = row[3] or ""
                     loc_type = row[4] or "Onsite"
                     screening_lvl = row[5] or "L1.5"
+                    job_recruiter_notes = row[7] if len(row) > 7 else None
+                    ai_description = row[8] or ""
+                    state = row[9] or ""
+                    if row[10]:
+                        customer_name = row[10]
+                    numeric_job_id = str(row[11] or canonical_ref)
 
-        if not (template_rubric or template_questions or template_sourcing or bot_introduction or campaign.get("template_enhanced_title") or campaign.get("template_ai_description") or job_title or job_desc):
+        if not (job_title or job_desc):
             return
 
-        # Generate dynamic technical/role-specific questions for this job description
-        try:
-            from core.llm_client import get_openai_client
-            from services.screening_question_generator import generate_screening_questions
-            openai_client = get_openai_client()
-            if openai_client:
-                logger.info(f"Generating custom technical questions for child job {canonical_ref}...")
+        # Mimic Job Wizard / jobdiva.py logic: Prioritize job description over JobDiva API for location type parsing.
+        # If API says Remote (or location_type is Remote), but JD text has no remote mention and city != REMOTE,
+        # then correct loc_type to Onsite (or Hybrid if hybrid is mentioned).
+        import re
+        desc_lower = (job_desc or "").lower()
+        has_hybrid = bool(re.search(r'\b(?:hybrid\s+(?:role|position|work|schedule|model|arrangement|option|setting|basis|format|working|opportunity|flexibility))\b', desc_lower))
+        has_onsite = bool(re.search(r'\b(?:onsite|on-site|work\s+on\s+site|working\s+on\s+site|on\s+site\s+(?:work|role|position|basis|location|office|presence|environment|days|requirement|required|mandatory|essential|only))\b', desc_lower))
+        _remote_mention = bool(re.search(r'\bremote\b', desc_lower))
+        _remote_negated = bool(re.search(r'\b(?:not|no|non|never)(?:-|\s+)(?:a\s+|an\s+)?(?:remote|wfh|work\s+from\s+home|(?:wfh/)?remote)\b', desc_lower))
+        has_remote = _remote_mention and not _remote_negated
+
+        if "remote" in (loc_type or "").lower() and not has_remote and (city or "").strip().upper() != "REMOTE":
+            if has_hybrid:
+                loc_type = "Hybrid"
+            else:
+                loc_type = "Onsite"
+            with get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE monitored_jobs SET location_type = %s WHERE jobdiva_id = %s OR job_id = %s",
+                        (loc_type, canonical_ref, canonical_ref)
+                    )
+                    conn.commit()
+            logger.info(f"Corrected location_type from Remote to {loc_type} for campaign child job {canonical_ref} based on JD prioritization.")
+
+        openai_client = get_openai_client()
+
+        # --- Stage 1: Step 2 (AI Job Description & Enhanced Title) ---
+        if not ai_description.strip() and openai_client and OPENAI_API_KEY:
+            try:
+                logger.info(f"Generating AI Job Description (Step 2) for child job {canonical_ref}...")
+                from routers.ai_generation import _hook_seed, OPENAI_MODEL, _is_remote_job
+                
+                notes_block = (job_recruiter_notes or "").strip()
+                recruiter_notes_block = (
+                    "RECRUITER NOTES (HIGHEST PRIORITY — the hiring team wrote these. "
+                    "Quote concrete facts from here VERBATIM: exact years, exact tools, "
+                    "exact certifications, exact location. Do not paraphrase numbers or "
+                    "proper nouns. If a fact appears here, it MUST appear in the output):\n"
+                    f"\"\"\"\n{notes_block}\n\"\"\""
+                    if notes_block else "RECRUITER NOTES: (none provided)"
+                )
+                
+                canonical_title_block = (
+                    f"CANONICAL JOB TITLE (highest priority for naming): {job_title}"
+                    if job_title
+                    else "CANONICAL JOB TITLE: (not specified)"
+                )
+                
+                if _is_remote_job(loc_type, city):
+                    remote_directive_block = (
+                        "REMOTE ROLE DIRECTIVE (highest priority — these instructions override "
+                        "anything in the source JD that says otherwise):\n"
+                        f"- The role is fully remote. Add the sentence \"This is a remote position based in the United States.\" "
+                        "near the top of **The Role** section.\n"
+                        "- Do NOT include a city, state, street address, or zip code anywhere in the body.\n"
+                        "- Do NOT label the role as onsite or hybrid, and do NOT describe a client site.\n"
+                    )
+                else:
+                    remote_directive_block = ""
+
+                yoe_block = "REQUIRED EXPERIENCE: (not specified — infer conservatively from JD if needed)"
+                pay_rate_block = "STRUCTURED PAY RATE: (not specified — only infer from the source JD if explicitly present there)"
+                education_block = "EDUCATION & CERTIFICATIONS:\n(none specified)"
+                certs_block = "ADDITIONAL CERTIFICATIONS:\n(none specified)"
+
+                jd_prompt = (
+                    "You are an expert recruitment copywriter. Your task is to generate a premium, catchy, and concise job description ready for external publication on platforms like LinkedIn and job boards.\n\n"
+                    "STRICT EXTRACTION PRIORITY (You MUST extract concrete facts based on this hierarchy):\n"
+                    "1. HIGHEST PRIORITY - Recruiter Notes & Work Authorization: The recruiter notes are the hiring manager's own words. Quote concrete facts VERBATIM (exact years, exact tools, exact certifications). Reflect Work Authorization clearly if provided.\n"
+                    "2. SECOND PRIORITY - Required Experience & Education blocks: If a Required Experience figure is provided, bold it in 'What You Bring'. If Education or Certifications are listed, render them under 'What You Bring' grouped by Required vs Preferred — do NOT drop them.\n"
+                    "3. THIRD PRIORITY - Existing Job Description: Mine for concrete facts (tools, duties, domain terms) missing from the blocks above. Do NOT summarize away specific numbers like '10 years of experience'.\n"
+                    "4. LAST PRIORITY - Job Title: Use this for general context and naming conventions.\n\n"
+                    f"Input Data:\n"
+                    f"{recruiter_notes_block}\n\n"
+                    f"{remote_directive_block}{chr(10) if remote_directive_block else ''}"
+                    f"{canonical_title_block}\n\n"
+                    f"Work Authorization: (not specified)\n\n"
+                    f"{pay_rate_block}\n\n"
+                    f"{yoe_block}\n\n"
+                    f"{education_block}\n\n"
+                    f"{certs_block}\n\n"
+                    f"Existing Job Description:\n\"\"\"\n{job_desc}\n\"\"\"\n\n"
+                    f"Job Title: {job_title}\n\n"
+                    "MANDATORY CONTENT (non-negotiable):\n"
+                    "- The CANONICAL JOB TITLE is authoritative. Use that exact role naming throughout the output, even if the raw source JD contains an older or alternate title variation.\n"
+                    "- Do NOT reintroduce discarded title fragments, prefixes, or suffixes from the source JD when the canonical title already provides the cleaned title.\n"
+                    "- If Structured Pay Rate is provided, the **Pay Rate Transparency** section MUST use that exact value verbatim.\n"
+                    "- If Required Experience is provided, the phrase '**X+ years**' MUST appear in 'What You Bring'.\n"
+                    "- Every Required education/certification item MUST appear as a bullet in 'What You Bring'; Preferred items go in a 'Nice to have' bullet set under the same section.\n"
+                    "- Every concrete fact in Recruiter Notes (named tools, certifications, domain terms, numeric thresholds) MUST be reflected in the output.\n\n"
+                    "STYLING & STRUCTURE INSTRUCTIONS:\n"
+                    "- Format headers by using **Bold Title Case** (e.g., **The Role**).\n"
+                    "- Format bullet points by starting the line with the • bullet (e.g., • Responsibility details).\n"
+                    "- DO NOT use Markdown headings (no #).\n"
+                    "- ACTIVELY use bolding (**bold**) and italics (*italic*) to emphasize important keywords (e.g., years of experience, specific tools).\n"
+                    "- MANDATORY BOLDING: You MUST bold the **Location** (e.g., **New York, NY**) whenever it appears in the main body.\n"
+                    "- ZIP CODE REMOVAL: Do NOT include zip codes or postal codes in any location mention. Always format locations as City, State only (e.g., Austin, TX — not Austin, TX 73301).\n"
+                    "- PAY RATE RULE: The Pay Rate MUST appear ONLY in the **Pay Rate Transparency** section. DO NOT mention the pay rate, salary, or compensation anywhere in the other sections (THE ROLE, WHAT YOU'LL DO, WHAT YOU BRING, WHY WORK WITH US). Bold the pay rate only inside the **Pay Rate Transparency** section.\n"
+                    "- PAY RATE FORMAT: When extracting the pay rate, you MUST preserve the EXACT range from the source. If a range is given (e.g., $62 - $62.80/hour or $60 - $80/hour), use the full range — do NOT reduce it to a single value. Only use a single value if the source explicitly provides just one fixed rate.\n"
+                    "- STRICT REMOVAL: You MUST NOT include the following internal fields in the final output, regardless of whether they appear in the Job Notes or the original Job Description: Bill Rate, Hiring Manager, Customer Name, and Option Ref No.\n"
+                    "- DO NOT use any emojis anywhere in the text.\n"
+                    f"- START with a catchy, unique 2–3 sentence opening tailored to this specific role and domain. The very first word of the opening MUST be '{_hook_seed()}' — build the hook naturally from there. Draw from the job's actual requirements, industry, or challenge. Make it compelling and specific, not generic.\n"
+                    "- INCLUDE sections in this EXACT order: **The Role**, **Pay Rate Transparency**, **What You'll Do**, **What You Bring**, and **Why Work With Us**.\n"
+                    "- SECTION CONTENT: Use the following for the Pay Rate Transparency section:\n\n"
+                    "**Pay Rate Transparency**\n"
+                    "Pay Range: [Extracted Pay Rate or XX-XX]/hour. Employee benefits include, but are not limited to, health insurance (medical, dental, vision), 401(k) plan, and paid sick leave (depending on work location).\n\n"
+                    "- MANDATORY FINAL SECTION: You MUST append the following exactly as written to the very end of the job description:\n\n"
+                    "**Equal Employment Opportunity**\n"
+                    "Pyramid Consulting, Inc. provides equal employment opportunities to all employees and applicants for employment and prohibits discrimination and harassment of any type without regard to race, colour, religion, age, sex, national origin, disability status, genetics, protected veteran status, sexual orientation, gender identity or expression, or any other characteristic protected by federal, state, or local laws.\n"
+                    "By applying to our jobs, you agree to receive calls, AI-generated calls, text messages, or emails from Pyramid Consulting, Inc. and its affiliates, and contracted partners. Frequency varies for text messages. Message and data rates may apply. Carriers are not liable for delayed or undelivered messages. You can reply STOP to cancel and HELP for help. You can access our privacy policy [here](https://pyramidci.com).\n\n"
+                    "- Use professional and engaging language. Avoid generic corporate speak.\n"
+                    "- Be concise but impactful. Focus on value propositions.\n"
+                    "- Ensure the final output is a unified, cohesive narrative that feels like it was written by a human expert.\n\n"
+                    "Return ONLY the final formatted job description text. No preamble or meta-commentary."
+                )
+                completion = await openai_client.chat.completions.create(
+                    model=OPENAI_MODEL if OPENAI_MODEL else "gpt-4o",
+                    messages=[
+                        {"role": "system", "content": "You are an expert recruitment copywriter."},
+                        {"role": "user", "content": jd_prompt}
+                    ],
+                    temperature=0.3,
+                    timeout=45,
+                )
+                ai_description = completion.choices[0].message.content or ""
+                if ai_description.strip():
+                    with get_db_connection() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE monitored_jobs SET ai_description = %s, enhanced_title = COALESCE(enhanced_title, %s) WHERE jobdiva_id = %s OR job_id = %s",
+                                (ai_description.strip(), job_title, canonical_ref, canonical_ref)
+                            )
+                            conn.commit()
+                    logger.info(f"Generated and saved AI JD for {canonical_ref}.")
+            except Exception as jd_err:
+                logger.warning(f"AI JD generation failed for child job {canonical_ref}: {jd_err}")
+
+        # --- Stage 2: Step 3 (Skills Rubric) ---
+        rubric_payload = {}
+        if OPENAI_API_KEY:
+            try:
+                logger.info(f"Generating full Skills Rubric (Step 3) for child job {canonical_ref}...")
+                extractor = JobSkillsExtractor(OPENAI_API_KEY)
+                location_str = f"{city}, {state}".strip(", ") if (city or state) else city
+                rubric_obj = await extractor.extract_full_rubric(
+                    job_id=numeric_job_id or canonical_ref,
+                    job_title=job_title,
+                    enhanced_job_title=job_title,
+                    jobdiva_description=job_desc,
+                    ai_description=ai_description or job_desc,
+                    recruiter_notes=job_recruiter_notes or "",
+                    customer_name=customer_name,
+                    job_location=location_str,
+                    location_type=loc_type
+                )
+                rubric_payload = asdict(rubric_obj)
+                logger.info(f"Generated Skills Rubric for {canonical_ref} ({len(rubric_payload.get('required_skills') or [])} required skills).")
+            except Exception as rubric_err:
+                logger.warning(f"Skills Rubric generation failed for child job {canonical_ref}: {rubric_err}")
+
+        # --- Stage 3: Step 4 (Screening Questions) ---
+        from services.screening_question_generator import _is_remote_role
+        is_remote = _is_remote_role(loc_type, city)
+        arrangement_label = "a hybrid" if "hybrid" in (loc_type or "").lower() else "an onsite"
+        loc_str = city.strip() if city else "the job location"
+        tailored_defaults = []
+        for q in template_questions:
+            q_copy = dict(q)
+            if q_copy.get("category") == "work-arrangement" or "work arrangement based in" in q_copy.get("question_text", ""):
+                if is_remote:
+                    continue  # skip onsite/hybrid question for remote jobs
+                q_copy["question_text"] = f"This role follows {arrangement_label} work arrangement based in {loc_str}. Are you open to working in this setup?"
+                q_copy["pass_criteria"] = f"Must be open to {arrangement_label} work arrangement"
+            tailored_defaults.append(q_copy)
+        template_questions = tailored_defaults
+
+        if openai_client and rubric_payload:
+            try:
+                from services.screening_question_generator import generate_screening_questions
+                logger.info(f"Generating custom technical questions (Step 4) for child job {canonical_ref} using rich rubric...")
                 tech_questions = await generate_screening_questions(
                     openai_client=openai_client,
                     model="gpt-4o-mini",
                     job_title=job_title,
-                    rubric=template_rubric,
+                    rubric=rubric_payload,
                     screening_level=screening_lvl,
-                    customer_name=campaign.get("customer_name") or "",
-                    job_description=job_desc,
+                    customer_name=customer_name,
+                    job_description=ai_description or job_desc,
                     work_arrangement=loc_type,
                     city=city,
                 )
-                # Filter: keep only technical/role-specific questions from the generated set.
-                # Exclude generic front-matter and logistics categories that come from the LLM.
                 _EXCLUDE_CATS = {"default", "work-arrangement", "intro", "logistics"}
                 tech_only = [
                     q for q in (tech_questions or [])
                     if str((q or {}).get("category", "")).lower() not in _EXCLUDE_CATS
                 ]
                 logger.info(f"Generated {len(tech_only)} custom technical questions for child job {canonical_ref}.")
-
-                # Target order:
-                #   [default / intro / behavioral]   ← campaign template questions
-                #   [logistics tail]                  ← availability, compensation, work-auth
-                #   [role-specific tech]              ← always at the very end
                 template_questions = template_questions + tech_only
-
-                # Re-index the full merged list sequentially to avoid order_index collisions.
                 for _i, _q in enumerate(template_questions):
                     _q["order_index"] = _i
-        except Exception as gen_err:
-            logger.warning(f"Technical question generation failed for child job {canonical_ref}: {gen_err}")
+            except Exception as gen_err:
+                logger.warning(f"Technical question generation failed for child job {canonical_ref}: {gen_err}")
 
-        rubric_payload = dict(template_rubric)
         if template_questions:
             rubric_payload["screen_questions"] = template_questions
+
         JobRubricDB().save_full_rubric(
             jobdiva_id=canonical_ref,
             rubric_obj=rubric_payload,
-            recruiter_notes=campaign.get("recruiter_notes"),
+            recruiter_notes=job_recruiter_notes if job_recruiter_notes is not None else campaign.get("recruiter_notes"),
             bot_introduction=bot_introduction,
         )
 
         sourcing_payload = dict(template_sourcing) if isinstance(template_sourcing, dict) and template_sourcing else {}
-        if not sourcing_payload and template_rubric:
+        active_rubric = rubric_payload if (rubric_payload and (rubric_payload.get("skills") or rubric_payload.get("titles"))) else template_rubric
+        if not sourcing_payload and active_rubric:
             titles = [
                 {
                     "id": i + 1,
@@ -448,7 +716,7 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
                     "similarTitles": [],
                     "fromRubric": True,
                 }
-                for i, t in enumerate(template_rubric.get("titles") or [])
+                for i, t in enumerate(active_rubric.get("titles") or [])
             ]
             skills = [
                 {
@@ -461,7 +729,7 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
                     "similarSkills": [],
                     "fromRubric": True,
                 }
-                for i, s in enumerate(template_rubric.get("skills") or [])
+                for i, s in enumerate(active_rubric.get("skills") or [])
             ]
             sourcing_payload = {
                 "sources": {"jobdiva": True, "linkedin": False, "dice": False, "exa": False},
@@ -476,7 +744,7 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
 
         resume_filters = []
         filter_id = 1
-        for title in (template_rubric.get("titles") or []):
+        for title in (active_rubric.get("titles") or []):
             is_req = title.get("required") == "Required"
             cat = "Required Title" if is_req else "Preferred Title"
             val = title.get("value", "")
@@ -485,7 +753,7 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
                 "id": filter_id, "category": cat, "value": display, "active": is_req, "ai": True, "fromRubric": True, "rubricKey": f"{cat}:{val.split('—')[0].strip().lower()}", "weight": 1
             })
             filter_id += 1
-        for skill in (template_rubric.get("skills") or []):
+        for skill in (active_rubric.get("skills") or []):
             is_req = skill.get("required") == "Required"
             cat = "Required Skill" if is_req else "Preferred Skill"
             val = skill.get("value", "")
@@ -494,11 +762,19 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
                 "id": filter_id, "category": cat, "value": display, "active": is_req, "ai": True, "fromRubric": True, "rubricKey": f"{cat}:{val.split('—')[0].strip().lower()}", "weight": 1
             })
             filter_id += 1
-        for edu in (template_rubric.get("education") or []):
+        for edu in (active_rubric.get("education") or []):
             is_req = edu.get("required") == "Required"
             display = f"{edu.get('degree', '')}{' in ' + edu.get('field', '') if edu.get('field') else ''}"
             resume_filters.append({
                 "id": filter_id, "category": "Education", "value": display, "active": is_req, "ai": True, "fromRubric": True, "rubricKey": f"Education:{display.split('—')[0].strip().lower()}", "weight": 1
+            })
+            filter_id += 1
+        for dom in (active_rubric.get("domain") or []):
+            val = dom.get("value", "")
+            if not val: continue
+            is_req = dom.get("required") == "Required"
+            resume_filters.append({
+                "id": filter_id, "category": "Domain", "value": val, "active": is_req, "ai": True, "fromRubric": True, "rubricKey": f"Domain:{val.strip().lower()}", "weight": 1
             })
             filter_id += 1
 
@@ -507,13 +783,13 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
                 cur.execute("""
                     UPDATE monitored_jobs
                     SET sourcing_filters = CASE
-                            WHEN sourcing_filters IS NULL OR sourcing_filters::text IN ('null', '[]', '{}') OR (jsonb_typeof(sourcing_filters->'skills') = 'array' AND jsonb_array_length(sourcing_filters->'skills') = 0)
+                            WHEN sourcing_filters IS NULL OR sourcing_filters::text IN ('null', '[]', '{}') OR (jsonb_typeof(sourcing_filters->'skills') = 'array' AND jsonb_array_length(sourcing_filters->'skills') = 0) OR %s::jsonb->'skills' IS NOT NULL
                             THEN %s::jsonb ELSE sourcing_filters END,
                         resume_match_filters = CASE
-                            WHEN resume_match_filters IS NULL OR resume_match_filters::text IN ('null', '[]') OR (jsonb_typeof(resume_match_filters) = 'array' AND jsonb_array_length(resume_match_filters) = 0)
+                            WHEN resume_match_filters IS NULL OR resume_match_filters::text IN ('null', '[]') OR (jsonb_typeof(resume_match_filters) = 'array' AND jsonb_array_length(resume_match_filters) = 0) OR jsonb_array_length(%s::jsonb) > 0
                             THEN %s::jsonb ELSE resume_match_filters END
                     WHERE jobdiva_id = %s OR job_id = %s
-                """, (json.dumps(sourcing_payload), json.dumps(resume_filters), ref, ref))
+                """, (json.dumps(sourcing_payload), json.dumps(sourcing_payload), json.dumps(resume_filters), json.dumps(resume_filters), ref, ref))
             conn.commit()
     except Exception as e:
         logger.warning(f"template rubric seed failed for {ref}: {e}")
@@ -619,11 +895,18 @@ async def _create_campaign_job(
         if campaign_name and campaign_name in raw_intro and campaign_name != job_title_str and job_title_str:
             raw_intro = re.sub(r'(recruit\s+for\s+a(?:n)?\s+)' + re.escape(campaign_name), r'\1' + job_title_str, raw_intro, flags=re.IGNORECASE)
 
+    child_job_notes = (data.get("recruiter_notes") or data.get("job_notes") or "").strip()
+    campaign_notes = (campaign.get("recruiter_notes") or "").strip()
+    if child_job_notes and campaign_notes:
+        combined_notes = f"{child_job_notes}\n\nCampaign Rules:\n{campaign_notes}"
+    else:
+        combined_notes = child_job_notes or campaign_notes
+
     data.update({
         "campaign_id": campaign_id,
         "enhanced_title": job_title_str if child_job_title else campaign_seed_title,
-        "ai_description": campaign.get("template_ai_description") or "",
-        "recruiter_notes": campaign.get("recruiter_notes") or "",
+        "ai_description": data.get("ai_description") or "",
+        "recruiter_notes": combined_notes,
         "work_authorization": campaign.get("work_authorization") or data.get("work_authorization") or "",
         "recruiter_emails": campaign.get("recruiter_emails") or [],
         "selected_employment_types": campaign.get("selected_employment_types") or [],
@@ -633,7 +916,7 @@ async def _create_campaign_job(
         "screening_level": screening_level or campaign.get("screening_level") or "L1.5",
         "bot_introduction": raw_intro,
         "processing_status": "campaign_created",
-        "sourcing_filters": campaign.get("template_sourcing_filters") or None,
+        "sourcing_filters": data.get("sourcing_filters") or None,
     })
 
     ok = jobdiva_service.monitor_job_locally(data["job_id"], data)

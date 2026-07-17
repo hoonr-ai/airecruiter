@@ -1,9 +1,8 @@
 "use client";
 
-// Common-properties form for a campaign (name + the operational settings every
-// child job inherits). Used by both the "New Campaign" dialog on the list page
-// and the "Edit" dialog on the detail page. The JD/rubric/questions TEMPLATE is
-// captured by the 3-step campaign wizard (Phase 3), not here.
+// Common-properties form for a campaign (name + operational settings every
+// child job inherits). Used by both the "New Campaign" creation flow and the
+// "Edit" dialog on the detail page.
 
 import { useState } from "react";
 import { X } from "lucide-react";
@@ -19,7 +18,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { CampaignTemplateCard } from "@/components/campaigns/CampaignTemplateCard";
 import {
   Campaign,
   CampaignCreatePayload,
@@ -27,7 +25,10 @@ import {
   JOB_BOARDS,
   SCREENING_LEVELS,
   isValidRecruiterEmail,
+  TemplateQuestion,
+  getDefaultCampaignScreeningQuestions,
 } from "@/lib/campaigns";
+import { ScreeningQuestionsEditor } from "@/components/campaigns/ScreeningQuestionsEditor";
 
 interface CampaignFormProps {
   initial?: Partial<Campaign>;
@@ -85,6 +86,11 @@ export function CampaignForm({
       : ""
   );
   const [recruiterNotes, setRecruiterNotes] = useState(initial?.recruiter_notes ?? "");
+  const [questions, setQuestions] = useState<TemplateQuestion[]>(
+    initial?.template_screen_questions && initial.template_screen_questions.length > 0
+      ? (initial.template_screen_questions as TemplateQuestion[])
+      : getDefaultCampaignScreeningQuestions()
+  );
   const [nameError, setNameError] = useState<string | null>(null);
 
   const addEmail = () => {
@@ -123,6 +129,7 @@ export function CampaignForm({
       bot_introduction: botIntro.trim() || undefined,
       outreach_delay_mins: parsedDelay !== undefined && !isNaN(parsedDelay) ? parsedDelay : undefined,
       recruiter_notes: recruiterNotes.trim() || undefined,
+      template_screen_questions: questions,
     });
   };
 
@@ -146,7 +153,7 @@ export function CampaignForm({
 
       <div className="space-y-1.5">
         <Label htmlFor="campaign-customer">
-          Customer <span className="text-red-500">*</span>
+          Customer / Account <span className="text-red-500">*</span>
         </Label>
         <Input
           id="campaign-customer"
@@ -194,6 +201,20 @@ export function CampaignForm({
           placeholder="Type an email and press Enter"
         />
         {emailError && <p className="text-xs text-destructive">{emailError}</p>}
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="campaign-notes">Recruiter Notes</Label>
+        <Textarea
+          id="campaign-notes"
+          value={recruiterNotes ?? ""}
+          onChange={(e) => setRecruiterNotes(e.target.value)}
+          placeholder="Enter only common administrative rules across all roles (e.g., 'W2 only, max rate $80/hr'). Do not enter role-specific tech skills."
+          rows={3}
+        />
+        <p className="text-xs text-amber-600">
+          Enter only common administrative rules across all roles (e.g., 'W2 only, max rate $80/hr'). Do not enter role-specific tech skills, as these notes are prioritized when generating AI Job Descriptions across child jobs.
+        </p>
       </div>
 
       <div className="space-y-1.5">
@@ -262,19 +283,21 @@ export function CampaignForm({
         />
       </div>
 
-      <div className="space-y-1.5">
-        <Label htmlFor="campaign-notes">Recruiter Notes</Label>
-        <Textarea
-          id="campaign-notes"
-          value={recruiterNotes ?? ""}
-          onChange={(e) => setRecruiterNotes(e.target.value)}
-          placeholder="Notes shared across all jobs in this campaign"
-          rows={2}
-        />
-      </div>
-
-      <div className="pt-2">
-        <CampaignTemplateCard campaign={initial} />
+      <div className="space-y-3 pt-3 border-t border-slate-200">
+        <div className="flex flex-col gap-1">
+          <Label className="text-base font-semibold text-slate-900">
+            Default Campaign Screening Questions
+          </Label>
+          <p className="text-xs text-slate-500 leading-relaxed">
+            These baseline questions (shared across all child roles in the campaign) check openness to opportunities, work arrangement, availability, compensation, and work authorization before any role-specific technical questions are appended.
+          </p>
+        </div>
+        <div className="rounded-xl border border-slate-200 bg-slate-50/50 p-4">
+          <ScreeningQuestionsEditor
+            questions={questions}
+            onChange={setQuestions}
+          />
+        </div>
       </div>
 
       <div className="flex justify-end gap-2 pt-2">

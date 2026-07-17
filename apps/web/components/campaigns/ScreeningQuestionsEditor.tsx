@@ -133,11 +133,6 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
 
           {/* Question text */}
           <div className="flex-1 min-w-0">
-            {q.is_hard_filter && (
-              <div className="inline-flex items-center gap-1 bg-rose-50 text-rose-700 border border-rose-200 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full mb-1">
-                Hard filter
-              </div>
-            )}
             <textarea
               value={q.question_text ?? ""}
               onChange={(e) => update(index, { question_text: e.target.value })}
