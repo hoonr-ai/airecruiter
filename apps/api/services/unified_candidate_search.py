@@ -1035,7 +1035,9 @@ class UnifiedCandidateSearch:
                             provider_id = cand.get("provider_id")
                             if provider_id:
                                 try:
-                                    full_profile = await self.unipile_service.get_candidate_profile(provider_id)
+                                    full_profile = await self.unipile_service.get_candidate_profile(
+                                        provider_id, account_id=cand.get("unipile_account_id")
+                                    )
                                     if full_profile:
                                         cand.update(self._extract_linkedin_profile_data(full_profile))
                                 except Exception as e:

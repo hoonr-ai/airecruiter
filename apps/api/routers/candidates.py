@@ -936,7 +936,7 @@ async def search_jobdiva_candidates_legacy(request: CandidateSearchRequest):
         return {"candidates": [], "message": f"Search failed: {str(e)}"}
 
 @router.post("/candidates/message")
-async def message_candidate(request: CandidateMessageRequest):
+async def message_candidate(request: CandidateMessageRequest, user: UserIdentity = Depends(get_current_user)):
     """
     Sends a message to a candidate via the specified source provider.
     Currently supports: LinkedIn (via Unipile).
