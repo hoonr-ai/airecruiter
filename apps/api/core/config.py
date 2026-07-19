@@ -65,9 +65,21 @@ JOBDIVA_USERNAME = get_env_or_fail("JOBDIVA_USERNAME")
 JOBDIVA_PASSWORD = get_env_or_fail("JOBDIVA_PASSWORD")
 
 # Unipile Configuration
-UNIPILE_API_KEY = get_env_or_fail("UNIPILE_API_KEY")
+# The service degrades gracefully (LinkedIn channel returns no results) when
+# the key is absent, so none of these block boot. Accounts are auto-discovered
+# from the Unipile workspace. Only the NEW, explicit UNIPILE_ACCOUNT_IDS var
+# pins rotation to a subset — the legacy single UNIPILE_ACCOUNT_ID is set in
+# every pre-existing deployment (it used to be mandatory), so treating it as a
+# pin would silently disable multi-account rotation everywhere; it now serves
+# only as a last-resort fallback when workspace discovery is unavailable.
+UNIPILE_API_KEY = get_env_with_default("UNIPILE_API_KEY", "")
 UNIPILE_DSN = get_env_with_default("UNIPILE_DSN", "api1.unipile.com")
-UNIPILE_ACCOUNT_ID = get_env_or_fail("UNIPILE_ACCOUNT_ID")
+UNIPILE_ACCOUNT_ID = get_env_with_default("UNIPILE_ACCOUNT_ID", "")
+UNIPILE_ACCOUNT_IDS = [
+    a.strip()
+    for a in get_env_with_default("UNIPILE_ACCOUNT_IDS", "").split(",")
+    if a.strip()
+]
 
 # ---- Database Settings ----
 DATABASE_URL = get_env_or_fail("DATABASE_URL")

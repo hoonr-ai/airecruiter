@@ -927,11 +927,13 @@ function NewJobPageContent() {
   // Step 5 - Sourcing state
   // Recruiter QA 5.1 / 5.2: the "JobDiva Applicants" toggle was misleading —
   // applicants auto-enroll via jobdiva_applicant_auto_sync. It's off the
-  // switchboard now. Only JobDiva Talent Search is pre-ticked; the recruiter
-  // opts in to LinkedIn/Dice/Exa explicitly.
+  // switchboard now. JobDiva Talent Search and LinkedIn are pre-ticked
+  // (LinkedIn sourcing now round-robins across all attached Unipile
+  // accounts, so default-on no longer risks burning a single account);
+  // the recruiter opts in to Dice/Exa explicitly.
   const [searchSources, setSearchSources] = useState({
     jobdiva: true,
-    linkedin: false,
+    linkedin: true,
     dice: false,
     exa: false,
   });
