@@ -7338,6 +7338,20 @@ function NewJobPageContent() {
         showToast("No launchable candidates — all were excluded (employed by client / offer status).", "info");
         return;
       }
+      // Search & Launch fires irreversible PAIR outreach to every auto-selected
+      // candidate with no per-candidate review. Confirm before arming so a single
+      // accidental click can't mass-message up to SEARCH_AND_LAUNCH_TOTAL people.
+      const confirmed =
+        typeof window === "undefined" ||
+        window.confirm(
+          `This will immediately launch PAIR outreach to ${ids.length} candidate${
+            ids.length === 1 ? "" : "s"
+          } (calls/messages), with no per-candidate review. This can't be undone. Continue?`,
+        );
+      if (!confirmed) {
+        showToast("Search & Launch cancelled — no outreach was sent.", "info");
+        return;
+      }
       trackEvent("job_wizard_step5_search_and_launch_clicked", {
         step: 5,
         pool_size: pool.length,
