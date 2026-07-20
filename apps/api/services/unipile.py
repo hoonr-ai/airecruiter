@@ -520,6 +520,15 @@ class UnipileService:
         account-level error (checkpoint / expired / rate-limited) it is
         benched and the search retries on up to two sibling accounts.
         """
+        # LinkedIn Recruiter searches are capped per-search to protect the
+        # attached accounts (rate/abuse limits) — 100 per search, tunable.
+        try:
+            from core import sourcing_config as _sc
+            _cap = int(getattr(_sc, "UNIPILE_SEARCH_LIMIT", 100) or 100)
+        except Exception:
+            _cap = 100
+        limit = max(1, min(int(limit or 25), _cap))
+
         tried = set()
         for _ in range(3):
             account_id = await self.acquire_account()
