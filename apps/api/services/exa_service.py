@@ -701,8 +701,15 @@ class ExaService:
         location: str,
         seed_urls: List[str],
         within_miles: Optional[int] = None,
+        exclude_company: str = "",
     ) -> List[Dict[str, Any]]:
         """Exa Agent API (Websets 2.0) pass — agentic enrichment + discovery.
+
+        `exclude_company` is the HIRING CLIENT: the agent is told to skip
+        anyone whose CURRENT employer is that company (we can never submit a
+        client's own employees). The orchestrator re-checks the returned
+        `recent_companies` against the same name, so this instruction is a
+        recall optimization, not the enforcement point.
 
         Calls `exa.beta.agent.runs.create(...)` with:
           - `query`: JD-focused natural-language task description.
@@ -794,10 +801,20 @@ class ExaService:
             "company HQ or a past position's city; leave empty only if the "
             "profile shows no location at all.\n"
         )
+        exclude_clause = ""
+        exclude_clean = str(exclude_company or "").strip()
+        if exclude_clean and exclude_clean.lower() not in ("external", "unknown", "n/a"):
+            exclude_clause = (
+                f"HARD EXCLUSION: skip anyone whose CURRENT employer is "
+                f"\"{exclude_clean}\" (or an obvious subsidiary/brand of it) — "
+                "this is the hiring company and its own employees must not be "
+                "sourced. Past employment there is fine. "
+            )
         query = (
             f"Find LinkedIn profiles of candidates matching this role: {role_line}. "
             "Prefer candidates who are currently active in this role — skip retired "
             "or long-inactive profiles. "
+            + exclude_clause
             + radius_hint +
             "Also enrich every profile passed in `input.data`. "
             "For each candidate, you MUST attempt to extract ALL of the following — "

@@ -1030,6 +1030,19 @@ function NewJobPageContent() {
   // launch for everyone). Has no effect outside QA (gated by IS_QA_CURATE).
   const [qaOverrideEnabled, setQaOverrideEnabled] = useState(true);
   const [readyLaunchedPendingRedirect, setReadyLaunchedPendingRedirect] = useState(false);
+
+  // Search & Launch: one click runs the cross-source search, auto-selects the
+  // best SEARCH_AND_LAUNCH_TOTAL candidates by skill/location match with a
+  // JobDiva quota, and fires the standard Launch PAIR flow. The remainder
+  // after the JobDiva quota goes to whichever other sources scored best.
+  const SEARCH_AND_LAUNCH_TOTAL = 250;
+  const SEARCH_AND_LAUNCH_JOBDIVA_QUOTA = 150;
+  const [isSearchAndLaunch, setIsSearchAndLaunch] = useState(false);
+  // Armed by handleSearchAndLaunchClick: the launch must fire AFTER the
+  // auto-selection lands in selectedCandidates state (the launch flow reads
+  // that state), so a selection-effect performs the actual launch call.
+  const searchAndLaunchArmedRef = useRef(false);
+
   const [hasSearched, setHasSearched] = useState(false);
   const [hasFetchedMoreJobDiva, setHasFetchedMoreJobDiva] = useState(false);
   const [booleanStringOpen, setBooleanStringOpen] = useState(false);
@@ -1041,6 +1054,13 @@ function NewJobPageContent() {
   const QUALIFIED_SCORE_THRESHOLD = 70;
   const QUALIFIED_TARGET_COUNT = 50;
   const [candidates, setCandidates] = useState<any[]>([]);
+  // Live mirror of `candidates` for async flows that finish after an await
+  // (e.g. Search & Launch reads the freshest pool right after the search
+  // stream completes, when its closure's `candidates` is stale).
+  const candidatesRef = useRef<any[]>([]);
+  useEffect(() => {
+    candidatesRef.current = candidates;
+  }, [candidates]);
   // `true` when the current `candidates` list was restored from localStorage
   // rather than a fresh stream. Used to surface a small "Restored from last
   // run" caption so recruiters know results are stale until re-run.
@@ -1324,36 +1344,78 @@ function NewJobPageContent() {
       .replace(/\s+/g, " ")
       .trim();
 
-  // The candidate's CURRENT employer only (present role). Past employers must
-  // NOT count — we only skip people who literally work at the client today.
-  const getCandidateCurrentCompany = (c: any): string => {
-    const ei = c?.enhanced_info || c?.data?.enhanced_info || {};
-    const direct = c?.current_company || ei?.current_company || c?.company || c?.company_name || ei?.company;
-    if (direct) return String(direct);
-    const exp =
-      (Array.isArray(c?.company_experience) && c.company_experience) ||
-      (Array.isArray(ei?.company_experience) && ei.company_experience) ||
-      [];
-    for (const e of exp) {
-      if (!e || typeof e !== "object") continue;
-      const endRaw = String(e.end_date ?? e.endDate ?? e.to ?? "").trim();
-      const isCurrent = e.is_current === true || e.current === true || !endRaw || /present|current/i.test(endRaw);
-      if (isCurrent) return String(e.company || e.company_name || e.employer || e.name || "");
-    }
-    return "";
+  // Best-effort CURRENT company from a LinkedIn-style headline ("Engineer at
+  // Meta | ex-Amazon" → "Meta"). Unipile/Exa search rows carry the employer
+  // only in headline text. Uses the LAST "at X"/"@ X" occurrence (current
+  // employer is named last in "Ex-Google | Engineer at Stripe").
+  const extractCompanyFromHeadline = (headline: any): string => {
+    const text = String(headline || "").trim();
+    if (!text || text.length > 300) return "";
+    const matches = [...text.matchAll(/(?:\s+at\s+|\s+@\s*)([^|,;•·(–—]+)/gi)];
+    if (!matches.length) return "";
+    let company = String(matches[matches.length - 1][1] || "").trim();
+    company = company.replace(/^the\s+/i, "").replace(/[\s.!\-–—]+$/g, "");
+    if (!company || company.split(/\s+/).length > 6) return "";
+    return company;
   };
+
+  // Every signal of the candidate's CURRENT employer (present role only).
+  // Past employers must NOT count — we only skip people who literally work
+  // at the client today. Mirrors the backend collector
+  // (apps/api/services/company_match.py) across all source shapes: flat
+  // fields, current company_experience entries, Exa deep-search
+  // exa_recent_companies, and the headline parse.
+  const getCandidateCurrentCompanies = (c: any): string[] => {
+    const ei = c?.enhanced_info || c?.data?.enhanced_info || {};
+    const data = c?.data || {};
+    const out: string[] = [];
+    for (const direct of [
+      c?.current_company, ei?.current_company, data?.current_company,
+      c?.company, c?.company_name, ei?.company,
+    ]) {
+      if (direct && String(direct).trim()) out.push(String(direct).trim());
+    }
+    const expLists = [
+      (Array.isArray(c?.company_experience) && c.company_experience) ||
+        (Array.isArray(ei?.company_experience) && ei.company_experience) ||
+        (Array.isArray(data?.company_experience) && data.company_experience) || [],
+      (Array.isArray(c?.exa_recent_companies) && c.exa_recent_companies) ||
+        (Array.isArray(data?.exa_recent_companies) && data.exa_recent_companies) || [],
+    ];
+    for (const exp of expLists) {
+      for (const e of exp) {
+        if (!e || typeof e !== "object") continue;
+        const endRaw = String(e.end_date ?? e.endDate ?? e.to ?? e.end ?? "").trim();
+        const isCurrent = e.is_current === true || e.current === true || !endRaw || /present|current/i.test(endRaw);
+        const comp = String(e.company || e.company_name || e.employer || e.name || "").trim();
+        if (isCurrent && comp) out.push(comp);
+      }
+    }
+    for (const headline of [c?.headline, c?.title, data?.headline, data?.title]) {
+      const parsed = extractCompanyFromHeadline(headline);
+      if (parsed) out.push(parsed);
+    }
+    return [...new Set(out)];
+  };
+
+  // Back-compat single-value accessor (first current-company signal).
+  const getCandidateCurrentCompany = (c: any): string =>
+    getCandidateCurrentCompanies(c)[0] || "";
 
   const isEmployedByClient = (c: any): boolean => {
     const client = normalizeCompanyName(jobData?.customer_name || jobData?.customer || "");
     // "external" is the placeholder for non-JobDiva reqs — never a real client.
     if (!client || client === "external") return false;
-    const cand = normalizeCompanyName(getCandidateCurrentCompany(c));
-    if (!cand) return false;
-    if (cand === client) return true;
-    // Substring match only when the shorter name is specific enough (>= 4 chars)
-    // to avoid false hits on generic tokens left after normalization.
-    const shorter = cand.length <= client.length ? cand : client;
-    return shorter.length >= 4 && (cand.includes(client) || client.includes(cand));
+    for (const raw of getCandidateCurrentCompanies(c)) {
+      const cand = normalizeCompanyName(raw);
+      if (!cand) continue;
+      if (cand === client) return true;
+      // Substring match only when the shorter name is specific enough (>= 4 chars)
+      // to avoid false hits on generic tokens left after normalization.
+      const shorter = cand.length <= client.length ? cand : client;
+      if (shorter.length >= 4 && (cand.includes(client) || client.includes(cand))) return true;
+    }
+    return false;
   };
 
   const getCandidateExclusionReason = (c: any): string => {
@@ -1423,10 +1485,11 @@ function NewJobPageContent() {
       if (stLower.includes("current employee")) return "Current Employee (Pyramid)";
     }
 
-    const currComp = normalizeCompanyName(getCandidateCurrentCompany(c));
-
-    if (currComp && currComp.includes("pyramid")) {
-      return "Current Employee (Pyramid)";
+    for (const raw of getCandidateCurrentCompanies(c)) {
+      const currComp = normalizeCompanyName(raw);
+      if (currComp && currComp.includes("pyramid")) {
+        return "Current Employee (Pyramid)";
+      }
     }
 
     if (isEmployedByClient(c)) {
@@ -5979,7 +6042,7 @@ function NewJobPageContent() {
     }
   }, [currentStep, sourcingResultsKey]);
 
-  const handleRunSearch = async () => {
+  const handleRunSearch = async (): Promise<any[]> => {
     const searchStartMs = Date.now();
     let accumulated: any[] = [];
     let runBreakdown: Array<Record<string, unknown>> = [];
@@ -6088,6 +6151,7 @@ function NewJobPageContent() {
         ...buildStep5FilterContext(),
       });
     }
+    return accumulated;
   };
 
   const handleSearchMoreJobDiva = async () => {
@@ -6851,6 +6915,10 @@ function NewJobPageContent() {
     let totalFailedBatches = 0;
     let engageFailureMessage: string | null = null;
     let skippedCandidateNames: string[] = [];
+    // Candidates the BACKEND excluded at launch (employed by hiring client,
+    // offer extended, …) — the server may know company data the FE's own
+    // pre-filter (hardFilterSkipIds) couldn't see.
+    let serverExcluded: { candidate_id: string; name?: string; reason: string }[] = [];
     // Ids of candidates whose save batch succeeded — the single launch call
     // below engages exactly these (in order).
     const savedCandidateIds: string[] = [];
@@ -7064,6 +7132,7 @@ function NewJobPageContent() {
                     : id;
                 })
                 .filter(Boolean);
+              serverExcluded = evt.excluded_candidates || [];
             }
           }
         );
@@ -7140,6 +7209,16 @@ function NewJobPageContent() {
       );
     }
 
+    if (serverExcluded.length > 0) {
+      showToast(
+        `${serverExcluded.length} candidate${serverExcluded.length === 1 ? "" : "s"} excluded by launch checks (${serverExcluded
+          .slice(0, 3)
+          .map((e) => e.reason)
+          .join(", ")})`,
+        "info",
+      );
+    }
+
     setLaunchProgress(prev => ({
       ...prev,
       phase: totalFailedBatches === 0 ? "completed" : (totalHandled > 0 ? "completed" : "failed"),
@@ -7148,6 +7227,14 @@ function NewJobPageContent() {
       totalFailedBatches,
       failedCandidates: failedLaunchCandidates,
       finalMessage: engageFailureMessage ?? undefined,
+      // Fold backend exclusions into the modal's skip panel alongside the
+      // FE-predicted ones (no overlap: FE-predicted skips never reach the
+      // backend in the first place).
+      hardFilterSkipped: prev.hardFilterSkipped + serverExcluded.length,
+      hardFilterSkippedNames: [
+        ...prev.hardFilterSkippedNames,
+        ...serverExcluded.map((e) => `${e.name || e.candidate_id} (${e.reason})`),
+      ],
     }));
 
     // Redirect to the rank list only on a clean run (no failed candidates), so
@@ -7171,6 +7258,117 @@ function NewJobPageContent() {
 
   // Entry point wired to Launch PAIR. Before save, auto-enrich selected
   // candidates missing phone via ZoomInfo using LinkedIn URL.
+  // ── Search & Launch ────────────────────────────────────────────────────
+  // Rank for the auto-selection: skill/other match score first, with
+  // in-radius candidates ahead of out-of-radius ones and a mild distance
+  // tiebreak. Mirrors "best by skill and location and other matches".
+  const searchAndLaunchRank = (c: any): number => {
+    let score = getCandidateMatchScore(c);
+    if (c?.location_out_of_radius) score -= 40;
+    const dist = Number(c?.distance_miles);
+    if (Number.isFinite(dist) && dist > 0) score -= Math.min(10, dist / 25);
+    return score;
+  };
+
+  // Pick the best SEARCH_AND_LAUNCH_TOTAL launchable candidates:
+  // top SEARCH_AND_LAUNCH_JOBDIVA_QUOTA from JobDiva (agent search), the
+  // remainder from the other sources purely by rank — whichever source
+  // produced the best results naturally gets the bigger share. Short pools
+  // backfill from the combined remainder so the total is met when possible.
+  const computeSearchAndLaunchSelection = (pool: any[]): string[] => {
+    const idOf = (c: any) =>
+      String(c.candidate_id || c.jobdiva_candidate_id || c.id || "").trim();
+    const isJobdivaCand = (c: any) =>
+      String(c.source || "").toLowerCase().includes("jobdiva") ||
+      (Array.isArray(c.sources) &&
+        c.sources.some((s: any) => String(s).toLowerCase().includes("jobdiva")));
+
+    const launchable = pool.filter(
+      (c) => idOf(c) && !getCandidateExclusionReason(c)
+    );
+    const byRank = [...launchable].sort(
+      (a, b) => searchAndLaunchRank(b) - searchAndLaunchRank(a)
+    );
+    const jobdivaPool = byRank.filter(isJobdivaCand);
+    const otherPool = byRank.filter((c) => !isJobdivaCand(c));
+
+    const jobdivaTake = Math.min(jobdivaPool.length, SEARCH_AND_LAUNCH_JOBDIVA_QUOTA);
+    const selected = [
+      ...jobdivaPool.slice(0, jobdivaTake),
+      ...otherPool.slice(0, SEARCH_AND_LAUNCH_TOTAL - jobdivaTake),
+    ];
+    if (selected.length < SEARCH_AND_LAUNCH_TOTAL) {
+      const chosen = new Set(selected.map(idOf));
+      for (const c of byRank) {
+        if (selected.length >= SEARCH_AND_LAUNCH_TOTAL) break;
+        const id = idOf(c);
+        if (!chosen.has(id)) {
+          chosen.add(id);
+          selected.push(c);
+        }
+      }
+    }
+    return [...new Set(selected.slice(0, SEARCH_AND_LAUNCH_TOTAL).map(idOf))];
+  };
+
+  const handleSearchAndLaunchClick = async () => {
+    if (isSearching || isSearchAndLaunch || isEnrichingContacts || launchProgress.open || isViewOnly) return;
+    setIsSearchAndLaunch(true);
+    try {
+      // Reuse a completed search's pool; otherwise run the standard
+      // cross-source search (it covers exactly the sources selected above).
+      let searched: any[] = [];
+      if (!hasSearched || candidatesRef.current.length === 0) {
+        searched = await handleRunSearch();
+        // Let the final stream updates flush into candidates state/ref.
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      // Prefer the state mirror (deduped/enriched rows); fall back to the
+      // raw accumulated stream if the last state flush hasn't landed yet.
+      const pool =
+        candidatesRef.current.length >= searched.length
+          ? candidatesRef.current
+          : searched;
+      if (pool.length === 0) {
+        showToast("Search returned no candidates to launch.", "info");
+        return;
+      }
+      const ids = computeSearchAndLaunchSelection(pool);
+      if (ids.length === 0) {
+        showToast("No launchable candidates — all were excluded (employed by client / offer status).", "info");
+        return;
+      }
+      trackEvent("job_wizard_step5_search_and_launch_clicked", {
+        step: 5,
+        pool_size: pool.length,
+        selected_count: ids.length,
+        jobdiva_quota: SEARCH_AND_LAUNCH_JOBDIVA_QUOTA,
+        total_quota: SEARCH_AND_LAUNCH_TOTAL,
+      });
+      showToast(
+        `Auto-selected the best ${ids.length} candidate${ids.length === 1 ? "" : "s"} — launching PAIR…`,
+        "info",
+      );
+      // Land the selection in state first (the launch flow reads it there),
+      // then the selection-effect below fires the actual launch.
+      searchAndLaunchArmedRef.current = true;
+      setSelectedCandidates(new Set(ids));
+    } finally {
+      setIsSearchAndLaunch(false);
+    }
+  };
+
+  // Fires the launch one render AFTER Search & Launch lands its auto-selection
+  // in state, so handleLaunchPairClick's reads of selectedCandidates see the
+  // fresh set. No-op for every ordinary selection change (ref stays false).
+  useEffect(() => {
+    if (!searchAndLaunchArmedRef.current) return;
+    searchAndLaunchArmedRef.current = false;
+    if (selectedCandidates.size === 0) return;
+    void handleLaunchPairClick();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCandidates]);
+
   const handleLaunchPairClick = async () => {
     if (!hasSearched) {
       showToast("Run Search first to source candidates.", "info");
@@ -9210,6 +9408,25 @@ function NewJobPageContent() {
                   >
                     <ExternalLink className="w-4 h-4" />
                     New tab
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="h-[42px] px-4 font-semibold text-[14px] rounded-xl flex items-center gap-2 border-[#6366f1]/40 text-[#4f46e5] hover:bg-[#6366f1]/5 disabled:cursor-not-allowed"
+                    onClick={handleSearchAndLaunchClick}
+                    disabled={isSearching || isSearchAndLaunch || isEnrichingContacts || isViewOnly || launchProgress.open}
+                    title={
+                      isViewOnly
+                        ? "Job activity has been stopped"
+                        : `Search every selected source, auto-select the best ${SEARCH_AND_LAUNCH_TOTAL} by match (top ${SEARCH_AND_LAUNCH_JOBDIVA_QUOTA} JobDiva + best of the other sources), and launch PAIR in one go`
+                    }
+                  >
+                    {isSearchAndLaunch ? (
+                      <span className="w-4 h-4 border-2 border-[#6366f1]/30 border-t-[#6366f1] rounded-full animate-spin" />
+                    ) : (
+                      <Rocket className="w-4 h-4" />
+                    )}
+                    {isSearchAndLaunch ? "Searching & Launching…" : `Search & Launch ${SEARCH_AND_LAUNCH_TOTAL}`}
                   </Button>
                   <Button
                     className="h-[42px] px-5 text-white font-bold text-[14px] rounded-xl flex items-center gap-2 shadow-md transition-all group bg-[#6366f1] hover:bg-[#4f46e5] hover:translate-y-[-1px] active:translate-y-[0px] active:scale-[0.98] disabled:bg-slate-300 disabled:cursor-not-allowed disabled:hover:translate-y-0"

@@ -1,19 +1,17 @@
 """
 jobdiva_boolean_translator.py
 -----------------------------
-Years-of-experience translator for JobDiva Talent Search.
+Boolean-string helpers for JobDiva Talent Search.
 
-The user-authored boolean is sent to JobDiva verbatim — JobDiva already
-understands AND / OR / NOT and quoted terms natively. The only rewrite
-this module performs is years-of-experience: JobDiva expects the
-`OVER N YRS` dialect attached to a skill, but recruiters write
-`"Skill" AND "5+ years"` or `"Skill 5 years"`.
+Since the v2 payload fix (2026-07-19), production NO LONGER sends boolean
+strings to TalentSearch at all — the endpoint takes a plain array of AND'd
+terms (`extract_and_terms` / `sanitize_talent_term` below produce it from
+a wizard boolean). OR / NOT / years clauses cannot be expressed
+server-side and stay client-side in the scorer.
 
-  "Databricks" AND "5+ years"  → "Databricks" OVER 5 YRS
-  "Python 5 years"             → "Python" OVER 5 YRS
-
-Anything else (operators, casing, parentheses, freeform terms) is
-preserved as the user wrote it.
+The legacy rewrites (`translate_for_jobdiva`'s `OVER N YRS` years dialect,
+`rewrite_location_clauses_to_zip_dialect`) are retained for the probe
+scripts and back-compat callers only.
 """
 
 from __future__ import annotations
@@ -181,6 +179,82 @@ def translate_for_jobdiva(
         translated = re.sub(r"\s+", " ", translated).strip()
 
     return translated
+
+
+# NOT groups: `NOT ("A" OR "B")` or `NOT "A"`.
+_NOT_GROUP_RE = re.compile(r'\bNOT\s*(?:\([^)]*\)|"[^"]*")', flags=re.IGNORECASE)
+# Parenthesized OR groups: `("A" OR "B" ...)`.
+_PAREN_GROUP_RE = re.compile(r"\([^()]*\)")
+_QUOTED_TERM_RE = re.compile(r'"([^"]+)"')
+_YEARS_TERM_RE = re.compile(r"^\d+\+?\s*(?:years?|yrs?)(?:\s+.*)?$", flags=re.IGNORECASE)
+_OPERATOR_TOKENS = {"and", "or", "not", "within", "mi", "miles"}
+
+
+def sanitize_talent_term(term: str) -> str:
+    """One plain keyword for the v2 TalentSearch `skills` array.
+
+    The v2 endpoint does NOT parse boolean syntax — a term containing
+    quotes/operators makes the server error out mid-response (probe S2,
+    2026-07-19) — so terms must be bare phrases. Returns "" for terms
+    that cannot be safely sent (operator words, years clauses, numbers).
+    """
+    cleaned = re.sub(r'["()]', " ", str(term or ""))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned or len(cleaned) > 60:
+        return ""
+    if cleaned.lower() in _OPERATOR_TOKENS:
+        return ""
+    if cleaned.replace("+", "").replace(".", "").isdigit():
+        return ""
+    if _YEARS_TERM_RE.match(cleaned):
+        return ""
+    return cleaned
+
+
+def extract_and_terms(boolean_str: str, max_terms: int = 4) -> List[str]:
+    """Top-level AND-connected quoted terms from a wizard boolean, for the
+    v2 TalentSearch `skills` array (which ANDs its elements server-side).
+
+    Deliberately conservative — the server has no OR, so anything we can't
+    express as a required term is DROPPED rather than over-restricting:
+      - NOT groups are removed (exclusions stay client-side in the scorer),
+      - `"City, ST ZIP" within N mi` location clauses are removed (geo goes
+        in the structured zipCode/withinMiles/states fields),
+      - years clauses are removed (YOE is scored client-side),
+      - parenthesized/naked OR groups are skipped entirely (requiring one
+        alternative would silently exclude the others).
+    """
+    if not boolean_str or '"' not in boolean_str:
+        return []
+    text = _NOT_GROUP_RE.sub(" ", boolean_str)
+    text = _LOCATION_CLAUSE_RE.sub(" ", text)
+    text = _QUOTED_YEARS_RE.sub(_combine_term_and_years, text)
+    text = _COMBINED_TERM_YEARS_RE.sub(_combine_inside_quote, text)
+    text = _OVER_YRS_CLAUSE_RE.sub(" ", text)
+    # Drop parenthesized groups that contain OR; unwrap the rest.
+    def _drop_or_groups(match: re.Match) -> str:
+        inner = match.group(0)
+        return " " if re.search(r"\bOR\b", inner, flags=re.IGNORECASE) else inner.strip("()")
+    prev = None
+    while prev != text:
+        prev = text
+        text = _PAREN_GROUP_RE.sub(_drop_or_groups, text)
+
+    terms: List[str] = []
+    seen = set()
+    for fragment in re.split(r"\bAND\b", text, flags=re.IGNORECASE):
+        if re.search(r"\bOR\b", fragment, flags=re.IGNORECASE):
+            continue  # naked OR alternatives — same drop rule as groups
+        for quoted in _QUOTED_TERM_RE.findall(fragment):
+            term = sanitize_talent_term(quoted)
+            key = term.lower()
+            if not term or key in seen:
+                continue
+            seen.add(key)
+            terms.append(term)
+            if len(terms) >= max_terms:
+                return terms
+    return terms
 
 
 def extract_skill_years(

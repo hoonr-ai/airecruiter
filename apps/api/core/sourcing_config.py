@@ -149,11 +149,31 @@ JOBAGENT_MAX_RESUME_COUNT = 300
 # ─────────────────────────────────────────────────────────────────────────
 # TalentSearch pagination
 # ─────────────────────────────────────────────────────────────────────────
-# JobDiva TalentSearch supports pageNumber/pageSize, so each recruiter action
-# maps cleanly to one 150-result page: page 0 initially, page 1 on Search more.
+# The v2 TalentSearch contract IGNORES pageNumber/pageSize and returns the
+# full filtered set in one response (live probe 2026-07-19). One fetch is
+# capped at MAX_TOTAL_COUNT; the recruiter's 150-result tranches ("Search
+# more") are sliced from it locally via jobdiva_offset/jobdiva_batch_size.
 JOBDIVA_TALENTSEARCH_PAGE_SIZE = 150
 JOBDIVA_TALENTSEARCH_TOTAL_COUNT = 150
 JOBDIVA_TALENTSEARCH_MAX_TOTAL_COUNT = 300
+
+# Max terms sent in the v2 TalentSearch `skills` array. The server ANDs
+# every element, so a long must-list zeroes out; the fetcher also retries
+# with the first two terms when the full AND returns nothing. Remaining
+# skill filtering happens client-side in the scorer.
+JOBDIVA_TALENT_MAX_SKILL_TERMS = 4
+
+# Second TalentSearch pull with titleSearch=<job title>. Recall lever:
+# surfaces candidates whose resume wording doesn't contain the skill terms
+# but whose title matches (live probe: titleSearch is honored stand-alone
+# and geo-filters correctly; it adds nothing when sent WITH skills, hence
+# a separate pull merged by candidateId).
+JOBDIVA_TALENT_TITLE_PULL_ENABLED = True
+
+# Per-search result cap for Unipile LinkedIn Recruiter searches. Protects
+# the attached LinkedIn accounts from rate/abuse flags; enforced inside
+# unipile_service.search_candidates regardless of the caller's page size.
+UNIPILE_SEARCH_LIMIT = 100
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -195,23 +215,22 @@ def _env_bool_geo(var: str, default: bool) -> bool:
         return default
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
-# Send talentSearchDef.zipCode + withinMiles on JobDiva TalentSearch.
-# The swagger documents both fields; an operational note in
-# scripts/jobdiva_mainframe_search.py claims the endpoint silently ignores
-# structured geo. Harmless if ignored, a real server-side radius filter if
-# honored — default ON. scripts/jobdiva_zip_radius_probe.py settles it live.
-# Guardrails against the honored case: the radius is sent with 2x headroom
-# (so the UI's BEYOND-radius soft-keep bucket still gets the near-miss
-# band; only far-away noise is cut server-side), and the zip is skipped
-# entirely for multi-location-chip searches (one anchor can't represent an
-# OR of locations) and for Remote jobs.
+# Send zipCode + withinMiles on JobDiva TalentSearch. SETTLED by the live
+# probe 2026-07-19 (scripts/jobdiva_payload_variants_probe.py): with the
+# correct v2 top-level body shape the structured radius IS honored — 98.8%
+# of returned candidates in-radius vs 8.1% unfiltered. Guardrails: the
+# radius is sent with 2x headroom (so the UI's BEYOND-radius soft-keep
+# bucket still gets the near-miss band; only far-away noise is cut
+# server-side), and the zip is skipped entirely for multi-location-chip
+# searches (one anchor can't represent an OR of locations) and for Remote
+# jobs.
 JOBDIVA_ZIP_RADIUS_ENABLED = _env_bool_geo("JOBDIVA_ZIP_RADIUS_ENABLED", True)
 
-# Rewrite frontend location clauses (`"Tempe, AZ 85281" within 25 mi`) into
-# JobDiva's native boolean geo dialect (`Within 25 miles of 85281`) before
-# sending to TalentSearch. Default OFF until the probe confirms the dialect
-# is parsed as geo — if JobDiva treated it as keywords, the words
-# "within/miles" would poison the search.
+# DEAD FLAG (kept for env compat): the boolean geo dialect rewrite is moot
+# since the v2 TalentSearch payload no longer sends boolean strings at all —
+# and the probe showed the server never parsed the dialect anyway (arms
+# C/C2 identical to control). Only scripts/jobdiva_zip_radius_probe.py
+# still exercises the translator path.
 JOBDIVA_BOOLEAN_ZIP_DIALECT_ENABLED = _env_bool_geo(
     "JOBDIVA_BOOLEAN_ZIP_DIALECT_ENABLED", False
 )
