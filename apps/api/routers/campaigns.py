@@ -638,9 +638,12 @@ async def _create_campaign_job(
 
     ok = jobdiva_service.monitor_job_locally(data["job_id"], data)
     if ok:
+        # Seed once. _seed_job_rubric internally resolves to the canonical
+        # jobdiva_id (via monitored_jobs jobdiva_id/job_id lookup) and persists
+        # under that single key, and reads accept either key — so a second call
+        # keyed on job_id would resolve to the same canonical_ref and merely
+        # re-run the LLM question generation and overwrite the first result.
         await _seed_job_rubric(campaign, ref, bot_introduction=raw_intro)
-        if ref != str(data["job_id"]):
-            await _seed_job_rubric(campaign, str(data["job_id"]), bot_introduction=raw_intro)
 
     return {
         "jobdiva_id": jobdiva_id or "",
