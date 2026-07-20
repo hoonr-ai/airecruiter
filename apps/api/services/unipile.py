@@ -3,13 +3,25 @@ import json
 import logging
 import asyncio
 import re
+import time
 from urllib.parse import urlparse
 from typing import List, Dict, Any, Optional
 from core import (
-    UNIPILE_API_KEY, UNIPILE_DSN, UNIPILE_ACCOUNT_ID
+    UNIPILE_API_KEY, UNIPILE_DSN, UNIPILE_ACCOUNT_ID, UNIPILE_ACCOUNT_IDS
 )
 
 logger = logging.getLogger(__name__)
+
+# How long a discovered-accounts listing stays fresh before we re-hit
+# GET /accounts. Attaching a new LinkedIn account to the Unipile workspace
+# is picked up within this window without a restart.
+_ACCOUNTS_CACHE_TTL_S = 300
+
+# Cooldown applied to an account after an account-level failure, by class.
+_COOLDOWN_AUTH_S = 30 * 60      # 401/403/checkpoint — needs human attention
+_COOLDOWN_RATE_LIMIT_S = 15 * 60  # 429 — LinkedIn throttled this account
+_COOLDOWN_TRANSIENT_S = 5 * 60  # 5xx — brief backoff, likely recovers
+
 
 class UnipileService:
     def __init__(self):
@@ -18,10 +30,270 @@ class UnipileService:
         if not dsn.startswith("http"):
             dsn = f"https://{dsn}"
         self.api_url = f"{dsn}/api/v1"
-        
+
         self.api_key = UNIPILE_API_KEY
-        self.account_id = UNIPILE_ACCOUNT_ID # Use from config if available
+        # Legacy single-account id, kept for callers that read .account_id
+        # directly and as a discovery-outage fallback. NOT a rotation pin.
+        self.account_id = UNIPILE_ACCOUNT_ID or (UNIPILE_ACCOUNT_IDS[0] if UNIPILE_ACCOUNT_IDS else "")
+        # Explicit pin list (UNIPILE_ACCOUNT_IDS env only). Empty = rotate
+        # across every discovered workspace account.
+        self.pinned_account_ids = list(UNIPILE_ACCOUNT_IDS)
+        # Used only when the /accounts listing is unreachable and no cache exists.
+        self.fallback_account_ids = list(UNIPILE_ACCOUNT_IDS) or ([UNIPILE_ACCOUNT_ID] if UNIPILE_ACCOUNT_ID else [])
         self._id_cache = {} # Simple in-memory cache for skill/location IDs
+        # Discovered LinkedIn accounts: [{"id","name","status"}], cached per worker.
+        self._accounts_cache: List[Dict[str, Any]] = []
+        self._accounts_cache_at: float = 0.0
+        self._usage_table_ready = False
+        # In-process fallback pointer when the DB round-robin is unavailable.
+        self._local_rr_idx = 0
+
+    # ------------------------------------------------------------------
+    # Multi-account discovery + round-robin rotation
+    # ------------------------------------------------------------------
+    async def list_linkedin_accounts(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """All LinkedIn accounts attached to the Unipile workspace.
+
+        Returns [{"id", "name", "status"}]. Cached for _ACCOUNTS_CACHE_TTL_S.
+        Falls back to the configured id list (status unknown) when the
+        listing call fails, so an API blip doesn't kill the channel.
+        """
+        if not self.api_key:
+            return []
+
+        now = time.monotonic()
+        if not force_refresh and self._accounts_cache and (now - self._accounts_cache_at) < _ACCOUNTS_CACHE_TTL_S:
+            return self._accounts_cache
+
+        url = f"{self.api_url}/accounts"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url, headers=self._get_headers())
+                if resp.status_code == 200:
+                    data = resp.json()
+                    raw = data.get("items", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+                    accounts = []
+                    for acc in raw:
+                        if str(acc.get("type", "")).upper() != "LINKEDIN" or not acc.get("id"):
+                            continue
+                        # Health lives under sources[].status on current Unipile
+                        # API versions; older payloads had a top-level status.
+                        status = str(acc.get("status") or "").upper()
+                        if not status:
+                            source_statuses = [
+                                str(s.get("status") or "").upper()
+                                for s in (acc.get("sources") or [])
+                                if isinstance(s, dict)
+                            ]
+                            if source_statuses:
+                                status = ("OK" if all(s == "OK" for s in source_statuses)
+                                          else next(s for s in source_statuses if s != "OK"))
+                        accounts.append({
+                            "id": acc.get("id"),
+                            "name": acc.get("name") or "",
+                            "status": status,
+                        })
+                    if accounts:
+                        self._accounts_cache = accounts
+                        self._accounts_cache_at = now
+                        return accounts
+                    logger.warning("Unipile: no LinkedIn accounts attached to the workspace.")
+                else:
+                    logger.error(f"Unipile Accounts Error: {resp.status_code} - {resp.text}")
+        except Exception as e:
+            logger.error(f"Unipile Account Fetch Exception: {e}")
+
+        if self._accounts_cache:
+            return self._accounts_cache  # stale beats empty
+        return [{"id": a, "name": "", "status": ""} for a in self.fallback_account_ids]
+
+    async def get_rotation_account_ids(self) -> List[str]:
+        """Account ids eligible for rotation.
+
+        Auto-discovery is primary so newly attached accounts join the pool
+        without a config change. Only the explicit UNIPILE_ACCOUNT_IDS env
+        var pins rotation to a subset — the legacy UNIPILE_ACCOUNT_ID never
+        pins (every old deployment has it set, and honoring it would silently
+        reduce the pool back to one account).
+        """
+        accounts = await self.list_linkedin_accounts()
+        healthy = [a["id"] for a in accounts if a.get("status") in ("OK", "")]
+        discovered = healthy or [a["id"] for a in accounts]
+        if self.pinned_account_ids:
+            pinned = [a for a in discovered if a in self.pinned_account_ids]
+            return pinned or self.pinned_account_ids
+        return discovered
+
+    def _ensure_usage_table_sync(self) -> None:
+        from core.db import get_db_connection
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # Advisory lock: 8 workers × concurrent coroutines can race
+                # here on first use, and CREATE TABLE IF NOT EXISTS is not
+                # concurrency-safe (losers raise 42P07/23505 on the catalog).
+                # TIMESTAMPTZ so serialized values carry an explicit offset —
+                # the frontend parses them with new Date().
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext('unipile_account_usage_ddl'))")
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS unipile_account_usage (
+                        account_id TEXT PRIMARY KEY,
+                        account_name TEXT,
+                        use_count BIGINT NOT NULL DEFAULT 0,
+                        last_used_at TIMESTAMPTZ NULL,
+                        cooldown_until TIMESTAMPTZ NULL,
+                        last_error TEXT,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )
+                """)
+            conn.commit()
+        except Exception as e:
+            # A concurrent creator winning the race is success, not failure.
+            if "already exists" not in str(e) and "duplicate key" not in str(e):
+                raise
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        finally:
+            conn.close()
+
+    def _acquire_account_sync(self, account_ids: List[str], names: Dict[str, str]) -> Optional[str]:
+        """Atomically claim the least-recently-used eligible account.
+
+        The UPDATE...RETURNING with FOR UPDATE SKIP LOCKED makes the claim
+        safe across the 8 uvicorn workers — two concurrent searches can't
+        both bump the same account, so usage spreads round-robin cluster-wide.
+        """
+        from core.db import get_db_connection
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # DO NOTHING (not DO UPDATE): an update arm would row-lock
+                # every existing account until commit, serializing all claims
+                # across workers and inviting lock-order deadlocks. Sorted
+                # order keeps insertion of genuinely-new rows deadlock-free.
+                for aid in sorted(account_ids):
+                    cur.execute("""
+                        INSERT INTO unipile_account_usage (account_id, account_name)
+                        VALUES (%s, %s)
+                        ON CONFLICT (account_id) DO NOTHING
+                    """, (aid, names.get(aid, "")))
+                claim_sql = """
+                    UPDATE unipile_account_usage
+                    SET use_count = use_count + 1, last_used_at = NOW(), updated_at = NOW()
+                    WHERE account_id = (
+                        SELECT account_id FROM unipile_account_usage
+                        WHERE account_id = ANY(%s) {cooldown_clause}
+                        ORDER BY last_used_at ASC NULLS FIRST, account_id
+                        LIMIT 1
+                        FOR UPDATE SKIP LOCKED
+                    )
+                    RETURNING account_id
+                """
+                cur.execute(
+                    claim_sql.format(cooldown_clause="AND (cooldown_until IS NULL OR cooldown_until <= NOW())"),
+                    (account_ids,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    # Every account is cooling down (or lock-contended) —
+                    # a degraded search beats no search: claim LRU anyway.
+                    cur.execute(claim_sql.format(cooldown_clause=""), (account_ids,))
+                    row = cur.fetchone()
+            conn.commit()
+            # Refresh display names in their own short transaction, outside
+            # the claim, so name churn never holds locks during a claim.
+            try:
+                with conn.cursor() as cur:
+                    for aid, name in names.items():
+                        if name:
+                            cur.execute("""
+                                UPDATE unipile_account_usage
+                                SET account_name = %s, updated_at = NOW()
+                                WHERE account_id = %s
+                                  AND account_name IS DISTINCT FROM %s
+                            """, (name, aid, name))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    def _mark_account_failure_sync(self, account_id: str, error: str, cooldown_s: int) -> None:
+        from core.db import get_db_connection
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                # Upsert: the row may not exist yet (e.g. the account was
+                # never claimed through the DB path) — a bare UPDATE would
+                # silently no-op and the bench would never stick.
+                cur.execute("""
+                    INSERT INTO unipile_account_usage (account_id, cooldown_until, last_error, updated_at)
+                    VALUES (%s, NOW() + (%s || ' seconds')::interval, %s, NOW())
+                    ON CONFLICT (account_id) DO UPDATE
+                    SET cooldown_until = EXCLUDED.cooldown_until,
+                        last_error = EXCLUDED.last_error,
+                        updated_at = NOW()
+                """, (account_id, str(int(cooldown_s)), error[:500]))
+            conn.commit()
+        finally:
+            conn.close()
+
+    async def acquire_account(self) -> Optional[str]:
+        """Pick the next LinkedIn account, round-robin across the cluster.
+
+        Single-account pools still go through the DB claim so the admin
+        dashboard sees usage counts and benching telemetry for that account.
+        """
+        account_ids = await self.get_rotation_account_ids()
+        if not account_ids:
+            logger.warning("Unipile: no LinkedIn accounts available (none attached / none configured).")
+            return None
+
+        names = {a["id"]: a.get("name") or "" for a in (self._accounts_cache or [])}
+        try:
+            if not self._usage_table_ready:
+                await asyncio.to_thread(self._ensure_usage_table_sync)
+                self._usage_table_ready = True
+            claimed = await asyncio.to_thread(self._acquire_account_sync, account_ids, names)
+            if claimed:
+                if len(account_ids) > 1:
+                    logger.info(f"Unipile: rotated to LinkedIn account {claimed}")
+                return claimed
+        except Exception as e:
+            logger.warning(f"Unipile: DB round-robin unavailable ({e}); using in-process rotation.")
+
+        # Fallback: per-worker cycle. Not cluster-fair, but never blocks a search.
+        idx = self._local_rr_idx % len(account_ids)
+        self._local_rr_idx = idx + 1
+        return account_ids[idx]
+
+    async def mark_account_failure(self, account_id: str, error: str, cooldown_s: int) -> None:
+        """Bench a misbehaving account so rotation skips it for a while."""
+        logger.error(f"Unipile: benching account {account_id} for {cooldown_s}s — {error[:200]}")
+        try:
+            if not self._usage_table_ready:
+                await asyncio.to_thread(self._ensure_usage_table_sync)
+                self._usage_table_ready = True
+            await asyncio.to_thread(self._mark_account_failure_sync, account_id, error, cooldown_s)
+        except Exception as e:
+            logger.warning(f"Unipile: failed to persist account cooldown: {e}")
+
+    @staticmethod
+    def classify_account_failure(status_code: int, body: str) -> Optional[int]:
+        """Cooldown seconds if the failure is account-level, else None."""
+        text = (body or "").lower()
+        if status_code in (401, 403) or any(
+            marker in text for marker in ("checkpoint", "disconnected", "credentials", "expired", "invalid account")
+        ):
+            return _COOLDOWN_AUTH_S
+        if status_code == 429 or "rate limit" in text or "too many" in text:
+            return _COOLDOWN_RATE_LIMIT_S
+        if status_code >= 500:
+            return _COOLDOWN_TRANSIENT_S
+        return None
 
     def _clean_candidate_name(self, value: Optional[str]) -> Optional[str]:
         raw = re.sub(r"\s+", " ", str(value or "")).strip()
@@ -129,13 +401,13 @@ class UnipileService:
             "Accept": "application/json"
         }
 
-    async def _resolve_id(self, category: str, name: str) -> Optional[str]:
+    async def _resolve_id(self, category: str, name: str, account_id: Optional[str] = None) -> Optional[str]:
         """Resolves a string name to a LinkedIn ID (Geurn) using Unipile endpoints."""
         cache_key = f"{category}:{name.lower()}"
         if cache_key in self._id_cache:
             return self._id_cache[cache_key]
 
-        account_id = await self.get_account_id()
+        account_id = account_id or await self.acquire_account()
         if not account_id: return None
 
         # Fixed endpoint: /linkedin/search/parameters instead of /linkedin/search/skills 
@@ -168,43 +440,15 @@ class UnipileService:
         return None
 
     async def get_account_id(self) -> Optional[str]:
-        if self.account_id:
-            return self.account_id
-            
+        """Legacy single-account accessor — now a rotation claim.
+
+        Kept for backward compatibility; new code should call
+        acquire_account() (rotation) or list_linkedin_accounts() (inventory).
+        """
         if not self.api_key:
             logger.warning("Unipile API Key is missing.")
             return None
-
-        url = f"{self.api_url}/accounts"
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(url, headers=self._get_headers())
-                if resp.status_code == 200:
-                    data = resp.json()
-                    # Response structure: { items: [...], cursor: ... } or list [...]
-                    accounts = []
-                    if isinstance(data, dict):
-                         accounts = data.get("items", [])
-                    elif isinstance(data, list):
-                         accounts = data
-                    
-                    for acc in accounts:
-                        # Check type. Usually "LINKEDIN" or "linkedin"
-                        # The documentation says type: "LINKEDIN"
-                        if str(acc.get("type", "")).upper() == "LINKEDIN" and acc.get("status") == "OK":
-                             self.account_id = acc.get("id")
-                             logger.info(f"Unipile: Using LinkedIn Account {self.account_id} ({acc.get('name')})")
-                             return self.account_id
-                    
-                    if accounts and not self.account_id:
-                        # Fallback: take first account if no explict match? No, safer to fail.
-                        logger.warning("No active LinkedIn account found in Unipile.")
-                else:
-                    logger.error(f"Unipile Accounts Error: {resp.status_code} - {resp.text}")
-        except Exception as e:
-            logger.error(f"Unipile Account Fetch Exception: {e}")
-            
-        return None
+        return await self.acquire_account()
 
     def _sanitize_linkedin_keywords(
         self,
@@ -215,6 +459,10 @@ class UnipileService:
         s = boolean_string or ""
         # Drop years-of-experience phrases — LinkedIn profiles rarely contain the exact "10+ years" literal
         s = re.sub(r'"\d+\+\s*years?"', "", s, flags=re.IGNORECASE)
+        # Drop JobDiva-dialect experience clauses ("OVER 5 YRS") — the wizard
+        # builds one boolean for all ticked sources and keys its dialect on
+        # JobDiva, so these tokens leak into LinkedIn searches and match nothing.
+        s = re.sub(r'\bOVER\s+\d+\s+YRS?\b', "", s, flags=re.IGNORECASE)
         s = re.sub(r'\s+AND\s+recent', "", s, flags=re.IGNORECASE)
         # Drop location radius clauses when we've already resolved the location to an ID
         if has_location_id:
@@ -265,11 +513,52 @@ class UnipileService:
     async def search_candidates(self, skills: List[Any], location: str, open_to_work: bool = True, limit: int = 25, boolean_string: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Search LinkedIn via Unipile using the Recruiter API mode.
-        """
-        account_id = await self.get_account_id()
-        if not account_id:
-            return []
 
+        Each search claims the least-recently-used attached LinkedIn account
+        (cluster-wide round-robin), so volume spreads evenly instead of
+        hammering one account. If the claimed account fails with an
+        account-level error (checkpoint / expired / rate-limited) it is
+        benched and the search retries on up to two sibling accounts.
+        """
+        # LinkedIn Recruiter searches are capped per-search to protect the
+        # attached accounts (rate/abuse limits) — 100 per search, tunable.
+        try:
+            from core import sourcing_config as _sc
+            _cap = int(getattr(_sc, "UNIPILE_SEARCH_LIMIT", 100) or 100)
+        except Exception:
+            _cap = 100
+        limit = max(1, min(int(limit or 25), _cap))
+
+        tried = set()
+        for _ in range(3):
+            account_id = await self.acquire_account()
+            if not account_id or account_id in tried:
+                # No account available, or rotation cycled back to one that
+                # already failed — no healthier sibling exists this pass.
+                return []
+            tried.add(account_id)
+            results, account_error = await self._search_candidates_once(
+                account_id, skills, location, open_to_work, limit, boolean_string
+            )
+            if account_error is None:
+                return results
+        return []
+
+    async def _search_candidates_once(
+        self,
+        account_id: str,
+        skills: List[Any],
+        location: str,
+        open_to_work: bool,
+        limit: int,
+        boolean_string: Optional[str],
+    ) -> tuple[List[Dict[str, Any]], Optional[str]]:
+        """One search attempt against a specific account.
+
+        Returns (results, account_error): account_error is non-None only when
+        the failure was account-level and the account has been benched, i.e.
+        retrying on a different account could succeed.
+        """
         # 1. Resolve Skill IDs
         skill_ids = []
         # Prioritize Must Have skills
@@ -282,7 +571,7 @@ class UnipileService:
         for s in search_terms:
             name = s.get("value") or s.get("name") if isinstance(s, dict) else getattr(s, "value", getattr(s, "name", str(s)))
             if name:
-                 s_id = await self._resolve_id("skill", name)
+                 s_id = await self._resolve_id("skill", name, account_id=account_id)
                  if s_id:
                      priority = "MUST_HAVE" if s in must_haves else "CAN_HAVE"
                      skill_ids.append({"id": s_id, "priority": priority, "name_ref": name})
@@ -291,7 +580,7 @@ class UnipileService:
         location_ids = []
         if location and location.strip():
              loc_term = location.split(",")[0].strip()
-             l_id = await self._resolve_id("location", loc_term)
+             l_id = await self._resolve_id("location", loc_term, account_id=account_id)
              if l_id:
                  location_ids.append(l_id)
 
@@ -390,25 +679,38 @@ class UnipileService:
                             "profile_url": p_url,
                             "image_url": img_url,
                             "open_to_work": open_to_work,
-                            "recruiter_candidate_id": item.get("recruiter_candidate_id")
+                            "recruiter_candidate_id": item.get("recruiter_candidate_id"),
+                            # Account affinity: recruiter_candidate_id and some
+                            # profile lookups are only valid on the account that
+                            # performed the search, so downstream enrichment and
+                            # messaging reuse this account.
+                            "unipile_account_id": account_id,
                         }
                         results.append(cand)
                 else:
-                    logger.error(f"Unipile Search Failed: {resp.status_code} - {resp.text}")
-                    return []
+                    body = resp.text
+                    logger.error(f"Unipile Search Failed on account {account_id}: {resp.status_code} - {body}")
+                    cooldown_s = self.classify_account_failure(resp.status_code, body)
+                    if cooldown_s:
+                        await self.mark_account_failure(account_id, f"search {resp.status_code}: {body[:200]}", cooldown_s)
+                        return [], f"{resp.status_code}"
+                    return [], None
 
         except Exception as e:
+            # Network-level failure — not attributable to this account, so
+            # don't bench it; a sibling account wouldn't fare better either.
             logger.error(f"Unipile Search Exception: {e}")
-            return []
+            return [], None
 
-        logger.info(f"Unipile returned {len(results)} candidates")
-        return results
+        logger.info(f"Unipile returned {len(results)} candidates from account {account_id}")
+        return results, None
 
-    async def send_message(self, candidate_provider_id: str, text: str) -> bool:
+    async def send_message(self, candidate_provider_id: str, text: str, account_id: Optional[str] = None) -> bool:
         """
         Send LinkedIn Message (InMail if premium allowed).
+        Pass account_id to send from the account that sourced the candidate.
         """
-        account_id = await self.get_account_id()
+        account_id = account_id or await self.acquire_account()
         if not account_id: return False
         
         url = f"{self.api_url}/chats"
@@ -440,12 +742,13 @@ class UnipileService:
             logger.error(f"Unipile Send Message Exception: {e}")
             return False
 
-    async def get_candidate_profile(self, candidate_provider_id: str) -> Optional[Dict[str, Any]]:
+    async def get_candidate_profile(self, candidate_provider_id: str, account_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Fetches full LinkedIn profile for a candidate.
         Endpoint: /linkedin/users/{id} (or generic /users/{id} depending on Unipile version)
+        Pass account_id to reuse the account that surfaced the candidate.
         """
-        account_id = await self.get_account_id()
+        account_id = account_id or await self.acquire_account()
         if not account_id: return None
         
         # Try specific LinkedIn User endpoint
@@ -469,5 +772,32 @@ class UnipileService:
         except Exception as e:
             logger.error(f"Unipile Profile Exception: {e}")
             return None
+
+    def get_account_usage_sync(self) -> List[Dict[str, Any]]:
+        """Rotation state for the admin dashboard (DB only, no Unipile call)."""
+        from core.db import get_db_connection
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT account_id, account_name, use_count, last_used_at,
+                           cooldown_until, last_error
+                    FROM unipile_account_usage
+                    ORDER BY use_count DESC, account_id
+                """)
+                rows = cur.fetchall()
+            return [
+                {
+                    "account_id": r[0],
+                    "account_name": r[1] or "",
+                    "use_count": int(r[2] or 0),
+                    "last_used_at": r[3].isoformat() if r[3] else None,
+                    "cooldown_until": r[4].isoformat() if r[4] else None,
+                    "last_error": r[5] or "",
+                }
+                for r in rows
+            ]
+        finally:
+            conn.close()
 
 unipile_service = UnipileService()

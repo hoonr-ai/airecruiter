@@ -51,6 +51,7 @@ _COLUMNS = (
     "campaign_id", "name", "customer_name",
     "recruiter_emails", "selected_employment_types", "screening_level",
     "recruiter_notes", "work_authorization", "selected_job_boards", "bot_introduction",
+    "outreach_delay_mins",
     "template_enhanced_title", "template_ai_description",
     "template_rubric", "template_screen_questions", "template_sourcing_filters",
     "pair_enabled", "status", "user_session",
@@ -75,6 +76,7 @@ async def init_campaigns_schema():
                         work_authorization        TEXT,
                         selected_job_boards       TEXT,
                         bot_introduction          TEXT,
+                        outreach_delay_mins       INTEGER DEFAULT NULL,
                         template_enhanced_title   TEXT,
                         template_ai_description   TEXT,
                         template_rubric           JSONB,
@@ -86,6 +88,12 @@ async def init_campaigns_schema():
                         created_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at                TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
+                    """
+                )
+                cur.execute(
+                    """
+                    ALTER TABLE campaigns
+                    ADD COLUMN IF NOT EXISTS outreach_delay_mins INTEGER DEFAULT NULL;
                     """
                 )
                 conn.commit()
@@ -172,6 +180,14 @@ async def create_campaign(campaign: CampaignData, user: UserIdentity = Depends(g
                 _ensure_campaign_access(existing, user)
         data = campaign.dict()
         data["campaign_id"] = campaign_id
+
+        if not (data.get("bot_introduction") or "").strip():
+            data["bot_introduction"] = (
+                f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with Pyramid Consulting. "
+                f"We are helping our client recruit for a {{{{job_title}}}} in {{{{job_location}}}}, "
+                f"and you seem to be a good fit for the role. Please note that conversation may be recorded "
+                f"for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
+            )
 
         values = [_param_value(col, data.get(col)) for col in _COLUMNS]
         placeholders = ", ".join(["%s"] * len(_COLUMNS))
@@ -328,27 +344,177 @@ async def delete_campaign(campaign_id: str, user: UserIdentity = Depends(get_cur
         raise HTTPException(status_code=500, detail="Failed to delete campaign")
 
 
-def _seed_job_rubric(campaign: Dict[str, Any], ref: str) -> None:
+async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction: Optional[str] = None) -> None:
     """Seed a child job's rubric + screening-questions satellite tables from the
-    campaign template. save_full_rubric accepts the same dict shape
-    generate-rubric produces (which template_rubric holds) and persists
-    screen_questions when embedded. Keyed by the job's reference string. Non-fatal."""
+    campaign template. Generates custom technical questions for the specific job description
+    and merges them with campaign baseline defaults before persisting."""
     template_rubric = campaign.get("template_rubric") or {}
-    template_questions = campaign.get("template_screen_questions") or []
-    if not (template_rubric or template_questions):
-        return
+    template_questions = list(campaign.get("template_screen_questions") or [])
+    template_sourcing = campaign.get("template_sourcing_filters") or {}
     try:
         from services.job_rubric_db import JobRubricDB
+        from routers._helpers import get_db_connection
+        import json
+
+        # Always resolve to the *canonical* jobdiva_id stored in monitored_jobs
+        # and retrieve child-job details to generate tailored questions.
+        canonical_ref = ref
+        job_title = ""
+        job_desc = ""
+        city = ""
+        loc_type = "Onsite"
+        screening_lvl = "L1.5"
+
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT jobdiva_id, title, jobdiva_description, city, location_type, screening_level, enhanced_title 
+                    FROM monitored_jobs WHERE jobdiva_id = %s OR job_id = %s LIMIT 1
+                    """,
+                    (ref, ref),
+                )
+                row = cur.fetchone()
+                if row:
+                    canonical_ref = row[0] or ref
+                    job_title = (row[6] or row[1] or "").strip()
+                    job_desc = row[2] or ""
+                    city = row[3] or ""
+                    loc_type = row[4] or "Onsite"
+                    screening_lvl = row[5] or "L1.5"
+
+        if not (template_rubric or template_questions or template_sourcing or bot_introduction or campaign.get("template_enhanced_title") or campaign.get("template_ai_description") or job_title or job_desc):
+            return
+
+        # Generate dynamic technical/role-specific questions for this job description
+        try:
+            from core.llm_client import get_openai_client
+            from services.screening_question_generator import generate_screening_questions
+            openai_client = get_openai_client()
+            if openai_client:
+                logger.info(f"Generating custom technical questions for child job {canonical_ref}...")
+                tech_questions = await generate_screening_questions(
+                    openai_client=openai_client,
+                    model="gpt-4o-mini",
+                    job_title=job_title,
+                    rubric=template_rubric,
+                    screening_level=screening_lvl,
+                    customer_name=campaign.get("customer_name") or "",
+                    job_description=job_desc,
+                    work_arrangement=loc_type,
+                    city=city,
+                )
+                # Filter: keep only technical/role-specific questions from the generated set.
+                # Exclude generic front-matter and logistics categories that come from the LLM.
+                _EXCLUDE_CATS = {"default", "work-arrangement", "intro", "logistics"}
+                tech_only = [
+                    q for q in (tech_questions or [])
+                    if str((q or {}).get("category", "")).lower() not in _EXCLUDE_CATS
+                ]
+                logger.info(f"Generated {len(tech_only)} custom technical questions for child job {canonical_ref}.")
+
+                # Target order:
+                #   [default / intro / behavioral]   ← campaign template questions
+                #   [logistics tail]                  ← availability, compensation, work-auth
+                #   [role-specific tech]              ← always at the very end
+                template_questions = template_questions + tech_only
+
+                # Re-index the full merged list sequentially to avoid order_index collisions.
+                for _i, _q in enumerate(template_questions):
+                    _q["order_index"] = _i
+        except Exception as gen_err:
+            logger.warning(f"Technical question generation failed for child job {canonical_ref}: {gen_err}")
 
         rubric_payload = dict(template_rubric)
         if template_questions:
             rubric_payload["screen_questions"] = template_questions
         JobRubricDB().save_full_rubric(
-            jobdiva_id=ref,
+            jobdiva_id=canonical_ref,
             rubric_obj=rubric_payload,
             recruiter_notes=campaign.get("recruiter_notes"),
-            bot_introduction=campaign.get("bot_introduction"),
+            bot_introduction=bot_introduction,
         )
+
+        sourcing_payload = dict(template_sourcing) if isinstance(template_sourcing, dict) and template_sourcing else {}
+        if not sourcing_payload and template_rubric:
+            titles = [
+                {
+                    "id": i + 1,
+                    "value": t.get("value", ""),
+                    "matchType": "must" if t.get("required") == "Required" else "can",
+                    "years": t.get("minYears", 0),
+                    "recent": False,
+                    "similarCount": "0",
+                    "similarTitles": [],
+                    "fromRubric": True,
+                }
+                for i, t in enumerate(template_rubric.get("titles") or [])
+            ]
+            skills = [
+                {
+                    "id": i + 1,
+                    "value": s.get("value", ""),
+                    "matchType": "must" if s.get("required") == "Required" else "can",
+                    "years": s.get("minYears", 0),
+                    "recent": False,
+                    "similarCount": "0",
+                    "similarSkills": [],
+                    "fromRubric": True,
+                }
+                for i, s in enumerate(template_rubric.get("skills") or [])
+            ]
+            sourcing_payload = {
+                "sources": {"jobdiva": True, "linkedin": False, "dice": False, "exa": False},
+                "titles": titles,
+                "skills": skills,
+                "locations": [],
+                "companies": [],
+                "keywords": [],
+                "recentDaysFilter": 90,
+                "includeNoResume": False,
+            }
+
+        resume_filters = []
+        filter_id = 1
+        for title in (template_rubric.get("titles") or []):
+            is_req = title.get("required") == "Required"
+            cat = "Required Title" if is_req else "Preferred Title"
+            val = title.get("value", "")
+            display = f"{val} — {title.get('minYears', 0)}+ yrs, {title.get('matchType', 'broad')} match"
+            resume_filters.append({
+                "id": filter_id, "category": cat, "value": display, "active": is_req, "ai": True, "fromRubric": True, "rubricKey": f"{cat}:{val.split('—')[0].strip().lower()}", "weight": 1
+            })
+            filter_id += 1
+        for skill in (template_rubric.get("skills") or []):
+            is_req = skill.get("required") == "Required"
+            cat = "Required Skill" if is_req else "Preferred Skill"
+            val = skill.get("value", "")
+            display = f"{val} — {skill.get('minYears', 0)}+ yrs, {skill.get('matchType', 'broad')} match"
+            resume_filters.append({
+                "id": filter_id, "category": cat, "value": display, "active": is_req, "ai": True, "fromRubric": True, "rubricKey": f"{cat}:{val.split('—')[0].strip().lower()}", "weight": 1
+            })
+            filter_id += 1
+        for edu in (template_rubric.get("education") or []):
+            is_req = edu.get("required") == "Required"
+            display = f"{edu.get('degree', '')}{' in ' + edu.get('field', '') if edu.get('field') else ''}"
+            resume_filters.append({
+                "id": filter_id, "category": "Education", "value": display, "active": is_req, "ai": True, "fromRubric": True, "rubricKey": f"Education:{display.split('—')[0].strip().lower()}", "weight": 1
+            })
+            filter_id += 1
+
+        with get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE monitored_jobs
+                    SET sourcing_filters = CASE
+                            WHEN sourcing_filters IS NULL OR sourcing_filters::text IN ('null', '[]', '{}') OR (jsonb_typeof(sourcing_filters->'skills') = 'array' AND jsonb_array_length(sourcing_filters->'skills') = 0)
+                            THEN %s::jsonb ELSE sourcing_filters END,
+                        resume_match_filters = CASE
+                            WHEN resume_match_filters IS NULL OR resume_match_filters::text IN ('null', '[]') OR (jsonb_typeof(resume_match_filters) = 'array' AND jsonb_array_length(resume_match_filters) = 0)
+                            THEN %s::jsonb ELSE resume_match_filters END
+                    WHERE jobdiva_id = %s OR job_id = %s
+                """, (json.dumps(sourcing_payload), json.dumps(resume_filters), ref, ref))
+            conn.commit()
     except Exception as e:
         logger.warning(f"template rubric seed failed for {ref}: {e}")
 
@@ -367,6 +533,9 @@ async def _create_campaign_job(
     requirements) fall back to the campaign's JD template. Common props + JD +
     campaign_id are always inherited; rubric/questions are seeded from the
     template. Returns a per-job result dict."""
+    from services.jobdiva import jobdiva_service
+    import time
+
     fetched = None
     if jobdiva_id:
         try:
@@ -410,11 +579,49 @@ async def _create_campaign_job(
             "jobdiva_description": description or "",
         }
 
-    # Overlay campaign-inherited common props + template + campaign_id.
-    # Raw Python lists — monitor_job_locally json.dumps them exactly once.
+    # Resolve Bot Introduction: use campaign template or default standard intro,
+    # then interpolate job-specific details when the child job is added under the campaign.
+    # Matching the job wizard: enhanced_title is prioritized over title, location prefixes are stripped, and staffing agency is always Pyramid Consulting.
+    def _clean_job_title_for_intro(title: str) -> str:
+        if not title:
+            return "role"
+        import re
+        cleaned = re.sub(r'^(?:(?:US|USA|CAN|CANADA|UK|INDIA|MEX|APAC|EMEA|LATAM|[A-Z]{2,3}(?:\/[A-Z]{2,3})?)\s*[-:/|]\s*)+', '', str(title), flags=re.IGNORECASE).strip()
+        return cleaned or "role"
+
+    raw_intro = campaign.get("bot_introduction") or ""
+    child_job_title = (data.get("title") or "").strip()
+    campaign_seed_title = (campaign.get("template_enhanced_title") or "").strip()
+    raw_title_str = child_job_title or campaign_seed_title or "role"
+    job_title_str = _clean_job_title_for_intro(raw_title_str)
+    job_location_str = (
+        f"{data.get('city')}, {data.get('state')}".strip(", ")
+        if (data.get("city") and data.get("state"))
+        else (data.get("city") or data.get("state") or "your area")
+    )
+
+    if not raw_intro.strip():
+        raw_intro = (
+            f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with Pyramid Consulting. "
+            f"We are helping our client recruit for a {job_title_str} in {job_location_str}, "
+            f"and you seem to be a good fit for the role. Please note that conversation may be recorded "
+            f"for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
+        )
+    else:
+        import re
+        raw_intro = re.sub(r'\{\{\s*(?:job_title|title)\s*\}\}|\{\s*(?:job_title|title)\s*\}', job_title_str, raw_intro, flags=re.IGNORECASE)
+        raw_intro = re.sub(r'\{\{\s*(?:job_location|location)\s*\}\}|\{\s*(?:job_location|location)\s*\}', job_location_str, raw_intro, flags=re.IGNORECASE)
+        raw_intro = re.sub(r'\{\{\s*(?:customer_name|company)\s*\}\}|\{\s*(?:customer_name|company)\s*\}', 'Pyramid Consulting', raw_intro, flags=re.IGNORECASE)
+        seed_title = campaign_seed_title
+        if seed_title and seed_title in raw_intro and seed_title != job_title_str and job_title_str:
+            raw_intro = raw_intro.replace(seed_title, job_title_str)
+        campaign_name = (campaign.get("name") or "").strip()
+        if campaign_name and campaign_name in raw_intro and campaign_name != job_title_str and job_title_str:
+            raw_intro = re.sub(r'(recruit\s+for\s+a(?:n)?\s+)' + re.escape(campaign_name), r'\1' + job_title_str, raw_intro, flags=re.IGNORECASE)
+
     data.update({
         "campaign_id": campaign_id,
-        "enhanced_title": campaign.get("template_enhanced_title") or data.get("title") or "",
+        "enhanced_title": job_title_str if child_job_title else campaign_seed_title,
         "ai_description": campaign.get("template_ai_description") or "",
         "recruiter_notes": campaign.get("recruiter_notes") or "",
         "work_authorization": campaign.get("work_authorization") or data.get("work_authorization") or "",
@@ -424,13 +631,19 @@ async def _create_campaign_job(
             selected_job_boards if selected_job_boards is not None else (campaign.get("selected_job_boards") or [])
         ),
         "screening_level": screening_level or campaign.get("screening_level") or "L1.5",
-        "bot_introduction": campaign.get("bot_introduction") or "",
+        "bot_introduction": raw_intro,
         "processing_status": "campaign_created",
+        "sourcing_filters": campaign.get("template_sourcing_filters") or None,
     })
 
     ok = jobdiva_service.monitor_job_locally(data["job_id"], data)
     if ok:
-        _seed_job_rubric(campaign, ref)
+        # Seed once. _seed_job_rubric internally resolves to the canonical
+        # jobdiva_id (via monitored_jobs jobdiva_id/job_id lookup) and persists
+        # under that single key, and reads accept either key — so a second call
+        # keyed on job_id would resolve to the same canonical_ref and merely
+        # re-run the LLM question generation and overwrite the first result.
+        await _seed_job_rubric(campaign, ref, bot_introduction=raw_intro)
 
     return {
         "jobdiva_id": jobdiva_id or "",

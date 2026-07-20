@@ -969,6 +969,7 @@ class JobDivaService:
         page_number: int = 0,
         zip_code: str = "",
         within_miles: Optional[int] = None,
+        title: str = "",
     ) -> List[Dict[str, Any]]:
         """
         Search for candidates.
@@ -1002,6 +1003,7 @@ class JobDivaService:
             page_number=page_number or 0,
             zip_code=zip_code or "",
             within_miles=within_miles,
+            title=title,
         )
 
     async def _search_job_applicants(self, job_id: str, limit: int, token: str, skills: List[Any] = None, location: str = "") -> List[Dict[str, Any]]:
@@ -1547,17 +1549,30 @@ class JobDivaService:
         page_number: int = 0,
         zip_code: str = "",
         within_miles: Optional[int] = None,
+        title: str = "",
     ) -> List[Dict[str, Any]]:
         """
-        Search JobDiva Talent Search using the generated Boolean string.
+        Search the JobDiva Talent Pool via the v2 TalentSearch contract.
 
-        The raw `boolean_string` coming from the frontend is in human-readable
-        form (`"Databricks" AND "5+ years"`). JobDiva expects the
-        `OVER N YRS` dialect (`"DATABRICKS" OVER 5 YRS`) — so we translate
-        through `jobdiva_boolean_translator.translate_for_jobdiva` right
-        before building the payload. See
-        `apps/api/services/jobdiva_boolean_translator.py` for the syntax
-        rules we normalize.
+        Live-probed 2026-07-19 (scripts/jobdiva_payload_variants_probe.py +
+        swagger group "Version 2"): the endpoint takes the TalentSearchDef
+        fields at the TOP LEVEL of the request body. The previous
+        `{"talentSearchDef": {...}}` wrapper (plus string-typed
+        skills/states/countries) was silently discarded by the server, which
+        then returned its default unfiltered dump — the same ~2.5k candidates
+        for every job, regardless of skills or location. Verified field
+        semantics:
+
+          skills               array of PLAIN terms, AND semantics; boolean
+                               syntax inside a term kills the request
+          zipCode/withinMiles  honored (98.8% in-radius vs 8.1% unfiltered)
+          states / countries   arrays of 2-letter codes, honored
+          titleSearch          honored alone; no extra effect beside skills
+          advancedSkills, location   always return 0 rows — never send
+          pageNumber/pageSize  ignored — the full set returns in one call
+
+        Boolean OR / NOT / years clauses cannot be expressed server-side;
+        they stay client-side in the scorer (see extract_and_terms).
 
         Also filters out profile-only candidates (no resume_text) unless the
         caller explicitly opts in via `require_resume=False`. These profiles
@@ -1565,230 +1580,107 @@ class JobDivaService:
         warning in the UI and eroded trust in the match ranking.
         """
         from services.jobdiva_boolean_translator import (
-            translate_for_jobdiva,
-            extract_skill_years,
-            rewrite_location_clauses_to_zip_dialect,
+            extract_and_terms,
+            sanitize_talent_term,
             count_location_clauses,
         )
         from core import sourcing_config as _sc
 
         jd_results = []
-        raw_search_value = (
-            boolean_string.strip()
-            if boolean_string
-            else self._build_talent_boolean(
-                skills, location, zip_code=zip_code, within_miles=within_miles
-            )
-        )
 
-        # Pull { skill: years } hints from the passed `skills` payload so
-        # the translator can attach OVER clauses even if the frontend
-        # forgot to inline them.
-        skill_years = extract_skill_years(
-            skills if isinstance(skills, list) else []
-        )
+        # Must-terms for the server-side AND: prefer the structured skills
+        # payload (wizard chips); fall back to parsing the raw boolean.
+        max_terms = max(1, int(getattr(_sc, "JOBDIVA_TALENT_MAX_SKILL_TERMS", 4) or 4))
+        must_terms: List[str] = []
+        seen_terms = set()
+        for skill in skills or []:
+            if isinstance(skill, dict):
+                if skill.get("match_type", "must") == "exclude":
+                    continue
+                raw_term = skill.get("value") or skill.get("name") or ""
+            else:
+                raw_term = str(skill)
+            term = sanitize_talent_term(raw_term)
+            if term and term.lower() not in seen_terms:
+                seen_terms.add(term.lower())
+                must_terms.append(term)
+        if not must_terms and boolean_string:
+            must_terms = extract_and_terms(boolean_string, max_terms=max_terms)
+        must_terms = must_terms[:max_terms]
 
-        translated_search_value = translate_for_jobdiva(
-            raw_search_value,
-            skill_years=skill_years,
-            recent_days=recent_days,
-        )
-
-        # Optional: turn quoted frontend location clauses into JobDiva's
-        # native zip-radius dialect. Off by default — probe-gated.
-        if getattr(_sc, "JOBDIVA_BOOLEAN_ZIP_DIALECT_ENABLED", False):
-            translated_search_value = rewrite_location_clauses_to_zip_dialect(
-                translated_search_value
-            )
-
-        url = f"{self.api_url}/apiv2/jobdiva/TalentSearch"
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        skills_value = translated_search_value or raw_search_value
-        countries_str = ",".join([c for c in (countries or []) if c]).strip()
-        states_str = ",".join([s for s in (states or []) if s]).strip()
-        talent_search_def: Dict[str, Any] = {
-            "skills": skills_value,
-            "countries": countries_str,
-            "states": states_str,
+        base_body: Dict[str, Any] = {
             "pageNumber": int(page_number or 0),
             "pageSize": limit,
         }
-        # Structured zip-radius (swagger: TalentSearchDef.zipCode/withinMiles).
-        # Harmless if the server ignores them; a real geo filter if honored.
-        # The zip rides ALONGSIDE any resolved states rather than replacing
-        # them: for an explicit-zip wizard location `states` is already empty
-        # (the parser dropped it), so keeping it is a no-op AND preserves the
-        # border-metro span (NYC ↔ NJ); but when the zip was SYNTHESIZED from a
-        # plain "City, ST" job (see unified_candidate_search.city_state_default_zip)
-        # the state IS the intended scope — blanking it there would fall back to
-        # nationwide results if the server ignores zipCode. Keeping states is
-        # the safe, no-broadening choice in both cases.
-        # Skipped for multi-location searches: the structured field can only
-        # carry ONE anchor, and pinning a `(A within 25 mi OR B within 25 mi)`
-        # boolean to chip A's zip would exclude chip B's candidates
-        # server-side. Geo stays in the boolean for those.
+        countries_list = [str(c).strip().upper() for c in (countries or []) if str(c).strip()]
+        base_body["countries"] = countries_list or ["US"]
+        states_list = [str(s).strip().upper() for s in (states or []) if str(s).strip()]
+        if states_list:
+            base_body["states"] = states_list
+
+        # Structured zip-radius. The zip rides ALONGSIDE any resolved states:
+        # for an explicit-zip wizard location `states` is already empty (the
+        # parser dropped it); when the zip was SYNTHESIZED from a plain
+        # "City, ST" job the state IS the intended scope. Skipped for
+        # multi-location searches: the structured field can only carry ONE
+        # anchor, and pinning a multi-chip search to chip A's zip would
+        # exclude chip B's candidates server-side.
         zip_radius_miles = 0
         zip5 = str(zip_code or "").strip()
         if (
             getattr(_sc, "JOBDIVA_ZIP_RADIUS_ENABLED", True)
             and len(zip5) == 5 and zip5.isdigit()
-            and count_location_clauses(raw_search_value) < 2
+            and count_location_clauses(boolean_string or "") < 2
         ):
-            # 2x headroom: the server-side filter (if honored) is a COARSE
-            # recall gate — it must not empty the UI's BEYOND-radius
-            # soft-keep bucket. The client-side verdict still measures true
-            # distance against the recruiter's exact radius; this just cuts
-            # the wrong-coast noise while keeping the near-miss band.
+            # 2x headroom: the server radius is a coarse recall gate — it
+            # must not empty the UI's BEYOND-radius soft-keep bucket. The
+            # client-side verdict still measures true distance against the
+            # recruiter's exact radius; this just cuts the wrong-coast noise
+            # while keeping the near-miss band.
             zip_radius_miles = max(1, min(100, int(within_miles or 25) * 2))
-            talent_search_def["zipCode"] = zip5
-            talent_search_def["withinMiles"] = zip_radius_miles
-        payload = {"talentSearchDef": talent_search_def}
+            base_body["zipCode"] = zip5
+            base_body["withinMiles"] = zip_radius_miles
 
         logger.debug(
-            f"JobDiva Talent Search — skills: {skills_value!r} | "
-            f"countries={talent_search_def['countries']!r} "
-            f"states={talent_search_def['states']!r} "
-            f"zipCode={talent_search_def.get('zipCode', '')!r} "
-            f"withinMiles={zip_radius_miles or ''} "
-            f"pageNumber={page_number} pageSize={limit} | "
-            f"raw: {raw_search_value!r}"
+            f"JobDiva Talent Search v2 — terms={must_terms!r} title={title!r} | "
+            f"countries={base_body['countries']!r} states={base_body.get('states')!r} "
+            f"zipCode={base_body.get('zipCode', '')!r} withinMiles={zip_radius_miles or ''}"
         )
 
         dropped_no_resume = 0
         profile_only_results: List[Dict[str, Any]] = []
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(url, json=payload, headers=headers)
-                if response.status_code != 200:
-                    logger.warning(f"JobDiva Talent Search failed: {response.status_code} - {response.text[:200]}")
-                    return jd_results
+            candidates = await self._fetch_talent_search_rows(
+                token, base_body, must_terms, title=title
+            )
+            # The server ignores pageSize — cap client-side so the detail/
+            # resume enrichment below stays bounded.
+            candidates = candidates[: max(1, int(limit or 1))]
+            for c in candidates:
+                candidate_id = str(get_field(c, ["candidateId", "CANDIDATEID", "id", "ID"]) or "")
+                if not candidate_id:
+                    continue
 
-                data = response.json()
-                if isinstance(data, dict):
-                    candidates = data.get("data") or data.get("candidates") or data.get("results") or []
-                else:
-                    candidates = data or []
+                first_name = get_field(c, ["firstName", "firstname", "FIRSTNAME"]) or "Unknown"
+                last_name = get_field(c, ["lastName", "lastname", "LASTNAME"]) or "Candidate"
+                if not is_valid_candidate_name(first_name, last_name):
+                    logger.warning("Dropping TalentSearch candidate with invalid name: first=%r last=%r id=%r", first_name, last_name, candidate_id)
+                    continue
+                full_name = f"{first_name} {last_name}".strip()
 
-                for c in candidates:
-                    candidate_id = str(get_field(c, ["candidateId", "CANDIDATEID", "id", "ID"]) or "")
-                    if not candidate_id:
-                        continue
+                resume_text = self._extract_resume_text(c)
+                resume_id = get_field(c, ["resumeId", "RESUMEID", "resume_id"])
+                has_resume = bool((resume_text or "").strip()) or bool(resume_id)
 
-                    first_name = get_field(c, ["firstName", "firstname", "FIRSTNAME"]) or "Unknown"
-                    last_name = get_field(c, ["lastName", "lastname", "LASTNAME"]) or "Candidate"
-                    if not is_valid_candidate_name(first_name, last_name):
-                        logger.warning("Dropping TalentSearch candidate with invalid name: first=%r last=%r id=%r", first_name, last_name, candidate_id)
-                        continue
-                    full_name = f"{first_name} {last_name}".strip()
-
-                    resume_text = self._extract_resume_text(c)
-                    resume_id = get_field(c, ["resumeId", "RESUMEID", "resume_id"])
-                    has_resume = bool((resume_text or "").strip()) or bool(resume_id)
-
-                    # Filter out profile-only candidates unless caller opts in.
-                    # These trigger the "resume not available" warning downstream
-                    # and hurt the recruiter's trust in the match ranking.
-                    if require_resume and not has_resume:
-                        dropped_no_resume += 1
-                        # Keep a bounded fallback copy so we can avoid the
-                        # "always empty" failure mode when all JobDiva hits
-                        # are profile-only (common in some markets/roles).
-                        profile_only_results.append({
-                            "candidate_id": candidate_id,
-                            "id": candidate_id,
-                            "name": full_name,
-                            "first_name": first_name,
-                            "last_name": last_name,
-                            "firstName": first_name,
-                            "lastName": last_name,
-                            "email": get_field(c, ["email", "EMAIL"]) or "",
-                            "city": get_field(c, ["city", "locationCity", "CITY"]) or "",
-                            "state": get_field(c, ["state", "locationState", "STATE"]) or "",
-                            "location": ", ".join([p for p in [
-                                get_field(c, ["city", "locationCity", "CITY"]) or "",
-                                get_field(c, ["state", "locationState", "STATE"]) or "",
-                            ] if p]).strip(),
-                            "work_city": "",
-                            "work_state": "",
-                            "work_location": "",
-                            "title": get_field(c, ["title", "candidateTitle", "TITLE"]) or "",
-                            "source": "JobDiva-TalentSearch",
-                            "match_score": 75,
-                            "skills": self._extract_candidate_skills(c),
-                            "experience_years": self._extract_experience_years(c),
-                            "resume_text": resume_text,
-                            "resume_id": resume_id,
-                            "received": get_field(c, ["received", "RECEIVED"]),
-                            "recent_availability": get_field(
-                                c,
-                                [
-                                    "recentAvailability",
-                                    "RECENTAVAILABILITY",
-                                    "recent_availability",
-                                    "RECENT_AVAILABILITY",
-                                    "recentAvailable",
-                                    "RECENTAVAILABLE",
-                                    "recent_status",
-                                    "RECENT_STATUS",
-                                ],
-                            ) or "",
-                            "available": get_field(c, ["available", "AVAILABLE", "availability", "AVAILABILITY", "status", "STATUS"]) or "",
-                            "availability_status": get_field(c, ["available", "AVAILABLE", "availability", "AVAILABILITY", "status", "STATUS"]) or "",
-                            "abstract": (
-                                get_field(c, ["summary", "SUMMARY", "abstract", "ABSTRACT", "comments", "COMMENTS", "notes", "NOTES"])
-                                or ((resume_text or "")[:240].replace("\n", " ").strip())
-                            ),
-                            "profile_url": get_field(c, ["profileUrl", "PROFILEURL", "profile_url", "PROFILE_URL"]),
-                            "lastnote": get_field(c, ["lastNote", "LASTNOTE"]),
-                            "phone": _get_candidate_phone(c),
-                            "resume_missing": True,
-                        })
-                        continue
-
-                    city = get_field(c, ["city", "locationCity", "CITY"]) or ""
-                    state = get_field(c, ["state", "locationState", "STATE"]) or ""
-                    zipcode = get_field(c, ["zipcode", "ZIPCODE", "zip", "ZIP", "postalCode", "POSTALCODE"]) or ""
-                    location_str = ", ".join([p for p in [city, state] if p]).strip()
-
-                    # Abstract: prefer an explicit summary/comments field if JobDiva
-                    # returns one; fall back to the first ~200 chars of resume text
-                    # so the Step-5 list can show something meaningful.
-                    raw_abstract = (
-                        get_field(c, ["summary", "SUMMARY", "abstract", "ABSTRACT", "comments", "COMMENTS", "notes", "NOTES"])
-                        or ""
-                    )
-                    if not raw_abstract and resume_text:
-                        raw_abstract = resume_text[:240].replace("\n", " ").strip()
-                    if raw_abstract and len(raw_abstract) > 240:
-                        raw_abstract = raw_abstract[:237].rstrip() + "..."
-
-                    recent_availability = (
-                        get_field(
-                            c,
-                            [
-                                "recentAvailability",
-                                "RECENTAVAILABILITY",
-                                "recent_availability",
-                                "RECENT_AVAILABILITY",
-                                "recentAvailable",
-                                "RECENTAVAILABLE",
-                                "recent_status",
-                                "RECENT_STATUS",
-                            ],
-                        )
-                        or ""
-                    )
-                    availability_status = (
-                        recent_availability
-                        or get_field(c, ["available", "AVAILABLE", "availability", "AVAILABILITY", "status", "STATUS"])
-                        or ""
-                    )
-                    profile_url = get_field(
-                        c,
-                        ["profileUrl", "PROFILEURL", "profile_url", "PROFILE_URL"],
-                    )
-
-                    jd_results.append({
+                # Filter out profile-only candidates unless caller opts in.
+                # These trigger the "resume not available" warning downstream
+                # and hurt the recruiter's trust in the match ranking.
+                if require_resume and not has_resume:
+                    dropped_no_resume += 1
+                    # Keep a bounded fallback copy so we can avoid the
+                    # "always empty" failure mode when all JobDiva hits
+                    # are profile-only (common in some markets/roles).
+                    profile_only_results.append({
                         "candidate_id": candidate_id,
                         "id": candidate_id,
                         "name": full_name,
@@ -1797,10 +1689,12 @@ class JobDivaService:
                         "firstName": first_name,
                         "lastName": last_name,
                         "email": get_field(c, ["email", "EMAIL"]) or "",
-                        "city": city,
-                        "state": state,
-                        "zipcode": zipcode,
-                        "location": location_str,
+                        "city": get_field(c, ["city", "locationCity", "CITY"]) or "",
+                        "state": get_field(c, ["state", "locationState", "STATE"]) or "",
+                        "location": ", ".join([p for p in [
+                            get_field(c, ["city", "locationCity", "CITY"]) or "",
+                            get_field(c, ["state", "locationState", "STATE"]) or "",
+                        ] if p]).strip(),
                         "work_city": "",
                         "work_state": "",
                         "work_location": "",
@@ -1812,139 +1706,319 @@ class JobDivaService:
                         "resume_text": resume_text,
                         "resume_id": resume_id,
                         "received": get_field(c, ["received", "RECEIVED"]),
-                        "recent_availability": recent_availability,
-                        "available": availability_status,
-                        "availability_status": availability_status,
-                        "employee_status": get_field(
+                        "recent_availability": get_field(
                             c,
                             [
-                                "EMPLOYEESTATUS",
-                                "employeeStatus",
-                                "CURRENTEMPLOYEE",
-                                "currentEmployee",
-                                "ASSIGNMENTSTATUS",
-                                "assignmentStatus",
+                                "recentAvailability",
+                                "RECENTAVAILABILITY",
+                                "recent_availability",
+                                "RECENT_AVAILABILITY",
+                                "recentAvailable",
+                                "RECENTAVAILABLE",
+                                "recent_status",
+                                "RECENT_STATUS",
                             ],
+                        ) or "",
+                        "available": get_field(c, ["available", "AVAILABLE", "availability", "AVAILABILITY", "status", "STATUS"]) or "",
+                        "availability_status": get_field(c, ["available", "AVAILABLE", "availability", "AVAILABILITY", "status", "STATUS"]) or "",
+                        "abstract": (
+                            get_field(c, ["summary", "SUMMARY", "abstract", "ABSTRACT", "comments", "COMMENTS", "notes", "NOTES"])
+                            or ((resume_text or "")[:240].replace("\n", " ").strip())
                         ),
-                        "abstract": raw_abstract,
-                        "profile_url": profile_url,
+                        "profile_url": get_field(c, ["profileUrl", "PROFILEURL", "profile_url", "PROFILE_URL"]),
                         "lastnote": get_field(c, ["lastNote", "LASTNOTE"]),
                         "phone": _get_candidate_phone(c),
+                        "resume_missing": True,
                     })
+                    continue
 
-                # Two-step enrichment: TalentSearch returns thin records;
-                # CandidatesDetail fills in address1, linkedinUrl, and any
-                # email/phone/resume fields TalentSearch left empty. Merging
-                # both jd_results AND profile_only_results so a detail-
-                # supplied resume can rescue an otherwise-filtered candidate.
-                merge_targets = jd_results + profile_only_results
-                ids_to_enrich = [r["candidate_id"] for r in merge_targets if r.get("candidate_id")]
-                from core import sourcing_config as _sc
-                if ids_to_enrich and not _sc.FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH:
-                    detail_t0 = time.time()
-                    detail_map = await self._fetch_candidate_details_batch(token, ids_to_enrich)
-                    detail_ms = int((time.time() - detail_t0) * 1000)
-                    rescued = 0
-                    fields_from_detail = {"email": 0, "phone": 0, "address1": 0, "linkedin": 0, "resume": 0}
-                    for record in merge_targets:
-                        detail = detail_map.get(str(record.get("candidate_id") or ""))
-                        if not detail:
-                            continue
-                        self._merge_detail_into_candidate(record, detail, fields_from_detail)
-                        if record.get("resume_missing") and (record.get("resume_text") or record.get("resume_id")):
-                            record.pop("resume_missing", None)
-                            rescued += 1
-                    logger.debug(
-                        f"CandidatesDetail enrichment: {len(detail_map)}/{len(ids_to_enrich)} matched "
-                        f"in {detail_ms}ms, rescued={rescued}, "
-                        f"fields_from_detail={fields_from_detail}"
-                    )
-                elif ids_to_enrich:
-                    logger.info(
-                        "FAST_PATH_SKIP_DETAIL: TalentSearch path skipping inline CandidatesDetail for %d candidates; background hydration will follow.",
-                        len(ids_to_enrich),
-                    )
+                city = get_field(c, ["city", "locationCity", "CITY"]) or ""
+                state = get_field(c, ["state", "locationState", "STATE"]) or ""
+                zipcode = get_field(c, ["zipcode", "ZIPCODE", "zip", "ZIP", "postalCode", "POSTALCODE"]) or ""
+                location_str = ", ".join([p for p in [city, state] if p]).strip()
 
-                # Second-pass: TalentSearch + CandidatesDetail still leave
-                # `resume_text` empty for most candidates because resume bodies
-                # live in CandidatesResumesDetail / ResumesTextDetail. Without
-                # resume text the downstream skill scorer has nothing to match.
-                # Fetch concurrently for the remaining empty-resume candidates.
-                # When fast-path is on we defer resume fetch too — it's the
-                # other big rate-limit consumer; background hydration handles it.
-                empty_resume_ids = [
-                    r["candidate_id"] for r in (jd_results + profile_only_results)
-                    if r.get("candidate_id") and not (r.get("resume_text") or "").strip()
-                ] if not _sc.FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH else []
-                if empty_resume_ids:
-                    resume_t0 = time.time()
-                    resume_map = await self._fetch_resume_text_batch(
-                        token, empty_resume_ids[:200]
-                    )
-                    resume_ms = int((time.time() - resume_t0) * 1000)
-                    filled = 0
-                    for r in (jd_results + profile_only_results):
-                        cid = r.get("candidate_id")
-                        if not cid or (r.get("resume_text") or "").strip():
-                            continue
-                        body = resume_map.get(cid, "")
-                        if body:
-                            r["resume_text"] = body
-                            if not (r.get("abstract") or "").strip():
-                                r["abstract"] = body[:240].replace("\n", " ").strip()
-                            # Resume backfill rescues profile-only candidates
-                            # whose resume body now exists.
-                            if r.get("resume_missing"):
-                                r.pop("resume_missing", None)
-                            filled += 1
-                    logger.debug(
-                        f"Resume body backfill: {filled}/{len(empty_resume_ids)} "
-                        f"populated in {resume_ms}ms"
-                    )
+                # Abstract: prefer an explicit summary/comments field if JobDiva
+                # returns one; fall back to the first ~200 chars of resume text
+                # so the Step-5 list can show something meaningful.
+                raw_abstract = (
+                    get_field(c, ["summary", "SUMMARY", "abstract", "ABSTRACT", "comments", "COMMENTS", "notes", "NOTES"])
+                    or ""
+                )
+                if not raw_abstract and resume_text:
+                    raw_abstract = resume_text[:240].replace("\n", " ").strip()
+                if raw_abstract and len(raw_abstract) > 240:
+                    raw_abstract = raw_abstract[:237].rstrip() + "..."
 
-                # Promote rescued profile-only entries into the main result set.
-                if require_resume:
-                    promoted = [r for r in profile_only_results if not r.get("resume_missing")]
-                    if promoted:
-                        jd_results.extend(promoted)
-                        profile_only_results = [r for r in profile_only_results if r.get("resume_missing")]
-                        dropped_no_resume = max(0, dropped_no_resume - len(promoted))
-
-                # POLICY: never drop a JobDiva candidate for a missing résumé.
-                # Always append still-resumeless profile_only_results (flagged
-                # `resume_missing`) so the scorer/UI can downweight them rather
-                # than hide them — unconditional, not gated on a config flag.
-                if require_resume and profile_only_results:
-                    jd_results.extend(profile_only_results)
-                    logger.info(
-                        f"keep-no-resume: appended {len(profile_only_results)} "
-                        f"profile-only candidate(s), flagged resume_missing"
+                recent_availability = (
+                    get_field(
+                        c,
+                        [
+                            "recentAvailability",
+                            "RECENTAVAILABILITY",
+                            "recent_availability",
+                            "RECENT_AVAILABILITY",
+                            "recentAvailable",
+                            "RECENTAVAILABLE",
+                            "recent_status",
+                            "RECENT_STATUS",
+                        ],
                     )
-                    profile_only_results = []
-                    dropped_no_resume = 0
+                    or ""
+                )
+                availability_status = (
+                    recent_availability
+                    or get_field(c, ["available", "AVAILABLE", "availability", "AVAILABILITY", "status", "STATUS"])
+                    or ""
+                )
+                profile_url = get_field(
+                    c,
+                    ["profileUrl", "PROFILEURL", "profile_url", "PROFILE_URL"],
+                )
 
-                if dropped_no_resume:
-                    logger.info(
-                        f"JobDiva Talent Search: dropped {dropped_no_resume} "
-                        f"profile-only candidates (no resume). Toggle "
-                        f"'Include candidates without resumes' on the UI to keep them."
-                    )
+                jd_results.append({
+                    "candidate_id": candidate_id,
+                    "id": candidate_id,
+                    "name": full_name,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "firstName": first_name,
+                    "lastName": last_name,
+                    "email": get_field(c, ["email", "EMAIL"]) or "",
+                    "city": city,
+                    "state": state,
+                    "zipcode": zipcode,
+                    "location": location_str,
+                    "work_city": "",
+                    "work_state": "",
+                    "work_location": "",
+                    "title": get_field(c, ["title", "candidateTitle", "TITLE"]) or "",
+                    "source": "JobDiva-TalentSearch",
+                    "match_score": 75,
+                    "skills": self._extract_candidate_skills(c),
+                    "experience_years": self._extract_experience_years(c),
+                    "resume_text": resume_text,
+                    "resume_id": resume_id,
+                    "received": get_field(c, ["received", "RECEIVED"]),
+                    "recent_availability": recent_availability,
+                    "available": availability_status,
+                    "availability_status": availability_status,
+                    "employee_status": get_field(
+                        c,
+                        [
+                            "EMPLOYEESTATUS",
+                            "employeeStatus",
+                            "CURRENTEMPLOYEE",
+                            "currentEmployee",
+                            "ASSIGNMENTSTATUS",
+                            "assignmentStatus",
+                        ],
+                    ),
+                    "abstract": raw_abstract,
+                    "profile_url": profile_url,
+                    "lastnote": get_field(c, ["lastNote", "LASTNOTE"]),
+                    "phone": _get_candidate_phone(c),
+                })
 
-                # Safety fallback: if strict resume filtering removed everything,
-                # return profile-only hits instead of an empty result set.
-                if require_resume and not jd_results and profile_only_results:
-                    jd_results = profile_only_results[:limit]
-                    logger.warning(
-                        "JobDiva Talent Search fallback activated: strict require_resume "
-                        "yielded 0 results, returning %s profile-only candidate(s)",
-                        len(jd_results),
-                    )
+            # Two-step enrichment: TalentSearch returns thin records;
+            # CandidatesDetail fills in address1, linkedinUrl, and any
+            # email/phone/resume fields TalentSearch left empty. Merging
+            # both jd_results AND profile_only_results so a detail-
+            # supplied resume can rescue an otherwise-filtered candidate.
+            merge_targets = jd_results + profile_only_results
+            ids_to_enrich = [r["candidate_id"] for r in merge_targets if r.get("candidate_id")]
+            from core import sourcing_config as _sc
+            if ids_to_enrich and not _sc.FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH:
+                detail_t0 = time.time()
+                detail_map = await self._fetch_candidate_details_batch(token, ids_to_enrich)
+                detail_ms = int((time.time() - detail_t0) * 1000)
+                rescued = 0
+                fields_from_detail = {"email": 0, "phone": 0, "address1": 0, "linkedin": 0, "resume": 0}
+                for record in merge_targets:
+                    detail = detail_map.get(str(record.get("candidate_id") or ""))
+                    if not detail:
+                        continue
+                    self._merge_detail_into_candidate(record, detail, fields_from_detail)
+                    if record.get("resume_missing") and (record.get("resume_text") or record.get("resume_id")):
+                        record.pop("resume_missing", None)
+                        rescued += 1
+                logger.debug(
+                    f"CandidatesDetail enrichment: {len(detail_map)}/{len(ids_to_enrich)} matched "
+                    f"in {detail_ms}ms, rescued={rescued}, "
+                    f"fields_from_detail={fields_from_detail}"
+                )
+            elif ids_to_enrich:
+                logger.info(
+                    "FAST_PATH_SKIP_DETAIL: TalentSearch path skipping inline CandidatesDetail for %d candidates; background hydration will follow.",
+                    len(ids_to_enrich),
+                )
 
-                logger.debug(f"JobDiva Talent Search returned {len(jd_results)} candidates")
+            # Second-pass: TalentSearch + CandidatesDetail still leave
+            # `resume_text` empty for most candidates because resume bodies
+            # live in CandidatesResumesDetail / ResumesTextDetail. Without
+            # resume text the downstream skill scorer has nothing to match.
+            # Fetch concurrently for the remaining empty-resume candidates.
+            # When fast-path is on we defer resume fetch too — it's the
+            # other big rate-limit consumer; background hydration handles it.
+            empty_resume_ids = [
+                r["candidate_id"] for r in (jd_results + profile_only_results)
+                if r.get("candidate_id") and not (r.get("resume_text") or "").strip()
+            ] if not _sc.FAST_PATH_SKIP_DETAIL_IN_TALENT_SEARCH else []
+            if empty_resume_ids:
+                resume_t0 = time.time()
+                resume_map = await self._fetch_resume_text_batch(
+                    token, empty_resume_ids[:200]
+                )
+                resume_ms = int((time.time() - resume_t0) * 1000)
+                filled = 0
+                for r in (jd_results + profile_only_results):
+                    cid = r.get("candidate_id")
+                    if not cid or (r.get("resume_text") or "").strip():
+                        continue
+                    body = resume_map.get(cid, "")
+                    if body:
+                        r["resume_text"] = body
+                        if not (r.get("abstract") or "").strip():
+                            r["abstract"] = body[:240].replace("\n", " ").strip()
+                        # Resume backfill rescues profile-only candidates
+                        # whose resume body now exists.
+                        if r.get("resume_missing"):
+                            r.pop("resume_missing", None)
+                        filled += 1
+                logger.debug(
+                    f"Resume body backfill: {filled}/{len(empty_resume_ids)} "
+                    f"populated in {resume_ms}ms"
+                )
+
+            # Promote rescued profile-only entries into the main result set.
+            if require_resume:
+                promoted = [r for r in profile_only_results if not r.get("resume_missing")]
+                if promoted:
+                    jd_results.extend(promoted)
+                    profile_only_results = [r for r in profile_only_results if r.get("resume_missing")]
+                    dropped_no_resume = max(0, dropped_no_resume - len(promoted))
+
+            # POLICY: never drop a JobDiva candidate for a missing résumé.
+            # Always append still-resumeless profile_only_results (flagged
+            # `resume_missing`) so the scorer/UI can downweight them rather
+            # than hide them — unconditional, not gated on a config flag.
+            if require_resume and profile_only_results:
+                jd_results.extend(profile_only_results)
+                logger.info(
+                    f"keep-no-resume: appended {len(profile_only_results)} "
+                    f"profile-only candidate(s), flagged resume_missing"
+                )
+                profile_only_results = []
+                dropped_no_resume = 0
+
+            if dropped_no_resume:
+                logger.info(
+                    f"JobDiva Talent Search: dropped {dropped_no_resume} "
+                    f"profile-only candidates (no resume). Toggle "
+                    f"'Include candidates without resumes' on the UI to keep them."
+                )
+
+            # Safety fallback: if strict resume filtering removed everything,
+            # return profile-only hits instead of an empty result set.
+            if require_resume and not jd_results and profile_only_results:
+                jd_results = profile_only_results[:limit]
+                logger.warning(
+                    "JobDiva Talent Search fallback activated: strict require_resume "
+                    "yielded 0 results, returning %s profile-only candidate(s)",
+                    len(jd_results),
+                )
+
+            logger.debug(f"JobDiva Talent Search returned {len(jd_results)} candidates")
         except Exception as e:
             logger.error(f"Talent Search Error: {e}")
 
         return jd_results
+
+    async def _fetch_talent_search_rows(
+        self,
+        token: str,
+        base_body: Dict[str, Any],
+        must_terms: List[str],
+        title: str = "",
+    ) -> List[Dict[str, Any]]:
+        """Run the v2 TalentSearch pulls and merge their raw rows.
+
+        Pull 1: `skills` = AND of must_terms, relaxed to the two
+        highest-priority terms when the full AND matches nothing (server
+        AND semantics can zero out long must-lists). Pull 2: `titleSearch`
+        recall pull — title matches surface candidates whose resume wording
+        differs from the skill terms. Rows dedupe by candidateId, pull 1
+        first. Never posts an empty search definition: the server answers
+        one with its full unfiltered dump.
+        """
+        from core import sourcing_config as _sc
+
+        url = f"{self.api_url}/apiv2/jobdiva/TalentSearch"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+        async def _post(body: Dict[str, Any]) -> List[Dict[str, Any]]:
+            for attempt in range(3):
+                try:
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        response = await client.post(url, json=body, headers=headers)
+                    if response.status_code != 200:
+                        logger.warning(
+                            f"JobDiva Talent Search failed: {response.status_code} - {response.text[:200]}"
+                        )
+                        return []
+                    data = response.json()
+                    if isinstance(data, dict):
+                        return data.get("data") or data.get("candidates") or data.get("results") or []
+                    return data or []
+                except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ReadTimeout) as exc:
+                    # JobDiva intermittently truncates large chunked responses.
+                    logger.warning(
+                        f"JobDiva Talent Search transport retry {attempt + 1}/3: {exc!r}"
+                    )
+                    await asyncio.sleep(1.5 * (attempt + 1))
+            return []
+
+        rows: List[Dict[str, Any]] = []
+        if must_terms:
+            body = dict(base_body)
+            body["skills"] = list(must_terms)
+            rows = await _post(body)
+            if not rows and len(must_terms) > 2:
+                body["skills"] = list(must_terms[:2])
+                logger.info(
+                    f"JobDiva Talent Search: 0 rows for {len(must_terms)}-term AND, "
+                    f"relaxing to {body['skills']!r}"
+                )
+                rows = await _post(body)
+
+        title_clean = str(title or "").strip()
+        if title_clean and getattr(_sc, "JOBDIVA_TALENT_TITLE_PULL_ENABLED", True):
+            title_body = dict(base_body)
+            title_body["titleSearch"] = title_clean
+            title_rows = await _post(title_body)
+            if title_rows:
+                seen_ids = {
+                    str(get_field(r, ["candidateId", "CANDIDATEID", "id", "ID"]) or "")
+                    for r in rows
+                }
+                added = 0
+                for r in title_rows:
+                    cid = str(get_field(r, ["candidateId", "CANDIDATEID", "id", "ID"]) or "")
+                    if not cid or cid in seen_ids:
+                        continue
+                    seen_ids.add(cid)
+                    rows.append(r)
+                    added += 1
+                logger.debug(
+                    f"JobDiva Talent Search titleSearch pull: +{added} new rows "
+                    f"({len(title_rows)} returned)"
+                )
+
+        if not must_terms and not title_clean:
+            logger.warning(
+                "JobDiva Talent Search: no usable skill terms or title — skipping "
+                "(an empty search definition returns the unfiltered dump)"
+            )
+        return rows
 
     def _merge_detail_into_candidate(
         self,
@@ -3591,6 +3665,7 @@ class JobDivaService:
                         # Campaign grouping + phone-screen intro (inherited from a
                         # campaign when a job is added under one).
                         "campaign_id", "bot_introduction",
+                        "sourcing_filters", "resume_match_filters",
                     ]
                     
                     # Fields where an empty string IS a valid intentional value (cleared UDFs or optional fields)
@@ -3620,7 +3695,7 @@ class JobDivaService:
 
                                     
                             update_parts.append(f"{k} = :{k}")
-                            if k in ["selected_employment_types", "selected_job_boards", "recruiter_emails", "enhancement_metadata"]:
+                            if k in ["selected_employment_types", "selected_job_boards", "recruiter_emails", "enhancement_metadata", "sourcing_filters", "resume_match_filters"]:
                                 if isinstance(v, (list, dict)):
                                     params[k] = json.dumps(v)
                                 else:
@@ -3695,6 +3770,10 @@ class JobDivaService:
                         "created_at": data.get("created_at") or readable_ist_now(),
                         "updated_at": readable_ist_now()
                     }
+                    if data.get("sourcing_filters") is not None:
+                        params["sourcing_filters"] = json.dumps(data.get("sourcing_filters")) if isinstance(data.get("sourcing_filters"), (list, dict)) else data.get("sourcing_filters")
+                    if data.get("resume_match_filters") is not None:
+                        params["resume_match_filters"] = json.dumps(data.get("resume_match_filters")) if isinstance(data.get("resume_match_filters"), (list, dict)) else data.get("resume_match_filters")
                     
                     # Build INSERT query dynamically based on available fields
                     columns = list(params.keys())

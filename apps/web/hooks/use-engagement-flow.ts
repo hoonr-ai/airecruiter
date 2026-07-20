@@ -68,6 +68,15 @@ export type LaunchInput = {
   batchSize?: number;
 };
 
+// A candidate the BACKEND excluded at launch time (employed by hiring
+// client, offer extended, current Pyramid employee, …). Distinct from the
+// FE-predicted skips: the server may know company data the FE didn't see.
+export type LaunchExcludedCandidate = {
+  candidate_id: string;
+  name?: string;
+  reason: string;
+};
+
 export type LaunchEvent =
   | { type: "start"; total_candidates: number; total_batches: number; batch_size: number }
   | {
@@ -79,6 +88,8 @@ export type LaunchEvent =
       // counted as sent and remain retryable on a subsequent launch.
       no_interview?: number;
       already_sent?: number;
+      // Count of server-side exclusions in this batch (see done.excluded_candidates).
+      excluded?: number;
       bulk_id?: string;
       error?: string;
       candidate_ids?: string[];
@@ -87,8 +98,9 @@ export type LaunchEvent =
   | {
       type: "done";
       aborted: boolean;
-      totals: { sent: number; already_sent: number; failed_batches: number; no_interview?: number };
+      totals: { sent: number; already_sent: number; failed_batches: number; no_interview?: number; excluded?: number };
       skipped_already_sent: string[];
+      excluded_candidates?: LaunchExcludedCandidate[];
       failed_candidate_ids: string[];
     };
 

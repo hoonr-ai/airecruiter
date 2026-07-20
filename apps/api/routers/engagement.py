@@ -178,87 +178,24 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
         if "current employee" in st_lower:
             return True, "Current Employee (Pyramid)"
 
-    current_companies = []
-    for c_str in [
-        data.get("current_company"),
-        enhanced.get("current_company"),
-        data.get("company"),
-        data.get("company_name"),
-    ]:
-        if c_str and str(c_str).strip():
-            current_companies.append(str(c_str).strip())
+    # Shared matcher (services/company_match.py) so search-time filtering
+    # (Exa/Unipile) and this launch gate can't disagree. Covers flat
+    # company fields, current company_experience entries, Exa deep-search
+    # `exa_recent_companies`, and an "… at X" headline parse — Unipile/Exa
+    # rows often carry the employer only in headline text.
+    from services.company_match import (
+        collect_current_companies,
+        is_same_company,
+        normalize_company_name,
+    )
 
-    exp_list = data.get("company_experience") or enhanced.get("company_experience") or []
-    if isinstance(exp_list, list):
-        for exp in exp_list:
-            if isinstance(exp, dict):
-                end_raw = str(exp.get("end_date") or exp.get("endDate") or exp.get("to") or "").strip()
-                is_curr = exp.get("is_current") is True or exp.get("current") is True or not end_raw or "present" in end_raw.lower() or "current" in end_raw.lower()
-                if is_curr:
-                    comp = exp.get("company") or exp.get("company_name") or exp.get("employer") or exp.get("name")
-                    if comp and str(comp).strip():
-                        current_companies.append(str(comp).strip())
-
-    def _norm(name: str) -> str:
-        s = name.lower()
-        for char in ".,-_'\"()/":
-            s = s.replace(char, " ")
-        words = [
-            w
-            for w in s.split()
-            if w
-            not in {
-                "inc",
-                "llc",
-                "ltd",
-                "corp",
-                "corporation",
-                "co",
-                "company",
-                "plc",
-                "pvt",
-                "private",
-                "limited",
-                "technologies",
-                "technology",
-                "solutions",
-                "consulting",
-                "services",
-                "group",
-                "holdings",
-            }
-        ]
-        return " ".join(words).strip()
-
-    def _is_contiguous_sublist(needle: List[str], haystack: List[str]) -> bool:
-        # True if `needle` appears as a run of whole tokens inside `haystack`.
-        n = len(needle)
-        if not n or n > len(haystack):
-            return False
-        return any(haystack[i:i + n] == needle for i in range(len(haystack) - n + 1))
-
-    client_norm = _norm(client_name)
-    client_tokens = client_norm.split()
-
-    for comp in current_companies:
-        comp_norm = _norm(comp)
-        if not comp_norm:
-            continue
-        comp_tokens = comp_norm.split()
-        if "pyramid" in comp_tokens:
+    for comp in collect_current_companies(candidate):
+        if "pyramid" in normalize_company_name(comp).split():
             return True, "Current Employee (Pyramid)"
         # Match on whole-word tokens, not raw substrings: client "Meta"
-        # ("meta") must match "Meta Platforms" but NOT "Metadata Solutions"
-        # ("metadata"). A candidate is "employed by the hiring client" when the
-        # client name equals the company name, or one appears as a contiguous
-        # run of whole tokens within the other (e.g. "Meta" ⊂ "Meta Platforms").
-        if client_norm and client_norm != "external" and len(client_norm) >= 3:
-            if (
-                comp_tokens == client_tokens
-                or _is_contiguous_sublist(client_tokens, comp_tokens)
-                or _is_contiguous_sublist(comp_tokens, client_tokens)
-            ):
-                return True, "Employed by Hiring Client"
+        # must match "Meta Platforms" but NOT "Metadata Solutions".
+        if is_same_company(comp, client_name):
+            return True, "Employed by Hiring Client"
 
     return False, ""
 
@@ -700,6 +637,7 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
             jd = {
                 "job_id": job_row.get("job_id") or request.job_id,
                 "jobdiva_id": job_row.get("jobdiva_id") or "",
+                "campaign_id": job_row.get("campaign_id") or "0",
                 "context": {
                     "title": job_row.get("enhanced_title") or job_row.get("title", ""),
                     "customer_name": job_row.get("customer_name") or "Unknown",
@@ -761,11 +699,35 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                 "resume_screening_score": r.get("resume_screening_score"),
             })
 
+        raw_company_intro = (job_row.get("bot_introduction") or "") if job_row else ""
+        if job_row:
+            def _clean_job_title_for_intro(title: str) -> str:
+                if not title:
+                    return "role"
+                import re
+                cleaned = re.sub(r'^(?:US|USA|CAN|CANADA|UK|INDIA|MEX|APAC|EMEA|LATAM|[A-Z]{2,3}(?:\/[A-Z]{2,3})?)\s*[-:/|]\s*', '', str(title), flags=re.IGNORECASE).strip()
+                return cleaned or "role"
+
+            raw_title_str = (job_row.get("enhanced_title") or job_row.get("title") or "role").strip()
+            job_t = _clean_job_title_for_intro(raw_title_str)
+            job_l = f"{job_row.get('city') or ''}, {job_row.get('state') or ''}".strip(", ") or "your area"
+            if not raw_company_intro.strip():
+                raw_company_intro = (
+                    f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with Pyramid Consulting. "
+                    f"We are helping our client recruit for a {job_t} in {job_l}, and you seem to be a good fit for the role. "
+                    f"Please note that conversation may be recorded for verification and quality purposes. "
+                    f"Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?"
+                )
+            else:
+                raw_company_intro = re.sub(r'\{\{\s*(?:job_title|title)\s*\}\}|\{\s*(?:job_title|title)\s*\}', job_t, raw_company_intro, flags=re.IGNORECASE)
+                raw_company_intro = re.sub(r'\{\{\s*(?:job_location|location)\s*\}\}|\{\s*(?:job_location|location)\s*\}', job_l, raw_company_intro, flags=re.IGNORECASE)
+                raw_company_intro = re.sub(r'\{\{\s*(?:customer_name|company)\s*\}\}|\{\s*(?:customer_name|company)\s*\}', 'Pyramid Consulting', raw_company_intro, flags=re.IGNORECASE)
+
         # Assemble final payload matching pairbotqa /api/bulk-interviews schema
         payload = {
             "resumes": final_resumes,
             "jd": jd,
-            "company_intro": (job_row.get("bot_introduction") or "") if job_row else "",
+            "company_intro": raw_company_intro,
             "interview_duration": "20-25",
             "source": "Curate"
         }
@@ -1285,6 +1247,7 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 f"engage idempotency: skipped {len(skipped_already_sent)} already-sent candidates for job {job_id_from_payload}"
             )
 
+        excluded_records: List[Dict[str, str]] = []
         if request.real_candidate_ids:
             excluded_candidate_ids = set()
             try:
@@ -1309,7 +1272,7 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
 
                     _excl_cur.execute(
                         """
-                        SELECT candidate_id, data
+                        SELECT candidate_id, data, name
                         FROM sourced_candidates
                         WHERE candidate_id = ANY(%s)
                           AND (jobdiva_id = %s OR jobdiva_id = %s)
@@ -1337,6 +1300,11 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                                 _excl_reason,
                             )
                             excluded_candidate_ids.add(_row[0])
+                            excluded_records.append({
+                                "candidate_id": str(_row[0]),
+                                "name": str(_row[2] or ""),
+                                "reason": _excl_reason,
+                            })
                     _excl_cur.close()
                 finally:
                     _excl_conn.close()
@@ -1368,9 +1336,10 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
         if not request.real_candidate_ids:
             return {
                 "success": True,
-                "message": "All requested candidates were already launched; nothing to send.",
+                "message": "All requested candidates were already launched or excluded; nothing to send.",
                 "data": [],
                 "skipped_already_sent": skipped_already_sent,
+                "excluded_candidates": excluded_records,
                 "raw_response": {},
             }
 
@@ -1686,6 +1655,7 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 "bulk_id": response_data.get("bulk_id"),
                 "data": interview_results,
                 "skipped_already_sent": skipped_already_sent,
+                "excluded_candidates": excluded_records,
                 "raw_response": response_data
             }
         else:
@@ -1702,6 +1672,7 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 "message": _extract_pair_error_message(response_data, response.status_code),
                 "data": [],
                 "skipped_already_sent": skipped_already_sent,
+                "excluded_candidates": excluded_records,
                 "raw_response": response_data
             }
 
@@ -1805,8 +1776,9 @@ async def launch_bulk_interviews(request: LaunchRequest):
             "batch_size": batch_size,
         })
 
-        totals = {"sent": 0, "already_sent": 0, "failed_batches": 0, "no_interview": 0}
+        totals = {"sent": 0, "already_sent": 0, "failed_batches": 0, "no_interview": 0, "excluded": 0}
         all_skipped: List[str] = []
+        all_excluded: List[Dict[str, str]] = []
         failed_candidate_ids: List[str] = []
         aborted = False
         side_effects_fired = {"done": False}
@@ -1886,6 +1858,12 @@ async def launch_bulk_interviews(request: LaunchRequest):
 
                     skipped = res.get("skipped_already_sent") or []
                     all_skipped.extend(skipped)
+                    # Server-side exclusions (employed by hiring client, offer
+                    # extended, …) used to vanish silently — the FE could only
+                    # show the ones it predicted itself. Surface them on the
+                    # stream so the progress modal reports server skips too.
+                    batch_excluded = res.get("excluded_candidates") or []
+                    all_excluded.extend(batch_excluded)
 
                     if res.get("success"):
                         rows = res.get("data") or []
@@ -1898,6 +1876,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
                         totals["sent"] += sent
                         totals["already_sent"] += len(skipped)
                         totals["no_interview"] += no_interview
+                        totals["excluded"] += len(batch_excluded)
                         yield _sse({
                             "type": "batch",
                             "index": idx,
@@ -1905,6 +1884,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
                             "sent": sent,
                             "no_interview": no_interview,
                             "already_sent": len(skipped),
+                            "excluded": len(batch_excluded),
                             "bulk_id": res.get("bulk_id"),
                         })
                     else:
@@ -1960,6 +1940,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
             "aborted": aborted,
             "totals": totals,
             "skipped_already_sent": all_skipped,
+            "excluded_candidates": all_excluded,
             "failed_candidate_ids": failed_candidate_ids,
         })
 

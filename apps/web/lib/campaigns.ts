@@ -20,6 +20,12 @@ export const SCREENING_LEVELS: { value: ScreeningLevel; label: string; hint: str
   { value: "L2", label: "L2", hint: "Deep Screen" },
 ];
 
+export function formatScreeningLevel(level?: string | null): string {
+  if (!level) return "—";
+  const found = SCREENING_LEVELS.find((s) => s.value === level);
+  return found ? `${found.label} · ${found.hint}` : level;
+}
+
 export const JOB_BOARDS = ["LinkedIn", "Indeed", "Dice", "Monster", "CareerBuilder"];
 
 export interface CampaignChildJob {
@@ -71,6 +77,7 @@ export interface Campaign {
   work_authorization?: string | null;
   selected_job_boards: string[];
   bot_introduction?: string | null;
+  outreach_delay_mins?: number | null;
   template_enhanced_title?: string | null;
   template_ai_description?: string | null;
   template_rubric?: Record<string, unknown> | null;
@@ -96,6 +103,7 @@ export interface CampaignCreatePayload {
   work_authorization?: string;
   selected_job_boards?: string[];
   bot_introduction?: string;
+  outreach_delay_mins?: number;
   // Template fields (populated by the campaign wizard in Phase 3)
   template_enhanced_title?: string;
   template_ai_description?: string;
@@ -316,18 +324,65 @@ export async function generateScreeningQuestions(input: {
   screeningLevel: string;
   jobDescription?: string;
   customerName?: string;
+  difficultyMode?: string;
+  leniencyMode?: boolean;
+  workArrangement?: string;
+  city?: string;
+  totalYears?: number;
 }): Promise<TemplateQuestion[]> {
-  const res = await authFetch(`${AI_BASE}/jobs/new/screening-questions/generate`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      jobTitle: input.jobTitle,
-      rubric: input.rubric,
-      screeningLevel: screeningLevelToDepth(input.screeningLevel),
-      jobDescription: input.jobDescription ?? "",
-      customerName: input.customerName ?? "",
-    }),
-  });
-  const data = await json<{ questions: TemplateQuestion[] }>(res, "POST screening-questions/generate");
-  return data.questions ?? [];
+  const isRemote =
+    /remote/i.test(input.workArrangement ?? "") ||
+    /remote/i.test(input.city ?? "") ||
+    /remote/i.test(input.jobTitle ?? "");
+  const arrangementLabel = (input.workArrangement ?? "").toLowerCase().includes("hybrid")
+    ? "a hybrid"
+    : "an onsite";
+
+  const defaultQs: Array<{ text: string; criteria: string; is_hard_filter?: boolean }> = [
+    {
+      text: "Are you open to exploring new job opportunities?",
+      criteria: "Must be open to new job opportunities",
+    },
+    {
+      text: "What is your current or most recent role and key responsibilities?",
+      criteria: "",
+    },
+    { text: "What is your current location?", criteria: "" },
+  ];
+  if (!isRemote) {
+    defaultQs.push({
+      text: `This role follows ${arrangementLabel} work arrangement${
+        input.city ? ` based in ${input.city}` : ""
+      }. Are you open to working in this setup?`,
+      criteria: `Must be open to ${arrangementLabel} work arrangement`,
+    });
+  }
+  defaultQs.push(
+    { text: "What is your earliest availability to start a new role?", criteria: "" },
+    { text: "What is your expected compensation for this role?", criteria: "" },
+    {
+      text: "Which types of working arrangements are you open to and eligible for? Select all that apply: W2 Employee, Subcontractor to Pyramid through your current employer, Independent Contractor",
+      criteria: "",
+    },
+    {
+      text: "Are you authorized to work indefinitely for any employer in the United States?",
+      criteria: "",
+    },
+    {
+      text: "Will you now or in the future require visa sponsorship to continue working in the United States?",
+      criteria: "",
+    }
+  );
+
+  const defaults: TemplateQuestion[] = defaultQs.map((q, index) => ({
+    id: index + 1,
+    question_text: q.text,
+    pass_criteria: q.criteria,
+    is_default: true,
+    category: "default",
+    order_index: index,
+    is_hard_filter: !!q.is_hard_filter,
+  }));
+
+  return defaults;
 }

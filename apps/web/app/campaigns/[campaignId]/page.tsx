@@ -32,6 +32,7 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { CampaignForm } from "@/components/campaigns/CampaignForm";
+import { CampaignTemplateCard } from "@/components/campaigns/CampaignTemplateCard";
 import { cn } from "@/lib/utils";
 import {
   DropdownMenu,
@@ -49,6 +50,7 @@ import {
   updateCampaign,
   deleteCampaign,
   removeJobFromCampaign,
+  formatScreeningLevel,
 } from "@/lib/campaigns";
 
 export default function CampaignDetailPage() {
@@ -294,7 +296,7 @@ export default function CampaignDetailPage() {
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
           <Stat icon={<ShieldCheck className="h-4 w-4" />} label="Screening">
-            {campaign.screening_level}
+            {formatScreeningLevel(campaign.screening_level)}
           </Stat>
           <Stat icon={<Briefcase className="h-4 w-4" />} label="Employment">
             {campaign.selected_employment_types?.length
@@ -302,7 +304,17 @@ export default function CampaignDetailPage() {
               : "—"}
           </Stat>
           <Stat icon={<Mail className="h-4 w-4" />} label="Recruiters">
-            {campaign.recruiter_emails?.length ?? 0}
+            {campaign.recruiter_emails?.length ? (
+              <div className="space-y-0.5">
+                {campaign.recruiter_emails.map((email) => (
+                  <span key={email} className="block truncate" title={email}>
+                    {email}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              "—"
+            )}
           </Stat>
           <Stat icon={<Briefcase className="h-4 w-4" />} label="Job Boards">
             {campaign.selected_job_boards?.length ? campaign.selected_job_boards.join(", ") : "—"}
@@ -318,6 +330,8 @@ export default function CampaignDetailPage() {
           </div>
         )}
       </div>
+
+      <CampaignTemplateCard campaign={campaign} />
 
       {/* Jobs */}
       <div className="flex items-center justify-between mb-3">
@@ -440,7 +454,7 @@ export default function CampaignDetailPage() {
                       {j.location_type ? ` · ${j.location_type}` : ""}
                     </Field>
                     <Field label="Employment">{j.employment_type || "—"}</Field>
-                    <Field label="Screening">{j.screening_level || "—"}</Field>
+                    <Field label="Screening">{formatScreeningLevel(j.screening_level)}</Field>
                     <Field label="Pay Rate">{j.pay_rate || "—"}</Field>
                     <Field label="Openings">{j.openings ? String(j.openings) : "—"}</Field>
                     <Field label="Candidates">
@@ -688,7 +702,7 @@ function Stat({
         {icon}
         {label}
       </div>
-      <p className="text-sm text-slate-800 mt-1 font-medium">{children}</p>
+      <div className="text-sm text-slate-800 mt-1 font-medium">{children}</div>
     </div>
   );
 }

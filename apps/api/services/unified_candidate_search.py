@@ -1035,7 +1035,9 @@ class UnifiedCandidateSearch:
                             provider_id = cand.get("provider_id")
                             if provider_id:
                                 try:
-                                    full_profile = await self.unipile_service.get_candidate_profile(provider_id)
+                                    full_profile = await self.unipile_service.get_candidate_profile(
+                                        provider_id, account_id=cand.get("unipile_account_id")
+                                    )
                                     if full_profile:
                                         cand.update(self._extract_linkedin_profile_data(full_profile))
                                 except Exception as e:
@@ -1215,6 +1217,7 @@ class UnifiedCandidateSearch:
                             location=self._search_location_for_source(criteria),
                             seed_urls=seed_urls,
                             within_miles=getattr(criteria, "within_miles", 25),
+                            exclude_company=str(getattr(criteria, "client_name", "") or ""),
                         )
                     except Exception as e:
                         logger.warning("deep_research_candidates raised: %s", e)
@@ -1316,6 +1319,24 @@ class UnifiedCandidateSearch:
                             "_stage": "exa_deep_search",
                             **{k: v for k, v in patch_fields.items() if v is not None},
                         }
+                        # Hard filter: never surface someone currently employed
+                        # by the hiring client. The agent prompt already asks
+                        # for the exclusion, but its recent_companies output is
+                        # the ground truth — belt and suspenders.
+                        try:
+                            from services.company_match import currently_employed_by_client
+                            _client_match = currently_employed_by_client(
+                                new_cand, str(getattr(criteria, "client_name", "") or "")
+                            )
+                            if _client_match:
+                                logger.info(
+                                    "Exa deep-search dropping %s — currently at hiring client (%s)",
+                                    new_cand.get("name"), _client_match,
+                                )
+                                continue
+                        except Exception:
+                            pass
+
                         # Cross-source dedup so a deep-search hit doesn't
                         # duplicate a row that some other producer (Unipile,
                         # JobDiva) already emitted under a different id. On a
@@ -1815,13 +1836,12 @@ class UnifiedCandidateSearch:
             if str(getattr(criteria, "location_type", "") or "").strip().lower() == "remote":
                 geo_zip = ""
                 states = []
-            flat_terms = list(criteria.title_criteria or []) + list(criteria.skill_criteria or [])
+            batch_size = max(1, int(getattr(criteria, "jobdiva_batch_size", 150) or 150))
+            offset = max(0, int(getattr(criteria, "jobdiva_offset", 0) or 0))
             page_size = max(
                 1,
                 int(getattr(sc, "JOBDIVA_TALENTSEARCH_PAGE_SIZE", 150) or 150),
             )
-            batch_size = max(1, int(getattr(criteria, "jobdiva_batch_size", 150) or 150))
-            offset = max(0, int(getattr(criteria, "jobdiva_offset", 0) or 0))
             max_total = max(
                 batch_size,
                 int(getattr(sc, "JOBDIVA_TALENTSEARCH_MAX_TOTAL_COUNT", page_size * 2) or batch_size),
@@ -1832,56 +1852,44 @@ class UnifiedCandidateSearch:
             if offset >= max_total:
                 return {"candidates": [], "source_type": source_type}
 
-            total_target = min(batch_size, max_total - offset)
-            start_page = offset // page_size
-            first_page_skip = offset % page_size
-            total_pages = max(1, math.ceil((first_page_skip + total_target) / page_size))
+            # The v2 TalentSearch contract ignores pageNumber/pageSize and
+            # returns the full filtered set in one response (live probe
+            # 2026-07-19) — the old page loop just re-fetched identical rows.
+            # One fetch capped at max_total; progressive batching slices it.
+            sourcing_titles = criteria.sourcing_titles()
+            all_candidates = await self.jobdiva_service.search_candidates(
+                skills=list(criteria.skill_criteria or []),
+                location=criteria.location or "",
+                page=1,
+                limit=max_total,
+                job_id=None,
+                boolean_string=criteria.boolean_string or "",
+                recent_days=getattr(criteria, "recent_days", None),
+                require_resume=getattr(criteria, "require_resume", True),
+                countries=countries,
+                states=states,
+                page_number=0,
+                zip_code=geo_zip,
+                within_miles=getattr(criteria, "within_miles", 25),
+                title=sourcing_titles[0] if sourcing_titles else "",
+            )
+
+            self._log_stage(
+                "TalentSearch",
+                f"TalentSearch returned {len(all_candidates)} candidate(s) "
+                f"(offset={offset} batch={batch_size})",
+            )
 
             candidates: List[Dict[str, Any]] = []
             seen_ids = set()
-
-            for page_offset in range(total_pages):
-                page_number = start_page + page_offset
-                if len(candidates) >= total_target:
-                    break
-
-                page_candidates = await self.jobdiva_service.search_candidates(
-                    skills=flat_terms,
-                    location=criteria.location or "",
-                    page=page_number + 1,
-                    limit=page_size,
-                    job_id=None,
-                    boolean_string=criteria.boolean_string or "",
-                    recent_days=getattr(criteria, "recent_days", None),
-                    require_resume=getattr(criteria, "require_resume", True),
-                    countries=countries,
-                    states=states,
-                    page_number=page_number,
-                    zip_code=geo_zip,
-                    within_miles=getattr(criteria, "within_miles", 25),
-                )
-
-                self._log_stage(
-                    "TalentSearch",
-                    f"TalentSearch pageNumber={page_number} offset={offset} batch={batch_size} "
-                    f"returned {len(page_candidates)} candidate(s)",
-                )
-                if not page_candidates:
-                    break
-
-                page_slice = page_candidates[first_page_skip:] if page_offset == 0 and first_page_skip else page_candidates
-                for cand in page_slice:
-                    cid = str(cand.get("candidate_id") or cand.get("id") or "").strip()
-                    dedupe_key = cid or f"{cand.get('email') or ''}:{cand.get('name') or ''}".lower()
-                    if dedupe_key in seen_ids:
-                        continue
-                    seen_ids.add(dedupe_key)
-                    candidates.append(cand)
-                    if len(candidates) >= total_target:
-                        break
-
-                if len(page_candidates) < page_size:
-                    break
+            for cand in all_candidates:
+                cid = str(cand.get("candidate_id") or cand.get("id") or "").strip()
+                dedupe_key = cid or f"{cand.get('email') or ''}:{cand.get('name') or ''}".lower()
+                if dedupe_key in seen_ids:
+                    continue
+                seen_ids.add(dedupe_key)
+                candidates.append(cand)
+            candidates = candidates[offset:offset + batch_size]
 
             if not candidates:
                 return {"candidates": [], "source_type": source_type}
@@ -5057,6 +5065,52 @@ class UnifiedCandidateSearch:
         except Exception as e:
             logger.debug(f"Cached enhanced-info lookup skipped: {e}")
 
+    def _drop_client_employees(
+        self,
+        candidates: List[Dict[str, Any]],
+        criteria: SearchCriteria,
+        source_label: str,
+    ) -> List[Dict[str, Any]]:
+        """Search-time hard filter for EXTERNAL sources (Exa/Unipile): drop
+        rows whose CURRENT company is the hiring client (criteria.client_name).
+
+        We can never submit a client's own employees, so external-source rows
+        are filtered before they ever reach Step 5 — the query side can't
+        express the negation (Exa's neural search would be ATTRACTED by the
+        company name; Unipile keyword NOT would over-exclude past employees).
+        JobDiva rows are deliberately NOT touched here (Step-5 policy: JobDiva
+        candidates are never dropped) — they're caught by the launch gate.
+        """
+        client_name = str(getattr(criteria, "client_name", "") or "")
+        if not candidates or not client_name:
+            return candidates
+        try:
+            from services.company_match import (
+                currently_employed_by_client,
+                is_placeholder_client,
+            )
+            if is_placeholder_client(client_name):
+                return candidates
+            kept: List[Dict[str, Any]] = []
+            dropped: List[str] = []
+            for cand in candidates:
+                match = currently_employed_by_client(cand, client_name)
+                if match:
+                    dropped.append(f"{cand.get('name') or cand.get('id')} ({match})")
+                else:
+                    kept.append(cand)
+            if dropped:
+                self._log_stage(
+                    source_label,
+                    f"Dropped {len(dropped)} candidate(s) currently employed by "
+                    f"hiring client {client_name!r}: {', '.join(dropped[:10])}"
+                    f"{' …' if len(dropped) > 10 else ''}",
+                )
+            return kept
+        except Exception as exc:
+            logger.warning(f"client-employee filter skipped ({source_label}): {exc}")
+            return candidates
+
     async def _search_linkedin(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
             # Unipile expects skills as a list of dicts or strings. Derive from
@@ -5074,6 +5128,9 @@ class UnifiedCandidateSearch:
                 ),
             )
 
+            candidates = self._drop_client_employees(
+                candidates, criteria, "LinkedIn-Unipile"
+            )
             return {"candidates": candidates, "source_type": "LinkedIn-Unipile"}
         except Exception as e:
             logger.error(f"LinkedIn search failed: {e}")
@@ -5259,6 +5316,7 @@ class UnifiedCandidateSearch:
                     await _otw_enqueue(pending_urls)
                 except Exception as otw_exc:
                     logger.warning(f"Exa OTW enrichment skipped: {otw_exc}", exc_info=True)
+            candidates = self._drop_client_employees(candidates, criteria, "LinkedIn-Exa")
             return {"candidates": candidates, "source_type": "LinkedIn-Exa"}
         except Exception as e:
             logger.error(f"Exa search failed: {e}")

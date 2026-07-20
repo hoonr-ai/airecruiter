@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { CampaignTemplateCard } from "@/components/campaigns/CampaignTemplateCard";
 import {
   Campaign,
   CampaignCreatePayload,
@@ -76,7 +77,13 @@ export function CampaignForm({
   const [empTypes, setEmpTypes] = useState<string[]>(initial?.selected_employment_types ?? []);
   const [screeningLevel, setScreeningLevel] = useState<string>(initial?.screening_level ?? "L1.5");
   const [jobBoards, setJobBoards] = useState<string[]>(initial?.selected_job_boards ?? []);
-  const [botIntro, setBotIntro] = useState(initial?.bot_introduction ?? "");
+  const defaultBotIntro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a {{job_title}} in {{job_location}}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+  const [botIntro, setBotIntro] = useState(initial?.bot_introduction?.trim() ? initial.bot_introduction : defaultBotIntro);
+  const [outreachDelayMins, setOutreachDelayMins] = useState<string>(
+    initial?.outreach_delay_mins !== null && initial?.outreach_delay_mins !== undefined
+      ? initial.outreach_delay_mins.toString()
+      : ""
+  );
   const [recruiterNotes, setRecruiterNotes] = useState(initial?.recruiter_notes ?? "");
   const [nameError, setNameError] = useState<string | null>(null);
 
@@ -100,10 +107,12 @@ export function CampaignForm({
     setList(list.includes(value) ? list.filter((v) => v !== value) : [...list, value]);
 
   const handleSubmit = () => {
-    if (!name.trim()) {
-      setNameError("Campaign name is required");
+    if (!name.trim() || !customerName.trim() || emails.length === 0 || empTypes.length === 0) {
+      setNameError("Campaign Name, Customer, at least one Recruiter Email, and Employment Type are required");
       return;
     }
+    setNameError(null);
+    const parsedDelay = outreachDelayMins.trim() ? parseInt(outreachDelayMins.trim(), 10) : undefined;
     onSubmit({
       name: name.trim(),
       customer_name: customerName.trim() || undefined,
@@ -112,6 +121,7 @@ export function CampaignForm({
       screening_level: screeningLevel,
       selected_job_boards: jobBoards,
       bot_introduction: botIntro.trim() || undefined,
+      outreach_delay_mins: parsedDelay !== undefined && !isNaN(parsedDelay) ? parsedDelay : undefined,
       recruiter_notes: recruiterNotes.trim() || undefined,
     });
   };
@@ -119,7 +129,9 @@ export function CampaignForm({
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
-        <Label htmlFor="campaign-name">Campaign Name *</Label>
+        <Label htmlFor="campaign-name">
+          Campaign Name <span className="text-red-500">*</span>
+        </Label>
         <Input
           id="campaign-name"
           value={name}
@@ -133,7 +145,9 @@ export function CampaignForm({
       </div>
 
       <div className="space-y-1.5">
-        <Label htmlFor="campaign-customer">Customer</Label>
+        <Label htmlFor="campaign-customer">
+          Customer <span className="text-red-500">*</span>
+        </Label>
         <Input
           id="campaign-customer"
           value={customerName ?? ""}
@@ -143,7 +157,9 @@ export function CampaignForm({
       </div>
 
       <div className="space-y-1.5">
-        <Label>Recruiter Email(s)</Label>
+        <Label>
+          Recruiter Email(s) <span className="text-red-500">*</span>
+        </Label>
         <div className="flex flex-wrap gap-2">
           {emails.map((email) => (
             <span
@@ -181,7 +197,9 @@ export function CampaignForm({
       </div>
 
       <div className="space-y-1.5">
-        <Label>Employment Type</Label>
+        <Label>
+          Employment Type <span className="text-red-500">*</span>
+        </Label>
         <div className="flex flex-wrap gap-2">
           {EMPLOYMENT_TYPES.map((t) => (
             <PillToggle key={t} active={empTypes.includes(t)} onClick={() => toggle(empTypes, setEmpTypes, t)}>
@@ -205,6 +223,21 @@ export function CampaignForm({
             ))}
           </SelectContent>
         </Select>
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="campaign-outreach-delay">Outreach Frequency (Minutes)</Label>
+        <Input
+          id="campaign-outreach-delay"
+          type="number"
+          min={0}
+          value={outreachDelayMins}
+          onChange={(e) => setOutreachDelayMins(e.target.value)}
+          placeholder="e.g. 30 (Leaves empty for default delay)"
+        />
+        <p className="text-xs text-slate-500">
+          Minutes to wait after sending initial Email/SMS before the AI bot dials the candidate.
+        </p>
       </div>
 
       <div className="space-y-1.5">
@@ -238,6 +271,10 @@ export function CampaignForm({
           placeholder="Notes shared across all jobs in this campaign"
           rows={2}
         />
+      </div>
+
+      <div className="pt-2">
+        <CampaignTemplateCard campaign={initial} />
       </div>
 
       <div className="flex justify-end gap-2 pt-2">

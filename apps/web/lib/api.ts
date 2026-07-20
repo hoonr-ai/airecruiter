@@ -230,5 +230,6 @@ export const api = {
   },
   adminAnalytics: {
     get: () => req<any>(`/api/v1/admin/analytics`),
+    linkedinAccounts: () => req<any>(`/api/v1/admin/linkedin-accounts`),
   },
 };

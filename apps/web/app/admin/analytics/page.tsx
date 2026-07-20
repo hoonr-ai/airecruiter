@@ -1,19 +1,27 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { 
-  Briefcase, 
-  Archive, 
-  Users, 
-  UserCheck, 
-  RefreshCw, 
-  TrendingUp, 
-  Award, 
-  Building2, 
+import {
+  Briefcase,
+  Archive,
+  Users,
+  UserCheck,
+  RefreshCw,
+  TrendingUp,
+  Award,
+  Building2,
   ShieldAlert,
   ArrowLeft,
   AlertTriangle,
-  Download
+  Download,
+  Timer,
+  Rocket,
+  Clock,
+  Hourglass,
+  Activity,
+  CalendarClock,
+  Linkedin,
+  Search
 } from "lucide-react";
 import Link from "next/link";
 import { api } from "@/lib/api";
@@ -44,14 +52,146 @@ interface CandidateSource {
   count: number;
 }
 
+interface JobTimelineEntry {
+  job_id: string;
+  jobdiva_id: string;
+  title: string;
+  customer_name: string;
+  posted_date_raw: string;
+  jobdiva_posted_on: string | null;
+  added_to_curate_at: string | null;
+  curate_launched_at: string | null;
+  outreach_stopped_at: string | null;
+  posted_to_launch_days: number | null;
+  is_archived: boolean;
+  jobdiva_status: string;
+  pair_status: "Active" | "Inactive" | "Unpublished";
+  candidates_sourced: number;
+  candidates_launched: number;
+  campaign_id: string | null;
+}
+
+interface LaunchSpeed {
+  launched_jobs?: number;
+  unlaunched_active_jobs?: number;
+  aged_unlaunched_jobs?: number;
+  avg_days_posted_to_launch?: number | null;
+  median_days_posted_to_launch?: number | null;
+}
+
+interface WeeklyTrends {
+  weeks?: string[];
+  jobs_added?: number[];
+  jobs_launched?: number[];
+  candidates_sourced?: number[];
+  candidates_launched?: number[];
+}
+
+interface LinkedInAccount {
+  account_id: string;
+  account_name: string;
+  use_count: number;
+  last_used_at: string | null;
+  cooldown_until: string | null;
+  last_error: string;
+  /** Live Unipile workspace status ("OK", "CREDENTIALS", "DETACHED", ...) — only present on the /admin/linkedin-accounts live view. */
+  status?: string;
+}
+
 interface AnalyticsData {
   overview: AnalyticsOverview;
   candidates_by_status: Record<string, number>;
   jobs_by_customer: CustomerJob[];
   top_recruiters: RecruiterStat[];
   candidates_by_source?: CandidateSource[];
+  jobs_timeline?: JobTimelineEntry[];
+  jobs_timeline_total?: number;
+  launch_speed?: LaunchSpeed;
+  weekly_trends?: WeeklyTrends;
+  linkedin_accounts?: LinkedInAccount[];
   warning?: string;
 }
+
+const PAIR_STATUS_FILTERS = ["All", "Active", "Unpublished", "Inactive"] as const;
+type PairStatusFilter = (typeof PAIR_STATUS_FILTERS)[number];
+
+/** ISO date/datetime → "Feb 24, 2026"; null/invalid → "—". */
+const formatDate = (iso: string | null | undefined): string => {
+  if (!iso) return "—";
+  const d = /^\d{4}-\d{2}-\d{2}$/.test(iso) ? new Date(`${iso}T00:00:00`) : new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+};
+
+/** ISO Monday date → "Jun 1". */
+const formatWeekLabel = (iso: string): string => {
+  const d = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+};
+
+/** ISO datetime → relative "2h ago" / "3d ago"; null → "—". */
+const formatRelativeTime = (iso: string | null | undefined): string => {
+  if (!iso) return "—";
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "—";
+  const diffMins = Math.floor((Date.now() - t) / 60000);
+  if (diffMins < 1) return "just now";
+  if (diffMins < 60) return `${diffMins}m ago`;
+  const hours = Math.floor(diffMins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return `${Math.floor(days / 30)}mo ago`;
+};
+
+/** One decimal only when not whole: 3 → "3", 3.5 → "3.5". */
+const formatLagValue = (lag: number): string => (Number.isInteger(lag) ? `${lag}` : lag.toFixed(1));
+
+const renderDateCell = (iso: string | null) => {
+  const formatted = formatDate(iso);
+  return formatted === "—" ? (
+    <span className="text-slate-300">—</span>
+  ) : (
+    <span className="text-slate-700">{formatted}</span>
+  );
+};
+
+const renderLagChip = (lag: number | null) => {
+  if (lag === null || lag === undefined) return <span className="text-slate-300">—</span>;
+  if (lag < 0) {
+    return (
+      <span
+        title="posted date unreliable"
+        className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold bg-slate-100 text-slate-500 border border-slate-200"
+      >
+        n/a
+      </span>
+    );
+  }
+  let chipClass = "bg-emerald-50 text-emerald-700 border border-emerald-200";
+  if (lag > 7) chipClass = "bg-rose-50 text-rose-700 border border-rose-200";
+  else if (lag > 3) chipClass = "bg-amber-50 text-amber-700 border border-amber-200";
+  return (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold ${chipClass}`}>
+      {formatLagValue(lag)} d
+    </span>
+  );
+};
+
+const renderPairStatusBadge = (status: JobTimelineEntry["pair_status"]) => {
+  const badgeClass =
+    status === "Active"
+      ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+      : status === "Unpublished"
+        ? "bg-amber-50 text-amber-700 border border-amber-200"
+        : "bg-slate-100 text-slate-600 border border-slate-200";
+  return (
+    <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${badgeClass}`}>
+      {status}
+    </span>
+  );
+};
 
 export default function AdminAnalyticsPage() {
   const { isAdmin, isLoading: isRoleLoading, email, role } = useUserRole();
@@ -59,6 +199,12 @@ export default function AdminAnalyticsPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [timelineSearch, setTimelineSearch] = useState("");
+  const [timelineFilter, setTimelineFilter] = useState<PairStatusFilter>("All");
+  const [showAllTimeline, setShowAllTimeline] = useState(false);
+  const [liveAccounts, setLiveAccounts] = useState<LinkedInAccount[] | null>(null);
+  const [isRefreshingAccounts, setIsRefreshingAccounts] = useState(false);
+  const [accountsError, setAccountsError] = useState<string | null>(null);
 
   const fetchAnalytics = useCallback(async (refresh = false) => {
     if (refresh) setIsRefreshing(true);
@@ -68,6 +214,7 @@ export default function AdminAnalyticsPage() {
       const res = await api.adminAnalytics.get();
       if (res && res.status === "success" && res.data) {
         setData(res.data);
+        setLiveAccounts(null); // fall back to the fresh snapshot until the next live refresh
       } else {
         setError(res?.message || "Failed to load analytics data.");
       }
@@ -77,6 +224,24 @@ export default function AdminAnalyticsPage() {
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
+    }
+  }, []);
+
+  const refreshLinkedInAccounts = useCallback(async () => {
+    setIsRefreshingAccounts(true);
+    setAccountsError(null);
+    try {
+      const res = await api.adminAnalytics.linkedinAccounts();
+      if (res && res.status === "success" && res.data?.accounts) {
+        setLiveAccounts(res.data.accounts as LinkedInAccount[]);
+      } else {
+        setAccountsError(res?.message || "Failed to load live account status.");
+      }
+    } catch (err) {
+      console.error("Error loading LinkedIn accounts:", err);
+      setAccountsError(err instanceof Error ? err.message : "Failed to load live account status.");
+    } finally {
+      setIsRefreshingAccounts(false);
     }
   }, []);
 
@@ -129,6 +294,33 @@ export default function AdminAnalyticsPage() {
   const totalCandidates = Object.values(data?.candidates_by_status || {}).reduce((a, b) => a + b, 0) || 1;
   const maxJobCount = Math.max(...(data?.jobs_by_customer?.map((c) => c.job_count) || [1]), 1);
   const maxSrcCount = Math.max(...(data?.candidates_by_source?.map((s) => s.count) || [1]), 1);
+
+  const launchSpeed: LaunchSpeed = data?.launch_speed || {};
+
+  const trends: WeeklyTrends = data?.weekly_trends || {};
+  const trendWeeks = trends.weeks || [];
+  const trendSeries = [
+    { key: "jobs_added", label: "Jobs Added", values: trends.jobs_added || [], barClass: "bg-indigo-500" },
+    { key: "jobs_launched", label: "Jobs Launched", values: trends.jobs_launched || [], barClass: "bg-emerald-500" },
+    { key: "candidates_sourced", label: "Candidates Sourced", values: trends.candidates_sourced || [], barClass: "bg-violet-500" },
+    { key: "candidates_launched", label: "Candidates Launched", values: trends.candidates_launched || [], barClass: "bg-cyan-500" },
+  ];
+  const hasTrendData = trendWeeks.length > 0;
+
+  const timelineRows = data?.jobs_timeline || [];
+  const timelineQuery = timelineSearch.trim().toLowerCase();
+  const filteredTimeline = timelineRows.filter((job) => {
+    if (timelineFilter !== "All" && job.pair_status !== timelineFilter) return false;
+    if (!timelineQuery) return true;
+    return (
+      job.title.toLowerCase().includes(timelineQuery) ||
+      job.jobdiva_id.toLowerCase().includes(timelineQuery) ||
+      job.customer_name.toLowerCase().includes(timelineQuery)
+    );
+  });
+  const visibleTimeline = showAllTimeline ? filteredTimeline : filteredTimeline.slice(0, 50);
+
+  const linkedInRows: LinkedInAccount[] = liveAccounts ?? data?.linkedin_accounts ?? [];
 
   // Standard pipeline funnel stages aligning with candidate ranking page statuses
   const pipelineStages = [
@@ -217,6 +409,43 @@ export default function AdminAnalyticsPage() {
       "--- RECRUITER PRODUCTIVITY LEADERBOARD ---",
       "Rank,Recruiter Email,Active Jobs,Candidate Volume",
       ...(data.top_recruiters || []).map((r, idx) => `#${idx + 1},${escapeCsvField(r.email)},${r.active_jobs},${r.total_candidates}`),
+      "",
+      "--- JOB LAUNCH TIMELINE ---",
+      "Job Title,JobDiva Ref,Client,Posted on JobDiva,Added to Curate,Launched on Curate,Lag (days),PAIR Status,Candidates Sourced,Candidates Launched",
+      ...(data.jobs_timeline || []).map((job) =>
+        [
+          escapeCsvField(job.title),
+          escapeCsvField(job.jobdiva_id),
+          escapeCsvField(job.customer_name),
+          escapeCsvField(job.jobdiva_posted_on || job.posted_date_raw),
+          escapeCsvField(job.added_to_curate_at),
+          escapeCsvField(job.curate_launched_at),
+          // Mirror the UI's lag chip: negative = unreliable posted date
+          escapeCsvField(
+            job.posted_to_launch_days === null || job.posted_to_launch_days === undefined
+              ? ""
+              : job.posted_to_launch_days < 0
+                ? "n/a"
+                : String(job.posted_to_launch_days)
+          ),
+          escapeCsvField(job.pair_status),
+          job.candidates_sourced,
+          job.candidates_launched,
+        ].join(",")
+      ),
+      "",
+      "--- LINKEDIN ACCOUNTS ---",
+      "Account,Account ID,Searches,Last Used,Cooling Down Until,Last Error",
+      ...(liveAccounts ?? data.linkedin_accounts ?? []).map((acc) =>
+        [
+          escapeCsvField(acc.account_name || "Unnamed account"),
+          escapeCsvField(acc.account_id),
+          acc.use_count,
+          escapeCsvField(acc.last_used_at),
+          escapeCsvField(acc.cooldown_until),
+          escapeCsvField(acc.last_error),
+        ].join(",")
+      ),
     ];
 
     const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
@@ -259,7 +488,7 @@ export default function AdminAnalyticsPage() {
           <Button
             variant="outline"
             onClick={() => fetchAnalytics(true)}
-            disabled={isLoading || isRefreshing}
+            disabled={isLoading || isRefreshing || isRefreshingAccounts}
             className="flex items-center gap-2 h-10 px-4 border-slate-200 text-slate-700 font-semibold text-[13px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all"
           >
             <RefreshCw className={`h-4 w-4 text-slate-500 ${isRefreshing ? "animate-spin text-primary" : ""}`} />
@@ -355,6 +584,175 @@ export default function AdminAnalyticsPage() {
         </div>
       </div>
 
+      {/* Launch Velocity KPI Row */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm flex flex-col justify-between">
+          <div className="flex items-center justify-between">
+            <span className="text-[13px] font-semibold text-slate-500">Median Posted → Launch</span>
+            <div className="w-8 h-8 rounded-lg bg-sky-50 border border-sky-100 flex items-center justify-center text-sky-600">
+              <Timer className="w-4 h-4" />
+            </div>
+          </div>
+          <div className="mt-3">
+            {isLoading ? (
+              <div className="h-8 w-16 bg-slate-100 animate-pulse rounded" />
+            ) : (
+              <div className="text-[28px] font-bold text-slate-900 leading-none">
+                {typeof launchSpeed.median_days_posted_to_launch === "number"
+                  ? `${formatLagValue(launchSpeed.median_days_posted_to_launch)} days`
+                  : "—"}
+                {typeof launchSpeed.avg_days_posted_to_launch === "number" && (
+                  <span className="text-[13px] font-semibold text-slate-400 ml-2">
+                    avg {formatLagValue(launchSpeed.avg_days_posted_to_launch)}d
+                  </span>
+                )}
+              </div>
+            )}
+            <div className="text-[12px] text-slate-400 mt-1.5 font-medium">JobDiva post → Curate launch</div>
+          </div>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm flex flex-col justify-between">
+          <div className="flex items-center justify-between">
+            <span className="text-[13px] font-semibold text-slate-500">Jobs Launched on Curate</span>
+            <div className="w-8 h-8 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600">
+              <Rocket className="w-4 h-4" />
+            </div>
+          </div>
+          <div className="mt-3">
+            {isLoading ? (
+              <div className="h-8 w-16 bg-slate-100 animate-pulse rounded" />
+            ) : (
+              <div className="text-[28px] font-bold text-slate-900 leading-none">
+                {typeof launchSpeed.launched_jobs === "number" ? launchSpeed.launched_jobs.toLocaleString() : "—"}
+              </div>
+            )}
+            <div className="text-[12px] text-slate-400 mt-1.5 font-medium">all time</div>
+          </div>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm flex flex-col justify-between">
+          <div className="flex items-center justify-between">
+            <span className="text-[13px] font-semibold text-slate-500">Awaiting Launch</span>
+            <div className="w-8 h-8 rounded-lg bg-cyan-50 border border-cyan-100 flex items-center justify-center text-cyan-600">
+              <Clock className="w-4 h-4" />
+            </div>
+          </div>
+          <div className="mt-3">
+            {isLoading ? (
+              <div className="h-8 w-16 bg-slate-100 animate-pulse rounded" />
+            ) : (
+              <div className="text-[28px] font-bold text-slate-900 leading-none">
+                {typeof launchSpeed.unlaunched_active_jobs === "number"
+                  ? launchSpeed.unlaunched_active_jobs.toLocaleString()
+                  : "—"}
+              </div>
+            )}
+            <div className="text-[12px] text-slate-400 mt-1.5 font-medium">active, not yet launched</div>
+          </div>
+        </div>
+
+        <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm flex flex-col justify-between">
+          <div className="flex items-center justify-between">
+            <span className="text-[13px] font-semibold text-slate-500">Aged Unlaunched</span>
+            <div className="w-8 h-8 rounded-lg bg-amber-50 border border-amber-100 flex items-center justify-center text-amber-600">
+              <Hourglass className="w-4 h-4" />
+            </div>
+          </div>
+          <div className="mt-3">
+            {isLoading ? (
+              <div className="h-8 w-16 bg-slate-100 animate-pulse rounded" />
+            ) : (
+              <div className="text-[28px] font-bold text-amber-600 leading-none">
+                {typeof launchSpeed.aged_unlaunched_jobs === "number"
+                  ? launchSpeed.aged_unlaunched_jobs.toLocaleString()
+                  : "—"}
+              </div>
+            )}
+            <div className="text-[12px] text-slate-400 mt-1.5 font-medium">added &gt;7 days ago, never launched</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Weekly Activity Trends */}
+      <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200 bg-[#fcfdfd] flex items-center justify-between">
+          <div>
+            <h2 className="text-[16px] font-bold text-slate-900 flex items-center gap-2">
+              <Activity className="w-4 h-4 text-indigo-600" />
+              Weekly Activity Trends
+            </h2>
+            <p className="text-[12px] text-slate-500 mt-0.5">Jobs and candidate flow over the last 8 weeks</p>
+          </div>
+          {!isLoading && hasTrendData && (
+            <span className="inline-flex items-center rounded-md bg-slate-100 px-2 py-1 text-[12px] font-semibold text-slate-700">
+              {formatWeekLabel(trendWeeks[0])} – {formatWeekLabel(trendWeeks[trendWeeks.length - 1])}
+            </span>
+          )}
+        </div>
+
+        <div className="p-6">
+          {isLoading ? (
+            <div className="space-y-6">
+              {[1, 2, 3, 4].map((i) => (
+                <div key={i} className="flex items-center gap-5">
+                  <div className="w-44 shrink-0 space-y-2">
+                    <div className="h-4 w-32 bg-slate-100 animate-pulse rounded" />
+                    <div className="h-3 w-20 bg-slate-100 animate-pulse rounded" />
+                  </div>
+                  <div className="h-16 flex-1 bg-slate-100 animate-pulse rounded" />
+                </div>
+              ))}
+            </div>
+          ) : !hasTrendData ? (
+            <div className="text-center py-10 text-slate-400 text-[13px]">
+              No weekly activity recorded yet.
+            </div>
+          ) : (
+            <div className="space-y-6">
+              {trendSeries.map((series) => {
+                const values = trendWeeks.map((_, i) => series.values[i] ?? 0);
+                const total = values.reduce((a, b) => a + b, 0);
+                const seriesMax = Math.max(...values, 1);
+
+                return (
+                  <div key={series.key} className="flex items-center gap-5">
+                    <div className="w-44 shrink-0">
+                      <div className="text-[13px] font-semibold text-slate-700">{series.label}</div>
+                      <div className="text-[12px] text-slate-400 font-mono mt-0.5">{total.toLocaleString()} total</div>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-end gap-1.5 h-16">
+                        {values.map((value, i) => (
+                          <div
+                            key={trendWeeks[i]}
+                            title={`Week of ${formatWeekLabel(trendWeeks[i])}: ${value}`}
+                            className="flex-1 h-full flex items-end"
+                          >
+                            {value > 0 ? (
+                              <div
+                                className={`w-full rounded-t ${series.barClass} transition-all duration-500`}
+                                style={{ height: `${Math.max(Math.round((value / seriesMax) * 100), 8)}%` }}
+                              />
+                            ) : (
+                              <div className="w-full h-[2px] rounded bg-slate-100" />
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex justify-between mt-1.5 text-[11px] font-medium text-slate-400">
+                        <span>{formatWeekLabel(trendWeeks[0])}</span>
+                        <span>{formatWeekLabel(trendWeeks[trendWeeks.length - 1])}</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* Middle Section: Funnel & Clients */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Candidate Pipeline Funnel (2 cols) */}
@@ -387,7 +785,7 @@ export default function AdminAnalyticsPage() {
               </div>
             ) : (
               <div className="space-y-5 my-auto">
-                {pipelineStages.map((stage) => {
+                {pipelineStages.map((stage, stageIdx) => {
                   const count = getStageCount(stage);
                   const percentage = Math.round((count / totalCandidates) * 100);
                   const barColor = (stage as any).color || "bg-primary";
@@ -700,6 +1098,259 @@ export default function AdminAnalyticsPage() {
                             </span>
                           );
                         })()}
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Job Launch Timeline */}
+      <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200 bg-[#fcfdfd]">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="text-[16px] font-bold text-slate-900 flex items-center gap-2">
+                <CalendarClock className="w-4 h-4 text-indigo-600" />
+                Job Launch Timeline
+              </h2>
+              <p className="text-[12px] text-slate-500 mt-0.5">JobDiva posting → Curate launch lifecycle, most recent first</p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={timelineSearch}
+                  onChange={(e) => {
+                    setTimelineSearch(e.target.value);
+                    setShowAllTimeline(false);
+                  }}
+                  placeholder="Search title, ref or client..."
+                  className="h-8 w-56 rounded-lg border border-slate-200 bg-white pl-8 pr-3 text-[13px] text-slate-700 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/50"
+                />
+              </div>
+              <div className="inline-flex items-center rounded-lg bg-slate-100 p-0.5">
+                {PAIR_STATUS_FILTERS.map((filterOption) => (
+                  <button
+                    key={filterOption}
+                    type="button"
+                    onClick={() => {
+                      setTimelineFilter(filterOption);
+                      setShowAllTimeline(false);
+                    }}
+                    className={`px-2.5 py-1 rounded-md text-[12px] font-semibold transition-colors ${
+                      timelineFilter === filterOption
+                        ? "bg-white text-slate-900 shadow-sm"
+                        : "text-slate-500 hover:text-slate-700"
+                    }`}
+                  >
+                    {filterOption}
+                  </button>
+                ))}
+              </div>
+              <span className="text-[12px] font-medium text-slate-400 whitespace-nowrap">
+                Showing {filteredTimeline.length} of {data?.jobs_timeline_total || timelineRows.length} jobs
+                {(data?.jobs_timeline_total || 0) > timelineRows.length && " (most recent 200)"}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b border-slate-200 bg-slate-50 font-bold text-slate-500 text-[12.5px]">
+                <th className="py-3 px-6">Job</th>
+                <th className="py-3 px-6">Client</th>
+                <th className="py-3 px-6">Posted (JobDiva)</th>
+                <th className="py-3 px-6">Added (Curate)</th>
+                <th className="py-3 px-6">Launched (Curate)</th>
+                <th className="py-3 px-6 text-center">Lag</th>
+                <th className="py-3 px-6 text-center">PAIR Status</th>
+                <th className="py-3 px-6 text-center">Sourced</th>
+                <th className="py-3 px-6 text-center">Launched</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 text-[13px]">
+              {isLoading ? (
+                [1, 2, 3, 4].map((i) => (
+                  <tr key={i}>
+                    <td className="py-4 px-6">
+                      <div className="h-4 w-44 bg-slate-100 animate-pulse rounded" />
+                      <div className="h-3 w-20 bg-slate-100 animate-pulse rounded mt-1.5" />
+                    </td>
+                    <td className="py-4 px-6"><div className="h-4 w-24 bg-slate-100 animate-pulse rounded" /></td>
+                    <td className="py-4 px-6"><div className="h-4 w-20 bg-slate-100 animate-pulse rounded" /></td>
+                    <td className="py-4 px-6"><div className="h-4 w-20 bg-slate-100 animate-pulse rounded" /></td>
+                    <td className="py-4 px-6"><div className="h-4 w-20 bg-slate-100 animate-pulse rounded" /></td>
+                    <td className="py-4 px-6 text-center"><div className="h-5 w-10 bg-slate-100 animate-pulse rounded-full mx-auto" /></td>
+                    <td className="py-4 px-6 text-center"><div className="h-5 w-16 bg-slate-100 animate-pulse rounded-full mx-auto" /></td>
+                    <td className="py-4 px-6 text-center"><div className="h-4 w-8 bg-slate-100 animate-pulse rounded mx-auto" /></td>
+                    <td className="py-4 px-6 text-center"><div className="h-4 w-8 bg-slate-100 animate-pulse rounded mx-auto" /></td>
+                  </tr>
+                ))
+              ) : filteredTimeline.length === 0 ? (
+                <tr>
+                  <td colSpan={9} className="py-12 text-center text-slate-400 text-[13px]">
+                    {timelineRows.length === 0
+                      ? "No job timeline data available yet."
+                      : "No jobs match your search or filter."}
+                  </td>
+                </tr>
+              ) : (
+                visibleTimeline.map((job) => (
+                  <tr key={job.job_id || job.jobdiva_id} className="hover:bg-[#f6f8fb] transition-colors">
+                    <td className="py-3.5 px-6">
+                      <div className="font-semibold text-slate-800 max-w-[260px] truncate" title={job.title}>
+                        {job.title}
+                      </div>
+                      <div className="font-mono text-xs text-slate-400 mt-0.5">{job.jobdiva_id || "—"}</div>
+                    </td>
+                    <td className="py-3.5 px-6 text-slate-600">
+                      <div className="max-w-[160px] truncate" title={job.customer_name}>{job.customer_name}</div>
+                    </td>
+                    <td className="py-3.5 px-6 whitespace-nowrap">
+                      {job.jobdiva_posted_on ? (
+                        <span className="text-slate-700">{formatDate(job.jobdiva_posted_on)}</span>
+                      ) : job.posted_date_raw ? (
+                        <span className="text-slate-500">{job.posted_date_raw}</span>
+                      ) : (
+                        <span className="text-slate-300">—</span>
+                      )}
+                    </td>
+                    <td className="py-3.5 px-6 whitespace-nowrap">{renderDateCell(job.added_to_curate_at)}</td>
+                    <td className="py-3.5 px-6 whitespace-nowrap">{renderDateCell(job.curate_launched_at)}</td>
+                    <td className="py-3.5 px-6 text-center whitespace-nowrap">{renderLagChip(job.posted_to_launch_days)}</td>
+                    <td className="py-3.5 px-6 text-center">{renderPairStatusBadge(job.pair_status)}</td>
+                    <td className="py-3.5 px-6 text-center font-bold text-slate-800">
+                      {job.candidates_sourced.toLocaleString()}
+                    </td>
+                    <td className="py-3.5 px-6 text-center font-bold text-primary">
+                      {job.candidates_launched.toLocaleString()}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        {!isLoading && !showAllTimeline && filteredTimeline.length > 50 && (
+          <div className="px-6 py-3 border-t border-slate-100 text-center">
+            <button
+              type="button"
+              onClick={() => setShowAllTimeline(true)}
+              className="text-[13px] font-semibold text-primary hover:underline"
+            >
+              Show all {filteredTimeline.length}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* LinkedIn Sourcing Accounts */}
+      <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200 bg-[#fcfdfd] flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-[16px] font-bold text-slate-900 flex items-center gap-2">
+              <Linkedin className="w-4 h-4 text-sky-600" />
+              LinkedIn Sourcing Accounts
+            </h2>
+            <p className="text-[12px] text-slate-500 mt-0.5">
+              Searches rotate round-robin across all attached LinkedIn accounts.
+            </p>
+          </div>
+          <Button
+            variant="outline"
+            onClick={refreshLinkedInAccounts}
+            disabled={isLoading || isRefreshing || isRefreshingAccounts}
+            className="flex items-center gap-2 h-9 px-3.5 border-slate-200 text-slate-700 font-semibold text-[13px] rounded-lg bg-white shadow-sm hover:bg-slate-50 transition-all"
+          >
+            <RefreshCw className={`h-4 w-4 text-slate-500 ${isRefreshingAccounts ? "animate-spin text-primary" : ""}`} />
+            {isRefreshingAccounts ? "Checking Unipile..." : "Refresh live status"}
+          </Button>
+        </div>
+
+        {accountsError && (
+          <div className="px-6 py-2.5 border-b border-red-100 bg-red-50 text-[12px] font-medium text-red-700">
+            {accountsError}
+          </div>
+        )}
+
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="border-b border-slate-200 bg-slate-50 font-bold text-slate-500 text-[12.5px]">
+                <th className="py-3 px-6">Account</th>
+                <th className="py-3 px-6">Status</th>
+                <th className="py-3 px-6 text-center">Searches</th>
+                <th className="py-3 px-6 text-right">Last used</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100 text-[13px]">
+              {isLoading ? (
+                [1, 2].map((i) => (
+                  <tr key={i}>
+                    <td className="py-4 px-6">
+                      <div className="h-4 w-36 bg-slate-100 animate-pulse rounded" />
+                      <div className="h-3 w-24 bg-slate-100 animate-pulse rounded mt-1.5" />
+                    </td>
+                    <td className="py-4 px-6"><div className="h-5 w-20 bg-slate-100 animate-pulse rounded-full" /></td>
+                    <td className="py-4 px-6 text-center"><div className="h-4 w-8 bg-slate-100 animate-pulse rounded mx-auto" /></td>
+                    <td className="py-4 px-6 text-right"><div className="h-4 w-14 bg-slate-100 animate-pulse rounded ml-auto" /></td>
+                  </tr>
+                ))
+              ) : linkedInRows.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="py-12 text-center text-slate-400 text-[13px] px-6">
+                    No LinkedIn account activity yet — accounts appear after the first rotated search, or click Refresh to list the accounts attached to Unipile.
+                  </td>
+                </tr>
+              ) : (
+                linkedInRows.map((acc) => {
+                  const coolingDown =
+                    !!acc.cooldown_until && new Date(acc.cooldown_until).getTime() > Date.now();
+                  let chipText = "In rotation";
+                  let chipClass = "bg-emerald-50 text-emerald-700 border border-emerald-200";
+                  if (coolingDown) {
+                    chipText = "Cooling down";
+                    chipClass = "bg-amber-50 text-amber-700 border border-amber-200";
+                  } else if (acc.status && acc.status !== "OK") {
+                    chipText = acc.status;
+                    chipClass =
+                      acc.status === "DETACHED"
+                        ? "bg-slate-100 text-slate-600 border border-slate-200"
+                        : "bg-rose-50 text-rose-700 border border-rose-200";
+                  }
+
+                  return (
+                    <tr key={acc.account_id} className="hover:bg-[#f6f8fb] transition-colors">
+                      <td className="py-3.5 px-6">
+                        <div className="font-semibold text-slate-800">{acc.account_name || "Unnamed account"}</div>
+                        <div className="font-mono text-xs text-slate-400 mt-0.5">{acc.account_id}</div>
+                      </td>
+                      <td className="py-3.5 px-6">
+                        <span
+                          className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${chipClass}`}
+                          title={coolingDown ? `Until ${formatDate(acc.cooldown_until)}` : undefined}
+                        >
+                          {chipText}
+                        </span>
+                        {acc.last_error ? (
+                          <div className="text-xs text-red-600 mt-1 max-w-[320px] truncate" title={acc.last_error}>
+                            {acc.last_error.length > 60 ? `${acc.last_error.slice(0, 60)}…` : acc.last_error}
+                          </div>
+                        ) : null}
+                      </td>
+                      <td className="py-3.5 px-6 text-center font-bold text-slate-800">
+                        {acc.use_count.toLocaleString()}
+                      </td>
+                      <td className="py-3.5 px-6 text-right text-slate-600 whitespace-nowrap">
+                        {formatRelativeTime(acc.last_used_at)}
                       </td>
                     </tr>
                   );

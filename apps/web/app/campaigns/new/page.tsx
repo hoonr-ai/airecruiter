@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/select";
 import { RubricEditor } from "@/components/campaigns/RubricEditor";
 import { ScreeningQuestionsEditor } from "@/components/campaigns/ScreeningQuestionsEditor";
+import { AIPostingJobDescription } from "@/components/jobs/AIPostingJobDescription";
 import { cn } from "@/lib/utils";
 import {
   Rubric,
@@ -80,14 +81,15 @@ export default function NewCampaignPage() {
   const [empTypes, setEmpTypes] = useState<string[]>([]);
   const [screeningLevel, setScreeningLevel] = useState("L1.5");
   const [jobBoards, setJobBoards] = useState<string[]>([]);
-  const [botIntro, setBotIntro] = useState("");
+  const defaultBotIntro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a {{job_title}} in {{job_location}}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+  const [botIntro, setBotIntro] = useState(defaultBotIntro);
   const [recruiterNotes, setRecruiterNotes] = useState("");
   const [jobTitle, setJobTitle] = useState("");
   const [seedNotes, setSeedNotes] = useState("");
   const [setupError, setSetupError] = useState<string | null>(null);
 
-  // Step 2 — JD + rubric
   const [jobDescription, setJobDescription] = useState("");
+  const [isEditingJD, setIsEditingJD] = useState(false);
   const [rubric, setRubric] = useState<Rubric | null>(null);
   const [isGeneratingJD, setIsGeneratingJD] = useState(false);
   const [isGeneratingRubric, setIsGeneratingRubric] = useState(false);
@@ -168,6 +170,7 @@ export default function NewCampaignPage() {
         screeningLevel,
         jobDescription,
         customerName,
+        totalYears: rubric?.total_years,
       });
       setQuestions(qs);
     } catch {
@@ -178,8 +181,8 @@ export default function NewCampaignPage() {
   };
 
   const goToStep2 = async () => {
-    if (!name.trim() || !jobTitle.trim()) {
-      setSetupError("Campaign name and a seed role/title are required.");
+    if (!name.trim() || !jobTitle.trim() || !customerName.trim() || emails.length === 0 || empTypes.length === 0) {
+      setSetupError("Campaign Name, Seed Role/Title, Customer, at least one Recruiter Email, and Employment Type are required.");
       return;
     }
     setSetupError(null);
@@ -190,10 +193,19 @@ export default function NewCampaignPage() {
 
   const goToStep3 = async () => {
     setStep(3);
+    if (!botIntro.trim()) {
+      const defaultCampaignIntro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a {{job_title}} in {{job_location}}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+      setBotIntro(defaultCampaignIntro);
+    }
     if (questions.length === 0) await runGenerateQuestions();
   };
 
   const handleCreate = async () => {
+    if (!name.trim() || !jobTitle.trim() || !customerName.trim() || emails.length === 0 || empTypes.length === 0) {
+      setStep(1);
+      setSetupError("Campaign Name, Seed Role/Title, Customer, at least one Recruiter Email, and Employment Type are required.");
+      return;
+    }
     setSaving(true);
     try {
       const payload: CampaignCreatePayload = {
@@ -219,7 +231,7 @@ export default function NewCampaignPage() {
   };
 
   return (
-    <div className="max-w-3xl mx-auto pb-24">
+    <div className="max-w-6xl mx-auto pb-24">
       <Link
         href="/campaigns"
         className="inline-flex items-center text-sm text-slate-500 hover:text-slate-800 mb-4"
@@ -270,21 +282,29 @@ export default function NewCampaignPage() {
       {step === 1 && (
         <div className="space-y-5 bg-white border border-slate-200 rounded-xl p-6">
           <div className="space-y-1.5">
-            <Label htmlFor="c-name">Campaign Name *</Label>
+            <Label htmlFor="c-name">
+              Campaign Name <span className="text-red-500">*</span>
+            </Label>
             <Input id="c-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Q3 Java Backend — 10 seats" />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="c-title">Seed Role / Title *</Label>
+            <Label htmlFor="c-title">
+              Seed Role / Title <span className="text-red-500">*</span>
+            </Label>
             <Input id="c-title" value={jobTitle} onChange={(e) => setJobTitle(e.target.value)} placeholder="e.g. Senior Java Engineer" />
             <p className="text-xs text-slate-400">The AI drafts the template JD, rubric, and questions from this.</p>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="c-customer">Customer</Label>
+            <Label htmlFor="c-customer">
+              Customer <span className="text-red-500">*</span>
+            </Label>
             <Input id="c-customer" value={customerName} onChange={(e) => setCustomerName(e.target.value)} placeholder="Hiring client / account" />
           </div>
 
           <div className="space-y-1.5">
-            <Label>Recruiter Email(s)</Label>
+            <Label>
+              Recruiter Email(s) <span className="text-red-500">*</span>
+            </Label>
             <div className="flex flex-wrap gap-2">
               {emails.map((email) => (
                 <span key={email} className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-700">
@@ -306,7 +326,9 @@ export default function NewCampaignPage() {
           </div>
 
           <div className="space-y-1.5">
-            <Label>Employment Type</Label>
+            <Label>
+              Employment Type <span className="text-red-500">*</span>
+            </Label>
             <div className="flex flex-wrap gap-2">
               {EMPLOYMENT_TYPES.map((t) => (
                 <Pill key={t} active={empTypes.includes(t)} onClick={() => toggle(empTypes, setEmpTypes, t)}>{t}</Pill>
@@ -360,12 +382,84 @@ export default function NewCampaignPage() {
                 <span className="ml-1.5">Regenerate</span>
               </Button>
             </div>
-            <Textarea id="c-jd" value={jobDescription} onChange={(e) => setJobDescription(e.target.value)} rows={12} placeholder={isGeneratingJD ? "Generating…" : "Job description (markdown)"} />
+            {isEditingJD ? (
+              <div className="relative">
+                <textarea
+                  id="c-jd"
+                  autoFocus
+                  value={jobDescription}
+                  onChange={(e) => setJobDescription(e.target.value)}
+                  onBlur={() => setIsEditingJD(false)}
+                  className="w-full bg-white border-2 border-primary/40 rounded-lg p-7 h-[450px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 text-[13.5px] font-normal leading-relaxed text-slate-900 focus-visible:outline-none focus:ring-4 focus:ring-primary/10 transition-all resize-none"
+                  placeholder="Edit Markdown here..."
+                />
+                <div className="absolute top-4 right-4 bg-primary text-white text-[11px] font-bold px-3 py-1.5 rounded-md shadow-md pointer-events-none animate-in fade-in duration-200">
+                  Click outside to save & preview
+                </div>
+              </div>
+            ) : (
+              <div
+                onClick={() => setIsEditingJD(true)}
+                title="Click to edit job description"
+                className="bg-slate-50/50 border border-slate-200 rounded-lg p-7 h-[450px] overflow-y-auto scrollbar-thin scrollbar-thumb-slate-200 text-[13.5px] font-normal leading-relaxed text-slate-900 cursor-text hover:border-primary/40 hover:bg-white transition-colors group relative flex items-center justify-center text-center"
+              >
+                {jobDescription ? (
+                  <>
+                    <div className="absolute top-4 right-4 bg-slate-200 text-slate-600 text-[11px] font-bold px-3 py-1.5 rounded-md shadow-sm opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                      Click anywhere to edit
+                    </div>
+                    <div className="w-full h-full text-left">
+                      <AIPostingJobDescription text={jobDescription} />
+                    </div>
+                  </>
+                ) : (
+                  <div className="flex flex-col items-center gap-4 max-w-sm px-6">
+                    <div className="w-16 h-16 bg-white rounded-full shadow-sm flex items-center justify-center border border-slate-100">
+                      <Sparkles className="w-8 h-8 text-primary/40" />
+                    </div>
+                    <div>
+                      <h4 className="text-[17px] font-bold text-slate-900">No AI Description Yet</h4>
+                      <p className="text-[14px] text-slate-500 mt-2 leading-relaxed">
+                        This campaign template doesn't have an AI-enhanced description. Click the
+                        <strong> "Regenerate"</strong> button above or click anywhere to type one now.
+                      </p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      className="mt-2 border-primary/20 hover:bg-white hover:text-primary hover:border-primary/40"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        runGenerateJD();
+                      }}
+                    >
+                      Generate AI JD
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-3">
             <div className="flex items-center justify-between">
-              <Label>Grading Rubric</Label>
+              <div>
+                <Label>Grading Rubric</Label>
+                {(() => {
+                  const totalItems =
+                    (rubric?.titles?.length || 0) +
+                    (rubric?.skills?.length || 0) +
+                    (rubric?.soft_skills?.length || 0) +
+                    (((rubric as Record<string, unknown[]>)?.education)?.length || 0) +
+                    (((rubric as Record<string, unknown[]>)?.domain)?.length || 0) +
+                    (((rubric as Record<string, unknown[]>)?.customer_requirements)?.length || 0) +
+                    (((rubric as Record<string, unknown[]>)?.other_requirements)?.length || 0);
+                  return totalItems > 0 ? (
+                    <span className="ml-2 text-[12px] font-normal text-slate-500">
+                      {totalItems} item{totalItems !== 1 ? "s" : ""}
+                    </span>
+                  ) : null;
+                })()}
+              </div>
               <Button type="button" variant="outline" size="sm" onClick={runGenerateRubric} disabled={isGeneratingRubric}>
                 {isGeneratingRubric ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
                 <span className="ml-1.5">Regenerate</span>
@@ -384,16 +478,22 @@ export default function NewCampaignPage() {
       {step === 3 && (
         <div className="bg-white border border-slate-200 rounded-xl p-6 space-y-3">
           <div className="flex items-center justify-between">
-            <Label>Screening Questions</Label>
-            <Button type="button" variant="outline" size="sm" onClick={runGenerateQuestions} disabled={isGeneratingQuestions}>
-              {isGeneratingQuestions ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-              <span className="ml-1.5">Regenerate</span>
-            </Button>
+            <div>
+              <Label>Screening Questions</Label>
+              {questions.length > 0 && (
+                <span className="ml-2 text-[12px] font-normal text-slate-500">
+                  {questions.length} question{questions.length !== 1 ? "s" : ""}
+                </span>
+              )}
+            </div>
           </div>
           {isGeneratingQuestions && questions.length === 0 ? (
             <p className="text-sm text-slate-400">Generating questions…</p>
           ) : (
-            <ScreeningQuestionsEditor questions={questions} onChange={setQuestions} />
+            <ScreeningQuestionsEditor
+              questions={questions}
+              onChange={setQuestions}
+            />
           )}
         </div>
       )}
