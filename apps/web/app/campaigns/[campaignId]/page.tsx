@@ -32,7 +32,6 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { CampaignForm } from "@/components/campaigns/CampaignForm";
-import { CampaignTemplateCard } from "@/components/campaigns/CampaignTemplateCard";
 import { cn } from "@/lib/utils";
 import {
   DropdownMenu,
@@ -224,7 +223,7 @@ export default function CampaignDetailPage() {
 
   if (isLoading) {
     return (
-      <div className="max-w-6xl mx-auto">
+      <div className="max-w-7xl mx-auto p-8">
         <Skeleton className="h-6 w-32 mb-6" />
         <Skeleton className="h-40 rounded-xl mb-6" />
         <Skeleton className="h-64 rounded-xl" />
@@ -234,7 +233,7 @@ export default function CampaignDetailPage() {
 
   if (loadFailed || !campaign) {
     return (
-      <div className="max-w-6xl mx-auto flex flex-col items-center justify-center py-20 text-center">
+      <div className="max-w-7xl mx-auto p-8 flex flex-col items-center justify-center py-20 text-center">
         <AlertTriangle className="h-10 w-10 text-amber-500 mb-3" />
         <p className="text-slate-700 font-medium">Couldn&apos;t load this campaign</p>
         <div className="flex gap-2 mt-4">
@@ -253,7 +252,7 @@ export default function CampaignDetailPage() {
     router.push(`/jobs/new?jobId=${encodeURIComponent(j.jobdiva_id || j.job_id)}&mode=source&step=5`);
 
   return (
-    <div className="max-w-6xl mx-auto">
+    <div className="max-w-7xl mx-auto p-8 pb-24">
       <Link
         href="/campaigns"
         className="inline-flex items-center text-sm text-slate-500 hover:text-slate-800 mb-4"
@@ -321,17 +320,62 @@ export default function CampaignDetailPage() {
           </Stat>
         </div>
 
-        {campaign.bot_introduction && (
+        {campaign.recruiter_notes && (
           <div className="mt-5 border-t border-slate-100 pt-4">
+            <p className="text-xs font-medium text-slate-400 uppercase tracking-wide mb-1">
+              Recruiter Notes (Administrative)
+            </p>
+            <p className="text-sm text-slate-600 whitespace-pre-wrap">{campaign.recruiter_notes}</p>
+          </div>
+        )}
+
+        {campaign.bot_introduction && (
+          <div className="mt-4 border-t border-slate-100 pt-4">
             <p className="text-xs font-medium text-slate-400 uppercase tracking-wide mb-1">
               Bot Introduction
             </p>
             <p className="text-sm text-slate-600 whitespace-pre-wrap">{campaign.bot_introduction}</p>
           </div>
         )}
-      </div>
 
-      <CampaignTemplateCard campaign={campaign} />
+        {campaign.template_screen_questions && campaign.template_screen_questions.length > 0 && (
+          <div className="mt-5 border-t border-slate-100 pt-4">
+            <p className="text-xs font-medium text-slate-400 uppercase tracking-wide mb-3">
+              Default Campaign Screening Questions ({campaign.template_screen_questions.length})
+            </p>
+            <div className="space-y-3 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+              <div className="flex items-center gap-3 text-[11px] font-bold uppercase tracking-wider text-slate-500 pb-2 border-b-2 border-slate-200 mb-2">
+                <div className="w-8 flex-shrink-0">#</div>
+                <div className="flex-1">Question</div>
+                <div className="flex-1">
+                  Pass Criteria{" "}
+                  <span className="text-[10px] font-normal lowercase">(blank = informational only)</span>
+                </div>
+              </div>
+              {(campaign.template_screen_questions as any[]).map((q: any, idx: number) => (
+                <div
+                  key={idx}
+                  className="flex items-start gap-3 py-3 border-b border-slate-100 last:border-b-0"
+                >
+                  <div className="w-8 h-8 rounded-full bg-[#6366f1] text-white flex items-center justify-center text-[12px] font-bold flex-shrink-0 mt-0.5">
+                    {idx + 1}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[13px] text-slate-900 font-medium whitespace-pre-wrap break-words">
+                      {q.question_text}
+                    </p>
+                  </div>
+                  <div className="flex-1 min-w-0 border-l border-slate-100 pl-3">
+                    <p className={`text-[13px] font-medium whitespace-pre-wrap break-words ${q.pass_criteria ? 'text-[#4f46e5]' : 'text-slate-300 italic'}`}>
+                      {q.pass_criteria || "No hard filter"}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* Jobs */}
       <div className="flex items-center justify-between mb-3">

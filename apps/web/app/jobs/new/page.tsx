@@ -1991,13 +1991,15 @@ function NewJobPageContent() {
 
       // 2. Restore specialized data for later steps (Rubric, Filters, etc.)
       // Always check for existing rubric regardless of current step to prevent redundant AI generation
+      let loadedRubricForFallback: any = null;
       try {
         const rubricRes = await authFetch(`${apiUrl}/api/v1/ai-generation/jobs/${jobIdToLoad}/rubric`);
         if (rubricRes.ok) {
           const rData = await rubricRes.json();
           // Only pre-load if it's an actual populated rubric, not an empty shell
           if (rData.titles?.length > 0 || rData.skills?.length > 0) {
-            setRubricData(applyTitleRequiredSafetyNet(rData));
+            loadedRubricForFallback = applyTitleRequiredSafetyNet(rData);
+            setRubricData(loadedRubricForFallback);
             // Seed the rubric-fingerprint refs from the loaded rubric so a
             // Step 3 → 4 / 4 → 5 transition without edits doesn't think the
             // rubric "changed since last regeneration" and clobber the saved
@@ -2090,6 +2092,51 @@ function NewJobPageContent() {
           )}`;
         }
         console.log(`✅ Restored ${draft.resume_match_filters.length} resume match filters from database`);
+      } else if (loadedRubricForFallback) {
+        const fallbackFilters: any[] = [];
+        let fid = 1;
+        if (loadedRubricForFallback.titles) {
+          loadedRubricForFallback.titles.forEach((t: any) => {
+            const isReq = t.required === "Required";
+            const cat = isReq ? "Required Title" : "Preferred Title";
+            fallbackFilters.push({
+              id: fid++, category: cat, value: `${t.value || ""} — ${t.minYears || 0}+ yrs, ${t.matchType || "must"} match`,
+              active: isReq, ai: true, fromRubric: true, rubricKey: `${cat}:${(t.value || "").split("—")[0].trim().toLowerCase()}`, weight: 1
+            });
+          });
+        }
+        if (loadedRubricForFallback.skills) {
+          loadedRubricForFallback.skills.forEach((s: any) => {
+            const isReq = s.required === "Required";
+            const cat = isReq ? "Required Skill" : "Preferred Skill";
+            fallbackFilters.push({
+              id: fid++, category: cat, value: `${s.value || ""} — ${s.minYears || 0}+ yrs, ${s.matchType || "must"} match`,
+              active: isReq, ai: true, fromRubric: true, rubricKey: `${cat}:${(s.value || "").split("—")[0].trim().toLowerCase()}`, weight: 1
+            });
+          });
+        }
+        if (loadedRubricForFallback.education) {
+          loadedRubricForFallback.education.forEach((edu: any) => {
+            const isReq = edu.required === "Required";
+            const display = `${edu.degree || ""}${edu.field ? ` in ${edu.field}` : ""}`;
+            fallbackFilters.push({
+              id: fid++, category: "Education", value: display, active: isReq, ai: true, fromRubric: true, rubricKey: `Education:${display.split("—")[0].trim().toLowerCase()}`, weight: 1
+            });
+          });
+        }
+        if (loadedRubricForFallback.domain) {
+          loadedRubricForFallback.domain.forEach((dom: any) => {
+            if (!dom.value) return;
+            fallbackFilters.push({
+              id: fid++, category: "Domain", value: dom.value, active: dom.required === "Required", ai: true, fromRubric: true, rubricKey: `Domain:${dom.value.trim().toLowerCase()}`, weight: 1
+            });
+          });
+        }
+        if (fallbackFilters.length > 0) {
+          setResumeMatchFilters(fallbackFilters);
+          setFilterIdCounter(fid);
+          console.log(`✅ Derived ${fallbackFilters.length} resume match filters directly from rubric data`);
+        }
       }
 
       // Restore sourcing filters if they exist
@@ -2113,6 +2160,19 @@ function NewJobPageContent() {
         }
         if (typeof sf.sourceLocationMiles === "number") setSourceLocationMiles(sf.sourceLocationMiles);
         console.log('✅ Restored sourcing filters from database');
+      } else if (loadedRubricForFallback) {
+        if (loadedRubricForFallback.titles) {
+          setSourceTitles(loadedRubricForFallback.titles.map((t: any, i: number) => ({
+            id: i + 1, value: t.value || "", matchType: t.required === "Required" ? "must" : "can",
+            years: t.minYears || 0, recent: false, similarCount: "0", similarTitles: [], fromRubric: true
+          })));
+        }
+        if (loadedRubricForFallback.skills) {
+          setSourceSkills(loadedRubricForFallback.skills.map((s: any, i: number) => ({
+            id: i + 1, value: s.value || "", matchType: s.required === "Required" ? "must" : "can",
+            years: s.minYears || 0, recent: false, similarCount: "0", similarSkills: [], fromRubric: true
+          })));
+        }
       }
 
       // 5. Navigate to the saved step
@@ -6619,11 +6679,6 @@ function NewJobPageContent() {
               </div>
 
               <div className="flex-1 min-w-0">
-                {q.is_hard_filter && (
-                  <div className="inline-flex items-center gap-1 bg-rose-50 text-rose-700 border border-rose-200 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full mb-1">
-                    Hard filter
-                  </div>
-                )}
                 <textarea
                   value={q.question_text}
                   onChange={(e) => updateScreenQuestion(q.id, 'question_text', e.target.value)}
