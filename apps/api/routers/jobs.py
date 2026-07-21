@@ -26,7 +26,7 @@ from models import (
     ExternalJobCreateRequest,
 )
 from routers._helpers import get_db_connection, get_dict_cursor_connection
-from core.auth import get_current_user, UserIdentity, verify_job_access
+from core.auth import get_current_user, get_user_scope_emails, UserIdentity, verify_job_access
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -186,6 +186,11 @@ def _ensure_monitored_jobs_schema() -> None:
             # The frontend can render a badge that links the recruiter to
             # JobDiva's web UI to set the criteria.
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS jobdiva_criteria_unconfigured BOOLEAN DEFAULT FALSE",
+            # Total external submittals reported by JobDiva BI
+            # (JobSubmittalsDetail) for this job — refreshed on every
+            # auto-sync cycle alongside pair_external_subs. Raw records land
+            # in jobdiva_submittals (below) for date-bucketed analytics.
+            "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS jobdiva_total_subs INTEGER DEFAULT 0",
             "ALTER TABLE monitored_jobs ADD COLUMN IF NOT EXISTS current_step INTEGER",
             # Job versioning: "Edit Job Setup" after launch clones a job into a
             # new row keyed by a versioned reference (e.g. 26-06182-v2). v1's
@@ -219,6 +224,23 @@ def _ensure_monitored_jobs_schema() -> None:
             "CREATE TABLE IF NOT EXISTS user_roles (email TEXT PRIMARY KEY, role TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
             # Campaign detail page lists a campaign's child jobs by this column.
             "CREATE INDEX IF NOT EXISTS idx_monitored_jobs_campaign_id ON monitored_jobs (campaign_id)",
+            # Raw JobDiva submittal records (BI JobSubmittalsDetail), one row
+            # per submittal, fully replaced per job on each auto-sync cycle.
+            # job_id mirrors monitored_jobs.job_id (::text); jobdiva_ref is
+            # the alphanumeric JobDiva reference. Feeds the submission
+            # metrics on the admin / team-lead analytics dashboards.
+            """CREATE TABLE IF NOT EXISTS jobdiva_submittals (
+                id SERIAL PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                jobdiva_ref TEXT,
+                candidate_id TEXT NOT NULL DEFAULT '',
+                recipient_name TEXT,
+                submit_date TIMESTAMP NULL,
+                data JSONB,
+                synced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )""",
+            "CREATE INDEX IF NOT EXISTS idx_jobdiva_submittals_job ON jobdiva_submittals (job_id)",
+            "CREATE INDEX IF NOT EXISTS idx_jobdiva_submittals_date ON jobdiva_submittals (submit_date)",
         ):
             try:
                 cur.execute(stmt)
@@ -2206,6 +2228,7 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
                 "mj.pair_external_subs, mj.feedback_completed, "
                 "mj.candidates_sourced, mj.candidates_launched, "
                 "mj.complete_submissions, mj.pass_submissions, "
+                "mj.jobdiva_total_subs, "
                 "mj.jobdiva_criteria_unconfigured, "
                 "mj.pair_launched_at, mj.outreach_stopped_at, mj.time_to_first_pass, mj.created_at, mj.updated_at "
                 "FROM monitored_jobs mj"
@@ -2280,10 +2303,21 @@ def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
         conn.close()
 
 
-def _filter_jobs_for_user(payload: Dict[str, Any], user: UserIdentity) -> Dict[str, Any]:
+def _filter_jobs_for_user(
+    payload: Dict[str, Any],
+    user: UserIdentity,
+    allowed_emails: Optional[set] = None,
+) -> Dict[str, Any]:
     if user.is_admin or not payload or "jobs" not in payload:
         return payload
-    
+
+    # Recruiters see jobs they're assigned to; team leads additionally see
+    # every job assigned to someone on their team (scoped admin view).
+    # get_monitored_jobs pre-resolves this off-loop (team lookup hits the DB)
+    # and passes it in; the default covers any other caller.
+    if allowed_emails is None:
+        allowed_emails = get_user_scope_emails(user)
+
     filtered_jobs = {}
     for jid, job in payload["jobs"].items():
         raw_emails = job.get("recruiter_emails", [])
@@ -2297,9 +2331,9 @@ def _filter_jobs_for_user(payload: Dict[str, Any], user: UserIdentity) -> Dict[s
         else:
             emails = []
         clean_emails = [str(e).strip().lower() for e in emails if e]
-        if user.email in clean_emails:
+        if not allowed_emails.isdisjoint(clean_emails):
             filtered_jobs[jid] = job
-            
+
     res = dict(payload)
     res["jobs"] = filtered_jobs
     res["total_count"] = len(filtered_jobs)
@@ -2316,10 +2350,16 @@ async def get_monitored_jobs(
     Get all jobs currently being monitored from the database.
     By default, excludes archived jobs unless include_archived=true is passed.
     """
+    # Resolve the user's visibility scope once, off the event loop — for team
+    # leads this includes a team_members lookup.
+    allowed_emails = (
+        None if user.is_admin else await asyncio.to_thread(get_user_scope_emails, user)
+    )
+
     cached = _get_cached_monitored_jobs(include_archived, view)
     if cached is not None:
         cached["source"] = "cache"
-        return _filter_jobs_for_user(cached, user)
+        return _filter_jobs_for_user(cached, user, allowed_emails)
 
     try:
         # Hard wall-clock cap of 7s on the live query path. The inner
@@ -2335,7 +2375,7 @@ async def get_monitored_jobs(
             timeout=7.0,
         )
         _set_cached_monitored_jobs(include_archived, view, payload)
-        return _filter_jobs_for_user(payload, user)
+        return _filter_jobs_for_user(payload, user, allowed_emails)
     except (asyncio.TimeoutError, Exception) as e:
         if isinstance(e, asyncio.TimeoutError):
             logger.error(f"monitored_jobs wall-clock timeout (7s) — include_archived={include_archived}")
@@ -2347,7 +2387,7 @@ async def get_monitored_jobs(
         if stale_cached is not None:
             stale_cached["source"] = "cache_stale"
             stale_cached["warning"] = "Returned stale cache due DB contention"
-            return _filter_jobs_for_user(stale_cached, user)
+            return _filter_jobs_for_user(stale_cached, user, allowed_emails)
 
         # Both DB and cache are unavailable. Returning 503 here would cause
         # the dashboard to render blank with an AbortError toast — the
@@ -2364,7 +2404,7 @@ async def get_monitored_jobs(
             "total_count": 0,
             "source": "error",
             "warning": f"Monitored jobs temporarily unavailable: {e}",
-        }, user)
+        }, user, allowed_emails)
 
 @router.post("/jobs/poll-now")
 async def trigger_manual_poll(background_tasks: BackgroundTasks):
