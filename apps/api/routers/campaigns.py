@@ -45,13 +45,13 @@ _LIST_TEXT_FIELDS = ("recruiter_emails", "selected_employment_types", "selected_
 # JSONB columns holding the shared template payload.
 _JSONB_FIELDS = ("template_rubric", "template_screen_questions", "template_sourcing_filters")
 
-# Full column order used by INSERT/UPSERT. campaign_id first; timestamps are
-# handled by column defaults / CURRENT_TIMESTAMP.
 _COLUMNS = (
     "campaign_id", "name", "customer_name",
     "recruiter_emails", "selected_employment_types", "screening_level",
     "recruiter_notes", "work_authorization", "selected_job_boards", "bot_introduction",
     "outreach_delay_mins",
+    "phase1_6hr_reminder_hours", "phase1_to_phase2_hours", "phase2_to_phase3_hours",
+    "phase1_6hr_call_delay_mins", "phase2_call_delay_mins", "phase3_call_delay_mins",
     "template_enhanced_title", "template_ai_description",
     "template_rubric", "template_screen_questions", "template_sourcing_filters",
     "pair_enabled", "status", "user_session",
@@ -77,6 +77,12 @@ async def init_campaigns_schema():
                         selected_job_boards       TEXT,
                         bot_introduction          TEXT,
                         outreach_delay_mins       INTEGER DEFAULT NULL,
+                        phase1_6hr_reminder_hours REAL DEFAULT NULL,
+                        phase1_to_phase2_hours    REAL DEFAULT NULL,
+                        phase2_to_phase3_hours    REAL DEFAULT NULL,
+                        phase1_6hr_call_delay_mins INTEGER DEFAULT NULL,
+                        phase2_call_delay_mins    INTEGER DEFAULT NULL,
+                        phase3_call_delay_mins    INTEGER DEFAULT NULL,
                         template_enhanced_title   TEXT,
                         template_ai_description   TEXT,
                         template_rubric           JSONB,
@@ -93,7 +99,13 @@ async def init_campaigns_schema():
                 cur.execute(
                     """
                     ALTER TABLE campaigns
-                    ADD COLUMN IF NOT EXISTS outreach_delay_mins INTEGER DEFAULT NULL;
+                    ADD COLUMN IF NOT EXISTS outreach_delay_mins INTEGER DEFAULT NULL,
+                    ADD COLUMN IF NOT EXISTS phase1_6hr_reminder_hours REAL DEFAULT NULL,
+                    ADD COLUMN IF NOT EXISTS phase1_to_phase2_hours REAL DEFAULT NULL,
+                    ADD COLUMN IF NOT EXISTS phase2_to_phase3_hours REAL DEFAULT NULL,
+                    ADD COLUMN IF NOT EXISTS phase1_6hr_call_delay_mins INTEGER DEFAULT NULL,
+                    ADD COLUMN IF NOT EXISTS phase2_call_delay_mins INTEGER DEFAULT NULL,
+                    ADD COLUMN IF NOT EXISTS phase3_call_delay_mins INTEGER DEFAULT NULL;
                     """
                 )
                 conn.commit()
