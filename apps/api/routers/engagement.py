@@ -706,11 +706,23 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                     return "role"
                 import re
                 cleaned = re.sub(r'^(?:US|USA|CAN|CANADA|UK|INDIA|MEX|APAC|EMEA|LATAM|[A-Z]{2,3}(?:\/[A-Z]{2,3})?)\s*[-:/|]\s*', '', str(title), flags=re.IGNORECASE).strip()
+                cleaned = re.sub(r'\b(?:remote|onsite|on-site|hybrid|wfh)\b', '', cleaned, flags=re.IGNORECASE)
+                cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip(" -:/|")
                 return cleaned or "role"
+
+            def _clean_location_for_intro(loc: str) -> str:
+                if not loc:
+                    return "your area"
+                import re
+                cleaned = re.sub(r'\b(?:remote|onsite|on-site|hybrid|wfh)\b', '', str(loc), flags=re.IGNORECASE)
+                cleaned = re.sub(r'\(\s*\)', '', cleaned)
+                cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip(" ,/|")
+                return cleaned or "your area"
 
             raw_title_str = (job_row.get("enhanced_title") or job_row.get("title") or "role").strip()
             job_t = _clean_job_title_for_intro(raw_title_str)
-            job_l = f"{job_row.get('city') or ''}, {job_row.get('state') or ''}".strip(", ") or "your area"
+            raw_loc_str = f"{job_row.get('city') or ''}, {job_row.get('state') or ''}".strip(", ") or "your area"
+            job_l = _clean_location_for_intro(raw_loc_str)
             if not raw_company_intro.strip():
                 raw_company_intro = (
                     f"Hi {{{{candidate name}}}}, I'm Alex, a virtual recruiter with Pyramid Consulting. "

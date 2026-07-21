@@ -511,7 +511,7 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
         _remote_negated = bool(re.search(r'\b(?:not|no|non|never)(?:-|\s+)(?:a\s+|an\s+)?(?:remote|wfh|work\s+from\s+home|(?:wfh/)?remote)\b', desc_lower))
         has_remote = _remote_mention and not _remote_negated
 
-        if "remote" in (loc_type or "").lower() and not has_remote and (city or "").strip().upper() != "REMOTE":
+        if "remote" in (loc_type or "").lower() and _remote_negated and not _remote_mention and (city or "").strip().upper() != "REMOTE":
             if has_hybrid:
                 loc_type = "Hybrid"
             else:
@@ -875,18 +875,30 @@ async def _create_campaign_job(
             return "role"
         import re
         cleaned = re.sub(r'^(?:(?:US|USA|CAN|CANADA|UK|INDIA|MEX|APAC|EMEA|LATAM|[A-Z]{2,3}(?:\/[A-Z]{2,3})?)\s*[-:/|]\s*)+', '', str(title), flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r'\b(?:remote|onsite|on-site|hybrid|wfh)\b', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip(" -:/|")
         return cleaned or "role"
+
+    def _clean_location_for_intro(loc: str) -> str:
+        if not loc:
+            return "your area"
+        import re
+        cleaned = re.sub(r'\b(?:remote|onsite|on-site|hybrid|wfh)\b', '', str(loc), flags=re.IGNORECASE)
+        cleaned = re.sub(r'\(\s*\)', '', cleaned)
+        cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip(" ,/|")
+        return cleaned or "your area"
 
     raw_intro = campaign.get("bot_introduction") or ""
     child_job_title = (data.get("title") or "").strip()
     campaign_seed_title = (campaign.get("template_enhanced_title") or "").strip()
     raw_title_str = child_job_title or campaign_seed_title or "role"
     job_title_str = _clean_job_title_for_intro(raw_title_str)
-    job_location_str = (
+    raw_loc_str = (
         f"{data.get('city')}, {data.get('state')}".strip(", ")
         if (data.get("city") and data.get("state"))
         else (data.get("city") or data.get("state") or "your area")
     )
+    job_location_str = _clean_location_for_intro(raw_loc_str)
 
     if not raw_intro.strip():
         raw_intro = (

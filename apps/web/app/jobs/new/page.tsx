@@ -185,14 +185,23 @@ function getCandidateLaunchPhone(candidate: any): string {
 function cleanLocationType(locationType: string | null | undefined): string {
   if (!locationType) return "";
 
+  const cleanType = locationType.toLowerCase().trim();
+  if (cleanType.includes("remote") || cleanType.includes("wfh") || cleanType.includes("virtual") || cleanType.includes("telecommute")) {
+    return "Remote";
+  }
+  if (cleanType.includes("hybrid")) {
+    return "Hybrid";
+  }
+  if (cleanType.includes("onsite") || cleanType.includes("on-site")) {
+    return "Onsite";
+  }
+
   const employmentTerms = [
     "direct placement", "contract", "full-time", "part-time",
     "w2", "1099", "c2c", "corp to corp", "open", "pending",
     "temporary", "permanent", "temp to perm", "fulltime", "parttime",
     "consultant", "consulting", "employee", "contractor"
   ];
-
-  const cleanType = locationType.toLowerCase().trim();
 
   // If the location type contains any employment terms, return empty string
   if (employmentTerms.some(term => cleanType.includes(term))) {
@@ -207,8 +216,23 @@ function cleanLocationType(locationType: string | null | undefined): string {
 // AND the JobDiva quirk where city is literally "REMOTE" with location_type empty.
 function isRemoteJob(jd: { location_type?: string | null; city?: string | null } | null | undefined): boolean {
   if (!jd) return false;
-  if ((jd.location_type || "").toLowerCase().includes("remote")) return true;
+  const loc = (jd.location_type || "").toLowerCase();
+  if (loc.includes("remote") || loc.includes("wfh") || loc.includes("virtual") || loc.includes("telecommute")) return true;
   return (jd.city || "").trim().toUpperCase() === "REMOTE";
+}
+
+function cleanJobTitleForIntro(title: string): string {
+  if (!title) return "role";
+  let cleaned = title.trim();
+  cleaned = cleaned.replace(/^(?:US|USA|CAN|CANADA|UK|INDIA|MEX|APAC|EMEA|LATAM|[A-Z]{2,3}(?:\/[A-Z]{2,3})?)\s*[-:/|]\s*/i, "").trim();
+  cleaned = cleaned.replace(/\b(?:remote|onsite|on-site|hybrid|wfh)\b/gi, "").replace(/\s{2,}/g, " ").replace(/^[-:/|\s]+|[-:/|\s]+$/g, "").trim();
+  return cleaned || "role";
+}
+
+function cleanLocationForIntro(location: string, fallback: string = "your area"): string {
+  if (!location) return fallback;
+  let cleaned = location.replace(/\b(?:remote|onsite|on-site|hybrid|wfh)\b/gi, "").replace(/\(\s*\)/g, "").replace(/\s{2,}/g, " ").replace(/^[,/\s]+|[,/\s]+$/g, "").trim();
+  return cleaned || fallback;
 }
 
 function buildAutoBotIntroduction({
@@ -223,16 +247,8 @@ function buildAutoBotIntroduction({
   location: string;
 }): string {
   const introTitle = cleanJobTitleForIntro(title);
-  return isRemote
-    ? `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a remote ${introTitle} based in ${country}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`
-    : `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
-}
-
-function cleanJobTitleForIntro(title: string): string {
-  if (!title) return "role";
-  let cleaned = title.trim();
-  cleaned = cleaned.replace(/^(?:US|USA|CAN|CANADA|UK|INDIA|MEX|APAC|EMEA|LATAM|[A-Z]{2,3}(?:\/[A-Z]{2,3})?)\s*[-:/|]\s*/i, "").trim();
-  return cleaned || "role";
+  const locStr = cleanLocationForIntro(location || country || "your area", country || "your area");
+  return `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${locStr}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
 }
 
 function matchesAutoBotIntroductionTemplate({
@@ -4606,9 +4622,8 @@ function NewJobPageContent() {
 
     // 1. Bot Introduction
     const introTitle = cleanJobTitleForIntro(enhancedTitle || jobTitle || "role");
-    const intro = isRemote
-      ? `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a remote ${introTitle} based in ${country}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`
-      : `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+    const locStr = cleanLocationForIntro(location || country || "your area", country || "your area");
+    const intro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${locStr}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
     setBotIntroduction(prev => (prev && prev.trim().length > 0 && botIntroductionEditedRef.current ? prev : intro));
 
     // 2. Default Questions — arrangement-aware, address-aware. The onsite/hybrid

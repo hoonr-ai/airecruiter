@@ -515,7 +515,7 @@ def _is_remote_role(work_arrangement: str, city: str) -> bool:
     AND the JobDiva-import quirk where location_type is empty but the city
     field literally contains "REMOTE" (e.g. "REMOTE, ON")."""
     norm = (work_arrangement or "").strip().lower().replace("-", "").replace("_", "")
-    if "remote" in norm or norm in ("fullyremote", "wfh"):
+    if any(k in norm for k in ("remote", "wfh", "virtual", "telecommute", "workfromhome")):
         return True
     return (city or "").strip().upper() == "REMOTE"
 

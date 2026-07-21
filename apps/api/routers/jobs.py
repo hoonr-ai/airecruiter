@@ -1212,9 +1212,16 @@ def _get_job_draft_sync(job_id: str) -> dict:
         "data": {
             "id": job_id,
             "job_id": job_id,
+            "jobdiva_id": job_row.get("jobdiva_id") or job_id,
             "title": job_row.get("title") or "",
             "enhanced_title": job_row.get("enhanced_title") or job_row.get("title") or "",
+            "customer_name": job_row.get("customer_name") or "",
+            "location_type": job_row.get("location_type") or "Onsite",
+            "city": job_row.get("city") or "",
+            "state": job_row.get("state") or "",
+            "zip_code": job_row.get("zip_code") or "",
             "ai_description": job_row.get("ai_description") or "",
+            "jobdiva_description": job_row.get("jobdiva_description") or "",
             "recruiter_notes": job_row.get("recruiter_notes") or "",
             "work_authorization": job_row.get("work_authorization") or "",
             "selected_job_boards": parse_json(job_row.get("selected_job_boards")),
@@ -1224,7 +1231,25 @@ def _get_job_draft_sync(job_id: str) -> dict:
             "screening_level": job_row.get("screening_level") or "L1.5",
             "bot_introduction": job_row.get("bot_introduction") or "",
             "resume_match_filters": parse_json(job_row.get("resume_match_filters")),
-            "sourcing_filters": job_row.get("sourcing_filters") or {}
+            "sourcing_filters": job_row.get("sourcing_filters") or {},
+            "job_details": {
+                "id": job_row.get("job_id") or job_id,
+                "jobdiva_id": job_row.get("jobdiva_id") or job_id,
+                "title": job_row.get("title") or "",
+                "customer_name": job_row.get("customer_name") or "",
+                "status": job_row.get("status") or "OPEN",
+                "city": job_row.get("city") or "",
+                "state": job_row.get("state") or "",
+                "zip_code": job_row.get("zip_code") or "",
+                "location_type": job_row.get("location_type") or "Onsite",
+                "description": job_row.get("jobdiva_description") or "",
+                "jobdiva_description": job_row.get("jobdiva_description") or "",
+                "ai_description": job_row.get("ai_description") or "",
+                "recruiter_notes": job_row.get("recruiter_notes") or "",
+                "employment_type": job_row.get("employment_type") or "",
+                "pay_rate": job_row.get("pay_rate") or "",
+                "work_authorization": job_row.get("work_authorization") or ""
+            }
         }
     }
 
