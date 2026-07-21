@@ -121,17 +121,26 @@ def verify_azure_token(token: str) -> Optional[str]:
 @dataclass
 class UserIdentity:
     email: str
-    role: str  # 'admin' or 'recruiter'
+    role: str  # 'admin' | 'team_lead' | 'recruiter'
+    # Populated when the user belongs to a team (lead or member). Admins keep
+    # role='admin' even when they lead a team — the full admin view wins.
+    team_id: Optional[str] = None
+    team_name: Optional[str] = None
 
     @property
     def is_admin(self) -> bool:
         return self.role == "admin"
 
+    @property
+    def is_team_lead(self) -> bool:
+        return self.role == "team_lead"
+
 
 def get_user_role(email: str) -> str:
     """
     Determine user role ('admin' vs 'recruiter') based on ADMIN_EMAILS env var
-    and the user_roles SQL table.
+    and the user_roles SQL table. Team-lead promotion happens on top of this
+    in resolve_user_identity (admin always wins over team_lead).
     """
     if not email:
         return "recruiter"
@@ -158,6 +167,32 @@ def get_user_role(email: str) -> str:
         logger.debug("user_roles check failed for %s: %s", clean_email, e)
         
     return "recruiter"
+
+
+def resolve_user_identity(email: str) -> UserIdentity:
+    """Full identity resolution: base role + team membership.
+
+    A non-admin who is a 'lead' on a team resolves to role='team_lead'.
+    Team id/name are attached for any team member so scoped endpoints can
+    reuse them without re-querying.
+    """
+    role = get_user_role(email)
+    team_id = None
+    team_name = None
+    try:
+        # Late import: services.teams_db pulls core.db; importing it lazily
+        # keeps core.auth import-safe during early app boot and tests.
+        from services import teams_db
+
+        membership = teams_db.get_team_for_email(email)
+        if membership:
+            team_id = membership.get("team_id")
+            team_name = membership.get("team_name")
+            if role != "admin" and membership.get("member_role") == "lead":
+                role = "team_lead"
+    except Exception as e:
+        logger.debug("team membership check failed for %s: %s", email, e)
+    return UserIdentity(email=email, role=role, team_id=team_id, team_name=team_name)
 
 
 def get_current_user(
@@ -217,8 +252,24 @@ def get_current_user(
             detail="Authentication required. Provide a valid Authorization Bearer token."
         )
 
-    role = get_user_role(email)
-    return UserIdentity(email=email, role=role)
+    return resolve_user_identity(email)
+
+
+def get_user_scope_emails(user: UserIdentity) -> set:
+    """Emails whose job assignments this user may see.
+
+    Recruiters: themselves. Team leads: themselves + everyone on their team.
+    (Admins bypass scope checks entirely — callers check is_admin first.)
+    """
+    allowed = {user.email}
+    if user.is_team_lead and user.team_id:
+        try:
+            from services import teams_db
+
+            allowed.update(teams_db.get_team_member_emails(user.team_id))
+        except Exception as e:
+            logger.debug("team scope emails lookup failed for %s: %s", user.email, e)
+    return allowed
 
 
 def verify_job_access(job_data: Dict[str, Any], user: UserIdentity) -> None:
@@ -228,7 +279,7 @@ def verify_job_access(job_data: Dict[str, Any], user: UserIdentity) -> None:
     """
     if user.is_admin:
         return
-        
+
     raw_emails = job_data.get("recruiter_emails", [])
     if isinstance(raw_emails, str):
         try:
@@ -239,14 +290,15 @@ def verify_job_access(job_data: Dict[str, Any], user: UserIdentity) -> None:
         emails = raw_emails
     else:
         emails = []
-        
+
     clean_assigned_emails = [str(e).strip().lower() for e in emails if e]
-    
+
     # If job has no assigned recruiters (legacy or unassigned), allow authenticated recruiters to access/claim it
     if not clean_assigned_emails:
         return
-        
-    if user.email not in clean_assigned_emails:
+
+    # Team leads can access any job assigned to someone on their team.
+    if set(clean_assigned_emails).isdisjoint(get_user_scope_emails(user)):
         raise HTTPException(
             status_code=403,
             detail=f"Access denied. You ({user.email}) are not assigned as a recruiter for this job."
@@ -261,4 +313,7 @@ def get_my_identity(user: UserIdentity = Depends(get_current_user)):
         "email": user.email,
         "role": user.role,
         "is_admin": user.is_admin,
+        "is_team_lead": user.is_team_lead,
+        "team_id": user.team_id,
+        "team_name": user.team_name,
     }

@@ -21,7 +21,11 @@ import {
   Activity,
   CalendarClock,
   Linkedin,
-  Search
+  Search,
+  Send,
+  UsersRound,
+  BadgeCheck,
+  ClipboardCheck
 } from "lucide-react";
 import Link from "next/link";
 import { api } from "@/lib/api";
@@ -68,6 +72,7 @@ interface JobTimelineEntry {
   pair_status: "Active" | "Inactive" | "Unpublished";
   candidates_sourced: number;
   candidates_launched: number;
+  jobdiva_submittals?: number;
   campaign_id: string | null;
 }
 
@@ -85,6 +90,40 @@ interface WeeklyTrends {
   jobs_launched?: number[];
   candidates_sourced?: number[];
   candidates_launched?: number[];
+  jobdiva_submittals?: number[];
+}
+
+interface SubmissionTopJob {
+  job_id: string;
+  jobdiva_id: string;
+  title: string;
+  customer_name: string;
+  submittals: number;
+  last_submit_date: string | null;
+}
+
+interface SubmissionMetrics {
+  jobdiva_total_submittals?: number;
+  jobdiva_recorded_submittals?: number;
+  jobdiva_distinct_candidates?: number;
+  jobdiva_submittals_last_30_days?: number;
+  complete_submissions?: number;
+  pass_submissions?: number;
+  pair_external_subs?: number;
+  top_jobs_by_submittals?: SubmissionTopJob[];
+}
+
+interface TeamScope {
+  team_id: string;
+  team_name: string;
+  member_count?: number;
+}
+
+interface TeamSummary {
+  id: string;
+  name: string;
+  lead_emails: string[];
+  member_emails: string[];
 }
 
 interface LinkedInAccount {
@@ -108,7 +147,9 @@ interface AnalyticsData {
   jobs_timeline_total?: number;
   launch_speed?: LaunchSpeed;
   weekly_trends?: WeeklyTrends;
+  submission_metrics?: SubmissionMetrics;
   linkedin_accounts?: LinkedInAccount[];
+  team_scope?: TeamScope | null;
   warning?: string;
 }
 
@@ -194,7 +235,7 @@ const renderPairStatusBadge = (status: JobTimelineEntry["pair_status"]) => {
 };
 
 export default function AdminAnalyticsPage() {
-  const { isAdmin, isLoading: isRoleLoading, email, role } = useUserRole();
+  const { isAdmin, isTeamLead, teamName, isLoading: isRoleLoading, email, role } = useUserRole();
   const [data, setData] = useState<AnalyticsData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -205,13 +246,30 @@ export default function AdminAnalyticsPage() {
   const [liveAccounts, setLiveAccounts] = useState<LinkedInAccount[] | null>(null);
   const [isRefreshingAccounts, setIsRefreshingAccounts] = useState(false);
   const [accountsError, setAccountsError] = useState<string | null>(null);
+  // Team scoping: admins can flip between "All Teams" and one team via tabs;
+  // team leads are always scoped server-side to their own team.
+  const [teams, setTeams] = useState<TeamSummary[]>([]);
+  const [activeTeamId, setActiveTeamId] = useState<string | null>(() => {
+    // Deep link from the Teams page: /admin/analytics?team=<id>. Read once
+    // at mount (plain window access avoids the useSearchParams Suspense
+    // requirement for this client-only page).
+    if (typeof window === "undefined") return null;
+    try {
+      return new URLSearchParams(window.location.search).get("team");
+    } catch {
+      return null;
+    }
+  });
+
+  const canView = isAdmin || isTeamLead;
 
   const fetchAnalytics = useCallback(async (refresh = false) => {
     if (refresh) setIsRefreshing(true);
     else setIsLoading(true);
     setError(null);
     try {
-      const res = await api.adminAnalytics.get();
+      // Team leads never pass team_id — the backend pins them to their team.
+      const res = await api.adminAnalytics.get(isAdmin ? activeTeamId : null);
       if (res && res.status === "success" && res.data) {
         setData(res.data);
         setLiveAccounts(null); // fall back to the fresh snapshot until the next live refresh
@@ -225,7 +283,7 @@ export default function AdminAnalyticsPage() {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, []);
+  }, [isAdmin, activeTeamId]);
 
   const refreshLinkedInAccounts = useCallback(async () => {
     setIsRefreshingAccounts(true);
@@ -246,23 +304,40 @@ export default function AdminAnalyticsPage() {
   }, []);
 
   useEffect(() => {
-    if (!isRoleLoading && isAdmin) {
+    if (!isRoleLoading && canView) {
       fetchAnalytics();
     }
-  }, [isRoleLoading, isAdmin, fetchAnalytics]);
+  }, [isRoleLoading, canView, fetchAnalytics]);
+
+  // Admins also load the team list for the scoping tabs.
+  useEffect(() => {
+    if (isRoleLoading || !isAdmin) return;
+    let cancelled = false;
+    api.teams
+      .list()
+      .then((res) => {
+        if (!cancelled && res && res.status === "success" && res.data?.teams) {
+          setTeams(res.data.teams as TeamSummary[]);
+        }
+      })
+      .catch((err) => console.error("Error loading teams:", err));
+    return () => {
+      cancelled = true;
+    };
+  }, [isRoleLoading, isAdmin]);
 
   if (isRoleLoading) {
     return (
       <div className="flex h-[80vh] w-full items-center justify-center">
         <div className="flex flex-col items-center gap-3">
           <div className="h-8 w-8 animate-spin rounded-full border-[3px] border-primary border-t-transparent" />
-          <p className="text-[13px] font-medium text-slate-500">Verifying administrative access...</p>
+          <p className="text-[13px] font-medium text-slate-500">Verifying access...</p>
         </div>
       </div>
     );
   }
 
-  if (!isAdmin) {
+  if (!canView) {
     return (
       <div className="flex h-[80vh] w-full items-center justify-center p-6">
         <Card className="max-w-md w-full text-center p-8 border-slate-200 bg-white shadow-sm rounded-xl">
@@ -271,7 +346,7 @@ export default function AdminAnalyticsPage() {
           </div>
           <h1 className="text-[20px] font-bold text-slate-900 mb-2">Access Restricted</h1>
           <p className="text-slate-500 text-[13px] mb-6 leading-relaxed">
-            You are signed in as <span className="font-semibold text-slate-800">{email || "a Recruiter"}</span> with the <span className="uppercase font-semibold text-[11px] bg-slate-100 px-2 py-0.5 rounded text-slate-700">{role}</span> role. System analytics are restricted to Administrators only.
+            You are signed in as <span className="font-semibold text-slate-800">{email || "a Recruiter"}</span> with the <span className="uppercase font-semibold text-[11px] bg-slate-100 px-2 py-0.5 rounded text-slate-700">{role.replace("_", " ")}</span> role. Analytics are restricted to Administrators and Team Leads.
           </p>
           <Link href="/">
             <Button className="w-full gap-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg h-10 font-semibold text-[13px]">
@@ -304,8 +379,14 @@ export default function AdminAnalyticsPage() {
     { key: "jobs_launched", label: "Jobs Launched", values: trends.jobs_launched || [], barClass: "bg-emerald-500" },
     { key: "candidates_sourced", label: "Candidates Sourced", values: trends.candidates_sourced || [], barClass: "bg-violet-500" },
     { key: "candidates_launched", label: "Candidates Launched", values: trends.candidates_launched || [], barClass: "bg-cyan-500" },
+    { key: "jobdiva_submittals", label: "JobDiva Submittals", values: trends.jobdiva_submittals || [], barClass: "bg-amber-500" },
   ];
   const hasTrendData = trendWeeks.length > 0;
+
+  const submissionMetrics: SubmissionMetrics = data?.submission_metrics || {};
+  const teamScope: TeamScope | null = data?.team_scope || null;
+  const activeTeam = teams.find((t) => t.id === activeTeamId) || null;
+  const submissionTopJobs = submissionMetrics.top_jobs_by_submittals || [];
 
   const timelineRows = data?.jobs_timeline || [];
   const timelineQuery = timelineSearch.trim().toLowerCase();
@@ -372,15 +453,37 @@ export default function AdminAnalyticsPage() {
       ? Math.round(data.overview.total_sourced_candidates / data.overview.total_monitored_jobs)
       : data.overview.total_sourced_candidates;
 
+    const sm = data.submission_metrics || {};
     const lines = [
       "Hoonr Curate - Executive Analytics Report",
       `Generated: ${new Date().toLocaleDateString()}`,
+      `Scope: ${data.team_scope ? `Team - ${data.team_scope.team_name}` : "All Teams (System-wide)"}`,
       "",
       "--- SYSTEM KPI OVERVIEW ---",
       `Active Monitored Jobs,${data.overview.total_monitored_jobs}`,
       `Sourced Candidates,${data.overview.total_sourced_candidates}`,
       `Active Recruiters,${data.overview.total_active_recruiters}`,
       `Archived Jobs,${data.overview.total_archived_jobs}`,
+      "",
+      "--- SUBMISSION METRICS (JOBDIVA + PAIR) ---",
+      `JobDiva Submittals (all time),${sm.jobdiva_total_submittals ?? 0}`,
+      `JobDiva Submittals (last 30 days),${sm.jobdiva_submittals_last_30_days ?? 0}`,
+      `Distinct Candidates Submitted (JobDiva),${sm.jobdiva_distinct_candidates ?? 0}`,
+      `PAIR External Submittals,${sm.pair_external_subs ?? 0}`,
+      `Complete Submissions (PAIR),${sm.complete_submissions ?? 0}`,
+      `Pass Submissions (PAIR),${sm.pass_submissions ?? 0}`,
+      "",
+      "--- TOP JOBS BY JOBDIVA SUBMITTALS ---",
+      "Job Title,JobDiva Ref,Client,Submittals,Last Submittal",
+      ...(sm.top_jobs_by_submittals || []).map((j) =>
+        [
+          escapeCsvField(j.title),
+          escapeCsvField(j.jobdiva_id),
+          escapeCsvField(j.customer_name),
+          j.submittals,
+          escapeCsvField(j.last_submit_date),
+        ].join(",")
+      ),
       "",
       "--- CANDIDATE PIPELINE FUNNEL ---",
       "Stage,Count,Percentage",
@@ -411,7 +514,7 @@ export default function AdminAnalyticsPage() {
       ...(data.top_recruiters || []).map((r, idx) => `#${idx + 1},${escapeCsvField(r.email)},${r.active_jobs},${r.total_candidates}`),
       "",
       "--- JOB LAUNCH TIMELINE ---",
-      "Job Title,JobDiva Ref,Client,Posted on JobDiva,Added to Curate,Launched on Curate,Lag (days),PAIR Status,Candidates Sourced,Candidates Launched",
+      "Job Title,JobDiva Ref,Client,Posted on JobDiva,Added to Curate,Launched on Curate,Lag (days),PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals",
       ...(data.jobs_timeline || []).map((job) =>
         [
           escapeCsvField(job.title),
@@ -431,21 +534,28 @@ export default function AdminAnalyticsPage() {
           escapeCsvField(job.pair_status),
           job.candidates_sourced,
           job.candidates_launched,
+          job.jobdiva_submittals ?? 0,
         ].join(",")
       ),
-      "",
-      "--- LINKEDIN ACCOUNTS ---",
-      "Account,Account ID,Searches,Last Used,Cooling Down Until,Last Error",
-      ...(liveAccounts ?? data.linkedin_accounts ?? []).map((acc) =>
-        [
-          escapeCsvField(acc.account_name || "Unnamed account"),
-          escapeCsvField(acc.account_id),
-          acc.use_count,
-          escapeCsvField(acc.last_used_at),
-          escapeCsvField(acc.cooldown_until),
-          escapeCsvField(acc.last_error),
-        ].join(",")
-      ),
+      // LinkedIn accounts are global infrastructure — only exported on the
+      // unscoped (all-teams) view.
+      ...(data.team_scope
+        ? []
+        : [
+            "",
+            "--- LINKEDIN ACCOUNTS ---",
+            "Account,Account ID,Searches,Last Used,Cooling Down Until,Last Error",
+            ...(liveAccounts ?? data.linkedin_accounts ?? []).map((acc) =>
+              [
+                escapeCsvField(acc.account_name || "Unnamed account"),
+                escapeCsvField(acc.account_id),
+                acc.use_count,
+                escapeCsvField(acc.last_used_at),
+                escapeCsvField(acc.cooldown_until),
+                escapeCsvField(acc.last_error),
+              ].join(",")
+            ),
+          ]),
     ];
 
     const blob = new Blob([lines.join("\n")], { type: "text/csv;charset=utf-8;" });
@@ -463,10 +573,28 @@ export default function AdminAnalyticsPage() {
       {/* Page Header aligning with Jobs Portfolio */}
       <div className="flex items-center justify-between mt-2">
         <div className="flex items-center gap-3">
-          <h1 className="text-[28px] font-bold text-slate-900 tracking-tight">Admin Analytics</h1>
-          <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-[12px] font-semibold text-slate-500 ring-1 ring-inset ring-slate-200">
-            System Overview
-          </span>
+          <h1 className="text-[28px] font-bold text-slate-900 tracking-tight">
+            {isAdmin ? "Admin Analytics" : "Team Lead Dashboard"}
+          </h1>
+          {isAdmin && !teamScope && (
+            <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-[12px] font-semibold text-slate-500 ring-1 ring-inset ring-slate-200">
+              System Overview
+            </span>
+          )}
+          {(teamScope || (!isAdmin && teamName)) && (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-2.5 py-0.5 text-[12px] font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200">
+              <UsersRound className="w-3.5 h-3.5" />
+              {teamScope?.team_name || teamName}
+              {typeof teamScope?.member_count === "number" && (
+                <span className="font-medium text-indigo-500">· {teamScope.member_count} people</span>
+              )}
+            </span>
+          )}
+          {!isAdmin && (
+            <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-[12px] font-semibold text-slate-500 ring-1 ring-inset ring-slate-200 uppercase tracking-wide">
+              Team Lead
+            </span>
+          )}
           {data?.warning && (
             <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[12px] font-semibold bg-amber-50 text-amber-800 border border-amber-200">
               {data.warning}
@@ -496,6 +624,52 @@ export default function AdminAnalyticsPage() {
           </Button>
         </div>
       </div>
+
+      {/* Team scope tabs — admins flip between the system-wide view and any
+          team; selecting a tab refetches server-side scoped analytics. */}
+      {isAdmin && teams.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex flex-wrap items-center rounded-lg bg-slate-100 p-0.5">
+            <button
+              type="button"
+              onClick={() => setActiveTeamId(null)}
+              className={`px-3 py-1.5 rounded-md text-[13px] font-semibold transition-colors ${
+                activeTeamId === null
+                  ? "bg-white text-slate-900 shadow-sm"
+                  : "text-slate-500 hover:text-slate-700"
+              }`}
+            >
+              All Teams
+            </button>
+            {teams.map((team) => (
+              <button
+                key={team.id}
+                type="button"
+                onClick={() => setActiveTeamId(team.id)}
+                className={`px-3 py-1.5 rounded-md text-[13px] font-semibold transition-colors ${
+                  activeTeamId === team.id
+                    ? "bg-white text-slate-900 shadow-sm"
+                    : "text-slate-500 hover:text-slate-700"
+                }`}
+              >
+                {team.name}
+              </button>
+            ))}
+          </div>
+          {activeTeam && (
+            <span className="text-[12px] font-medium text-slate-400">
+              {activeTeam.lead_emails.length} lead{activeTeam.lead_emails.length === 1 ? "" : "s"} ·{" "}
+              {activeTeam.member_emails.length} member{activeTeam.member_emails.length === 1 ? "" : "s"}
+            </span>
+          )}
+          <Link
+            href="/admin/teams"
+            className="ml-auto text-[12.5px] font-semibold text-primary hover:underline"
+          >
+            Manage teams →
+          </Link>
+        </div>
+      )}
 
       {error ? (
         <div className="flex items-center justify-between rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-[13px] text-red-800">
@@ -671,6 +845,149 @@ export default function AdminAnalyticsPage() {
             )}
             <div className="text-[12px] text-slate-400 mt-1.5 font-medium">added &gt;7 days ago, never launched</div>
           </div>
+        </div>
+      </div>
+
+      {/* Submission Metrics (JobDiva v2 BI submittals + local PAIR funnel) */}
+      <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200 bg-[#fcfdfd] flex items-center justify-between">
+          <div>
+            <h2 className="text-[16px] font-bold text-slate-900 flex items-center gap-2">
+              <Send className="w-4 h-4 text-amber-600" />
+              Submission Metrics
+            </h2>
+            <p className="text-[12px] text-slate-500 mt-0.5">
+              External submittals reported by JobDiva alongside the PAIR screening funnel — refreshed every sync cycle
+            </p>
+          </div>
+          {!isLoading && (
+            <span className="inline-flex items-center rounded-md bg-amber-50 px-2 py-1 text-[12px] font-semibold text-amber-700 border border-amber-200">
+              {(submissionMetrics.jobdiva_submittals_last_30_days ?? 0).toLocaleString()} in last 30 days
+            </span>
+          )}
+        </div>
+
+        <div className="p-6 space-y-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div className="rounded-xl border border-slate-200 p-4 flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-[13px] font-semibold text-slate-500">JobDiva Submittals</span>
+                <div className="w-8 h-8 rounded-lg bg-amber-50 border border-amber-100 flex items-center justify-center text-amber-600">
+                  <Send className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-3">
+                {isLoading ? (
+                  <div className="h-8 w-16 bg-slate-100 animate-pulse rounded" />
+                ) : (
+                  <div className="text-[26px] font-bold text-slate-900 leading-none">
+                    {(submissionMetrics.jobdiva_total_submittals ?? 0).toLocaleString()}
+                  </div>
+                )}
+                <div className="text-[12px] text-slate-400 mt-1.5 font-medium">all time, from JobDiva v2 BI</div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 p-4 flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-[13px] font-semibold text-slate-500">Candidates Submitted</span>
+                <div className="w-8 h-8 rounded-lg bg-sky-50 border border-sky-100 flex items-center justify-center text-sky-600">
+                  <UsersRound className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-3">
+                {isLoading ? (
+                  <div className="h-8 w-16 bg-slate-100 animate-pulse rounded" />
+                ) : (
+                  <div className="text-[26px] font-bold text-slate-900 leading-none">
+                    {(submissionMetrics.jobdiva_distinct_candidates ?? 0).toLocaleString()}
+                  </div>
+                )}
+                <div className="text-[12px] text-slate-400 mt-1.5 font-medium">distinct candidates submitted</div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 p-4 flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-[13px] font-semibold text-slate-500">PAIR External Subs</span>
+                <div className="w-8 h-8 rounded-lg bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600">
+                  <BadgeCheck className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-3">
+                {isLoading ? (
+                  <div className="h-8 w-16 bg-slate-100 animate-pulse rounded" />
+                ) : (
+                  <div className="text-[26px] font-bold text-slate-900 leading-none">
+                    {(submissionMetrics.pair_external_subs ?? 0).toLocaleString()}
+                  </div>
+                )}
+                <div className="text-[12px] text-slate-400 mt-1.5 font-medium">submittals matching PAIR criteria</div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 p-4 flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-[13px] font-semibold text-slate-500">Complete / Pass</span>
+                <div className="w-8 h-8 rounded-lg bg-violet-50 border border-violet-100 flex items-center justify-center text-violet-600">
+                  <ClipboardCheck className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-3">
+                {isLoading ? (
+                  <div className="h-8 w-16 bg-slate-100 animate-pulse rounded" />
+                ) : (
+                  <div className="text-[26px] font-bold text-slate-900 leading-none">
+                    {(submissionMetrics.complete_submissions ?? 0).toLocaleString()}
+                    <span className="text-[13px] font-semibold text-emerald-600 ml-2">
+                      {(submissionMetrics.pass_submissions ?? 0).toLocaleString()} pass
+                    </span>
+                  </div>
+                )}
+                <div className="text-[12px] text-slate-400 mt-1.5 font-medium">PAIR screening submissions</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Top jobs by JobDiva submittals */}
+          {!isLoading && submissionTopJobs.length > 0 && (
+            <div className="border border-slate-200 rounded-xl overflow-hidden">
+              <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 text-[12.5px] font-bold text-slate-500">
+                Top Jobs by JobDiva Submittals
+              </div>
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-200 bg-slate-50/50 font-bold text-slate-500 text-[12px]">
+                    <th className="py-2 px-4">Job</th>
+                    <th className="py-2 px-4">Client</th>
+                    <th className="py-2 px-4 text-center">Submittals</th>
+                    <th className="py-2 px-4 text-right">Last Submittal</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-[13px]">
+                  {submissionTopJobs.map((job) => (
+                    <tr key={job.job_id} className="hover:bg-[#f6f8fb] transition-colors">
+                      <td className="py-2.5 px-4">
+                        <div className="font-semibold text-slate-800 max-w-[280px] truncate" title={job.title}>
+                          {job.title}
+                        </div>
+                        <div className="font-mono text-[11px] text-slate-400 mt-0.5">{job.jobdiva_id || "—"}</div>
+                      </td>
+                      <td className="py-2.5 px-4 text-slate-600">
+                        <div className="max-w-[180px] truncate" title={job.customer_name}>{job.customer_name}</div>
+                      </td>
+                      <td className="py-2.5 px-4 text-center font-bold text-amber-600">
+                        {job.submittals.toLocaleString()}
+                      </td>
+                      <td className="py-2.5 px-4 text-right text-slate-600 whitespace-nowrap">
+                        {formatDate(job.last_submit_date)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </div>
 
@@ -1173,6 +1490,7 @@ export default function AdminAnalyticsPage() {
                 <th className="py-3 px-6 text-center">PAIR Status</th>
                 <th className="py-3 px-6 text-center">Sourced</th>
                 <th className="py-3 px-6 text-center">Launched</th>
+                <th className="py-3 px-6 text-center">Submittals</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100 text-[13px]">
@@ -1191,11 +1509,12 @@ export default function AdminAnalyticsPage() {
                     <td className="py-4 px-6 text-center"><div className="h-5 w-16 bg-slate-100 animate-pulse rounded-full mx-auto" /></td>
                     <td className="py-4 px-6 text-center"><div className="h-4 w-8 bg-slate-100 animate-pulse rounded mx-auto" /></td>
                     <td className="py-4 px-6 text-center"><div className="h-4 w-8 bg-slate-100 animate-pulse rounded mx-auto" /></td>
+                    <td className="py-4 px-6 text-center"><div className="h-4 w-8 bg-slate-100 animate-pulse rounded mx-auto" /></td>
                   </tr>
                 ))
               ) : filteredTimeline.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-12 text-center text-slate-400 text-[13px]">
+                  <td colSpan={10} className="py-12 text-center text-slate-400 text-[13px]">
                     {timelineRows.length === 0
                       ? "No job timeline data available yet."
                       : "No jobs match your search or filter."}
@@ -1232,6 +1551,9 @@ export default function AdminAnalyticsPage() {
                     <td className="py-3.5 px-6 text-center font-bold text-primary">
                       {job.candidates_launched.toLocaleString()}
                     </td>
+                    <td className="py-3.5 px-6 text-center font-bold text-amber-600">
+                      {(job.jobdiva_submittals ?? 0).toLocaleString()}
+                    </td>
                   </tr>
                 ))
               )}
@@ -1252,7 +1574,9 @@ export default function AdminAnalyticsPage() {
         )}
       </div>
 
-      {/* LinkedIn Sourcing Accounts */}
+      {/* LinkedIn Sourcing Accounts — global infrastructure, only meaningful
+          on the unscoped all-teams admin view. */}
+      {!teamScope && (
       <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
         <div className="px-6 py-4 border-b border-slate-200 bg-[#fcfdfd] flex flex-wrap items-center justify-between gap-3">
           <div>
@@ -1360,6 +1684,7 @@ export default function AdminAnalyticsPage() {
           </table>
         </div>
       </div>
+      )}
     </div>
   );
 }

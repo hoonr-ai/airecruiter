@@ -200,7 +200,9 @@ class AutoAssignService:
             payload["jobdiva_candidate_id"] = candidate_id
         return payload
 
-    async def _count_external_curate_submittals(self, numeric_job_id) -> int:
+    async def _count_external_curate_submittals(
+        self, numeric_job_id, submittals: Optional[List[Dict[str, Any]]] = None
+    ) -> int:
         """
         Count external curate submittals for a job.
 
@@ -208,6 +210,10 @@ class AutoAssignService:
         1. The submittal recipient name matches the job's contact person (from JobDiva BI JobDetail).
         2. The candidate has a PAIR Candidates qualification with value 'Pass'.
         3. The qualification date is within 60 days of the submittal date.
+
+        `submittals` lets refresh_job_performance_metrics share one
+        JobSubmittalsDetail fetch between this counter and the raw-record
+        persistence; when None the method fetches them itself.
 
         Returns the count of valid external submittals.
         """
@@ -242,7 +248,8 @@ class AutoAssignService:
             logger.debug(f"⏭️ _count_external_curate_submittals: No contact name for job {numeric_job_id} — skipping")
             return 0
 
-        submittals = await jobdiva_service.get_job_submittals(numeric_job_id)
+        if submittals is None:
+            submittals = await jobdiva_service.get_job_submittals(numeric_job_id)
         if not submittals:
             logger.debug(f"📋 No submittals found for job {numeric_job_id}")
             return 0
@@ -314,6 +321,62 @@ class AutoAssignService:
                     break  # Only count once per submittal
 
         return count
+
+    def _persist_job_submittals(
+        self,
+        resolved_job_id: str,
+        jobdiva_ref: str,
+        submittals: List[Dict[str, Any]],
+    ) -> None:
+        """Mirror JobDiva BI JobSubmittalsDetail records into
+        jobdiva_submittals (created at startup by routers/jobs.py schema
+        init). Full DELETE+INSERT per job so the table always reflects the
+        latest JobDiva snapshot — callers must NOT invoke this on a failed
+        fetch (see refresh_job_performance_metrics)."""
+        from services.jobdiva import get_field
+
+        def _parse_dt(raw: Any) -> Optional[datetime]:
+            if raw is None or raw == "":
+                return None
+            if isinstance(raw, datetime):
+                return raw
+            try:
+                return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            except Exception:
+                return None
+
+        rows = []
+        for sub in submittals or []:
+            candidate_id = str(get_field(sub, ["CANDIDATEID", "ID", "candidateId"]) or "")
+            recipient = str(get_field(sub, ["RECIPIENTNAME", "RECIPIENT", "recipientName"]) or "")
+            submit_date = _parse_dt(get_field(sub, ["SUBMITDATE", "DATE", "submitDate"]))
+            try:
+                raw_json = json.dumps(sub, default=str)
+            except Exception:
+                raw_json = "{}"
+            rows.append(
+                (str(resolved_job_id), jobdiva_ref or "", candidate_id, recipient, submit_date, raw_json)
+            )
+
+        with self._get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL lock_timeout = '2000ms'")
+                cur.execute("SET LOCAL statement_timeout = '5000ms'")
+                cur.execute(
+                    "DELETE FROM jobdiva_submittals WHERE job_id = %s",
+                    (str(resolved_job_id),),
+                )
+                if rows:
+                    cur.executemany(
+                        "INSERT INTO jobdiva_submittals "
+                        "(job_id, jobdiva_ref, candidate_id, recipient_name, submit_date, data) "
+                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        rows,
+                    )
+                conn.commit()
+        logger.debug(
+            f"📥 [AutoAssignService] Persisted {len(rows)} JobDiva submittal(s) for job {resolved_job_id}"
+        )
 
     async def _count_feedback_completed(self, target_job_id: str) -> int:
         """
@@ -828,8 +891,14 @@ class AutoAssignService:
                 logger.debug(f"[AutoAssignService] Could not resolve numeric ID for {target_job_id} — skipping metrics refresh")
                 return
 
-            # 1. Count and persist external curate submittals
-            ext_subs = await self._count_external_curate_submittals(numeric_jd_id)
+            # 0. Fetch raw submittals ONCE for this cycle. None means the
+            #    JobDiva call failed — keep the previously stored records and
+            #    total instead of wiping them with an empty snapshot.
+            submittals = await jobdiva_service.get_job_submittals(numeric_jd_id, none_on_error=True)
+
+            # 1. Count and persist external curate submittals (reuses the
+            #    fetched records; falls back to its own fetch on None)
+            ext_subs = await self._count_external_curate_submittals(numeric_jd_id, submittals=submittals)
             # 2. Count and persist feedback completed (local actions)
             feedback_count = await self._count_feedback_completed(target_job_id)
             # 3. Calculate time to first PASS candidate (in minutes)
@@ -859,7 +928,7 @@ class AutoAssignService:
                     # by an UPDATE WHERE job_id = %s is one indexed path,
                     # one row, deterministic.
                     cur.execute(
-                        "SELECT job_id FROM monitored_jobs "
+                        "SELECT job_id, jobdiva_id FROM monitored_jobs "
                         "WHERE job_id = %s OR jobdiva_id = %s "
                         "LIMIT 1",
                         (str(target_job_id), str(target_job_id)),
@@ -870,64 +939,66 @@ class AutoAssignService:
                             f"[AutoAssignService] No monitored_jobs row for {target_job_id} — skipping metrics update"
                         )
                         return
-                    resolved_job_id = row[0]
+                    resolved_job_id, resolved_jobdiva_ref = row[0], row[1]
+                    set_clauses = [
+                        "pair_external_subs = %s",
+                        "feedback_completed = %s",
+                        "time_to_first_pass = %s",
+                        "candidates_sourced = %s",
+                        "candidates_launched = %s",
+                        "complete_submissions = %s",
+                        "pass_submissions = %s",
+                    ]
+                    params: List[Any] = [
+                        ext_subs,
+                        feedback_count,
+                        time_to_pass,
+                        counters["candidates_sourced"],
+                        counters["candidates_launched"],
+                        counters["complete_submissions"],
+                        counters["pass_submissions"],
+                    ]
+                    # Only overwrite jobdiva_total_subs when this cycle got a
+                    # real snapshot — a failed fetch (None) keeps the
+                    # last-known total instead of zeroing the dashboard.
+                    if submittals is not None:
+                        set_clauses.append("jobdiva_total_subs = %s")
+                        params.append(len(submittals))
                     # F7: only overwrite `jobdiva_criteria_unconfigured` when
                     # we have a fresh boolean from this run's summary. Callers
                     # that don't run a search (manual backfills) pass None and
                     # leave the flag at its last-known value.
-                    if jobdiva_criteria_unconfigured is None:
-                        cur.execute(
-                            "UPDATE monitored_jobs SET "
-                            "  pair_external_subs = %s, "
-                            "  feedback_completed = %s, "
-                            "  time_to_first_pass = %s, "
-                            "  candidates_sourced = %s, "
-                            "  candidates_launched = %s, "
-                            "  complete_submissions = %s, "
-                            "  pass_submissions = %s, "
-                            "  updated_at = NOW() "
-                            "WHERE job_id = %s",
-                            (
-                                ext_subs,
-                                feedback_count,
-                                time_to_pass,
-                                counters["candidates_sourced"],
-                                counters["candidates_launched"],
-                                counters["complete_submissions"],
-                                counters["pass_submissions"],
-                                resolved_job_id,
-                            ),
-                        )
-                    else:
-                        cur.execute(
-                            "UPDATE monitored_jobs SET "
-                            "  pair_external_subs = %s, "
-                            "  feedback_completed = %s, "
-                            "  time_to_first_pass = %s, "
-                            "  candidates_sourced = %s, "
-                            "  candidates_launched = %s, "
-                            "  complete_submissions = %s, "
-                            "  pass_submissions = %s, "
-                            "  jobdiva_criteria_unconfigured = %s, "
-                            "  updated_at = NOW() "
-                            "WHERE job_id = %s",
-                            (
-                                ext_subs,
-                                feedback_count,
-                                time_to_pass,
-                                counters["candidates_sourced"],
-                                counters["candidates_launched"],
-                                counters["complete_submissions"],
-                                counters["pass_submissions"],
-                                bool(jobdiva_criteria_unconfigured),
-                                resolved_job_id,
-                            ),
-                        )
+                    if jobdiva_criteria_unconfigured is not None:
+                        set_clauses.append("jobdiva_criteria_unconfigured = %s")
+                        params.append(bool(jobdiva_criteria_unconfigured))
+                    set_clauses.append("updated_at = NOW()")
+                    params.append(resolved_job_id)
+                    cur.execute(
+                        "UPDATE monitored_jobs SET " + ", ".join(set_clauses) + " WHERE job_id = %s",
+                        params,
+                    )
                     conn.commit()
+
+            # 5. Mirror the raw submittal records for date-bucketed analytics
+            #    (admin / team-lead dashboards). Full per-job replace; skipped
+            #    when the fetch failed so stored history survives outages.
+            if submittals is not None:
+                try:
+                    await asyncio.to_thread(
+                        self._persist_job_submittals,
+                        str(resolved_job_id),
+                        str(resolved_jobdiva_ref or ""),
+                        submittals,
+                    )
+                except Exception as persist_err:  # noqa: BLE001
+                    logger.warning(
+                        f"[AutoAssignService] Submittal persistence failed for job {target_job_id}: {persist_err}"
+                    )
             logger.info(
                 f"📊 [AutoAssignService] Metrics refreshed for {target_job_id}: "
                 f"pass_time={time_to_pass}min ext_subs={ext_subs} feedback={feedback_count} "
                 f"sourced={counters['candidates_sourced']} pass={counters['pass_submissions']} "
+                f"jd_total_subs={'n/a (fetch failed)' if submittals is None else len(submittals)} "
                 f"jd_unconfigured={jobdiva_criteria_unconfigured}"
             )
         except Exception as e:

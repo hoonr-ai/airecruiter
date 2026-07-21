@@ -3,8 +3,8 @@ import datetime
 import json
 import logging
 import statistics
-from typing import Dict, Any, List
-from fastapi import APIRouter, HTTPException, Depends
+from typing import Dict, Any, List, Optional, Tuple
+from fastapi import APIRouter, HTTPException, Depends, Query
 
 from core.auth import get_current_user, UserIdentity
 from routers._helpers import get_db_connection
@@ -54,15 +54,96 @@ def _int(col: str) -> str:
     return f"COALESCE(NULLIF(TRIM({col}::text), '')::numeric, 0)::int"
 
 
-def _compute_jobs_timeline(conn) -> Dict[str, Any]:
+# ---------------------------------------------------------------------------
+# Team scoping
+# ---------------------------------------------------------------------------
+# When a team scope is active (admin clicked a team tab, or the caller is a
+# team lead), every section is restricted to the jobs assigned to that team's
+# emails via monitored_jobs.recruiter_emails. sourced_candidates /
+# engage_interview_audit rows key on either the alphanumeric JobDiva ref or
+# the job_id uuid text, so the scope carries both key sets.
+
+def _parse_recruiter_emails(raw_emails: Any) -> List[str]:
+    if isinstance(raw_emails, str):
+        try:
+            emails = json.loads(raw_emails) if raw_emails.strip().startswith("[") else [raw_emails]
+        except Exception:
+            emails = [raw_emails] if raw_emails else []
+    elif isinstance(raw_emails, list):
+        emails = raw_emails
+    else:
+        emails = []
+    return [str(e).strip().lower() for e in emails if e and str(e).strip()]
+
+
+def _load_team_scope(conn, team_id: str) -> Dict[str, Any]:
+    """Resolve a team into its email list + scoped job key sets.
+
+    Raises LookupError for an unknown team — callers translate to 404.
+    """
+    from services import teams_db
+
+    team = teams_db.get_team(team_id)
+    if not team:
+        raise LookupError(f"Team '{team_id}' not found.")
+    emails = set(
+        e.strip().lower()
+        for e in (team.get("lead_emails") or []) + (team.get("member_emails") or [])
+        if e and str(e).strip()
+    )
+
+    job_ids: List[str] = []
+    jobdiva_ids: List[str] = []
+    with conn.cursor() as cur:
+        cur.execute("SELECT job_id, jobdiva_id, recruiter_emails FROM monitored_jobs")
+        for job_id, jobdiva_id, raw_emails in cur.fetchall():
+            assigned = _parse_recruiter_emails(raw_emails)
+            if assigned and not emails.isdisjoint(assigned):
+                if job_id is not None and str(job_id):
+                    job_ids.append(str(job_id))
+                if jobdiva_id is not None and str(jobdiva_id).strip():
+                    jobdiva_ids.append(str(jobdiva_id).strip())
+
+    return {
+        "team_id": team["id"],
+        "team_name": team["name"],
+        "emails": sorted(emails),
+        # monitored_jobs rows are matched on job_id::text
+        "job_ids": sorted(set(job_ids)),
+        # sourced_candidates / engage_interview_audit rows were written under
+        # either key — match both (mirrors _sum_metrics_for_job in jobs.py)
+        "sc_keys": sorted(set(job_ids) | set(jobdiva_ids)),
+    }
+
+
+def _mj_filter(scope: Optional[Dict[str, Any]], alias: str = "") -> Tuple[str, List[Any]]:
+    """(SQL condition, params) restricting monitored_jobs rows to the scope.
+
+    Returns ("TRUE", []) when unscoped so callers can embed it uniformly.
+    """
+    if scope is None:
+        return "TRUE", []
+    col = f"{alias}.job_id" if alias else "job_id"
+    return f"{col}::text = ANY(%s)", [scope["job_ids"]]
+
+
+def _sc_filter(scope: Optional[Dict[str, Any]], col: str) -> Tuple[str, List[Any]]:
+    """(SQL condition, params) restricting candidate-keyed tables to the scope."""
+    if scope is None:
+        return "TRUE", []
+    return f"{col} = ANY(%s)", [scope["sc_keys"]]
+
+
+def _compute_jobs_timeline(conn, scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Per-job lifecycle: when it was posted on JobDiva vs launched on Curate.
 
     Timestamps are declared UTC (AT TIME ZONE 'UTC') so the serialized values
     carry an explicit offset — otherwise browsers parse the naive strings in
     the viewer's local timezone and dates can shift by a day.
     """
+    cond, params = _mj_filter(scope)
     with conn.cursor() as cur:
-        cur.execute("SELECT COUNT(*) FROM monitored_jobs")
+        cur.execute(f"SELECT COUNT(*) FROM monitored_jobs WHERE {cond}", params)
         total_jobs = int(cur.fetchone()[0] or 0)
 
         cur.execute(f"""
@@ -79,17 +160,19 @@ def _compute_jobs_timeline(conn) -> Dict[str, Any]:
                 status,
                 {_int('candidates_sourced')},
                 {_int('candidates_launched')},
+                {_int('jobdiva_total_subs')},
                 campaign_id
             FROM monitored_jobs
+            WHERE {cond}
             ORDER BY COALESCE({_ts('pair_launched_at')}, {_ts('created_at')}) DESC NULLS LAST
             LIMIT 200
-        """)
+        """, params)
         rows = cur.fetchall()
 
     timeline = []
     for (job_id, jobdiva_id, title, customer, posted_raw, created_at,
          launched_at, stopped_at, is_archived, status, sourced, launched_count,
-         campaign_id) in rows:
+         jobdiva_subs, campaign_id) in rows:
         posted_on = _parse_posted_date(posted_raw)
         lag_days = None
         if launched_at is not None and posted_on is not None:
@@ -127,13 +210,15 @@ def _compute_jobs_timeline(conn) -> Dict[str, Any]:
             "pair_status": pair_status,
             "candidates_sourced": int(sourced or 0),
             "candidates_launched": int(launched_count or 0),
+            "jobdiva_submittals": int(jobdiva_subs or 0),
             "campaign_id": str(campaign_id or "") or None,
         })
     return {"rows": timeline, "total": total_jobs}
 
 
-def _compute_launch_speed(conn) -> Dict[str, Any]:
+def _compute_launch_speed(conn, scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Posted→launched velocity across ALL jobs (not just the timeline page)."""
+    cond, params = _mj_filter(scope)
     with conn.cursor() as cur:
         cur.execute(f"""
             SELECT
@@ -144,7 +229,8 @@ def _compute_launch_speed(conn) -> Dict[str, Any]:
                                  AND COALESCE(is_archived, FALSE) = FALSE
                                  AND {_ts('created_at')} < NOW() - INTERVAL '7 days') AS aged_unlaunched_jobs
             FROM monitored_jobs
-        """)
+            WHERE {cond}
+        """, params)
         launched_jobs, unlaunched_active, aged_unlaunched = cur.fetchone()
 
         # Lag stats computed in Python — posted_date is unparseable-in-SQL
@@ -156,8 +242,8 @@ def _compute_launch_speed(conn) -> Dict[str, Any]:
         cur.execute(f"""
             SELECT posted_date, {_ts('pair_launched_at')} AS launched_ts
             FROM monitored_jobs
-            WHERE pair_launched_at IS NOT NULL
-        """)
+            WHERE pair_launched_at IS NOT NULL AND {cond}
+        """, params)
         lags = []
         for posted_raw, launched_ts in cur.fetchall():
             posted_on = _parse_posted_date(posted_raw)
@@ -180,7 +266,7 @@ def _compute_launch_speed(conn) -> Dict[str, Any]:
     }
 
 
-def _compute_weekly_trends(conn, weeks: int = 8) -> Dict[str, Any]:
+def _compute_weekly_trends(conn, scope: Optional[Dict[str, Any]] = None, weeks: int = 8) -> Dict[str, Any]:
     """Aligned weekly (Monday-anchored) series for the trends card.
 
     The anchor Monday comes from the DATABASE clock — the same clock the
@@ -194,11 +280,15 @@ def _compute_weekly_trends(conn, weeks: int = 8) -> Dict[str, Any]:
                    for w in range(weeks - 1, -1, -1)]
     labels = [d.isoformat() for d in week_starts]
 
-    def series(sql: str) -> List[int]:
+    def series(sql: str, extra_params: List[Any]) -> List[int]:
         with conn.cursor() as cur:
-            cur.execute(sql, (weeks - 1,))
+            cur.execute(sql, [weeks - 1] + extra_params)
             counts = {row[0].isoformat(): int(row[1]) for row in cur.fetchall() if row[0]}
         return [counts.get(label, 0) for label in labels]
+
+    mj_cond, mj_params = _mj_filter(scope)
+    sc_cond, sc_params = _sc_filter(scope, "jobdiva_id")
+    sub_cond, sub_params = ("TRUE", []) if scope is None else ("job_id = ANY(%s)", [scope["job_ids"]])
 
     return {
         "weeks": labels,
@@ -206,27 +296,121 @@ def _compute_weekly_trends(conn, weeks: int = 8) -> Dict[str, Any]:
             SELECT date_trunc('week', {_ts('created_at')})::date, COUNT(*)
             FROM monitored_jobs
             WHERE {_ts('created_at')} >= date_trunc('week', NOW()) - make_interval(weeks => %s)
+              AND {mj_cond}
             GROUP BY 1
-        """),
+        """, mj_params),
         "jobs_launched": series(f"""
             SELECT date_trunc('week', {_ts('pair_launched_at')})::date, COUNT(*)
             FROM monitored_jobs
             WHERE {_ts('pair_launched_at')} >= date_trunc('week', NOW()) - make_interval(weeks => %s)
+              AND {mj_cond}
             GROUP BY 1
-        """),
-        "candidates_sourced": series("""
+        """, mj_params),
+        "candidates_sourced": series(f"""
             SELECT date_trunc('week', created_at)::date, COUNT(*)
             FROM sourced_candidates
             WHERE created_at >= date_trunc('week', NOW()) - make_interval(weeks => %s)
+              AND {sc_cond}
             GROUP BY 1
-        """),
-        "candidates_launched": series("""
+        """, sc_params),
+        "candidates_launched": series(f"""
             SELECT date_trunc('week', created_at)::date, COUNT(*)
             FROM engage_interview_audit
             WHERE created_at >= date_trunc('week', NOW()) - make_interval(weeks => %s)
               AND COALESCE(NULLIF(interview_id, ''), '') <> ''
+              AND {sc_cond}
             GROUP BY 1
-        """),
+        """, sc_params),
+        # JobDiva-reported submittals, bucketed by the submittal date JobDiva
+        # returned (not our sync time) — mirrored locally by auto-sync into
+        # jobdiva_submittals.
+        "jobdiva_submittals": series(f"""
+            SELECT date_trunc('week', submit_date)::date, COUNT(*)
+            FROM jobdiva_submittals
+            WHERE submit_date >= date_trunc('week', NOW()) - make_interval(weeks => %s)
+              AND {sub_cond}
+            GROUP BY 1
+        """, sub_params),
+    }
+
+
+def _compute_submission_metrics(conn, scope: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Submission funnel for the admin / team-lead dashboards.
+
+    Two sources:
+      - monitored_jobs counters (refreshed each auto-sync cycle):
+        complete/pass submissions (local PAIR funnel), pair_external_subs
+        (JobDiva submittals matching the strict PAIR criteria) and
+        jobdiva_total_subs (raw JobDiva submittal count per job).
+      - jobdiva_submittals raw records (BI JobSubmittalsDetail mirror) for
+        distinct-candidate and last-30-days cuts plus the top-jobs table.
+
+    All-time across active AND archived jobs — a submittal on a since-closed
+    job still happened.
+    """
+    cond, params = _mj_filter(scope)
+    with conn.cursor() as cur:
+        cur.execute(f"""
+            SELECT
+                COALESCE(SUM({_int('complete_submissions')}), 0),
+                COALESCE(SUM({_int('pass_submissions')}), 0),
+                COALESCE(SUM({_int('pair_external_subs')}), 0),
+                COALESCE(SUM({_int('jobdiva_total_subs')}), 0)
+            FROM monitored_jobs
+            WHERE {cond}
+        """, params)
+        complete_subs, pass_subs, pair_external, jobdiva_total = cur.fetchone()
+
+        sub_cond, sub_params = ("TRUE", []) if scope is None else ("job_id = ANY(%s)", [scope["job_ids"]])
+        cur.execute(f"""
+            SELECT
+                COUNT(*),
+                COUNT(DISTINCT NULLIF(candidate_id, '')),
+                COUNT(*) FILTER (WHERE submit_date >= NOW() - INTERVAL '30 days')
+            FROM jobdiva_submittals
+            WHERE {sub_cond}
+        """, sub_params)
+        recorded_total, distinct_candidates, last_30_days = cur.fetchone()
+
+        top_cond, top_params = ("TRUE", []) if scope is None else ("s.job_id = ANY(%s)", [scope["job_ids"]])
+        cur.execute(f"""
+            SELECT
+                s.job_id,
+                MAX(s.jobdiva_ref) AS jobdiva_ref,
+                COALESCE(NULLIF(TRIM(MAX(mj.enhanced_title)), ''), NULLIF(TRIM(MAX(mj.title)), ''), 'Untitled') AS title,
+                COALESCE(NULLIF(TRIM(MAX(mj.customer_name)), ''), 'Unknown') AS customer_name,
+                COUNT(*) AS submittals,
+                MAX(s.submit_date) AS last_submit_date
+            FROM jobdiva_submittals s
+            LEFT JOIN monitored_jobs mj ON mj.job_id::text = s.job_id
+            WHERE {top_cond}
+            GROUP BY s.job_id
+            ORDER BY COUNT(*) DESC, MAX(s.submit_date) DESC NULLS LAST
+            LIMIT 10
+        """, top_params)
+        top_jobs = [
+            {
+                "job_id": str(r[0] or ""),
+                "jobdiva_id": str(r[1] or ""),
+                "title": r[2],
+                "customer_name": r[3],
+                "submittals": int(r[4] or 0),
+                "last_submit_date": _iso(r[5]),
+            }
+            for r in cur.fetchall()
+        ]
+
+    return {
+        # Raw JobDiva v2 (BI JobSubmittalsDetail) submittal volume
+        "jobdiva_total_submittals": int(jobdiva_total or 0),
+        "jobdiva_recorded_submittals": int(recorded_total or 0),
+        "jobdiva_distinct_candidates": int(distinct_candidates or 0),
+        "jobdiva_submittals_last_30_days": int(last_30_days or 0),
+        # Local PAIR funnel counters (per-job denormalized sums)
+        "complete_submissions": int(complete_subs or 0),
+        "pass_submissions": int(pass_subs or 0),
+        "pair_external_subs": int(pair_external or 0),
+        "top_jobs_by_submittals": top_jobs,
     }
 
 
@@ -253,16 +437,30 @@ def _compute_linkedin_accounts(conn) -> List[Dict[str, Any]]:
     ]
 
 
-def _compute_analytics_sync() -> Dict[str, Any]:
+def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, Any]:
     conn = get_db_connection()
+    scope: Optional[Dict[str, Any]] = None
+    team_scope_out: Optional[Dict[str, Any]] = None
     try:
+        if scope_team_id:
+            # LookupError (unknown team) is re-raised below → endpoint 404s
+            # instead of returning a zeroed dashboard.
+            scope = _load_team_scope(conn, scope_team_id)
+            team_scope_out = {
+                "team_id": scope["team_id"],
+                "team_name": scope["team_name"],
+                "member_count": len(scope["emails"]),
+            }
+        mj_cond, mj_params = _mj_filter(scope)
+        sc_cond, sc_params = _sc_filter(scope, "sc.jobdiva_id")
         with conn.cursor() as cur:
             # 1. Overview: Monitored vs Archived Jobs
-            cur.execute("""
+            cur.execute(f"""
                 SELECT COALESCE(is_archived, FALSE), COUNT(DISTINCT COALESCE(jobdiva_id, job_id::text))
                 FROM monitored_jobs
+                WHERE {mj_cond}
                 GROUP BY COALESCE(is_archived, FALSE)
-            """)
+            """, mj_params)
             job_rows = cur.fetchall()
             active_jobs = 0
             archived_jobs = 0
@@ -273,7 +471,7 @@ def _compute_analytics_sync() -> Dict[str, Any]:
                     active_jobs = count
 
             # 2. Sourced candidates by effective funnel status
-            cur.execute("""
+            cur.execute(f"""
                 SELECT
                     CASE
                         WHEN LOWER(COALESCE(sc.data->>'engage_status', '')) IN ('pass', 'passed', 'qualified', 'shortlisted', 'hired', 'selected') THEN 'passed'
@@ -292,8 +490,9 @@ def _compute_analytics_sync() -> Dict[str, Any]:
                     END AS effective_status,
                     COUNT(*)
                 FROM sourced_candidates sc
+                WHERE {sc_cond}
                 GROUP BY effective_status
-            """)
+            """, sc_params)
             status_rows = cur.fetchall()
             candidates_by_status = {}
             total_candidates = 0
@@ -302,14 +501,14 @@ def _compute_analytics_sync() -> Dict[str, Any]:
                 total_candidates += count
 
             # 3. Jobs by Customer
-            cur.execute("""
+            cur.execute(f"""
                 SELECT COALESCE(NULLIF(TRIM(customer_name), ''), 'Unknown') AS cust, COUNT(*)
                 FROM monitored_jobs
-                WHERE COALESCE(is_archived, FALSE) = FALSE
+                WHERE COALESCE(is_archived, FALSE) = FALSE AND {mj_cond}
                 GROUP BY cust
                 ORDER BY COUNT(*) DESC
                 LIMIT 10
-            """)
+            """, mj_params)
             customer_rows = cur.fetchall()
             jobs_by_customer = [
                 {"customer_name": cust, "job_count": count}
@@ -318,32 +517,30 @@ def _compute_analytics_sync() -> Dict[str, Any]:
 
             # 4. Top Recruiters
             # First map candidate counts by jobdiva_id
-            cur.execute("""
+            sc_plain_cond, sc_plain_params = _sc_filter(scope, "jobdiva_id")
+            cur.execute(f"""
                 SELECT CAST(jobdiva_id AS TEXT), COUNT(*)
                 FROM sourced_candidates
-                WHERE jobdiva_id IS NOT NULL
+                WHERE jobdiva_id IS NOT NULL AND {sc_plain_cond}
                 GROUP BY jobdiva_id
-            """)
+            """, sc_plain_params)
             cand_count_map = {str(row[0]): row[1] for row in cur.fetchall()}
 
             # Get recruiter emails, jobdiva_id, and job_id for active jobs
-            cur.execute("""
+            cur.execute(f"""
                 SELECT jobdiva_id, job_id, recruiter_emails
                 FROM monitored_jobs
-                WHERE COALESCE(is_archived, FALSE) = FALSE
-            """)
+                WHERE COALESCE(is_archived, FALSE) = FALSE AND {mj_cond}
+            """, mj_params)
+            # Team scope: the leaderboard only ranks the team's own emails —
+            # a shared job also assigned to an outside recruiter must not
+            # leak that recruiter into the team's view.
+            scope_emails = set(scope["emails"]) if scope else None
             recruiter_stats = {}
             for jobdiva_id, job_id, raw_emails in cur.fetchall():
-                emails = []
-                if isinstance(raw_emails, str):
-                    try:
-                        emails = json.loads(raw_emails) if raw_emails.strip().startswith("[") else [raw_emails]
-                    except Exception:
-                        emails = [raw_emails] if raw_emails else []
-                elif isinstance(raw_emails, list):
-                    emails = raw_emails
-                
-                clean_emails = set(str(e).strip().lower() for e in emails if e and str(e).strip())
+                clean_emails = set(_parse_recruiter_emails(raw_emails))
+                if scope_emails is not None:
+                    clean_emails &= scope_emails
                 cand_count = cand_count_map.get(str(jobdiva_id), 0)
                 if cand_count == 0 and job_id:
                     cand_count = cand_count_map.get(str(job_id), 0)
@@ -360,11 +557,12 @@ def _compute_analytics_sync() -> Dict[str, Any]:
             )[:10]
 
             # 5. Candidate Sources (grouped by Step 5 channels: JobDiva Talent, LinkedIn, Dice, Exa)
-            cur.execute("""
+            cur.execute(f"""
                 SELECT source, COUNT(*)
                 FROM sourced_candidates
+                WHERE {sc_plain_cond}
                 GROUP BY source
-            """)
+            """, sc_plain_params)
             source_rows = cur.fetchall()
             source_buckets = {
                 "JobDiva Talent": 0,
@@ -395,9 +593,9 @@ def _compute_analytics_sync() -> Dict[str, Any]:
         # so roll back before falling through to the next section — one
         # missing table (e.g. unipile_account_usage before first rotation)
         # must not zero out the rest of the dashboard.
-        def _section(compute, default):
+        def _section(compute, default, *args):
             try:
-                return compute(conn)
+                return compute(conn, *args)
             except Exception as e:
                 logger.warning(f"Admin analytics section {compute.__name__} unavailable: {e}")
                 try:
@@ -406,10 +604,13 @@ def _compute_analytics_sync() -> Dict[str, Any]:
                     pass
                 return default
 
-        jobs_timeline = _section(_compute_jobs_timeline, {"rows": [], "total": 0})
-        launch_speed = _section(_compute_launch_speed, {})
-        weekly_trends = _section(_compute_weekly_trends, {})
-        linkedin_accounts = _section(_compute_linkedin_accounts, [])
+        jobs_timeline = _section(_compute_jobs_timeline, {"rows": [], "total": 0}, scope)
+        launch_speed = _section(_compute_launch_speed, {}, scope)
+        weekly_trends = _section(_compute_weekly_trends, {}, scope)
+        submission_metrics = _section(_compute_submission_metrics, {}, scope)
+        # LinkedIn accounts are global sourcing infrastructure — only shown
+        # on the unscoped (all-teams admin) view.
+        linkedin_accounts = _section(_compute_linkedin_accounts, []) if scope is None else []
 
         return {
             "overview": {
@@ -426,8 +627,12 @@ def _compute_analytics_sync() -> Dict[str, Any]:
             "jobs_timeline_total": jobs_timeline.get("total", 0),
             "launch_speed": launch_speed,
             "weekly_trends": weekly_trends,
+            "submission_metrics": submission_metrics,
             "linkedin_accounts": linkedin_accounts,
+            "team_scope": team_scope_out,
         }
+    except LookupError:
+        raise
     except Exception as e:
         logger.error(f"Error computing admin analytics: {e}")
         # If tables do not exist or error occurs, return fallback zeros
@@ -446,7 +651,9 @@ def _compute_analytics_sync() -> Dict[str, Any]:
             "jobs_timeline_total": 0,
             "launch_speed": {},
             "weekly_trends": {},
+            "submission_metrics": {},
             "linkedin_accounts": [],
+            "team_scope": team_scope_out,
             "warning": f"Analytics partially unavailable: {e}"
         }
     finally:
@@ -503,22 +710,35 @@ async def get_admin_linkedin_accounts(user: UserIdentity = Depends(get_current_u
 
 
 @router.get("/admin/analytics")
-async def get_admin_analytics(user: UserIdentity = Depends(get_current_user)):
+async def get_admin_analytics(
+    team_id: Optional[str] = Query(default=None),
+    user: UserIdentity = Depends(get_current_user),
+):
     """
-    Get system-wide analytics for administrators.
+    Analytics for administrators and team leads.
+
+    - Admins: system-wide by default; pass ?team_id=... to scope to one team.
+    - Team leads: always scoped to their own team (team_id is ignored).
+    - Recruiters: 403.
     """
-    if not user.is_admin:
+    if user.is_admin:
+        scope_team_id = (team_id or "").strip() or None
+    elif user.is_team_lead and user.team_id:
+        scope_team_id = user.team_id
+    else:
         raise HTTPException(
             status_code=403,
-            detail="Access denied. Admin access required to view system analytics."
+            detail="Access denied. Admin or team lead access required to view analytics."
         )
 
     try:
-        data = await asyncio.to_thread(_compute_analytics_sync)
+        data = await asyncio.to_thread(_compute_analytics_sync, scope_team_id)
         return {
             "status": "success",
             "data": data
         }
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         logger.error(f"Failed to fetch admin analytics: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch analytics: {str(e)}")
