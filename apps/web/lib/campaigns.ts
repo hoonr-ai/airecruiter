@@ -386,3 +386,57 @@ export async function generateScreeningQuestions(input: {
 
   return defaults;
 }
+
+export function getDefaultCampaignScreeningQuestions(): TemplateQuestion[] {
+  const defaultQs = [
+    {
+      text: "Are you open to exploring new job opportunities?",
+      criteria: "Must be open to new job opportunities",
+      category: "default",
+      is_hard_filter: false,
+    },
+    {
+      text: "What is your current or most recent role and key responsibilities?",
+      criteria: "",
+      category: "default",
+      is_hard_filter: false,
+    },
+    { text: "What is your current location?", criteria: "", category: "default", is_hard_filter: false },
+    {
+      text: "This role follows an onsite/hybrid work arrangement based in the job location. Are you open to working in this setup?",
+      criteria: "Must be open to onsite/hybrid work arrangement",
+      category: "work-arrangement",
+      is_hard_filter: true,
+    },
+    { text: "What is your earliest availability to start a new role?", criteria: "", category: "logistics", is_hard_filter: false },
+    { text: "What is your expected compensation for this role?", criteria: "", category: "logistics", is_hard_filter: false },
+    {
+      text: "Which types of working arrangements are you open to and eligible for? Select all that apply: W2 Employee, Subcontractor to Pyramid through your current employer, Independent Contractor",
+      criteria: "",
+      category: "logistics",
+      is_hard_filter: false,
+    },
+    {
+      text: "Are you authorized to work indefinitely for any employer in the United States?",
+      criteria: "",
+      category: "logistics",
+      is_hard_filter: false,
+    },
+    {
+      text: "Will you now or in the future require visa sponsorship to continue working in the United States?",
+      criteria: "",
+      category: "logistics",
+      is_hard_filter: false,
+    },
+  ];
+
+  return defaultQs.map((q, index) => ({
+    id: index + 1,
+    question_text: q.text,
+    pass_criteria: q.criteria,
+    is_default: true,
+    category: q.category,
+    order_index: index,
+    is_hard_filter: !!q.is_hard_filter,
+  }));
+}

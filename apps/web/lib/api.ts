@@ -229,7 +229,17 @@ export const api = {
     getMe: () => req<any>(`/api/v1/auth/me`),
   },
   adminAnalytics: {
-    get: () => req<any>(`/api/v1/admin/analytics`),
+    get: (teamId?: string | null) =>
+      req<any>(`/api/v1/admin/analytics${teamId ? `?team_id=${encodeURIComponent(teamId)}` : ""}`),
     linkedinAccounts: () => req<any>(`/api/v1/admin/linkedin-accounts`),
+  },
+  teams: {
+    list: () => req<any>(`/api/v1/teams`),
+    create: (body: { name: string; lead_emails: string; member_emails: string }) =>
+      req<any>(`/api/v1/teams`, { method: "POST", body }),
+    update: (teamId: string, body: { name: string; lead_emails: string; member_emails: string }) =>
+      req<any>(`/api/v1/teams/${encodeURIComponent(teamId)}`, { method: "PUT", body }),
+    remove: (teamId: string) =>
+      req<any>(`/api/v1/teams/${encodeURIComponent(teamId)}`, { method: "DELETE" }),
   },
 };

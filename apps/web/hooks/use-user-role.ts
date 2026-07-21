@@ -4,17 +4,33 @@ import { useEffect, useState } from "react";
 import { useMsal } from "@azure/msal-react";
 import { api, getActiveUserEmail } from "@/lib/api";
 
+export type UserRole = "admin" | "team_lead" | "recruiter";
+
 export interface UserRoleInfo {
   email: string;
-  role: "admin" | "recruiter";
+  role: UserRole;
   isAdmin: boolean;
+  isTeamLead: boolean;
+  teamId: string | null;
+  teamName: string | null;
   isLoading: boolean;
 }
 
 interface RoleData {
-  role: "admin" | "recruiter";
+  role: UserRole;
   isAdmin: boolean;
+  isTeamLead: boolean;
+  teamId: string | null;
+  teamName: string | null;
 }
+
+const DEFAULT_ROLE: RoleData = {
+  role: "recruiter",
+  isAdmin: false,
+  isTeamLead: false,
+  teamId: null,
+  teamName: null,
+};
 
 const roleCache: Record<string, RoleData> = {};
 const inflightRequests: Record<string, Promise<RoleData | null>> = {};
@@ -33,9 +49,14 @@ async function fetchRoleForEmail(email: string): Promise<RoleData | null> {
   try {
     const data = await api.auth.getMe();
     if (data) {
+      const role: UserRole =
+        data.role === "admin" ? "admin" : data.role === "team_lead" ? "team_lead" : "recruiter";
       const resolved: RoleData = {
-        role: data.role === "admin" ? "admin" : "recruiter",
-        isAdmin: data.role === "admin" || data.is_admin === true,
+        role,
+        isAdmin: role === "admin" || data.is_admin === true,
+        isTeamLead: role === "team_lead" || data.is_team_lead === true,
+        teamId: data.team_id || null,
+        teamName: data.team_name || null,
       };
       roleCache[email] = resolved;
       return resolved;
@@ -56,7 +77,7 @@ export function useUserRole(): UserRoleInfo {
     if (email && roleCache[email]) {
       return roleCache[email];
     }
-    return { role: "recruiter", isAdmin: false };
+    return DEFAULT_ROLE;
   });
 
   const [isLoading, setIsLoading] = useState<boolean>(() => {
@@ -99,6 +120,9 @@ export function useUserRole(): UserRoleInfo {
     email,
     role: roleInfo.role,
     isAdmin: roleInfo.isAdmin,
+    isTeamLead: roleInfo.isTeamLead,
+    teamId: roleInfo.teamId,
+    teamName: roleInfo.teamName,
     isLoading,
   };
 }

@@ -2,20 +2,30 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Briefcase, Users, Settings, Megaphone } from "lucide-react";
+import { LayoutDashboard, Briefcase, Users, Settings, Megaphone, UsersRound } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AzureLoginButton } from "@/components/auth/AzureLoginButton";
 import { useUserRole } from "@/hooks/use-user-role";
 
 export function Sidebar() {
     const pathname = usePathname();
-    const { isAdmin } = useUserRole();
+    const { isAdmin, isTeamLead, teamName, isLoading } = useUserRole();
 
     const navItems = [
         { label: "Jobs", href: "/", icon: Briefcase, disabled: false },
         { label: "Campaigns", href: "/campaigns", icon: Megaphone, disabled: false },
         { label: "Candidates", href: "/candidates", icon: Users, disabled: true },
-        ...(isAdmin ? [{ label: "Admin Analytics", href: "/admin/analytics", icon: LayoutDashboard, disabled: false }] : []),
+        // Admins get the full analytics + team management; team leads get the
+        // same analytics page auto-scoped to their team by the backend.
+        ...(isAdmin
+            ? [
+                  { label: "Admin Analytics", href: "/admin/analytics", icon: LayoutDashboard, disabled: false },
+                  { label: "Teams", href: "/admin/teams", icon: UsersRound, disabled: false },
+              ]
+            : []),
+        ...(!isAdmin && isTeamLead
+            ? [{ label: "Team Analytics", href: "/admin/analytics", icon: LayoutDashboard, disabled: false }]
+            : []),
         { label: "Settings", href: "/settings", icon: Settings, disabled: false },
     ];
 
@@ -75,6 +85,25 @@ export function Sidebar() {
                     })}
                 </ul>
             </nav>
+
+            {/* Role identity chip — team leads see "Team Lead" instead of
+                recruiter/admin, per the team management spec. */}
+            {!isLoading && (isAdmin || isTeamLead) && (
+                <div className="mt-4 px-4">
+                    <span
+                        className={cn(
+                            "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ring-1 ring-inset",
+                            isAdmin
+                                ? "bg-slate-100 text-slate-600 ring-slate-200"
+                                : "bg-indigo-50 text-indigo-700 ring-indigo-200"
+                        )}
+                        title={!isAdmin && teamName ? `Team: ${teamName}` : undefined}
+                    >
+                        {isAdmin ? "Admin" : "Team Lead"}
+                        {!isAdmin && teamName ? <span className="font-medium text-indigo-500">· {teamName}</span> : null}
+                    </span>
+                </div>
+            )}
 
             <AzureLoginButton />
         </div>

@@ -4753,15 +4753,21 @@ class JobDivaService:
                 return True
         return False
 
-    async def get_job_submittals(self, job_id) -> List[Dict[str, Any]]:
+    async def get_job_submittals(self, job_id, none_on_error: bool = False) -> Optional[List[Dict[str, Any]]]:
         """
         Fetch manual candidate submittals for a job from JobDiva BI endpoint.
         Uses /apiv2/bi/JobSubmittalsDetail. Returns list of submittal records.
         Each record includes CANDIDATEID, RECIPIENTNAME, SUBMITDATE fields.
+
+        none_on_error=True makes fetch failures distinguishable from a
+        genuinely empty submittal list (returns None instead of []) — the
+        auto-sync persistence path must not wipe previously stored submittals
+        on a transient JobDiva outage.
         """
+        error_result = None if none_on_error else []
         token = await self.authenticate()
         if not token:
-            return []
+            return error_result
 
         # Resolve to numeric JobDiva ID
         resolved_id = await self._resolve_jobdiva_job_id(str(job_id))
@@ -4771,7 +4777,7 @@ class JobDivaService:
             numeric_id = int(safe_job_id)
         except (ValueError, TypeError):
             logger.error(f"❌ get_job_submittals: Invalid job_id '{safe_job_id}'")
-            return []
+            return error_result
 
         url = f"{self.api_url}/apiv2/bi/JobSubmittalsDetail"
         headers = {
@@ -4792,7 +4798,7 @@ class JobDivaService:
                     logger.error(f"❌ get_job_submittals failed: {response.status_code} - {response.text[:300]}")
         except Exception as e:
             logger.error(f"❌ get_job_submittals exception: {e}")
-        return []
+        return error_result
 
     async def _fetch_candidate_qualifications_batch(
         self,
