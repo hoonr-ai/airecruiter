@@ -3030,26 +3030,27 @@ class JobDivaService:
                 # Determine what the API explicitly said
                 api_loc = ""
                 if "hybrid" in val_lower: api_loc = "Hybrid"
-                elif "remote" in val_lower: api_loc = "Remote"
+                elif "remote" in val_lower or "wfh" in val_lower or "virtual" in val_lower or "telecommute" in val_lower: api_loc = "Remote"
                 elif "onsite" in val_lower or "on-site" in val_lower: api_loc = "Onsite"
                 
-                # If API and JD both agree on Onsite, trust it — even if "remote" appears
-                # negatively in the JD (e.g. "This is not a WFH/remote role").
-                if api_loc == "Onsite" and has_onsite and not has_hybrid:
+                # If API explicitly says Remote, respect it unless strictly negated without positive mention
+                if api_loc == "Remote":
+                    if has_hybrid:
+                        loc_type = "Hybrid"
+                    elif _remote_negated and not _remote_mention:
+                        loc_type = "Onsite"
+                    else:
+                        loc_type = "Remote"
+                elif api_loc == "Onsite" and has_onsite and not has_hybrid:
                     loc_type = "Onsite"
                 elif has_hybrid:
                     loc_type = "Hybrid"
                 elif has_onsite and has_remote:
                     # Mentions both Onsite and Remote -> usually implies a Hybrid arrangement
                     loc_type = "Hybrid"
-                elif has_onsite:
-                    loc_type = "Onsite"
                 elif has_remote:
                     loc_type = "Remote"
-                elif _remote_negated and api_loc == "Remote":
-                    # JD explicitly says "not remote" / "no WFH" but API says Remote.
-                    # The JD overrides the API — the job is clearly NOT remote.
-                    # Default to Onsite since the JD is denying remote without naming an alternative.
+                elif has_onsite:
                     loc_type = "Onsite"
                 else:
                     # JD is silent about location keywords, trust the API field

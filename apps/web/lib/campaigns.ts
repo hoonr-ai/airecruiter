@@ -343,9 +343,9 @@ export async function generateScreeningQuestions(input: {
   totalYears?: number;
 }): Promise<TemplateQuestion[]> {
   const isRemote =
-    /remote/i.test(input.workArrangement ?? "") ||
-    /remote/i.test(input.city ?? "") ||
-    /remote/i.test(input.jobTitle ?? "");
+    /(?:remote|wfh|virtual|telecommute)/i.test(input.workArrangement ?? "") ||
+    /(?:remote|wfh|virtual|telecommute)/i.test(input.city ?? "") ||
+    /(?:remote|wfh|virtual|telecommute)/i.test(input.jobTitle ?? "");
   const arrangementLabel = (input.workArrangement ?? "").toLowerCase().includes("hybrid")
     ? "a hybrid"
     : "an onsite";
