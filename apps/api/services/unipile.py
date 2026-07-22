@@ -516,9 +516,23 @@ class UnipileService:
 
         Each search claims the least-recently-used attached LinkedIn account
         (cluster-wide round-robin), so volume spreads evenly instead of
-        hammering one account. If the claimed account fails with an
-        account-level error (checkpoint / expired / rate-limited) it is
-        benched and the search retries on up to two sibling accounts.
+        hammering one account.
+
+        Rotation-on-failure — the search moves to a sibling account when the
+        claimed one:
+          - fails with an account-level error (401/403 checkpoint/expired,
+            429 rate-limit, 5xx) — the account is benched, then a sibling
+            is tried;
+          - hits a network error / timeout — a sibling is tried WITHOUT
+            benching (a per-session hang isn't the account's fault);
+          - returns HTTP 200 but ZERO candidates — a sibling is tried, so a
+            silently-degraded account (e.g. a lost Recruiter seat that returns
+            empty) doesn't sink the whole search. Rotation continues through
+            every sibling until one yields candidates or the pool is exhausted.
+
+        The only non-rotating failure is a bad-payload 4xx (e.g. 400/422):
+        every account would reject an identical request, so siblings aren't
+        burned on it.
         """
         # LinkedIn Recruiter searches are capped per-search to protect the
         # attached accounts (rate/abuse limits) — 100 per search, tunable.
@@ -529,19 +543,35 @@ class UnipileService:
             _cap = 100
         limit = max(1, min(int(limit or 25), _cap))
 
-        tried = set()
-        for _ in range(3):
+        # Cap attempts at the size of the rotation pool: `acquire_account`
+        # hands back the LRU account each call, and the `tried` guard stops us
+        # once it cycles back to one we've already searched (pool exhausted).
+        rotation_ids = await self.get_rotation_account_ids()
+        max_attempts = max(1, len(rotation_ids))
+
+        tried: set = set()
+        for _ in range(max_attempts):
             account_id = await self.acquire_account()
             if not account_id or account_id in tried:
-                # No account available, or rotation cycled back to one that
-                # already failed — no healthier sibling exists this pass.
-                return []
+                # No account available, or rotation cycled back to one we've
+                # already searched — the pool of distinct accounts is exhausted.
+                break
             tried.add(account_id)
-            results, account_error = await self._search_candidates_once(
+            results, outcome = await self._search_candidates_once(
                 account_id, skills, location, open_to_work, limit, boolean_string
             )
-            if account_error is None:
+            if outcome == "fatal":
+                # Bad-payload 4xx — a sibling would reject it identically.
                 return results
+            if outcome == "ok" and results:
+                return results
+            # "ok" but empty, or "rotate" (benched account-level error, or a
+            # non-benched network blip): try the next sibling.
+            logger.info(
+                "Unipile: account %s yielded no candidates (%s); rotating to a "
+                "sibling (%d/%d accounts tried).",
+                account_id, outcome, len(tried), max_attempts,
+            )
         return []
 
     async def _search_candidates_once(
@@ -552,12 +582,17 @@ class UnipileService:
         open_to_work: bool,
         limit: int,
         boolean_string: Optional[str],
-    ) -> tuple[List[Dict[str, Any]], Optional[str]]:
+    ) -> tuple[List[Dict[str, Any]], str]:
         """One search attempt against a specific account.
 
-        Returns (results, account_error): account_error is non-None only when
-        the failure was account-level and the account has been benched, i.e.
-        retrying on a different account could succeed.
+        Returns (results, outcome) where outcome is one of:
+          - "ok":     got a 2xx response (results may be empty — the caller
+                      rotates to a sibling when empty).
+          - "rotate": a transient failure the caller should retry on another
+                      account — an account-level error (already benched here)
+                      or a network error/timeout (NOT benched).
+          - "fatal":  a bad-payload 4xx that every account would reject
+                      identically — the caller should stop, not burn siblings.
         """
         # 1. Resolve Skill IDs
         skill_ids = []
@@ -621,13 +656,18 @@ class UnipileService:
             if unresolved_terms:
                 final_keywords = " AND ".join(unresolved_terms)
 
-        # Handle Open to Work separately or append it
-        if open_to_work:
-            otw = '("Open to Work" OR "Looking for opportunities")'
-            if final_keywords:
-                final_keywords = f"({final_keywords}) AND {otw}"
-            else:
-                final_keywords = otw
+        # NOTE: we deliberately do NOT append an '("Open to Work" OR
+        # "Looking for opportunities")' clause here. LinkedIn Recruiter
+        # keywords are a free-text match against profile text, but
+        # "Open to Work" is a profile badge/spotlight — almost nobody writes
+        # those literal words in their headline/about. ANDing that clause onto
+        # every search collapsed the result set to ~1 profile (and a poor one,
+        # since the survivor matched the job-seeker phrase, not the role).
+        # Open-to-work is now resolved as a real, per-candidate signal via the
+        # Apify path (services/apify_open_to_work.py) — see _search_linkedin in
+        # unified_candidate_search.py — surfaced as a UI badge and a small
+        # score boost. `open_to_work` is retained on this method's signature
+        # for backward compatibility but no longer shapes the query.
 
         payload = {
             "api": "recruiter",
@@ -678,7 +718,14 @@ class UnipileService:
                             "match_score": 0,
                             "profile_url": p_url,
                             "image_url": img_url,
-                            "open_to_work": open_to_work,
+                            # `open_to_work` is intentionally left unset here.
+                            # It used to be hardcoded to the request-level flag
+                            # (always True), which (a) mislabeled every profile
+                            # as open-to-work in the UI and (b) made the frontend
+                            # poller skip them (it only polls candidates whose
+                            # open_to_work is not yet a bool). It's now populated
+                            # from the real Apify signal downstream, exactly like
+                            # Exa LinkedIn candidates.
                             "recruiter_candidate_id": item.get("recruiter_candidate_id"),
                             # Account affinity: recruiter_candidate_id and some
                             # profile lookups are only valid on the account that
@@ -692,18 +739,23 @@ class UnipileService:
                     logger.error(f"Unipile Search Failed on account {account_id}: {resp.status_code} - {body}")
                     cooldown_s = self.classify_account_failure(resp.status_code, body)
                     if cooldown_s:
+                        # Account-level failure: bench it and let the caller
+                        # rotate to a sibling.
                         await self.mark_account_failure(account_id, f"search {resp.status_code}: {body[:200]}", cooldown_s)
-                        return [], f"{resp.status_code}"
-                    return [], None
+                        return [], "rotate"
+                    # Bad-payload 4xx (400/404/422 …): the same request would
+                    # fail identically on every account — don't rotate.
+                    return [], "fatal"
 
         except Exception as e:
-            # Network-level failure — not attributable to this account, so
-            # don't bench it; a sibling account wouldn't fare better either.
+            # Network-level failure / timeout — not attributable to this
+            # account, so don't bench it, but a per-session hang can be
+            # account-specific, so let the caller try a sibling.
             logger.error(f"Unipile Search Exception: {e}")
-            return [], None
+            return [], "rotate"
 
         logger.info(f"Unipile returned {len(results)} candidates from account {account_id}")
-        return results, None
+        return results, "ok"
 
     async def send_message(self, candidate_provider_id: str, text: str, account_id: Optional[str] = None) -> bool:
         """
