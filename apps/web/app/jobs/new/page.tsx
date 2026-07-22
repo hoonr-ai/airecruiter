@@ -4649,57 +4649,31 @@ function NewJobPageContent() {
     // question is a preference check, not a hard filter; recruiters can flip
     // it to a hard filter manually if disqualification should be automatic.
     const availabilityDate = jobData.start_date || 'ASAP';
-    const isBooleanScreen = screeningLevel === "L0.5";
-    const defaultQs: Array<{ text: string; criteria: string; is_hard_filter?: boolean }> = isBooleanScreen
-      ? [
-          {
-            text: "Are you open to exploring new job opportunities?",
-            criteria: "Pass when candidate confirms interest in exploring this role.",
-          },
-          {
-            text: "Do you have recent experience in a role similar to this position?",
-            criteria: "Pass when candidate confirms relevant recent role experience.",
-          },
-          {
-            text: "Are you currently based in the required job region for this role?",
-            criteria: "Pass when candidate confirms they are currently in, or can reliably work from, the required region.",
-          },
-        ]
-      : [
-          { text: "Are you open to exploring new job opportunities?", criteria: "Must be open to new job opportunities" },
-          { text: "What is your current or most recent role and key responsibilities?", criteria: "" },
-          { text: "What is your current location?", criteria: "" },
-        ];
+    const defaultQs: Array<{ text: string; criteria: string; is_hard_filter?: boolean }> = [
+      { text: "Are you open to exploring new job opportunities?", criteria: "Must be open to new job opportunities" }
+    ];
+
+    if (screeningLevel !== "L0.5") {
+      defaultQs.push({ text: "What is your current or most recent role and key responsibilities?", criteria: "" });
+    }
+
+    defaultQs.push({ text: "What is your current location?", criteria: "" });
+
     if (!isRemote) {
       defaultQs.push({
-        text: isBooleanScreen
-          ? `Are you open to ${arrangementLabel} work arrangement based in ${addressStr || location || "the job location"}?`
-          : `This role follows ${arrangementLabel} work arrangement based in ${addressStr || location || "the job location"}. Are you open to working in this setup?`,
-        criteria: isBooleanScreen
-          ? `Pass when candidate confirms they can work in ${arrangementLabel} setup.`
-          : `Must be open to ${arrangementLabel} work arrangement`,
+        text: `This role follows ${arrangementLabel} work arrangement based in ${addressStr || location || "the job location"}. Are you open to working in this setup?`,
+        criteria: `Must be open to ${arrangementLabel} work arrangement`,
       });
     }
-    const availabilityText = isBooleanScreen
-      ? "Are you available to start within the required timeline for this role?"
-      : "What is your earliest availability to start a new role?";
+    
+    const availabilityText = "What is your earliest availability to start a new role?";
 
     defaultQs.push(
-      { text: availabilityText, criteria: isBooleanScreen ? "Pass when candidate confirms required start timeline." : "" },
-      {
-        text: isBooleanScreen
-          ? "Are your compensation expectations aligned with this role?"
-          : "What is your expected compensation for this role?",
-        criteria: isBooleanScreen ? "Pass when candidate confirms compensation alignment." : "",
-      },
-      {
-        text: isBooleanScreen
-          ? "Are you eligible to work in at least one of these arrangements: W2, Subcontractor, or Independent Contractor?"
-          : "Which types of working arrangements are you open to and eligible for? Select all that apply: W2 Employee, Subcontractor to Pyramid through your current employer, Independent Contractor",
-        criteria: isBooleanScreen ? "Pass when candidate confirms at least one eligible arrangement." : "",
-      },
-      { text: "Are you authorized to work indefinitely for any employer in the United States?", criteria: isBooleanScreen ? "Pass when candidate confirms authorization." : "" },
-      { text: "Will you now or in the future require visa sponsorship to continue working in the United States?", criteria: isBooleanScreen ? "Pass when candidate confirms no sponsorship needed per job requirement." : "" },
+      { text: availabilityText, criteria: "" },
+      { text: "What is your expected compensation for this role?", criteria: "" },
+      { text: "Which types of working arrangements are you open to and eligible for? Select all that apply: W2 Employee, Subcontractor to Pyramid through your current employer, Independent Contractor", criteria: "" },
+      { text: "Are you authorized to work indefinitely for any employer in the United States?", criteria: "" },
+      { text: "Will you now or in the future require visa sponsorship to continue working in the United States?", criteria: "" },
     );
 
     defaultQs.forEach((q, index) => {
