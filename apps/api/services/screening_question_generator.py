@@ -982,6 +982,8 @@ async def generate_screening_questions(
     # Re-index role-specific entries to sit after the front-matter.
     base_index = len(questions)
     for offset, q in enumerate(role_specific):
+        if boolean_mode:
+            q["is_hard_filter"] = True
         q["order_index"] = base_index + offset
         questions.append(q)
 
