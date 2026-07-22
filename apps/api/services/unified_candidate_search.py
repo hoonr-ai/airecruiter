@@ -176,6 +176,35 @@ class SearchCriteria(BaseModel):
             values.append(value)
         return values
 
+    def sourcing_skills_with_priority(self) -> List[Dict[str, str]]:
+        """Like sourcing_skill_values, but each term keeps a coarse priority
+        ('Must Have' | 'Preferred') derived from its rubric match_type.
+
+        Lets the Unipile layer map required-vs-optional onto LinkedIn
+        MUST_HAVE / CAN_HAVE instead of ANDing every term together — sending
+        everything as MUST_HAVE collapsed searches to ~1 result. Skills come
+        before titles so the downstream MUST_HAVE cap fills from the more
+        reliably-resolvable skill terms first. Excludes/empties dropped;
+        deduped by lowercased value (first occurrence wins)."""
+        out: List[Dict[str, str]] = []
+        seen = set()
+        for item in (self.skill_criteria or []) + (self.title_criteria or []):
+            if not isinstance(item, dict):
+                continue
+            match_type = str(item.get("match_type", "must") or "must").lower().replace("_", " ").strip()
+            if match_type in {"exclude", "must not"}:
+                continue
+            value = str(item.get("value", "")).strip()
+            if not value:
+                continue
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            priority = "Preferred" if match_type in {"can", "preferred", "nice to have"} else "Must Have"
+            out.append({"value": value, "priority": priority})
+        return out
+
     def skill_only_values(self) -> List[str]:
         """Plain skill strings from skill_criteria ONLY (titles excluded).
 
@@ -5128,11 +5157,12 @@ class UnifiedCandidateSearch:
 
     async def _search_linkedin(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
-            # Unipile expects skills as a list of dicts or strings. Derive from
-            # skill_criteria + title_criteria so callers don't have to send a
-            # redundant flat list.
-            skill_values = criteria.sourcing_skill_values()
-            skills = [{"value": s, "priority": "Must Have"} for s in skill_values]
+            # Unipile expects skills as a list of dicts. Carry each term's real
+            # rubric priority (Must Have vs Preferred) so the Unipile layer can
+            # AND only the genuine requirements and OR the rest — stamping every
+            # term "Must Have" here was ANDing all of them on LinkedIn Recruiter
+            # and collapsing the result set to ~1 profile.
+            skills = criteria.sourcing_skills_with_priority()
             candidates = await self.unipile_service.search_candidates(
                 skills=skills,
                 location=self._search_location_for_source(criteria),

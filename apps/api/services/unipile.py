@@ -599,16 +599,34 @@ class UnipileService:
         # Prioritize Must Have skills
         must_haves = [s for s in skills if (isinstance(s, dict) and s.get("priority") == "Must Have") or (hasattr(s, "priority") and s.priority == "Must Have")]
         other_skills = [s for s in skills if s not in must_haves]
-        
+
         # Resolve top 5 terms only to keep payload reasonable
         search_terms = (must_haves + other_skills)[:5]
-        
+
+        # LinkedIn Recruiter ANDs every MUST_HAVE skill together, so sending
+        # many hard requirements collapses the result set (the root cause of
+        # single-result searches when the wizard marked every skill "Must
+        # Have"). Cap the hard requirements at UNIPILE_MUST_HAVE_SKILL_CAP;
+        # extra must-haves and all preferred terms become CAN_HAVE (OR), which
+        # still lifts LinkedIn's relevance ranking without over-constraining.
+        try:
+            from core import sourcing_config as _sc
+            _must_cap = int(getattr(_sc, "UNIPILE_MUST_HAVE_SKILL_CAP", 2) or 2)
+        except Exception:
+            _must_cap = 2
+        _must_cap = max(0, _must_cap)
+
+        must_used = 0
         for s in search_terms:
             name = s.get("value") or s.get("name") if isinstance(s, dict) else getattr(s, "value", getattr(s, "name", str(s)))
             if name:
                  s_id = await self._resolve_id("skill", name, account_id=account_id)
                  if s_id:
-                     priority = "MUST_HAVE" if s in must_haves else "CAN_HAVE"
+                     if s in must_haves and must_used < _must_cap:
+                         priority = "MUST_HAVE"
+                         must_used += 1
+                     else:
+                         priority = "CAN_HAVE"
                      skill_ids.append({"id": s_id, "priority": priority, "name_ref": name})
         
         # 2. Resolve Location ID
