@@ -368,6 +368,12 @@ def _enforce_boolean_pre_screen_questions(questions: List[Dict[str, Any]]) -> Li
     for q in questions or []:
         if not isinstance(q, dict):
             continue
+            
+        category = str(q.get("category") or "").strip().lower()
+        if category in ("default", "logistics"):
+            rewritten.append(q)
+            continue
+            
         qt = _to_boolean_question_text(str(q.get("question_text") or ""))
         pc = str(q.get("pass_criteria") or "").strip()
         if not pc:
