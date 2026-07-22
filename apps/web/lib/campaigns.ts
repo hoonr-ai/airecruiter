@@ -279,10 +279,11 @@ export interface TemplateQuestion {
 
 const AI_BASE = `${API_BASE}/api/v1/ai-generation`;
 
-// Campaign holds L1|L1.5|L2; the screening-question generator wants
-// light|medium|intensive (mirrors what the jobs wizard sends).
-export function screeningLevelToDepth(level: string): "light" | "medium" | "intensive" {
-  if (level === "L0.5" || level === "L1") return "light";
+// Campaign holds L0.5|L1|L1.5|L2; the screening-question generator wants
+// l0.5|light|medium|intensive (mirrors what the jobs wizard sends).
+export function screeningLevelToDepth(level: string): "l0.5" | "light" | "medium" | "intensive" {
+  if (level === "L0.5") return "l0.5";
+  if (level === "L1") return "light";
   if (level === "L2") return "intensive";
   return "medium";
 }
