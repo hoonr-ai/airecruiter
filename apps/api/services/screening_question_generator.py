@@ -354,10 +354,22 @@ def _build_prompt(
         "\nBOOLEAN MODE — ALL questions MUST be answerable with a simple \"Yes\" or \"No\".\n"
         "   - Phrase every question as \"Do you have...\", \"Have you...\", \"Are you...\", \"Can you confirm...\", etc.\n"
         "   - Do NOT ask open-ended or descriptive questions (no \"Can you describe\", no \"Walk me through\", no \"Tell me about\").\n"
-        "   - The `pass_criteria` must define what a \"Yes\" answer implies and the red flag for a \"No\".\n"
         "   - Example: \"Have you worked with React in a professional project?\"\n"
         "   - Example: \"Do you have hands-on experience with SQL databases?\""
     ) if boolean_mode else ""
+
+    pass_criteria_rule = (
+        "7. The `pass_criteria` field MUST instruct the AI evaluator to accept a simple 'Yes' without penalizing for a lack of detail.\n"
+        "    - Format exactly like this: \"Pass: Candidate confirms with 'Yes' or affirmative. Do not expect or require descriptive depth. | Red flag: Candidate says 'No'.\""
+    ) if boolean_mode else (
+        "7. The `pass_criteria` field MUST be ONE string with two parts:\n"
+        "    - \"Pass: \" followed by a simple CHECKLIST of 1–3 basic concepts or general tasks a practitioner would mention. NOT a sentence.\n"
+        "    - \" | Red flag: \" followed by ONE short phrase a fake/surface candidate would say.\n"
+        "    Format examples:\n"
+        "      - \"Pass: writing SQL queries, joining tables, basic CRUD operations. | Red flag: 'I just copy pasted code.'\"\n"
+        "      - \"Pass: creating React components, using useState, passing props. | Red flag: 'React is a database.'\"\n"
+        "    Never use \"N+ years\", \"X years of experience\", or duration thresholds anywhere."
+    )
 
     return f"""{intro}
 
@@ -389,13 +401,7 @@ STRICT RULES — FOLLOW EVERY ONE:
 5. Reference specific named concepts, tools, or artifacts where sensible — for THIS
    domain that means: {artifacts}.
 6. It is PERFECTLY FINE to ask "Can you describe a recent project where you used X?" or "Tell me about your experience with Y." Do not force artificial scenarios.
-7. The `pass_criteria` field MUST be ONE string with two parts:
-    - "Pass: " followed by a simple CHECKLIST of 1–3 basic concepts or general tasks a practitioner would mention. NOT a sentence.
-    - " | Red flag: " followed by ONE short phrase a fake/surface candidate would say.
-    Format examples:
-      - "Pass: writing SQL queries, joining tables, basic CRUD operations. | Red flag: 'I just copy pasted code.'"
-      - "Pass: creating React components, using useState, passing props. | Red flag: 'React is a database.'"
-    Never use "N+ years", "X years of experience", or duration thresholds anywhere.
+{pass_criteria_rule}
 8. Each `question_text` is ≤ 25 words and answerable verbally in 30–60 seconds — no coding. Ask simple, direct questions. "What kind of tasks did you do with X?" is perfect.
 9. Do not repeat or paraphrase the same question.
 10. Return nothing except the JSON below.
