@@ -15,7 +15,7 @@ to write depth-probing questions. Questions always include:
   - work-arrangement question (onsite / hybrid; hard-filter if not remote)
   - default-experience overview (total years)
     - N role-specific questions, scaled by screening_level:
-            Light=3, Medium=5, Intensive=7
+            L0.5=3 (Yes/No boolean only), Light=3, Medium=5, Intensive=7
 The frontend still owns the "merge user-edits" flow — we return a fresh
 set and the UI decides how to reconcile.
 """
@@ -78,6 +78,8 @@ def detect_seniority(job_title: str) -> str:
 def _question_count_for_level(level: str) -> int:
     """Exact number of role-specific questions for a screening level."""
     normalized = (level or "").strip().lower()
+    if normalized == "l0.5":
+        return 3  # L0.5 Boolean Screen — Yes/No questions only, same count as L1
     if normalized in ("light", "low", "basic", "quick"):
         return 3
     if normalized in ("intensive", "deep", "extensive", "high"):
@@ -235,6 +237,7 @@ def _build_prompt(
     domain: str = "generic_it",
     leniency_mode: bool = False,
     difficulty_mode: str = "medium",
+    boolean_mode: bool = False,
 ) -> str:
     def _fmt_skills(skills: List[Dict[str, Any]]) -> str:
         if not skills:
@@ -347,6 +350,15 @@ def _build_prompt(
         )
     )
 
+    boolean_rule = (
+        "\nBOOLEAN MODE — ALL questions MUST be answerable with a simple \"Yes\" or \"No\".\n"
+        "   - Phrase every question as \"Do you have...\", \"Have you...\", \"Are you...\", \"Can you confirm...\", etc.\n"
+        "   - Do NOT ask open-ended or descriptive questions (no \"Can you describe\", no \"Walk me through\", no \"Tell me about\").\n"
+        "   - The `pass_criteria` must define what a \"Yes\" answer implies and the red flag for a \"No\".\n"
+        "   - Example: \"Have you worked with React in a professional project?\"\n"
+        "   - Example: \"Do you have hands-on experience with SQL databases?\""
+    ) if boolean_mode else ""
+
     return f"""{intro}
 
 ROLE CONTEXT
@@ -364,7 +376,7 @@ RUBRIC — Must-have skills:
 
 RUBRIC — Nice-to-have skills:
 {_fmt_skills(preferred_skills)}
-
+{boolean_rule}
 TASK
 {task_objective.format(target_count=target_count)}
 
@@ -550,6 +562,7 @@ async def generate_screening_questions(
     followed by N role-specific questions from the LLM.
     """
     seniority = detect_seniority(job_title)
+    boolean_mode = (screening_level or "").strip().lower() == "l0.5"
     target_count = _question_count_for_level(screening_level)
     difficulty_mode_normalized = (difficulty_mode or "").strip().lower()
     if difficulty_mode_normalized not in ("easy", "medium", "hard"):
@@ -594,9 +607,15 @@ async def generate_screening_questions(
     questions: List[Dict[str, Any]] = []
 
     # 1. Intro
+    if boolean_mode:
+        intro_text = "Are you currently available and open to exploring a new job opportunity?"
+        intro_criteria = "Candidate confirms they are available and interested in exploring new opportunities."
+    else:
+        intro_text = "To start, can you briefly introduce yourself and walk me through your current role?"
+        intro_criteria = "Candidate gives a coherent 60-90s intro mentioning current title, team, and recent focus."
     questions.append({
-        "question_text": "To start, can you briefly introduce yourself and walk me through your current role?",
-        "pass_criteria": "Candidate gives a coherent 60-90s intro mentioning current title, team, and recent focus.",
+        "question_text": intro_text,
+        "pass_criteria": intro_criteria,
         "category": "default",
         "related_skill": "",
         "is_default": True,
@@ -605,7 +624,11 @@ async def generate_screening_questions(
     })
 
     # 2. Total-experience
-    if total_years and total_years > 0:
+    if boolean_mode:
+        years_label = f"{total_years}+ years" if (total_years and total_years > 0) else "relevant"
+        exp_text = f"Do you have {years_label} of experience in a {job_title} role?"
+        exp_criteria = f"Candidate confirms they have {years_label} of experience as a {job_title}."
+    elif total_years and total_years > 0:
         exp_text = (
             f"Can you summarize the most relevant parts of your background for a {job_title} role, "
             f"including the kinds of projects and scope you've handled?"
@@ -667,10 +690,16 @@ async def generate_screening_questions(
         domain=domain,
         leniency_mode=leniency_mode,
         difficulty_mode=difficulty_mode_normalized,
+        boolean_mode=boolean_mode,
     )
 
     is_it_role = family == "it"
     difficulty = difficulty_mode_normalized
+    boolean_system_suffix = (
+        " BOOLEAN MODE: every question_text MUST be answerable with Yes or No only "
+        "(e.g. 'Have you worked with X?', 'Do you have experience in Y?'). "
+        "No open-ended or descriptive questions."
+    ) if boolean_mode else ""
     system_message = (
         "You are a senior technical recruiter and AI interview screener for engineering hiring. "
         "Write 4–6 first-round audio screening questions at VERY BEGINNER level: extremely simple, "
@@ -700,6 +729,7 @@ async def generate_screening_questions(
             "practical scenarios, but keep it accessible and high-level. Avoid jargon. Output strict JSON."
         )
     )
+    system_message = system_message + boolean_system_suffix
 
     role_specific: List[Dict[str, Any]] = []
     # Cache the LLM JSON output keyed by (system, user) prompt content +
@@ -711,7 +741,7 @@ async def generate_screening_questions(
     # LLM failure.
     from core import llm_cache as _llm_cache
     _screening_cache_key = _llm_cache.make_key(
-        "screening", 2, system_message, prompt, screening_level, leniency_mode, difficulty_mode_normalized
+        "screening", 2, system_message, prompt, screening_level, leniency_mode, difficulty_mode_normalized, boolean_mode
     )
     try:
         _cached = await _llm_cache.get_json(_screening_cache_key)
@@ -747,7 +777,9 @@ async def generate_screening_questions(
         level = (screening_level or "").strip().lower()
         # Difficulty selection from Step 4 regenerate overrides fallback
         # template depth so easy/medium/hard stays consistent even if LLM fails.
-        if difficulty_mode_normalized == "easy":
+        if boolean_mode:
+            level = "l0.5"
+        elif difficulty_mode_normalized == "easy":
             level = "light"
         elif difficulty_mode_normalized == "medium":
             level = "medium"
@@ -758,6 +790,22 @@ async def generate_screening_questions(
             name = skill.get("value") or skill.get("name") or (
                 "this technology" if is_it_role else "this area"
             )
+            if boolean_mode:
+                q_text = f"Have you worked with {name} in a professional or project setting?"
+                criteria = (
+                    f"Pass: candidate confirms hands-on experience with {name}. "
+                    f"| Red flag: 'No' or 'I've only read about it.'"
+                )
+                fallback.append({
+                    "question_text": q_text,
+                    "pass_criteria": criteria,
+                    "category": "role-specific",
+                    "related_skill": name,
+                    "is_default": False,
+                    "is_hard_filter": False,
+                    "order_index": idx,
+                })
+                continue
             if is_it_role:
                 if level in ("intensive", "deep", "extensive", "high"):
                     q_text = (
@@ -879,7 +927,14 @@ async def generate_screening_questions(
             name = skill.get("value") or skill.get("name") or (
                 "this technology" if is_it_role else "this area"
             )
-            if is_it_role:
+            if boolean_mode:
+                q_text = f"Have you worked with {name} in a professional or project setting?"
+                criteria = (
+                    f"Pass: candidate confirms hands-on experience with {name}. "
+                    f"| Red flag: 'No' or 'I've only read about it.'"
+                )
+                category = "role-specific"
+            elif is_it_role:
                 q_text = (
                     f"What is one {name} feature or behavior you have used directly, "
                     "and what was the outcome?"

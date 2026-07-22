@@ -5,7 +5,7 @@
 // components + state container without either importing the other's page.
 
 export type Step = 1 | 2 | 3 | 4 | 5;
-export type ScreeningLevel = "L1" | "L1.5" | "L2";
+export type ScreeningLevel = "L0.5" | "L1" | "L1.5" | "L2";
 export type RegenerateDifficulty = "easy" | "medium" | "hard";
 export type EmploymentType = "W2" | "1099" | "C2C" | "Full-Time";
 export type WizardMode = "edit" | "source" | "view";

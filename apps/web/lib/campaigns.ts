@@ -9,12 +9,13 @@
 
 import { API_BASE, authFetch } from "@/lib/api";
 
-export type ScreeningLevel = "L1" | "L1.5" | "L2";
+export type ScreeningLevel = "L0.5" | "L1" | "L1.5" | "L2";
 export type EmploymentType = "W2" | "1099" | "C2C" | "Full-Time";
 
 export const EMPLOYMENT_TYPES: EmploymentType[] = ["W2", "1099", "C2C", "Full-Time"];
 
 export const SCREENING_LEVELS: { value: ScreeningLevel; label: string; hint: string }[] = [
+  { value: "L0.5", label: "L0.5", hint: "Boolean Screen" },
   { value: "L1", label: "L1", hint: "Basic Screen" },
   { value: "L1.5", label: "L1.5", hint: "Standard Screen" },
   { value: "L2", label: "L2", hint: "Deep Screen" },
@@ -281,7 +282,7 @@ const AI_BASE = `${API_BASE}/api/v1/ai-generation`;
 // Campaign holds L1|L1.5|L2; the screening-question generator wants
 // light|medium|intensive (mirrors what the jobs wizard sends).
 export function screeningLevelToDepth(level: string): "light" | "medium" | "intensive" {
-  if (level === "L1") return "light";
+  if (level === "L0.5" || level === "L1") return "light";
   if (level === "L2") return "intensive";
   return "medium";
 }
@@ -363,9 +364,8 @@ export async function generateScreeningQuestions(input: {
   ];
   if (!isRemote) {
     defaultQs.push({
-      text: `This role follows ${arrangementLabel} work arrangement${
-        input.city ? ` based in ${input.city}` : ""
-      }. Are you open to working in this setup?`,
+      text: `This role follows ${arrangementLabel} work arrangement${input.city ? ` based in ${input.city}` : ""
+        }. Are you open to working in this setup?`,
       criteria: `Must be open to ${arrangementLabel} work arrangement`,
     });
   }
