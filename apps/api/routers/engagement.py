@@ -382,6 +382,7 @@ def _enforce_boolean_pre_screen_questions(questions: List[Dict[str, Any]]) -> Li
             **q,
             "question_text": qt,
             "pass_criteria": pc,
+            "is_hard_filter": True,
         })
     return rewritten
 
