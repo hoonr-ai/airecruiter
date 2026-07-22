@@ -3352,7 +3352,26 @@ function NewJobPageContent() {
               <div>
                 <label className="block text-[14px] font-medium text-slate-900 mb-1">Screening Level</label>
                 <p className="text-[13px] text-slate-500 mb-4">How deeply should Hoonr-Curate screen each candidate?</p>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {/* L0.5 */}
+                  <div
+                    className={`flex-1 border-2 rounded-[10px] p-4 cursor-pointer transition-all ${screeningLevel === "L0.5" ? "border-primary bg-[#f5f3ff]" : "border-slate-200 hover:border-primary"}`}
+                    onClick={() => {
+                      setScreeningLevel("L0.5");
+                    }}
+                  >
+                    <div className="flex items-center gap-2 mb-3 flex-wrap">
+                      <span className="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide bg-[#ede9fe] text-[#5b21b6]">L0.5</span>
+                      <span className="font-semibold text-[14px] text-slate-900">Boolean Screen</span>
+                    </div>
+                    <div className="flex flex-col gap-1.5 text-[12px]">
+                      <p className="flex items-start gap-1.5 text-slate-500"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><circle cx="12" cy="12" r="10" strokeWidth="2" /><polyline points="12 6 12 12 16 14" strokeWidth="2" /></svg> ~3–5 min call</p>
+                      <p className="flex items-start gap-1.5 text-slate-500 leading-snug"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg> Availability, location, work authorization, 5 Yes/No skills-fit questions</p>
+                      <p className="flex items-start gap-1.5 text-[#166534] font-medium"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg> Highest volume — ideal for chatbot / telephone pre-screening</p>
+                      <p className="flex items-start gap-1.5 text-[#6b7280]"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM7 9a1 1 0 000 2h6a1 1 0 100-2H7z" clipRule="evenodd" /></svg> Minimal qualifying detail per candidate</p>
+                    </div>
+                  </div>
+
                   {/* L1 */}
                   <div
                     className={`flex-1 border-2 rounded-[10px] p-4 cursor-pointer transition-all ${screeningLevel === "L1" ? "border-primary bg-[#f5f3ff]" : "border-slate-200 hover:border-primary"}`}
@@ -4610,8 +4629,8 @@ function NewJobPageContent() {
       opts.force && !!opts.difficultyMode
         ? (existingRoleSpecificCount > 0
             ? existingRoleSpecificCount
-            : (screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5))
-        : (screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5);
+            : (screeningLevel === "L0.5" ? 5 : screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5))
+        : (screeningLevel === "L0.5" ? 5 : screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5);
     const customQuestions = screenQuestions.filter(
       question => question.category !== "default" && question.category !== "role-specific"
     );
@@ -4671,7 +4690,7 @@ function NewJobPageContent() {
     try {
       const apiUrl = API_BASE;
       const jobRef = numericJobId || jobdivaId || "new";
-      const levelForApi = screeningLevel === "L1" ? "light" : screeningLevel === "L2" ? "intensive" : "medium";
+      const levelForApi = screeningLevel === "L0.5" ? "l0.5" : screeningLevel === "L1" ? "light" : screeningLevel === "L2" ? "intensive" : "medium";
       const requestBody: any = {
         jobTitle: (enhancedTitle || jobTitle || "").trim(),
         jobDescription: (jobPosting || jobData?.description || "").trim(),
