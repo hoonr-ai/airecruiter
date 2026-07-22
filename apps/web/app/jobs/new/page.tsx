@@ -3365,9 +3365,9 @@ function NewJobPageContent() {
                       <span className="font-semibold text-[14px] text-slate-900">Boolean Screen</span>
                     </div>
                     <div className="flex flex-col gap-1.5 text-[12px]">
-                      <p className="flex items-start gap-1.5 text-slate-500"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><circle cx="12" cy="12" r="10" strokeWidth="2" /><polyline points="12 6 12 12 16 14" strokeWidth="2" /></svg> ~2–4 min call</p>
-                      <p className="flex items-start gap-1.5 text-slate-500 leading-snug"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg> Yes/No Boolean questions only</p>
-                      <p className="flex items-start gap-1.5 text-[#166534] font-medium"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg> Perfect for chatbot / telephone pre-screening</p>
+                      <p className="flex items-start gap-1.5 text-slate-500"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><circle cx="12" cy="12" r="10" strokeWidth="2" /><polyline points="12 6 12 12 16 14" strokeWidth="2" /></svg> ~3–5 min call</p>
+                      <p className="flex items-start gap-1.5 text-slate-500 leading-snug"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg> Availability, location, work authorization, 5 Yes/No skills-fit questions</p>
+                      <p className="flex items-start gap-1.5 text-[#166534] font-medium"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg> Highest volume — ideal for chatbot / telephone pre-screening</p>
                       <p className="flex items-start gap-1.5 text-[#6b7280]"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM7 9a1 1 0 000 2h6a1 1 0 100-2H7z" clipRule="evenodd" /></svg> Minimal qualifying detail per candidate</p>
                     </div>
                   </div>
@@ -4629,8 +4629,8 @@ function NewJobPageContent() {
       opts.force && !!opts.difficultyMode
         ? (existingRoleSpecificCount > 0
             ? existingRoleSpecificCount
-            : (screeningLevel === "L0.5" ? 0 : screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5))
-        : (screeningLevel === "L0.5" ? 0 : screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5);
+            : (screeningLevel === "L0.5" ? 5 : screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5))
+        : (screeningLevel === "L0.5" ? 5 : screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5);
     const customQuestions = screenQuestions.filter(
       question => question.category !== "default" && question.category !== "role-specific"
     );

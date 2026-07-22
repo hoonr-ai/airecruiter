@@ -15,7 +15,7 @@ to write depth-probing questions. Questions always include:
   - work-arrangement question (onsite / hybrid; hard-filter if not remote)
   - default-experience overview (total years)
     - N role-specific questions, scaled by screening_level:
-            L0.5=3 (Yes/No boolean only), Light=3, Medium=5, Intensive=7
+            L0.5=5 (Yes/No boolean only), Light=3, Medium=5, Intensive=7
 The frontend still owns the "merge user-edits" flow — we return a fresh
 set and the UI decides how to reconcile.
 """
@@ -79,7 +79,7 @@ def _question_count_for_level(level: str) -> int:
     """Exact number of role-specific questions for a screening level."""
     normalized = (level or "").strip().lower()
     if normalized == "l0.5":
-        return 3  # L0.5 Boolean Screen — Yes/No questions only, same count as L1
+        return 5  # L0.5 Boolean Screen — Yes/No questions only
     if normalized in ("light", "low", "basic", "quick"):
         return 3
     if normalized in ("intensive", "deep", "extensive", "high"):
