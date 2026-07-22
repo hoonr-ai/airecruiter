@@ -322,6 +322,64 @@ def _sanitize_pre_screen_questions_for_pair(
     return sanitized
 
 
+def _is_yes_no_question(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    return normalized.startswith(("are ", "do ", "does ", "did ", "have ", "has ", "is ", "can ", "will ", "would "))
+
+
+def _to_boolean_question_text(text: str) -> str:
+    raw = " ".join(str(text or "").split()).strip()
+    if not raw:
+        return "Do you have hands-on experience relevant to this role?"
+
+    lower = raw.lower()
+    # Keep already-boolean wording intact.
+    if _is_yes_no_question(lower):
+        return raw if raw.endswith("?") else f"{raw}?"
+
+    # Deterministic rewrite for known front-matter regular prompts.
+    if "current or most recent role" in lower:
+        return "Do you have recent experience in a role similar to this position?"
+    if "current location" in lower:
+        return "Are you currently based in the required job region for this role?"
+    if "earliest availability" in lower or "availability to start" in lower:
+        return "Are you available to start within the required timeline for this role?"
+    if "expected compensation" in lower or "salary" in lower or "pay" in lower:
+        return "Are your compensation expectations aligned with this role?"
+    if "working arrangements" in lower and "w2" in lower:
+        return "Are you eligible to work in at least one of these arrangements: W2, Subcontractor, or Independent Contractor?"
+    if "authorized to work" in lower:
+        return "Are you authorized to work indefinitely for any employer in the United States?"
+    if "visa sponsorship" in lower:
+        return "Will you now or in the future require visa sponsorship to continue working in the United States?"
+
+    # Role-specific fallback: map open-ended prompts to a yes/no skill check.
+    skill_match = re.search(r"\bwith\s+([^?.]+)", raw, flags=re.IGNORECASE)
+    if skill_match:
+        skill = skill_match.group(1).strip(" .,:;")
+        if skill:
+            return f"Do you have hands-on experience with {skill}?"
+
+    return "Do you have hands-on experience relevant to this role?"
+
+
+def _enforce_boolean_pre_screen_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    rewritten: List[Dict[str, Any]] = []
+    for q in questions or []:
+        if not isinstance(q, dict):
+            continue
+        qt = _to_boolean_question_text(str(q.get("question_text") or ""))
+        pc = str(q.get("pass_criteria") or "").strip()
+        if not pc:
+            pc = "Pass when candidate confirms relevant experience or eligibility."
+        rewritten.append({
+            **q,
+            "question_text": qt,
+            "pass_criteria": pc,
+        })
+    return rewritten
+
+
 def _extract_pair_error_message(response_data: Dict[str, Any], status_code: int) -> str:
     """Return the most useful PAIR error text for UI surfacing."""
     if not isinstance(response_data, dict):
@@ -609,6 +667,8 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                 }
                 for r in rows
             ]
+            if str(job_row.get("screening_level") or "").strip().lower() == "l0.5":
+                pre_screen_questions_raw = _enforce_boolean_pre_screen_questions(pre_screen_questions_raw)
             pre_screen_questions = _sanitize_pre_screen_questions_for_pair(
                 pre_screen_questions_raw,
                 fallback_job_title=(job_row.get("enhanced_title") or job_row.get("title") or request.job_id),
