@@ -317,6 +317,7 @@ def _sanitize_pre_screen_questions_for_pair(
             "pass_criteria": pass_criteria,
             "is_default": bool(q.get("is_default", True)),
             "category": category,
+            "is_hard_filter": bool(q.get("is_hard_filter", False)),
         })
 
     return sanitized
