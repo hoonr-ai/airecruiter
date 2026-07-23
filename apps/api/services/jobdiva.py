@@ -13,10 +13,11 @@ from html import unescape
 import sqlalchemy
 from sqlalchemy import text
 from core import (
-    JOBDIVA_API_URL, JOBDIVA_CLIENT_ID, JOBDIVA_USERNAME, 
+    JOBDIVA_API_URL, JOBDIVA_CLIENT_ID, JOBDIVA_USERNAME,
     JOBDIVA_PASSWORD, DATABASE_URL, DEBUG_LOG_PATH,
     JOBDIVA_PAIR_RECRUITER_ID
 )
+from services.location_type import resolve_location_type
 
 logger = logging.getLogger(__name__)
 
@@ -1588,24 +1589,35 @@ class JobDivaService:
 
         jd_results = []
 
-        # Must-terms for the server-side AND: prefer the structured skills
-        # payload (wizard chips); fall back to parsing the raw boolean.
+        # Must-terms for the server-side AND. The v2 endpoint ANDs every
+        # element of `skills`, so only genuinely REQUIRED chips belong here —
+        # ANDing a "nice to have" chip silently excludes every candidate who
+        # lacks an optional skill (preferred/excluded chips stay client-side
+        # in the scorer). Fallbacks when the wizard has no must-have chips:
+        # the boolean's top-level AND terms, then at most two preferred chips
+        # (a mild constraint beats posting an unconstrained search).
         max_terms = max(1, int(getattr(_sc, "JOBDIVA_TALENT_MAX_SKILL_TERMS", 4) or 4))
         must_terms: List[str] = []
+        preferred_terms: List[str] = []
         seen_terms = set()
         for skill in skills or []:
             if isinstance(skill, dict):
-                if skill.get("match_type", "must") == "exclude":
+                match_type = str(skill.get("match_type", "must") or "must").lower().replace("_", " ").strip()
+                if match_type in ("exclude", "must not"):
                     continue
                 raw_term = skill.get("value") or skill.get("name") or ""
+                is_preferred = match_type in ("can", "preferred", "nice to have")
             else:
                 raw_term = str(skill)
+                is_preferred = False
             term = sanitize_talent_term(raw_term)
             if term and term.lower() not in seen_terms:
                 seen_terms.add(term.lower())
-                must_terms.append(term)
+                (preferred_terms if is_preferred else must_terms).append(term)
         if not must_terms and boolean_string:
             must_terms = extract_and_terms(boolean_string, max_terms=max_terms)
+        if not must_terms:
+            must_terms = preferred_terms[:2]
         must_terms = must_terms[:max_terms]
 
         base_body: Dict[str, Any] = {
@@ -2964,97 +2976,11 @@ class JobDivaService:
                 else:
                     p_range = ""
                 
-                # Improved Location Type detection - Only use actual location fields, not employment fields
+                # Improved Location Type detection - Only use actual location fields, not employment fields.
+                # JD text is reconciled against the API field (which often wrongly
+                # defaults to "Remote") in the shared services/location_type helper.
                 loc_type_raw = get_field(j, ["location type", "location_type", "onsite_remote", "onsiteremote", "onsite remote", "onSiteRemote"]) or ""
-                val_lower = str(loc_type_raw).lower().strip()
-                
-                loc_type = ""
-                
-                # 1. Look for explicit keywords in the raw location field
-                if "remote" in val_lower:
-                    loc_type = "Remote"
-                elif "hybrid" in val_lower:
-                    loc_type = "Hybrid"
-                elif "onsite" in val_lower or "on-site" in val_lower:
-                    loc_type = "Onsite"
-                elif val_lower:
-                    # 2. Check for employment type contamination if no explicit location word found
-                    employment_terms = [
-                        "direct placement", "contract", "full-time", "part-time", 
-                        "w2", "1099", "c2c", "corp to corp", "open", "pending",
-                        "temporary", "permanent", "temp to perm", "fulltime", "parttime"
-                    ]
-                    if not any(term in val_lower for term in employment_terms):
-                        loc_type = str(loc_type_raw).strip()
-                
-                # 3. Prioritize Job Description over JobDiva API field
-                # JobDiva API often incorrectly defaults to "Remote" when JD says Hybrid/Onsite.
-                desc_lower = description.lower()
-                
-                has_hybrid = False
-                # Only treat "hybrid" as a work-arrangement signal when it appears
-                # near work-context words. Avoid false positives from tech JDs that
-                # say "hybrid cloud", "hybrid architecture", "hybrid environment" etc.
-                _hybrid_work_phrases = [
-                    "hybrid role", "hybrid position", "hybrid work", "hybrid schedule",
-                    "hybrid model", "hybrid arrangement", "hybrid option",
-                    "hybrid setting", "hybrid basis", "hybrid format",
-                    "hybrid working", "hybrid opportunity", "hybrid flexibility",
-                ]
-                _hybrid_tech_phrases = [
-                    "hybrid cloud", "hybrid environment", "hybrid architecture",
-                    "hybrid infrastructure", "hybrid network", "hybrid system",
-                    "hybrid solution", "hybrid deployment", "hybrid setup",
-                    "hybrid approach", "hybrid technology", "hybrid platform",
-                    "hybrid data", "hybrid storage",
-                ]
-                if "hybrid" in desc_lower:
-                    # Has a work-context phrase → definitely hybrid work arrangement
-                    if any(phrase in desc_lower for phrase in _hybrid_work_phrases):
-                        has_hybrid = True
-                    # Only has tech phrases → NOT a work arrangement signal
-                    elif any(phrase in desc_lower for phrase in _hybrid_tech_phrases):
-                        has_hybrid = False
-                    else:
-                        # Ambiguous standalone "hybrid" mention — trust the API field
-                        has_hybrid = ("hybrid" in val_lower)
-                # Tighten onsite matching using regex with word boundaries to avoid false positives like "depending on site conditions"
-                has_onsite = bool(re.search(r'\b(?:onsite|on-site|work\s+on\s+site|working\s+on\s+site|on\s+site\s+(?:work|role|position|basis|location|office|presence|environment|days|requirement|required|mandatory|essential|only))\b', desc_lower))
-
-                # Check for "remote" but carefully exclude negative phrases using word-bounded regex.
-                # e.g. "not a WFH/remote role", "not remote", "no remote", "non-remote"
-                _remote_mention = bool(re.search(r'\bremote\b', desc_lower))
-                _remote_negated = bool(re.search(r'\b(?:not|no|non|never)(?:-|\s+)(?:a\s+|an\s+)?(?:remote|wfh|work\s+from\s+home|(?:wfh/)?remote)\b', desc_lower))
-                has_remote = _remote_mention and not _remote_negated
-                
-                # Determine what the API explicitly said
-                api_loc = ""
-                if "hybrid" in val_lower: api_loc = "Hybrid"
-                elif "remote" in val_lower: api_loc = "Remote"
-                elif "onsite" in val_lower or "on-site" in val_lower: api_loc = "Onsite"
-                
-                # If API and JD both agree on Onsite, trust it — even if "remote" appears
-                # negatively in the JD (e.g. "This is not a WFH/remote role").
-                if api_loc == "Onsite" and has_onsite and not has_hybrid:
-                    loc_type = "Onsite"
-                elif has_hybrid:
-                    loc_type = "Hybrid"
-                elif has_onsite and has_remote:
-                    # Mentions both Onsite and Remote -> usually implies a Hybrid arrangement
-                    loc_type = "Hybrid"
-                elif has_onsite:
-                    loc_type = "Onsite"
-                elif has_remote:
-                    loc_type = "Remote"
-                elif _remote_negated and api_loc == "Remote":
-                    # JD explicitly says "not remote" / "no WFH" but API says Remote.
-                    # The JD overrides the API — the job is clearly NOT remote.
-                    # Default to Onsite since the JD is denying remote without naming an alternative.
-                    loc_type = "Onsite"
-                else:
-                    # JD is silent about location keywords, trust the API field
-                    loc_type = api_loc
-                        
+                loc_type = resolve_location_type(loc_type_raw, description)
                 if not loc_type:
                     loc_type = "Onsite"
                 

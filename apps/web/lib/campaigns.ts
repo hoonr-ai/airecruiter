@@ -9,12 +9,13 @@
 
 import { API_BASE, authFetch } from "@/lib/api";
 
-export type ScreeningLevel = "L1" | "L1.5" | "L2";
+export type ScreeningLevel = "L0.5" | "L1" | "L1.5" | "L2";
 export type EmploymentType = "W2" | "1099" | "C2C" | "Full-Time";
 
 export const EMPLOYMENT_TYPES: EmploymentType[] = ["W2", "1099", "C2C", "Full-Time"];
 
 export const SCREENING_LEVELS: { value: ScreeningLevel; label: string; hint: string }[] = [
+  { value: "L0.5", label: "L0.5", hint: "Boolean Screen" },
   { value: "L1", label: "L1", hint: "Basic Screen" },
   { value: "L1.5", label: "L1.5", hint: "Standard Screen" },
   { value: "L2", label: "L2", hint: "Deep Screen" },
@@ -78,6 +79,12 @@ export interface Campaign {
   selected_job_boards: string[];
   bot_introduction?: string | null;
   outreach_delay_mins?: number | null;
+  phase1_6hr_reminder_hours?: number | null;
+  phase1_to_phase2_hours?: number | null;
+  phase2_to_phase3_hours?: number | null;
+  phase1_6hr_call_delay_mins?: number | null;
+  phase2_call_delay_mins?: number | null;
+  phase3_call_delay_mins?: number | null;
   template_enhanced_title?: string | null;
   template_ai_description?: string | null;
   template_rubric?: Record<string, unknown> | null;
@@ -103,7 +110,13 @@ export interface CampaignCreatePayload {
   work_authorization?: string;
   selected_job_boards?: string[];
   bot_introduction?: string;
-  outreach_delay_mins?: number;
+  outreach_delay_mins?: number | null;
+  phase1_6hr_reminder_hours?: number | null;
+  phase1_to_phase2_hours?: number | null;
+  phase2_to_phase3_hours?: number | null;
+  phase1_6hr_call_delay_mins?: number | null;
+  phase2_call_delay_mins?: number | null;
+  phase3_call_delay_mins?: number | null;
   // Template fields (populated by the campaign wizard in Phase 3)
   template_enhanced_title?: string;
   template_ai_description?: string;
@@ -266,9 +279,10 @@ export interface TemplateQuestion {
 
 const AI_BASE = `${API_BASE}/api/v1/ai-generation`;
 
-// Campaign holds L1|L1.5|L2; the screening-question generator wants
-// light|medium|intensive (mirrors what the jobs wizard sends).
-export function screeningLevelToDepth(level: string): "light" | "medium" | "intensive" {
+// Campaign holds L0.5|L1|L1.5|L2; the screening-question generator wants
+// l0.5|light|medium|intensive (mirrors what the jobs wizard sends).
+export function screeningLevelToDepth(level: string): "l0.5" | "light" | "medium" | "intensive" {
+  if (level === "L0.5") return "l0.5";
   if (level === "L1") return "light";
   if (level === "L2") return "intensive";
   return "medium";
@@ -331,9 +345,9 @@ export async function generateScreeningQuestions(input: {
   totalYears?: number;
 }): Promise<TemplateQuestion[]> {
   const isRemote =
-    /remote/i.test(input.workArrangement ?? "") ||
-    /remote/i.test(input.city ?? "") ||
-    /remote/i.test(input.jobTitle ?? "");
+    /(?:remote|wfh|virtual|telecommute)/i.test(input.workArrangement ?? "") ||
+    /(?:remote|wfh|virtual|telecommute)/i.test(input.city ?? "") ||
+    /(?:remote|wfh|virtual|telecommute)/i.test(input.jobTitle ?? "");
   const arrangementLabel = (input.workArrangement ?? "").toLowerCase().includes("hybrid")
     ? "a hybrid"
     : "an onsite";
@@ -351,9 +365,8 @@ export async function generateScreeningQuestions(input: {
   ];
   if (!isRemote) {
     defaultQs.push({
-      text: `This role follows ${arrangementLabel} work arrangement${
-        input.city ? ` based in ${input.city}` : ""
-      }. Are you open to working in this setup?`,
+      text: `This role follows ${arrangementLabel} work arrangement${input.city ? ` based in ${input.city}` : ""
+        }. Are you open to working in this setup?`,
       criteria: `Must be open to ${arrangementLabel} work arrangement`,
     });
   }

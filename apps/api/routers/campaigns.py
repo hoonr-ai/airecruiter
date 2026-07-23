@@ -45,13 +45,13 @@ _LIST_TEXT_FIELDS = ("recruiter_emails", "selected_employment_types", "selected_
 # JSONB columns holding the shared template payload.
 _JSONB_FIELDS = ("template_rubric", "template_screen_questions", "template_sourcing_filters")
 
-# Full column order used by INSERT/UPSERT. campaign_id first; timestamps are
-# handled by column defaults / CURRENT_TIMESTAMP.
 _COLUMNS = (
     "campaign_id", "name", "customer_name",
     "recruiter_emails", "selected_employment_types", "screening_level",
     "recruiter_notes", "work_authorization", "selected_job_boards", "bot_introduction",
     "outreach_delay_mins",
+    "phase1_6hr_reminder_hours", "phase1_to_phase2_hours", "phase2_to_phase3_hours",
+    "phase1_6hr_call_delay_mins", "phase2_call_delay_mins", "phase3_call_delay_mins",
     "template_enhanced_title", "template_ai_description",
     "template_rubric", "template_screen_questions", "template_sourcing_filters",
     "pair_enabled", "status", "user_session",
@@ -77,6 +77,12 @@ async def init_campaigns_schema():
                         selected_job_boards       TEXT,
                         bot_introduction          TEXT,
                         outreach_delay_mins       INTEGER DEFAULT NULL,
+                        phase1_6hr_reminder_hours REAL DEFAULT NULL,
+                        phase1_to_phase2_hours    REAL DEFAULT NULL,
+                        phase2_to_phase3_hours    REAL DEFAULT NULL,
+                        phase1_6hr_call_delay_mins INTEGER DEFAULT NULL,
+                        phase2_call_delay_mins    INTEGER DEFAULT NULL,
+                        phase3_call_delay_mins    INTEGER DEFAULT NULL,
                         template_enhanced_title   TEXT,
                         template_ai_description   TEXT,
                         template_rubric           JSONB,
@@ -93,7 +99,13 @@ async def init_campaigns_schema():
                 cur.execute(
                     """
                     ALTER TABLE campaigns
-                    ADD COLUMN IF NOT EXISTS outreach_delay_mins INTEGER DEFAULT NULL;
+                    ADD COLUMN IF NOT EXISTS outreach_delay_mins INTEGER DEFAULT NULL,
+                    ADD COLUMN IF NOT EXISTS phase1_6hr_reminder_hours REAL DEFAULT NULL,
+                    ADD COLUMN IF NOT EXISTS phase1_to_phase2_hours REAL DEFAULT NULL,
+                    ADD COLUMN IF NOT EXISTS phase2_to_phase3_hours REAL DEFAULT NULL,
+                    ADD COLUMN IF NOT EXISTS phase1_6hr_call_delay_mins INTEGER DEFAULT NULL,
+                    ADD COLUMN IF NOT EXISTS phase2_call_delay_mins INTEGER DEFAULT NULL,
+                    ADD COLUMN IF NOT EXISTS phase3_call_delay_mins INTEGER DEFAULT NULL;
                     """
                 )
                 conn.commit()
@@ -489,17 +501,19 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
             return
 
         # Mimic Job Wizard / jobdiva.py logic: Prioritize job description over JobDiva API for location type parsing.
-        # If API says Remote (or location_type is Remote), but JD text has no remote mention and city != REMOTE,
-        # then correct loc_type to Onsite (or Hybrid if hybrid is mentioned).
+        # If loc_type says Remote but the JD explicitly denies remote (and never
+        # affirms it) and city != REMOTE, correct to Onsite (or Hybrid if hybrid
+        # is mentioned). Remote signals come from the shared helper, which strips
+        # negation phrases before looking for a positive "remote" mention —
+        # a plain \bremote\b search also matches inside "not a remote role",
+        # which made this correction unreachable.
         import re
+        from services.location_type import detect_remote_signals
         desc_lower = (job_desc or "").lower()
         has_hybrid = bool(re.search(r'\b(?:hybrid\s+(?:role|position|work|schedule|model|arrangement|option|setting|basis|format|working|opportunity|flexibility))\b', desc_lower))
-        has_onsite = bool(re.search(r'\b(?:onsite|on-site|work\s+on\s+site|working\s+on\s+site|on\s+site\s+(?:work|role|position|basis|location|office|presence|environment|days|requirement|required|mandatory|essential|only))\b', desc_lower))
-        _remote_mention = bool(re.search(r'\bremote\b', desc_lower))
-        _remote_negated = bool(re.search(r'\b(?:not|no|non|never)(?:-|\s+)(?:a\s+|an\s+)?(?:remote|wfh|work\s+from\s+home|(?:wfh/)?remote)\b', desc_lower))
-        has_remote = _remote_mention and not _remote_negated
+        _remote_mention, _remote_negated, has_remote = detect_remote_signals(desc_lower)
 
-        if "remote" in (loc_type or "").lower() and not has_remote and (city or "").strip().upper() != "REMOTE":
+        if "remote" in (loc_type or "").lower() and _remote_negated and not _remote_mention and (city or "").strip().upper() != "REMOTE":
             if has_hybrid:
                 loc_type = "Hybrid"
             else:
@@ -863,18 +877,30 @@ async def _create_campaign_job(
             return "role"
         import re
         cleaned = re.sub(r'^(?:(?:US|USA|CAN|CANADA|UK|INDIA|MEX|APAC|EMEA|LATAM|[A-Z]{2,3}(?:\/[A-Z]{2,3})?)\s*[-:/|]\s*)+', '', str(title), flags=re.IGNORECASE).strip()
+        cleaned = re.sub(r'\b(?:remote|onsite|on-site|hybrid|wfh)\b', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip(" -:/|")
         return cleaned or "role"
+
+    def _clean_location_for_intro(loc: str) -> str:
+        if not loc:
+            return "your area"
+        import re
+        cleaned = re.sub(r'\b(?:remote|onsite|on-site|hybrid|wfh)\b', '', str(loc), flags=re.IGNORECASE)
+        cleaned = re.sub(r'\(\s*\)', '', cleaned)
+        cleaned = re.sub(r'\s{2,}', ' ', cleaned).strip(" ,/|")
+        return cleaned or "your area"
 
     raw_intro = campaign.get("bot_introduction") or ""
     child_job_title = (data.get("title") or "").strip()
     campaign_seed_title = (campaign.get("template_enhanced_title") or "").strip()
     raw_title_str = child_job_title or campaign_seed_title or "role"
     job_title_str = _clean_job_title_for_intro(raw_title_str)
-    job_location_str = (
+    raw_loc_str = (
         f"{data.get('city')}, {data.get('state')}".strip(", ")
         if (data.get("city") and data.get("state"))
         else (data.get("city") or data.get("state") or "your area")
     )
+    job_location_str = _clean_location_for_intro(raw_loc_str)
 
     if not raw_intro.strip():
         raw_intro = (

@@ -48,7 +48,6 @@ import {
   UserCheck,
   Lightbulb,
   X,
-  Box,
   Ban,
   Mail,
   MessageSquare,
@@ -185,14 +184,23 @@ function getCandidateLaunchPhone(candidate: any): string {
 function cleanLocationType(locationType: string | null | undefined): string {
   if (!locationType) return "";
 
+  const cleanType = locationType.toLowerCase().trim();
+  if (cleanType.includes("remote") || cleanType.includes("wfh") || cleanType.includes("virtual") || cleanType.includes("telecommute")) {
+    return "Remote";
+  }
+  if (cleanType.includes("hybrid")) {
+    return "Hybrid";
+  }
+  if (cleanType.includes("onsite") || cleanType.includes("on-site")) {
+    return "Onsite";
+  }
+
   const employmentTerms = [
     "direct placement", "contract", "full-time", "part-time",
     "w2", "1099", "c2c", "corp to corp", "open", "pending",
     "temporary", "permanent", "temp to perm", "fulltime", "parttime",
     "consultant", "consulting", "employee", "contractor"
   ];
-
-  const cleanType = locationType.toLowerCase().trim();
 
   // If the location type contains any employment terms, return empty string
   if (employmentTerms.some(term => cleanType.includes(term))) {
@@ -207,8 +215,23 @@ function cleanLocationType(locationType: string | null | undefined): string {
 // AND the JobDiva quirk where city is literally "REMOTE" with location_type empty.
 function isRemoteJob(jd: { location_type?: string | null; city?: string | null } | null | undefined): boolean {
   if (!jd) return false;
-  if ((jd.location_type || "").toLowerCase().includes("remote")) return true;
+  const loc = (jd.location_type || "").toLowerCase();
+  if (loc.includes("remote") || loc.includes("wfh") || loc.includes("virtual") || loc.includes("telecommute")) return true;
   return (jd.city || "").trim().toUpperCase() === "REMOTE";
+}
+
+function cleanJobTitleForIntro(title: string): string {
+  if (!title) return "role";
+  let cleaned = title.trim();
+  cleaned = cleaned.replace(/^(?:US|USA|CAN|CANADA|UK|INDIA|MEX|APAC|EMEA|LATAM|[A-Z]{2,3}(?:\/[A-Z]{2,3})?)\s*[-:/|]\s*/i, "").trim();
+  cleaned = cleaned.replace(/\b(?:remote|onsite|on-site|hybrid|wfh)\b/gi, "").replace(/\s{2,}/g, " ").replace(/^[-:/|\s]+|[-:/|\s]+$/g, "").trim();
+  return cleaned || "role";
+}
+
+function cleanLocationForIntro(location: string, fallback: string = "your area"): string {
+  if (!location) return fallback;
+  let cleaned = location.replace(/\b(?:remote|onsite|on-site|hybrid|wfh)\b/gi, "").replace(/\(\s*\)/g, "").replace(/\s{2,}/g, " ").replace(/^[,/\s]+|[,/\s]+$/g, "").trim();
+  return cleaned || fallback;
 }
 
 function buildAutoBotIntroduction({
@@ -223,16 +246,8 @@ function buildAutoBotIntroduction({
   location: string;
 }): string {
   const introTitle = cleanJobTitleForIntro(title);
-  return isRemote
-    ? `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a remote ${introTitle} based in ${country}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`
-    : `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
-}
-
-function cleanJobTitleForIntro(title: string): string {
-  if (!title) return "role";
-  let cleaned = title.trim();
-  cleaned = cleaned.replace(/^(?:US|USA|CAN|CANADA|UK|INDIA|MEX|APAC|EMEA|LATAM|[A-Z]{2,3}(?:\/[A-Z]{2,3})?)\s*[-:/|]\s*/i, "").trim();
-  return cleaned || "role";
+  const locStr = cleanLocationForIntro(location || country || "your area", country || "your area");
+  return `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${locStr}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
 }
 
 function matchesAutoBotIntroductionTemplate({
@@ -3336,7 +3351,26 @@ function NewJobPageContent() {
               <div>
                 <label className="block text-[14px] font-medium text-slate-900 mb-1">Screening Level</label>
                 <p className="text-[13px] text-slate-500 mb-4">How deeply should Hoonr-Curate screen each candidate?</p>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {/* L0.5 */}
+                  <div
+                    className={`flex-1 border-2 rounded-[10px] p-4 cursor-pointer transition-all ${screeningLevel === "L0.5" ? "border-primary bg-[#f5f3ff]" : "border-slate-200 hover:border-primary"}`}
+                    onClick={() => {
+                      setScreeningLevel("L0.5");
+                    }}
+                  >
+                    <div className="flex items-center gap-2 mb-3 flex-wrap">
+                      <span className="inline-flex items-center justify-center px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide bg-[#ede9fe] text-[#5b21b6]">L0.5</span>
+                      <span className="font-semibold text-[14px] text-slate-900">Boolean Screen</span>
+                    </div>
+                    <div className="flex flex-col gap-1.5 text-[12px]">
+                      <p className="flex items-start gap-1.5 text-slate-500"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><circle cx="12" cy="12" r="10" strokeWidth="2" /><polyline points="12 6 12 12 16 14" strokeWidth="2" /></svg> ~3–5 min call</p>
+                      <p className="flex items-start gap-1.5 text-slate-500 leading-snug"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg> Availability, location, work authorization, 5 Yes/No skills-fit questions</p>
+                      <p className="flex items-start gap-1.5 text-[#166534] font-medium"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg> Highest volume — ideal for chatbot / telephone pre-screening</p>
+                      <p className="flex items-start gap-1.5 text-[#6b7280]"><svg className="w-3 h-3 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM7 9a1 1 0 000 2h6a1 1 0 100-2H7z" clipRule="evenodd" /></svg> Minimal qualifying detail per candidate</p>
+                    </div>
+                  </div>
+
                   {/* L1 */}
                   <div
                     className={`flex-1 border-2 rounded-[10px] p-4 cursor-pointer transition-all ${screeningLevel === "L1" ? "border-primary bg-[#f5f3ff]" : "border-slate-200 hover:border-primary"}`}
@@ -4594,8 +4628,8 @@ function NewJobPageContent() {
       opts.force && !!opts.difficultyMode
         ? (existingRoleSpecificCount > 0
             ? existingRoleSpecificCount
-            : (screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5))
-        : (screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5);
+            : (screeningLevel === "L0.5" ? 5 : screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5))
+        : (screeningLevel === "L0.5" ? 5 : screeningLevel === "L1" ? 3 : screeningLevel === "L2" ? 7 : 5);
     const customQuestions = screenQuestions.filter(
       question => question.category !== "default" && question.category !== "role-specific"
     );
@@ -4606,9 +4640,8 @@ function NewJobPageContent() {
 
     // 1. Bot Introduction
     const introTitle = cleanJobTitleForIntro(enhancedTitle || jobTitle || "role");
-    const intro = isRemote
-      ? `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a remote ${introTitle} based in ${country}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`
-      : `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${location || "your area"}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
+    const locStr = cleanLocationForIntro(location || country || "your area", country || "your area");
+    const intro = `Hi {{candidate name}}, I'm Alex, a virtual recruiter with Pyramid Consulting. We are helping our client recruit for a ${introTitle} in ${locStr}, and you seem to be a good fit for the role. Please note that conversation may be recorded for verification and quality purposes. Do you have about 8-12 minutes to begin the preliminary evaluation process for this role?`;
     setBotIntroduction(prev => (prev && prev.trim().length > 0 && botIntroductionEditedRef.current ? prev : intro));
 
     // 2. Default Questions — arrangement-aware, address-aware. The onsite/hybrid
@@ -4616,16 +4649,22 @@ function NewJobPageContent() {
     // it to a hard filter manually if disqualification should be automatic.
     const availabilityDate = jobData.start_date || 'ASAP';
     const defaultQs: Array<{ text: string; criteria: string; is_hard_filter?: boolean }> = [
-      { text: "Are you open to exploring new job opportunities?", criteria: "Must be open to new job opportunities" },
-      { text: "What is your current or most recent role and key responsibilities?", criteria: "" },
-      { text: "What is your current location?", criteria: "" },
+      { text: "Are you open to exploring new job opportunities?", criteria: "Must be open to new job opportunities" }
     ];
+
+    if (screeningLevel !== "L0.5") {
+      defaultQs.push({ text: "What is your current or most recent role and key responsibilities?", criteria: "" });
+    }
+
+    defaultQs.push({ text: "What is your current location?", criteria: "" });
+
     if (!isRemote) {
       defaultQs.push({
         text: `This role follows ${arrangementLabel} work arrangement based in ${addressStr || location || "the job location"}. Are you open to working in this setup?`,
         criteria: `Must be open to ${arrangementLabel} work arrangement`,
       });
     }
+    
     const availabilityText = "What is your earliest availability to start a new role?";
 
     defaultQs.push(
@@ -4656,7 +4695,7 @@ function NewJobPageContent() {
     try {
       const apiUrl = API_BASE;
       const jobRef = numericJobId || jobdivaId || "new";
-      const levelForApi = screeningLevel === "L1" ? "light" : screeningLevel === "L2" ? "intensive" : "medium";
+      const levelForApi = screeningLevel === "L0.5" ? "l0.5" : screeningLevel === "L1" ? "light" : screeningLevel === "L2" ? "intensive" : "medium";
       const requestBody: any = {
         jobTitle: (enhancedTitle || jobTitle || "").trim(),
         jobDescription: (jobPosting || jobData?.description || "").trim(),
@@ -7959,7 +7998,10 @@ function NewJobPageContent() {
                       // were a gated source, which they aren't.
                       { id: 'jobdiva', label: 'JobDiva Talent', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false },
                       { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: false },
-                      { id: 'dice', label: 'Dice', icon: <Box className="w-4 h-4 text-slate-700" />, disabled: false },
+                      // Dice source hidden from the sourcing switchboard. Backend
+                      // wiring (`Dice` source string, `_search_dice`) is left intact
+                      // so re-enabling is a one-line revert; the results chip below
+                      // self-hides at count 0.
                       { id: 'exa', label: 'Exa', icon: <Search className="w-4 h-4 text-pink-500" />, disabled: false }
                     ].map(source => (
                       <label key={source.id} className={`flex items-center gap-2 ${source.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer group'}`} title={source.disabled ? "Integration coming soon" : ""}>

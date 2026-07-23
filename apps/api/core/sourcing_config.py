@@ -175,6 +175,14 @@ JOBDIVA_TALENT_TITLE_PULL_ENABLED = True
 # unipile_service.search_candidates regardless of the caller's page size.
 UNIPILE_SEARCH_LIMIT = 100
 
+# Max number of skills sent to LinkedIn Recruiter as hard MUST_HAVE (ANDed)
+# requirements per search. LinkedIn ANDs every must-have together, so a high
+# count collapses results — the wizard marks most skills "Must Have", so
+# without this cap a 5-skill job matched almost nobody. Extra must-haves and
+# all preferred terms are sent as CAN_HAVE (OR) instead, which still boosts
+# LinkedIn's ranking. Enforced in unipile_service._search_candidates_once.
+UNIPILE_MUST_HAVE_SKILL_CAP = 2
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # CandidatesDetail batch — concurrency + retry
