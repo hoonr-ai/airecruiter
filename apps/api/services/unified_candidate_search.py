@@ -3038,6 +3038,10 @@ class UnifiedCandidateSearch:
             candidate.get("city", ""),
             candidate.get("state", ""),
             candidate.get("resume_text", ""),
+            # Exa deep-analysis full profile text — richer than the 4k-char
+            # highlights in resume_text; without it the fetched profile never
+            # reaches skill matching.
+            candidate.get("deep_text", ""),
             enhanced.get("candidate_name", ""),
             enhanced.get("job_title", ""),
             enhanced.get("current_location", ""),

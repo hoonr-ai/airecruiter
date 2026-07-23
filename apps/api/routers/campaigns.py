@@ -501,15 +501,17 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
             return
 
         # Mimic Job Wizard / jobdiva.py logic: Prioritize job description over JobDiva API for location type parsing.
-        # If API says Remote (or location_type is Remote), but JD text has no remote mention and city != REMOTE,
-        # then correct loc_type to Onsite (or Hybrid if hybrid is mentioned).
+        # If loc_type says Remote but the JD explicitly denies remote (and never
+        # affirms it) and city != REMOTE, correct to Onsite (or Hybrid if hybrid
+        # is mentioned). Remote signals come from the shared helper, which strips
+        # negation phrases before looking for a positive "remote" mention —
+        # a plain \bremote\b search also matches inside "not a remote role",
+        # which made this correction unreachable.
         import re
+        from services.location_type import detect_remote_signals
         desc_lower = (job_desc or "").lower()
         has_hybrid = bool(re.search(r'\b(?:hybrid\s+(?:role|position|work|schedule|model|arrangement|option|setting|basis|format|working|opportunity|flexibility))\b', desc_lower))
-        has_onsite = bool(re.search(r'\b(?:onsite|on-site|work\s+on\s+site|working\s+on\s+site|on\s+site\s+(?:work|role|position|basis|location|office|presence|environment|days|requirement|required|mandatory|essential|only))\b', desc_lower))
-        _remote_mention = bool(re.search(r'\bremote\b', desc_lower))
-        _remote_negated = bool(re.search(r'\b(?:not|no|non|never)(?:-|\s+)(?:a\s+|an\s+)?(?:remote|wfh|work\s+from\s+home|(?:wfh/)?remote)\b', desc_lower))
-        has_remote = _remote_mention and not _remote_negated
+        _remote_mention, _remote_negated, has_remote = detect_remote_signals(desc_lower)
 
         if "remote" in (loc_type or "").lower() and _remote_negated and not _remote_mention and (city or "").strip().upper() != "REMOTE":
             if has_hybrid:
