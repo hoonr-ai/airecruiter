@@ -670,7 +670,7 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
             jobdiva_id_for_lookup = job_row.get("jobdiva_id") or ""
             job_id_for_lookup = job_row.get("job_id") or request.job_id
             cur.execute("""
-                SELECT question_text, pass_criteria, is_default, category, order_index
+                SELECT question_text, pass_criteria, is_default, category, order_index, is_hard_filter
                 FROM job_screen_questions
                 WHERE jobdiva_id = %s OR jobdiva_id = %s
                 ORDER BY order_index
@@ -683,6 +683,8 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                     "pass_criteria": r["pass_criteria"],
                     "is_default": r["is_default"],
                     "category": r["category"],
+                    "order_index": r["order_index"],
+                    "is_hard_filter": r.get("is_hard_filter", False)
                 }
                 for r in rows
             ]
