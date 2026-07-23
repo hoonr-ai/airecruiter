@@ -291,6 +291,7 @@ def _sanitize_pre_screen_questions_for_pair(
     questions: List[Dict[str, Any]],
     *,
     fallback_job_title: str = "the role",
+    boolean_mode: bool = False,
 ) -> List[Dict[str, Any]]:
     """Normalize pre-screen questions to PAIR schema constraints."""
     sanitized: List[Dict[str, Any]] = []
@@ -312,11 +313,22 @@ def _sanitize_pre_screen_questions_for_pair(
         if len(category) > 50:
             category = category[:50].rstrip()
 
+        is_hard_filter = bool(q.get("is_hard_filter", False))
+        
+        # PRESERVE HISTORICAL PAIRBOT BUG: Pairbot historically ignored hard filters for Q10+
+        # User wants this ignorance to continue for L1/L2, but be respected for L0.5.
+        q_order = int(q.get("order_index", 0) or 0)
+        is_role_specific = q_order > 9 or category not in ("default", "logistics")
+        
+        if not boolean_mode and is_role_specific:
+            is_hard_filter = False
+
         sanitized.append({
             "question_text": text,
             "pass_criteria": pass_criteria,
             "is_default": bool(q.get("is_default", True)),
             "category": category,
+            "is_hard_filter": is_hard_filter,
         })
 
     return sanitized
@@ -382,6 +394,7 @@ def _enforce_boolean_pre_screen_questions(questions: List[Dict[str, Any]]) -> Li
             **q,
             "question_text": qt,
             "pass_criteria": pc,
+            "is_hard_filter": True,
         })
     return rewritten
 
@@ -657,7 +670,7 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
             jobdiva_id_for_lookup = job_row.get("jobdiva_id") or ""
             job_id_for_lookup = job_row.get("job_id") or request.job_id
             cur.execute("""
-                SELECT question_text, pass_criteria, is_default, category, order_index
+                SELECT question_text, pass_criteria, is_default, category, order_index, is_hard_filter
                 FROM job_screen_questions
                 WHERE jobdiva_id = %s OR jobdiva_id = %s
                 ORDER BY order_index
@@ -670,14 +683,18 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                     "pass_criteria": r["pass_criteria"],
                     "is_default": r["is_default"],
                     "category": r["category"],
+                    "order_index": r["order_index"],
+                    "is_hard_filter": r.get("is_hard_filter", False)
                 }
                 for r in rows
             ]
-            if str(job_row.get("screening_level") or "").strip().lower() == "l0.5":
+            is_l05 = str(job_row.get("screening_level") or "").strip().lower() == "l0.5"
+            if is_l05:
                 pre_screen_questions_raw = _enforce_boolean_pre_screen_questions(pre_screen_questions_raw)
             pre_screen_questions = _sanitize_pre_screen_questions_for_pair(
                 pre_screen_questions_raw,
                 fallback_job_title=(job_row.get("enhanced_title") or job_row.get("title") or request.job_id),
+                boolean_mode=is_l05,
             )
 
         cur.close()
@@ -713,6 +730,7 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                     "jobdiva_description": job_row.get("jobdiva_description") or "",
                     "ai_description": job_row.get("ai_description") or "",
                     "recruiter_notes": job_row.get("recruiter_notes") or "",
+                    "is_l05": is_l05,
                 },
                 "rubric": rubric if rubric else {},
                 "pre_screen_questions": pre_screen_questions,
