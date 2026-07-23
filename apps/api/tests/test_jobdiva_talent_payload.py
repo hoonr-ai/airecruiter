@@ -185,3 +185,41 @@ def test_terms_fall_back_to_boolean(monkeypatch):
 def test_radius_clamped_to_100(monkeypatch):
     cap = _run_pool(monkeypatch, skills=["Java"], zip_code="75019", within_miles=80)
     assert cap["base_body"]["withinMiles"] == 100
+
+
+# ── must vs preferred chips in the server-side AND ────────────────────────
+
+def test_preferred_chips_not_anded(monkeypatch):
+    # The server ANDs every element of `skills`; a "nice to have" chip in
+    # that list silently excludes candidates who lack an optional skill.
+    cap = _run_pool(monkeypatch, skills=[
+        {"value": "Java", "match_type": "must"},
+        {"value": "Kafka", "match_type": "preferred"},
+        {"value": "Kubernetes", "match_type": "nice_to_have"},
+        {"value": "Recruiter", "match_type": "exclude"},
+    ])
+    assert cap["must_terms"] == ["Java"]
+
+
+def test_preferred_only_falls_back_to_top_two(monkeypatch):
+    cap = _run_pool(monkeypatch, skills=[
+        {"value": "Kafka", "match_type": "preferred"},
+        {"value": "Flink", "match_type": "can"},
+        {"value": "Beam", "match_type": "preferred"},
+    ])
+    assert cap["must_terms"] == ["Kafka", "Flink"]
+
+
+def test_boolean_beats_preferred_fallback(monkeypatch):
+    cap = _run_pool(
+        monkeypatch,
+        skills=[{"value": "Kafka", "match_type": "preferred"}],
+        boolean_string='"Java" AND "Spring"',
+    )
+    assert cap["must_terms"] == ["Java", "Spring"]
+
+
+def test_plain_string_skills_still_anded(monkeypatch):
+    # Legacy callers pass bare strings — treated as required, as before.
+    cap = _run_pool(monkeypatch, skills=["Java", "Spring Boot"])
+    assert cap["must_terms"] == ["Java", "Spring Boot"]
