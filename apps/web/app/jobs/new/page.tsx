@@ -48,7 +48,6 @@ import {
   UserCheck,
   Lightbulb,
   X,
-  Box,
   Ban,
   Mail,
   MessageSquare,
@@ -7999,7 +7998,10 @@ function NewJobPageContent() {
                       // were a gated source, which they aren't.
                       { id: 'jobdiva', label: 'JobDiva Talent', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false },
                       { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: false },
-                      { id: 'dice', label: 'Dice', icon: <Box className="w-4 h-4 text-slate-700" />, disabled: false },
+                      // Dice source hidden from the sourcing switchboard. Backend
+                      // wiring (`Dice` source string, `_search_dice`) is left intact
+                      // so re-enabling is a one-line revert; the results chip below
+                      // self-hides at count 0.
                       { id: 'exa', label: 'Exa', icon: <Search className="w-4 h-4 text-pink-500" />, disabled: false }
                     ].map(source => (
                       <label key={source.id} className={`flex items-center gap-2 ${source.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer group'}`} title={source.disabled ? "Integration coming soon" : ""}>

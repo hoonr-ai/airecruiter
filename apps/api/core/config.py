@@ -297,6 +297,13 @@ SOURCE_TIER_BONUS = {
     "VettedDB": int(get_env_with_default("SOURCE_TIER_BONUS_VETTED", "2")),
 }
 
+# Small additive match_score bonus for candidates confirmed "open to work"
+# (the real Apify-backed LinkedIn #OpenToWork signal — see
+# services/apify_open_to_work.py). Applied in finalize_candidate on top of the
+# rubric score, only when base_score > 0. Kept modest (a tie-breaker nudge, not
+# a re-rank) and in line with SOURCE_TIER_BONUS magnitudes.
+OPEN_TO_WORK_SCORE_BONUS = int(get_env_with_default("OPEN_TO_WORK_SCORE_BONUS", "5"))
+
 # JobAgent rank → match_score floor. JobDiva's JobAgent returns candidates
 # ranked by their own relevance matcher; api_rank is 0-based, with 0 = top
 # pick. Recruiters trust JobDiva's ranking — our rubric-literal-match

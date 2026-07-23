@@ -28,6 +28,7 @@ from core.config import (
     SCORING_PARSING_GAP_FLOOR,
     SCORING_COVERAGE_BLEND_THRESHOLD,
     SOURCE_TIER_BONUS,
+    OPEN_TO_WORK_SCORE_BONUS,
     JOBAGENT_RANK_SCORE_FLOOR,
     EMBEDDING_SKILL_MATCH,
     EMBEDDING_MATCH_THRESHOLD,
@@ -174,6 +175,35 @@ class SearchCriteria(BaseModel):
             seen.add(key)
             values.append(value)
         return values
+
+    def sourcing_skills_with_priority(self) -> List[Dict[str, str]]:
+        """Like sourcing_skill_values, but each term keeps a coarse priority
+        ('Must Have' | 'Preferred') derived from its rubric match_type.
+
+        Lets the Unipile layer map required-vs-optional onto LinkedIn
+        MUST_HAVE / CAN_HAVE instead of ANDing every term together — sending
+        everything as MUST_HAVE collapsed searches to ~1 result. Skills come
+        before titles so the downstream MUST_HAVE cap fills from the more
+        reliably-resolvable skill terms first. Excludes/empties dropped;
+        deduped by lowercased value (first occurrence wins)."""
+        out: List[Dict[str, str]] = []
+        seen = set()
+        for item in (self.skill_criteria or []) + (self.title_criteria or []):
+            if not isinstance(item, dict):
+                continue
+            match_type = str(item.get("match_type", "must") or "must").lower().replace("_", " ").strip()
+            if match_type in {"exclude", "must not"}:
+                continue
+            value = str(item.get("value", "")).strip()
+            if not value:
+                continue
+            key = value.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            priority = "Preferred" if match_type in {"can", "preferred", "nice to have"} else "Must Have"
+            out.append({"value": value, "priority": priority})
+        return out
 
     def skill_only_values(self) -> List[str]:
         """Plain skill strings from skill_criteria ONLY (titles excluded).
@@ -461,6 +491,20 @@ class UnifiedCandidateSearch:
                     prev_score = cand["match_score"]
                     cand["match_score"] = min(100, prev_score + title_boost)
                     cand["match_score_details"]["title_boost"] = title_boost
+
+            # Open-to-Work boost. Candidates confirmed open to work (the real
+            # Apify #OpenToWork signal, resolved for LinkedIn sources) get a
+            # small tie-breaker bump — an actively-job-seeking match is more
+            # actionable than an identical passive one. Only when the signal is
+            # explicitly True (not "checking"/unknown) and base_score > 0, so a
+            # hard-vetoed candidate is never promoted. For candidates whose
+            # status resolves asynchronously after this scoring pass (cold Apify
+            # cache), the UI still shows the badge via polling; the score bump
+            # lands on the warm path / subsequent searches.
+            if base_score > 0 and OPEN_TO_WORK_SCORE_BONUS and cand.get("open_to_work") is True:
+                prev_score = cand["match_score"]
+                cand["match_score"] = min(100, prev_score + OPEN_TO_WORK_SCORE_BONUS)
+                cand["match_score_details"]["open_to_work_bonus"] = OPEN_TO_WORK_SCORE_BONUS
 
             # Candidate-details failure: when the JobDiva detail/résumé fetch or
             # LLM extraction yielded no real data (detail_failed), we can't fairly
@@ -5113,11 +5157,12 @@ class UnifiedCandidateSearch:
 
     async def _search_linkedin(self, criteria: SearchCriteria) -> Dict[str, Any]:
         try:
-            # Unipile expects skills as a list of dicts or strings. Derive from
-            # skill_criteria + title_criteria so callers don't have to send a
-            # redundant flat list.
-            skill_values = criteria.sourcing_skill_values()
-            skills = [{"value": s, "priority": "Must Have"} for s in skill_values]
+            # Unipile expects skills as a list of dicts. Carry each term's real
+            # rubric priority (Must Have vs Preferred) so the Unipile layer can
+            # AND only the genuine requirements and OR the rest — stamping every
+            # term "Must Have" here was ANDing all of them on LinkedIn Recruiter
+            # and collapsing the result set to ~1 profile.
+            skills = criteria.sourcing_skills_with_priority()
             candidates = await self.unipile_service.search_candidates(
                 skills=skills,
                 location=self._search_location_for_source(criteria),
@@ -5127,6 +5172,28 @@ class UnifiedCandidateSearch:
                     criteria.boolean_string or self._build_boolean_string(criteria)
                 ),
             )
+
+            # Open-to-Work enrichment via Apify (same path as Exa). Unipile
+            # candidates carry a `profile_url`, so the resolver treats them
+            # identically: cache-first fill of `open_to_work`, background
+            # fetch for the rest which the frontend resolves by polling
+            # /candidates/open-to-work-statuses. This is the real per-candidate
+            # signal that replaced the old literal-keyword hack in unipile.py.
+            if criteria.open_to_work and candidates:
+                try:
+                    from services.apify_open_to_work import (
+                        annotate as _otw_annotate,
+                        enqueue as _otw_enqueue,
+                    )
+                    pending_urls = await _otw_annotate(candidates)
+                    logger.info(
+                        "Unipile OTW: %d candidates, %d need Apify lookup",
+                        len(candidates),
+                        len(pending_urls),
+                    )
+                    await _otw_enqueue(pending_urls)
+                except Exception as otw_exc:
+                    logger.warning(f"Unipile OTW enrichment skipped: {otw_exc}", exc_info=True)
 
             candidates = self._drop_client_employees(
                 candidates, criteria, "LinkedIn-Unipile"
