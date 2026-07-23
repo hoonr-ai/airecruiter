@@ -730,6 +730,7 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
                     "jobdiva_description": job_row.get("jobdiva_description") or "",
                     "ai_description": job_row.get("ai_description") or "",
                     "recruiter_notes": job_row.get("recruiter_notes") or "",
+                    "is_l05": is_l05,
                 },
                 "rubric": rubric if rubric else {},
                 "pre_screen_questions": pre_screen_questions,
