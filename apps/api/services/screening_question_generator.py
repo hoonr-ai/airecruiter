@@ -677,7 +677,7 @@ async def generate_screening_questions(
             "category": "logistics",
             "related_skill": "",
             "is_default": True,
-            "is_hard_filter": True,
+            "is_hard_filter": boolean_mode,  # L0.5: qualifying gate (Q3); L1/L2: informational background
             "order_index": 2,
         })
 
@@ -980,10 +980,17 @@ async def generate_screening_questions(
             })
 
     # Re-index role-specific entries to sit after the front-matter.
+    # For L0.5 (boolean_mode), only questions at offset ≥ 5 are qualifying hard filters.
+    # The first 5 role-specific questions (offsets 0–4) are background/informational:
+    #   Hybrid (base=3): offsets 0-4 → order_index 3-7 → question_orders 4-8  (background)
+    #                    offsets 5+  → order_index 8+  → question_orders 9+   (qualifying)
+    #   Remote  (base=2): offsets 0-4 → order_index 2-6 → question_orders 3-7  (background)
+    #                    offsets 5+  → order_index 7+  → question_orders 8+   (qualifying)
+    # For L1/L2 (not boolean_mode), role-specific questions are never hard filters.
     base_index = len(questions)
     for offset, q in enumerate(role_specific):
         if boolean_mode:
-            q["is_hard_filter"] = True
+            q["is_hard_filter"] = offset >= 5
         q["order_index"] = base_index + offset
         questions.append(q)
 
