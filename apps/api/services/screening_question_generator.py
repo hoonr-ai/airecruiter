@@ -625,7 +625,7 @@ async def generate_screening_questions(
         "category": "default",
         "related_skill": "",
         "is_default": True,
-        "is_hard_filter": False,
+        "is_hard_filter": True,  # Q1 is always a qualifying gate for all interview levels
         "order_index": 0,
     })
 
@@ -986,11 +986,16 @@ async def generate_screening_questions(
     #                    offsets 5+  → order_index 8+  → question_orders 9+   (qualifying)
     #   Remote  (base=2): offsets 0-4 → order_index 2-6 → question_orders 3-7  (background)
     #                    offsets 5+  → order_index 7+  → question_orders 8+   (qualifying)
-    # For L1/L2 (not boolean_mode), role-specific questions are never hard filters.
+    # For L1/L2 hybrid (not boolean_mode, not remote), the first role-specific question
+    # (offset 0, question_order 4) is a qualifying hard filter per the classification table.
+    # For L1/L2 remote, no role-specific question is qualifying (only Q1 is).
+    is_remote_role = _is_remote_role(work_arrangement, city)
     base_index = len(questions)
     for offset, q in enumerate(role_specific):
         if boolean_mode:
             q["is_hard_filter"] = offset >= 5
+        elif not is_remote_role and offset == 0:
+            q["is_hard_filter"] = True  # L1/L2 hybrid Q4: first role-specific is qualifying
         q["order_index"] = base_index + offset
         questions.append(q)
 
