@@ -369,7 +369,7 @@ def _get_default_campaign_questions() -> List[Dict[str, Any]]:
             "category": "default",
             "related_skill": "",
             "is_default": True,
-            "is_hard_filter": False,
+            "is_hard_filter": True,
             "order_index": 0,
         },
         {

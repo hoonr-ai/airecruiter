@@ -98,10 +98,10 @@ def resolve_location_type(api_field_value: str, description: str) -> str:
     remote_mention, remote_negated, has_remote = detect_remote_signals(desc_lower)
 
     api_loc = ""
-    if "hybrid" in val_lower:
-        api_loc = "Hybrid"
-    elif any(k in val_lower for k in ("remote", "wfh", "virtual", "telecommute")):
+    if any(k in val_lower for k in ("remote", "wfh", "virtual", "telecommute")):
         api_loc = "Remote"
+    elif "hybrid" in val_lower:
+        api_loc = "Hybrid"
     elif "onsite" in val_lower or "on-site" in val_lower:
         api_loc = "Onsite"
 

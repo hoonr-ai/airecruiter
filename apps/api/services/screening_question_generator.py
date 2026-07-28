@@ -625,7 +625,13 @@ async def generate_screening_questions(
         "category": "default",
         "related_skill": "",
         "is_default": True,
-        "is_hard_filter": False,
+        # Q1 only gates where it is actually a gate. In boolean_mode (L0.5) it asks
+        # "are you available and open to a new opportunity?" — a clean yes/no, so it
+        # qualifies. For L1/L2 it is the open-ended rapport opener ("introduce
+        # yourself"), whose pass_criteria is a subjective delivery judgment (60-90s,
+        # mentions title/team/focus); hard-filtering on that rejects well-qualified
+        # candidates for a short intro, so it stays informational.
+        "is_hard_filter": boolean_mode,
         "order_index": 0,
     })
 
@@ -677,6 +683,11 @@ async def generate_screening_questions(
             "category": "logistics",
             "related_skill": "",
             "is_default": True,
+            # Commute willingness is the one objective, unambiguous gate available on a
+            # non-remote role, so it qualifies at every level. Scoping it to L0.5 left
+            # L1/L2 with no enforced gate at all: the role-specific question intended to
+            # replace it is stripped from the Pairbot payload by
+            # _sanitize_pre_screen_questions_for_pair (see routers/engagement.py).
             "is_hard_filter": True,
             "order_index": 2,
         })
@@ -980,10 +991,22 @@ async def generate_screening_questions(
             })
 
     # Re-index role-specific entries to sit after the front-matter.
+    # For L0.5 (boolean_mode), only questions at offset ≥ 5 are qualifying hard filters.
+    # The first 5 role-specific questions (offsets 0–4) are background/informational:
+    #   Hybrid (base=3): offsets 0-4 → order_index 3-7 → question_orders 4-8  (background)
+    #                    offsets 5+  → order_index 8+  → question_orders 9+   (qualifying)
+    #   Remote  (base=2): offsets 0-4 → order_index 2-6 → question_orders 3-7  (background)
+    #                    offsets 5+  → order_index 7+  → question_orders 8+   (qualifying)
+    # For L1/L2 no role-specific question is qualifying. Deliberately so: Pairbot has
+    # always ignored hard filters on L1/L2 role-specific questions, and
+    # _sanitize_pre_screen_questions_for_pair (routers/engagement.py) preserves that by
+    # clearing the flag on every role-specific entry when not in boolean_mode. Setting
+    # it here would be dead — the objective L1/L2 gate is the work-arrangement question
+    # above. Don't mark one here without carving out the matching exception downstream.
     base_index = len(questions)
     for offset, q in enumerate(role_specific):
         if boolean_mode:
-            q["is_hard_filter"] = True
+            q["is_hard_filter"] = offset >= 5
         q["order_index"] = base_index + offset
         questions.append(q)
 

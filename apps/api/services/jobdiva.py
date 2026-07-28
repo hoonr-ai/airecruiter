@@ -2980,7 +2980,8 @@ class JobDivaService:
                 # JD text is reconciled against the API field (which often wrongly
                 # defaults to "Remote") in the shared services/location_type helper.
                 loc_type_raw = get_field(j, ["location type", "location_type", "onsite_remote", "onsiteremote", "onsite remote", "onSiteRemote"]) or ""
-                loc_type = resolve_location_type(loc_type_raw, description)
+                city_raw = _clean_location_field(get_field(j, ["city", "jobCity", "locationCity", "worksitecity"])) or ""
+                loc_type = resolve_location_type(f"{loc_type_raw} {city_raw}".strip(), description)
                 if not loc_type:
                     loc_type = "Onsite"
                 
