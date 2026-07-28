@@ -318,7 +318,10 @@ def _sanitize_pre_screen_questions_for_pair(
         # PRESERVE HISTORICAL PAIRBOT BUG: Pairbot historically ignored hard filters for Q10+
         # User wants this ignorance to continue for L1/L2, but be respected for L0.5.
         q_order = int(q.get("order_index", 0) or 0)
-        is_role_specific = q_order > 9 or category not in ("default", "logistics")
+        # Compare case-insensitively: _enforce_boolean_pre_screen_questions lowercases
+        # before the same check, so a capitalized stored category (e.g. "Default") would
+        # otherwise make the two functions disagree about what is role-specific.
+        is_role_specific = q_order > 9 or category.lower() not in ("default", "logistics")
         
         if not boolean_mode and is_role_specific:
             is_hard_filter = False
