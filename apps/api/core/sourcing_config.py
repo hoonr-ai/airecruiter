@@ -170,6 +170,29 @@ JOBDIVA_TALENT_MAX_SKILL_TERMS = 4
 # a separate pull merged by candidateId).
 JOBDIVA_TALENT_TITLE_PULL_ENABLED = True
 
+# Max distinct titleSearch pulls per TalentSearch. Recruiters' hand-written
+# agent strings OR several role variants; the structured titleSearch field
+# carries exactly one string, so we approximate the OR with up to N separate
+# pulls (primary title chip first, then its selected similar titles, then
+# further title chips), merged by candidateId. Each pull is one API call.
+JOBDIVA_TALENT_TITLE_PULL_MAX_TITLES = 3
+
+# Minimum match_score for a JobDiva-TalentSearch row to stay visible on
+# Step 5. TalentSearch queries are machine-generated (top skills AND'd +
+# title pulls) and the long tail below this bar is noise recruiters have to
+# wade through. Sub-threshold rows are removed via a `dropped` patch after
+# scoring. Applies ONLY to JobDiva-TalentSearch: JobAgent results reflect
+# recruiter-authored criteria inside JobDiva and are never dropped, and
+# unscoreable rows (detail_failed → "Limited data") are always kept.
+JOBDIVA_TALENTSEARCH_MIN_SCORE = 60
+
+# High-level scoring for JobDiva-JobAgent results. The JobAgent criteria
+# are authored by recruiters inside JobDiva and its matcher pre-ranks the
+# results, so the expensive per-candidate LLM skills-match adds little —
+# skip it and score on the cheap signals (title/skills/location/rank floor).
+# The UI labels these rows "JobDiva agent search" with a high-level score.
+JOBAGENT_HIGH_LEVEL_SCORING = True
+
 # Per-search result cap for Unipile LinkedIn Recruiter searches. Protects
 # the attached LinkedIn accounts from rate/abuse flags; enforced inside
 # unipile_service.search_candidates regardless of the caller's page size.
@@ -298,3 +321,22 @@ try:
     EXA_AGENT_CONCURRENCY = int(_os.getenv("EXA_AGENT_CONCURRENCY", "1").strip() or "1")
 except ValueError:
     EXA_AGENT_CONCURRENCY = 1
+
+# Exa Agent as the sourcing-time contact fallback for LinkedIn-sourced
+# candidates. ZoomInfo can't match by LinkedIn URL (name→personId only) and
+# Apollo credits run dry, so URL-only LinkedIn/Exa candidates were streaming
+# in with no contact info until the recruiter clicked enrich. When True,
+# `enrich_contact_for_sourcing` falls through to the Exa Agent contact run
+# (still gated by EXA_CONTACT_ENRICH_ENABLED + EXA_API_KEY) for LinkedIn-*
+# sources. Capped per job by EXA_SOURCING_CONTACT_CAP to bound spend
+# (~$0.115/run).
+EXA_SOURCING_CONTACT_FALLBACK = _os.getenv(
+    "EXA_SOURCING_CONTACT_FALLBACK", "true"
+).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+
+try:
+    EXA_SOURCING_CONTACT_CAP = int(
+        _os.getenv("EXA_SOURCING_CONTACT_CAP", "25").strip() or "25"
+    )
+except ValueError:
+    EXA_SOURCING_CONTACT_CAP = 25

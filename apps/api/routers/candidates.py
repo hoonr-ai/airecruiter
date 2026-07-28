@@ -2043,6 +2043,16 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             seed_email = str(existing_rows[0].get("email") or "").strip()
         if not seed_phone:
             seed_phone = str(existing_rows[0].get("phone") or "").strip()
+    # Synthetic JobDiva placeholders (Auto_*@jobdiva.com etc.) are not real
+    # contact info — treating one as a seed short-circuits the chain before
+    # Apollo/Exa ever look for a genuine address, and it can't be messaged.
+    from services.jobdiva import _is_placeholder_email
+    if seed_email and _is_placeholder_email(seed_email):
+        logger.info(
+            "enrich_contact: ignoring synthetic seed email %s for %s",
+            seed_email, candidate_id,
+        )
+        seed_email = ""
 
     def _have_email_and_phone() -> bool:
         have_email = bool(seed_email) or bool(str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip())

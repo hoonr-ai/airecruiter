@@ -9334,6 +9334,7 @@ function NewJobPageContent() {
                           jobdivaCandidateId:
                             candidate.jobdiva_candidate_id ?? candidate.data?.jobdiva_candidate_id,
                           source: candidate.source,
+                          scoringMode: candidate.scoring_mode,
                         });
                         setDetailsModalOpen(true);
                       }}
@@ -10034,6 +10035,7 @@ return (
         explainability={selectedCandidateForDetails.explainability}
         jobdivaCandidateId={selectedCandidateForDetails.jobdivaCandidateId}
         source={selectedCandidateForDetails.source}
+        scoringMode={selectedCandidateForDetails.scoringMode}
         onClose={() => {
           setDetailsModalOpen(false);
           setSelectedCandidateForDetails(null);

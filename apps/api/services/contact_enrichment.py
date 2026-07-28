@@ -115,6 +115,32 @@ _JOB_ENRICH_COUNTERS: Dict[str, int] = {}
 _JOB_ENRICH_LOCK = asyncio.Lock()
 PER_JOB_CAP = 50
 
+# Separate, tighter budget for the Exa Agent fallback (paid ~$0.115/run and
+# slow — it polls). Counted per job, independent of the ZoomInfo/Apollo cap
+# so a burst of Exa runs can't starve the cheap providers or vice versa.
+# Like PER_JOB_CAP this is per-uvicorn-worker in-process state — a search
+# request streams entirely on one worker, so one search sees one budget;
+# re-runs landing on other workers get a fresh one (bounded worst case:
+# workers × cap).
+_JOB_EXA_COUNTERS: Dict[str, int] = {}
+
+# Exa enforces ~1/5-of-QPS concurrency on Agent runs (≥3 simultaneous runs
+# start 429ing on the default account). The sourcing fallback runs outside
+# _PROVIDER_SEMAPHORE (its slow polling would starve the cheap chain), so it
+# gets its own bound, sized from EXA_AGENT_CONCURRENCY.
+def _exa_semaphore() -> asyncio.Semaphore:
+    global _EXA_SEMAPHORE
+    if _EXA_SEMAPHORE is None:
+        try:
+            from core import sourcing_config as _sc
+            limit = max(1, int(getattr(_sc, "EXA_AGENT_CONCURRENCY", 1) or 1))
+        except Exception:
+            limit = 1
+        _EXA_SEMAPHORE = asyncio.Semaphore(limit)
+    return _EXA_SEMAPHORE
+
+_EXA_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
 _LINKEDIN_PROFILE_RE = re.compile(r"linkedin\.com/in/", re.IGNORECASE)
 
 
@@ -749,12 +775,15 @@ async def zoominfo_enrich_by_name(candidate_id: str, full_name: str) -> Dict[str
 def reset_job_counter(jobdiva_id: str) -> None:
     """Tests / explicit job-restart can clear the per-job cap counter."""
     _JOB_ENRICH_COUNTERS.pop(jobdiva_id, None)
+    _JOB_EXA_COUNTERS.pop(jobdiva_id, None)
 
 
 async def enrich_contact_for_sourcing(
     linkedin_url: str,
     jobdiva_id: Optional[str] = None,
     full_name: Optional[str] = None,
+    include_exa: bool = False,
+    company: str = "",
 ) -> Dict[str, Any]:
     """First-hit-wins sourcing-time enrichment.
 
@@ -763,8 +792,8 @@ async def enrich_contact_for_sourcing(
       - the kill switch CONTACT_ENRICHMENT_INLINE_ENABLED is "false"
       - the per-job cap has been reached
       - linkedin_url is not a LinkedIn profile URL
-      - both ZoomInfo and Apollo returned no usable fields
-      - either provider call raised (logged at WARN, swallowed)
+      - every attempted provider returned no usable fields
+      - a provider call raised (logged at WARN, swallowed)
 
     Args:
         linkedin_url: candidate's LinkedIn profile URL. Used for the Apollo
@@ -774,6 +803,13 @@ async def enrich_contact_for_sourcing(
             the new Data API doesn't accept `linkedinUrl` as a match input,
             so we need firstName + lastName for ContactSearch. If empty, the
             ZoomInfo step is skipped and we go straight to Apollo.
+        include_exa: when True, fall through to an Exa Agent contact run
+            after ZoomInfo + Apollo both miss. LinkedIn-sourced candidates
+            need this: ZoomInfo can't match by URL and Apollo credits run
+            dry, so URL-only profiles otherwise stream in contactless.
+            Gated by EXA_SOURCING_CONTACT_FALLBACK + EXA_CONTACT_ENRICH_ENABLED
+            and capped per job at EXA_SOURCING_CONTACT_CAP.
+        company: candidate's current company, sharpens the Exa Agent query.
     """
     if os.getenv("CONTACT_ENRICHMENT_INLINE_ENABLED", "true").strip().lower() != "true":
         return {}
@@ -829,6 +865,47 @@ async def enrich_contact_for_sourcing(
                 "mobilePhone": fields.get("mobilePhone", ""),
                 "workPhone": fields.get("workPhone", ""),
                 "provider_used": "apollo",
+            }
+
+    # Exa Agent fallback — outside the provider semaphore (it has its own
+    # slow polling loop and per-job budget; holding a ZoomInfo/Apollo slot
+    # for up to EXA_CONTACT_ENRICH_TIMEOUT_S would starve the cheap chain).
+    if include_exa:
+        from core import sourcing_config as _sc
+
+        if not getattr(_sc, "EXA_SOURCING_CONTACT_FALLBACK", True):
+            return {}
+        exa_cap = max(0, int(getattr(_sc, "EXA_SOURCING_CONTACT_CAP", 25) or 0))
+        async with _JOB_ENRICH_LOCK:
+            exa_used = _JOB_EXA_COUNTERS.get(job_key, 0)
+            if exa_used >= exa_cap:
+                if exa_used == exa_cap:
+                    logger.info(
+                        "contact_enrichment: per-job Exa cap (%d) reached for %s",
+                        exa_cap, job_key,
+                    )
+                    _JOB_EXA_COUNTERS[job_key] = exa_used + 1
+                return {}
+            _JOB_EXA_COUNTERS[job_key] = exa_used + 1
+
+        try:
+            async with _exa_semaphore():
+                exa_result = await exa_enrich_by_linkedin(
+                    job_key, linkedin_url, full_name or "", company or ""
+                )
+        except Exception as e:
+            logger.warning("contact_enrichment Exa path raised for %s: %s", job_key, e)
+            exa_result = {"ok": False}
+
+        if exa_result.get("ok") and _has_usable_field(exa_result.get("fields") or {}):
+            fields = exa_result["fields"]
+            logger.info("contact_enrichment: exa hit for %s", job_key)
+            return {
+                "workEmail": fields.get("workEmail", ""),
+                "personalEmail": fields.get("personalEmail", ""),
+                "mobilePhone": fields.get("mobilePhone", ""),
+                "workPhone": fields.get("workPhone", ""),
+                "provider_used": "exa",
             }
 
     return {}

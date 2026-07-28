@@ -41,6 +41,9 @@ interface CandidateDetailsModalProps {
   explainability?: string[];
   jobdivaCandidateId?: string;
   source?: string;
+  /** "high_level" when the backend skipped the detailed AI skills match
+   *  (JobDiva agent-search results are scored on cheap signals only). */
+  scoringMode?: string;
 }
 
 /** Title-case a string: "cloud security engineer" → "Cloud Security Engineer" */
@@ -155,12 +158,18 @@ function CandidateDetailsModalBase({
   explainability,
   jobdivaCandidateId,
   source,
+  scoringMode,
 }: CandidateDetailsModalProps) {
   const isLinkedIn = profileUrl?.includes("linkedin.com");
   const showJobDivaLink = !!jobdivaCandidateId && !!source && source.startsWith("JobDiva");
   const jobDivaUrl = showJobDivaLink
     ? buildJobDivaCandidateUrl(jobdivaCandidateId)
     : null;
+  // JobDiva agent-search rows carry a high-level score only (no detailed AI
+  // skills match). Fall back on the source string for rows cached before
+  // scoring_mode existed.
+  const isAgentHighLevel =
+    scoringMode === "high_level" || source === "JobDiva-JobAgent";
 
   const formattedTitle = toTitleCase(jobTitle || "");
   const formattedLocation = formatLocation(location || "");
@@ -175,7 +184,11 @@ function CandidateDetailsModalBase({
 
   const topMatches = (matchedSkills || []).slice(0, 8);
   const topMissing = (missingSkills || []).slice(0, 8);
-  const summary = explainability?.[0];
+  // The banner already states the high-level provenance — surface the next
+  // useful explainability line instead of repeating it.
+  const summary = isAgentHighLevel
+    ? (explainability || []).find((l) => !l.startsWith("High-level score"))
+    : explainability?.[0];
   const initials = candidateName
     .split(" ")
     .map((n) => n[0])
@@ -260,6 +273,23 @@ function CandidateDetailsModalBase({
         {/* ── Scrollable body ── */}
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5 bg-[#fafafa]">
 
+          {/* JobDiva agent-search provenance */}
+          {isAgentHighLevel && (
+            <div className="flex items-start gap-2.5 bg-[#fff7ed] border border-[#fed7aa] rounded-xl px-4 py-3">
+              <ExternalLink className="w-3.5 h-3.5 text-[#c2410c] mt-0.5 shrink-0" />
+              <div>
+                <p className="text-[12.5px] text-slate-800 leading-relaxed font-bold">
+                  Matched by JobDiva Agent Search
+                </p>
+                <p className="text-[12px] text-slate-600 leading-relaxed font-medium">
+                  This candidate was found by the recruiter-configured search agent in
+                  JobDiva. The score shown is a high-level estimate — the detailed AI
+                  skills analysis is skipped for agent-search results.
+                </p>
+              </div>
+            </div>
+          )}
+
           {/* AI Summary */}
           {summary && (
             <div className="flex items-start gap-2.5 bg-indigo-50/80 border border-indigo-100 rounded-xl px-4 py-3">
@@ -268,8 +298,8 @@ function CandidateDetailsModalBase({
             </div>
           )}
 
-          {/* Score breakdown */}
-          {scoreEntries.length > 0 && (
+          {/* Score breakdown — hidden for agent-search rows (high-level score only) */}
+          {!isAgentHighLevel && scoreEntries.length > 0 && (
             <div className="bg-white rounded-xl border border-slate-100 shadow-sm px-5 py-4 space-y-3">
               <div className="flex items-center gap-2 mb-1">
                 <TrendingUp className="w-3.5 h-3.5 text-slate-400" />
@@ -281,8 +311,10 @@ function CandidateDetailsModalBase({
             </div>
           )}
 
-          {/* Skill audit — two columns */}
-          {(topMatches.length > 0 || topMissing.length > 0) && (
+          {/* Skill audit — two columns (hidden for agent-search rows: the
+              keyword-level matched/gaps lists imply a depth of analysis the
+              high-level score doesn't have) */}
+          {!isAgentHighLevel && (topMatches.length > 0 || topMissing.length > 0) && (
             <div className="grid grid-cols-2 gap-3">
               {/* Matched */}
               <div className="bg-white rounded-xl border border-slate-100 shadow-sm p-4">

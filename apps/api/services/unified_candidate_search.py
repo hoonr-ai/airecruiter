@@ -249,6 +249,33 @@ class SearchCriteria(BaseModel):
             titles.append(value)
         return titles
 
+    def title_variants(self, max_titles: int = 3) -> List[str]:
+        """Role variants for multi-pull title searches, most important first.
+
+        Order: primary title chip, then ITS selected similar titles
+        (`similar_terms`, the recruiter-approved grounded variants), then the
+        next title chip and its variants. Deduped case-insensitively and
+        capped at `max_titles` so the per-variant TalentSearch pulls stay
+        bounded."""
+        variants: List[str] = []
+        seen = set()
+
+        def _add(value: Any) -> None:
+            v = str(value or "").strip()
+            if v and v.lower() not in seen:
+                seen.add(v.lower())
+                variants.append(v)
+
+        for item in self.title_criteria or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("match_type", "must") == "exclude":
+                continue
+            _add(item.get("value"))
+            for similar in item.get("similar_terms") or []:
+                _add(similar)
+        return variants[: max(1, int(max_titles or 1))]
+
 class UnifiedCandidateSearch:
     def __init__(self):
         self.jobdiva_service = JobDivaService()
@@ -310,15 +337,31 @@ class UnifiedCandidateSearch:
         accept linkedinUrl as a match input — it needs firstName + lastName for
         ContactSearch). Without a name we skip ZoomInfo and go straight to
         Apollo (which does accept a URL). Mutates ``cand`` in place; never raises.
+
+        LinkedIn-sourced candidates additionally fall through to the Exa Agent
+        contact run when ZoomInfo + Apollo both miss (``include_exa``): ZoomInfo
+        can't match by LinkedIn URL and Apollo credits run dry, so URL-only
+        profiles would otherwise stream in with no contact at all. Budgeted
+        separately inside the helper (EXA_SOURCING_CONTACT_CAP per job).
         """
         profile_url = str(cand.get("profile_url") or "").strip()
         if "linkedin.com/in/" not in profile_url.lower():
             return
+        source = str(cand.get("source") or "")
+        enhanced = cand.get("enhanced_info") if isinstance(cand.get("enhanced_info"), dict) else {}
+        company = str(
+            cand.get("current_company")
+            or enhanced.get("current_company")
+            or enhanced.get("company")
+            or ""
+        ).strip()
         try:
             enrich = await contact_enrichment.enrich_contact_for_sourcing(
                 profile_url,
                 criteria.job_id,
                 full_name=str(cand.get("name") or "").strip() or None,
+                include_exa=source.startswith("LinkedIn"),
+                company=company,
             )
         except Exception as e:
             logger.warning("contact_enrichment failed for %s: %s", cand.get("id"), e)
@@ -359,6 +402,16 @@ class UnifiedCandidateSearch:
         start_time = time.time()
         self._log_stage("Start", f"job={criteria.job_id} sources={', '.join(criteria.sources or [])}")
 
+        # Fresh per-run enrichment budget. The provider caps
+        # (PER_JOB_CAP / EXA_SOURCING_CONTACT_CAP) are in-process per-worker
+        # counters that nothing else resets — without this, a job whose
+        # counter filled up once would silently skip enrichment on every
+        # re-run for the rest of the worker's lifetime.
+        try:
+            contact_enrichment.reset_job_counter(str(criteria.job_id or ""))
+        except Exception:
+            pass
+
         # Detect role family once per search. Stored on the instance so
         # `_fuzzy_term_score` can swap between the global EMBEDDING_SKILL_MATCH
         # flag (legacy IT behavior) and the per-family override
@@ -381,6 +434,11 @@ class UnifiedCandidateSearch:
                 logger.warning(f"query-term embedding warm failed: {exc}")
 
         seen_ids = set()
+        # candidate_ids matched by the JobDiva JobAgent (recruiter-authored
+        # criteria). The TalentSearch min-score gate exempts these: when the
+        # same person surfaces via both pools, the surviving row may carry the
+        # TalentSearch label, but a JobAgent match must never be dropped.
+        jobagent_matched_ids: set = set()
         # Cross-source dedup ownership map: dedup key (strong identity —
         # email, phone+name, normalised LinkedIn URL) -> the already-emitted
         # "owner" candidate dict that claimed it. The legacy `seen_ids` set
@@ -429,6 +487,12 @@ class UnifiedCandidateSearch:
             cand["matched_skills"] = score_result.get("matched_skills", [])
             cand["explainability"] = score_result["explainability"]
             cand["match_score_details"] = score_result.get("score_details", {})
+
+            if cand.get("scoring_mode") == "high_level":
+                cand["explainability"] = [
+                    "High-level score — matched by JobDiva agent search; "
+                    "detailed AI skills analysis skipped"
+                ] + list(cand["explainability"] or [])[:5]
 
             # JobAgent-rank floor: JobDiva's JobAgent endpoint pre-ranks
             # candidates by their own relevance matcher. After refactor
@@ -678,7 +742,7 @@ class UnifiedCandidateSearch:
                 "zipcode", "distance_miles", "location_out_of_radius",
                 "location_match_reason",
                 "qualifications", "employee_status", "available",
-                "availability_status", "current_company",
+                "availability_status", "current_company", "scoring_mode",
             ):
                 v = cand.get(key)
                 if v not in (None, "", [], {}):
@@ -688,13 +752,19 @@ class UnifiedCandidateSearch:
             await queue.put({"type": "candidate", "data": agent_payload})
             return True
 
-        async def emit_jobdiva_scored(cand, assessment, qualified_counter_key=None):
+        async def emit_jobdiva_scored(cand, assessment, qualified_counter_key=None, min_score=None):
             """Stage 3 of progressive JobDiva flow: score the (now-enriched)
             candidate and emit a ``candidate_detail`` patch with the scored
             payload. Mirrors :py:func:`emit_candidate` for dedup +
             non-US drop semantics, but emits a patch (the row already
             exists from emit_jobdiva_agent_result) instead of a fresh
             ``candidate`` event.
+
+            ``min_score``: when set, rows scoring strictly below it are
+            removed via a ``dropped`` patch instead of shown. Used for
+            JobDiva-TalentSearch (machine-generated query → only surface
+            >JOBDIVA_TALENTSEARCH_MIN_SCORE matches). Unscoreable rows
+            (``detail_failed`` → match_score None) are always kept.
             """
             cid = str(cand.get("candidate_id") or cand.get("id") or "")
             location_reason = assessment.get("location_failure_reason") if isinstance(assessment, dict) else None
@@ -723,6 +793,35 @@ class UnifiedCandidateSearch:
                     logger.warning(f"candidate-skill embedding warm failed: {exc}")
 
             cand = finalize_candidate(cand)
+
+            # Min-score gate (TalentSearch only). Runs after finalize so the
+            # score already includes the source-tier bonus / title boost.
+            # Unscoreable rows (detail_failed → None) stay visible as
+            # "Limited data" — we can't fairly judge them.
+            if (
+                min_score is not None
+                and cand.get("match_score") is not None
+                and int(cand.get("match_score") or 0) < int(min_score)
+                and cid not in jobagent_matched_ids
+            ):
+                self._log_stage(
+                    "ScoreGate",
+                    f"dropping candidate_id={cid} source={cand.get('source')} "
+                    f"match_score={cand.get('match_score')} < min_score={min_score}",
+                )
+                # Release the id: the JobAgent pool shares seen_ids, and its
+                # copy of this person may have been suppressed as a duplicate
+                # when this row painted first. Freeing the id lets the
+                # never-dropped JobAgent copy re-emit if it arrives later.
+                if cid:
+                    seen_ids.discard(cid)
+                await queue.put({
+                    "type": "candidate_detail",
+                    "candidate_id": cid,
+                    "stage": "dropped",
+                    "patch": {"_stage": "dropped", "_drop_reason": "below_min_score"},
+                })
+                return
 
             # Cross-source dedup runs here (not at agent_result) since the
             # keys depend on email / phone / linkedin URL, which are only
@@ -805,6 +904,9 @@ class UnifiedCandidateSearch:
                 # Candidate-details failure flag → UI renders "N/A" + keeps the
                 # row launchable (vs. a 0% drop).
                 "detail_failed",
+                # "high_level" for JobDiva-JobAgent rows (LLM skills-match
+                # skipped) → popup labels the score "JobDiva agent search".
+                "scoring_mode",
             ):
                 v = cand.get(key)
                 if v is not None:
@@ -953,6 +1055,8 @@ class UnifiedCandidateSearch:
                     stage_name: str,
                     source_label: str,
                     cap_label: str,
+                    min_score: Optional[int] = None,
+                    high_level_scoring: bool = False,
                 ) -> None:
                     talent_pool = talent_res.get("candidates", [])
 
@@ -981,7 +1085,9 @@ class UnifiedCandidateSearch:
                         return
 
                     from core import sourcing_config as _sc_talent
-                    async for event in self._enrich_filtered_jobdiva_progressive(fresh_talent, criteria):
+                    async for event in self._enrich_filtered_jobdiva_progressive(
+                        fresh_talent, criteria, skip_llm=high_level_scoring
+                    ):
                         ev_type = event.get("type")
                         if ev_type == "candidate_detail":
                             await queue.put(event)
@@ -996,29 +1102,47 @@ class UnifiedCandidateSearch:
                                     stage_name,
                                     f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
                                 )
-                            await emit_jobdiva_scored(cand, assessment, "qualified_talent")
+                            await emit_jobdiva_scored(
+                                cand, assessment, "qualified_talent", min_score=min_score
+                            )
 
                 async def _run_jobagent_pool():
+                    from core import sourcing_config as _sc_pool
                     self._log_stage("JobDiva", "Running JobDiva JobAgent search...")
                     jobagent_res = await self._search_jobdiva_talent(criteria)
                     if jobagent_res.get("jobdiva_criteria_unconfigured"):
                         summary["jobdiva_criteria_unconfigured"] = True
+                    for _c in jobagent_res.get("candidates") or []:
+                        _jc = str(_c.get("candidate_id") or _c.get("id") or "")
+                        if _jc:
+                            jobagent_matched_ids.add(_jc)
                     await _process_talent_pool(
                         jobagent_res,
                         stage_name="JobDiva",
                         source_label="JobDiva-JobAgent",
                         cap_label="JobAgent rank",
+                        # Recruiter-authored criteria in JobDiva + its own
+                        # ranking → trust the results: high-level score only
+                        # (no per-candidate LLM skills-match), never dropped.
+                        high_level_scoring=bool(
+                            getattr(_sc_pool, "JOBAGENT_HIGH_LEVEL_SCORING", True)
+                        ),
                     )
 
                 async def _run_talent_search_pool():
+                    from core import sourcing_config as _sc_pool
                     self._log_stage("TalentSearch", "Running JobDiva Talent boolean search...")
                     talent_res = await self._search_jobdiva_talent_search(criteria)
                     summary["talent_search_count"] = len(talent_res.get("candidates", []))
+                    _min_score = getattr(_sc_pool, "JOBDIVA_TALENTSEARCH_MIN_SCORE", None)
                     await _process_talent_pool(
                         talent_res,
                         stage_name="TalentSearch",
                         source_label="JobDiva-TalentSearch",
                         cap_label="TalentSearch rank",
+                        # Machine-generated query → only surface strong
+                        # matches; the sub-threshold tail is noise.
+                        min_score=int(_min_score) if _min_score else None,
                     )
 
                 # Overlap both independent JobDiva talent searches to halve wall-clock latency
@@ -1162,15 +1286,19 @@ class UnifiedCandidateSearch:
                                     if s2 and not cand.get("state"):
                                         cand["state"] = s2
 
-                        # In-line ZoomInfo → Apollo enrichment.
+                        # In-line ZoomInfo → Apollo (→ Exa Agent for LinkedIn
+                        # sources) enrichment.
                         #   - LinkedIn-Exa: ALWAYS run; the result overwrites any
-                        #     pre-existing email/phone. ZoomInfo→Apollo is the
-                        #     source of truth for Exa-sourced contact info.
-                        #   - Other sources (JobDiva/Dice/Unipile): only run as a
-                        #     backfill when both email and phone are missing, to
-                        #     bound enrichment cost.
+                        #     pre-existing email/phone. The enrichment chain is
+                        #     the source of truth for Exa-sourced contact info.
+                        #   - Other sources (Dice/Unipile): run as a backfill
+                        #     whenever email OR phone is missing — Unipile never
+                        #     supplies contact itself, so ZoomInfo/Apollo (and
+                        #     the Exa fallback for LinkedIn-*) fill the gaps;
+                        #     only empty fields are written (overwrite=False).
                         # Gated by CONTACT_ENRICHMENT_INLINE_ENABLED inside the
-                        # helper; capped per-job at contact_enrichment.PER_JOB_CAP.
+                        # helper; capped per-job at contact_enrichment.PER_JOB_CAP
+                        # (+ EXA_SOURCING_CONTACT_CAP for the Exa fallback).
                         #
                         # `full_name` is required for the ZoomInfo path — the
                         # new Data API doesn't accept linkedinUrl as a match
@@ -1178,11 +1306,11 @@ class UnifiedCandidateSearch:
                         # ContactSearch. Without a name we skip ZoomInfo and
                         # go straight to Apollo (which does accept a URL).
                         is_exa_source = source_type == "LinkedIn-Exa"
-                        has_existing_contact = bool(
+                        has_full_contact = bool(
                             str(cand.get("email") or "").strip()
-                            or str(cand.get("phone") or "").strip()
+                            and str(cand.get("phone") or "").strip()
                         )
-                        if is_exa_source or not has_existing_contact:
+                        if is_exa_source or not has_full_contact:
                             await self._apply_contact_enrichment(
                                 cand, criteria, overwrite=is_exa_source
                             )
@@ -1900,7 +2028,11 @@ class UnifiedCandidateSearch:
             # returns the full filtered set in one response (live probe
             # 2026-07-19) — the old page loop just re-fetched identical rows.
             # One fetch capped at max_total; progressive batching slices it.
-            sourcing_titles = criteria.sourcing_titles()
+            # Titles: primary chip + its recruiter-approved similar titles,
+            # one titleSearch pull per variant (bounded in jobdiva service).
+            title_pull_variants = criteria.title_variants(
+                int(getattr(sc, "JOBDIVA_TALENT_TITLE_PULL_MAX_TITLES", 3) or 3)
+            )
             all_candidates = await self.jobdiva_service.search_candidates(
                 skills=list(criteria.skill_criteria or []),
                 location=criteria.location or "",
@@ -1915,7 +2047,7 @@ class UnifiedCandidateSearch:
                 page_number=0,
                 zip_code=geo_zip,
                 within_miles=getattr(criteria, "within_miles", 25),
-                title=sourcing_titles[0] if sourcing_titles else "",
+                titles=title_pull_variants,
             )
 
             self._log_stage(
@@ -4674,6 +4806,7 @@ class UnifiedCandidateSearch:
         self,
         candidates: List[Dict[str, Any]],
         criteria: SearchCriteria,
+        skip_llm: bool = False,
     ):
         """Progressive variant of :py:meth:`_enrich_filtered_jobdiva_candidates`.
 
@@ -4694,6 +4827,13 @@ class UnifiedCandidateSearch:
         scores + shows the row — hard-filter-fails surface at 0% and are
         excluded only at Launch PAIR, never hidden on Step 5. The only row
         removal left is cross-source dedup, handled in ``emit_jobdiva_scored``.
+
+        ``skip_llm=True`` (JobDiva-JobAgent high-level scoring): the résumé +
+        profile fields are still fetched and streamed, but the per-candidate
+        LLM extraction is skipped for EVERY candidate — JobDiva's recruiter-
+        configured agent already vetted them, so they get the cheap
+        deterministic score only. Rows are tagged ``scoring_mode="high_level"``
+        so the UI can label the score "JobDiva agent search".
         """
         from services.sourced_candidates_storage import process_jobdiva_candidate
 
@@ -4727,6 +4867,10 @@ class UnifiedCandidateSearch:
                 cid = str(candidate.get("candidate_id") or candidate.get("id") or "")
                 if not cid:
                     return
+                if skip_llm:
+                    # Tag before any keep-path so even no-resume/error rows
+                    # carry the provenance label for the UI popup.
+                    candidate["scoring_mode"] = "high_level"
 
                 async def _keep(status: str, *, detail_failed: bool = False):
                     # Policy: JobDiva (agentsearch) candidates are never removed
@@ -4797,6 +4941,14 @@ class UnifiedCandidateSearch:
                         "stage": "jobdiva_details",
                         "patch": details_patch,
                     })
+
+                    # High-level scoring (JobDiva-JobAgent): résumé + profile
+                    # fields are in hand — stop here. No pre-LLM gates, no LLM
+                    # extraction; the caller scores on the cheap deterministic
+                    # signals (rank floor keeps JobDiva's ordering honored).
+                    if skip_llm:
+                        await _keep("high_level")
+                        return
 
                     # PR-B: cheap pre-LLM YOE gate.
                     if self._candidate_below_min_years_pre_llm(candidate, criteria):

@@ -728,11 +728,17 @@ class ExaService:
             return []
 
         # Read knobs from env at call time so per-deploy tuning doesn't
-        # require a process restart.
-        effort = (os.getenv("EXA_AGENT_EFFORT", "medium").strip().lower() or "medium")
+        # require a process restart. Env default must match
+        # sourcing_config.EXA_AGENT_EFFORT ("high" — the tier that reliably
+        # fills all four schema fields); it silently drifted to "medium" here.
+        from core import sourcing_config as _sc
+        _effort_default = str(getattr(_sc, "EXA_AGENT_EFFORT", "high") or "high").lower()
+        if _effort_default not in {"low", "medium", "high", "xhigh", "auto"}:
+            _effort_default = "high"
+        effort = (os.getenv("EXA_AGENT_EFFORT", _effort_default).strip().lower() or _effort_default)
         if effort not in {"low", "medium", "high", "xhigh", "auto"}:
-            logger.warning("EXA_AGENT_EFFORT=%r is invalid; falling back to 'medium'", effort)
-            effort = "medium"
+            logger.warning("EXA_AGENT_EFFORT=%r is invalid; falling back to %r", effort, _effort_default)
+            effort = _effort_default
         try:
             timeout_s = int(os.getenv("EXA_AGENT_TIMEOUT", "180").strip() or "180")
         except ValueError:
