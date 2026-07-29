@@ -214,6 +214,33 @@ def _extract_enrichment_fields_legacy(payload: Any) -> Dict[str, str]:
     return found
 
 
+# Apollo returns a masked placeholder rather than omitting the field when a
+# record exists but the contact is not unlocked on the current plan/credits —
+# canonically `email_not_unlocked@domain.com`. It is a syntactically valid
+# address, so nothing downstream would reject it.
+_APOLLO_MASKED_EMAIL_MARKERS = ("not_unlocked", "notunlocked", "email_not_unlocked")
+
+
+def _apollo_real_email(value: Any) -> str:
+    """Drop Apollo's masked-email placeholders, keep genuine addresses.
+
+    Without this, a plan that can MATCH but not REVEAL yields
+    `email_not_unlocked@domain.com`, and because it parses as a real address it
+    would be stored as the candidate's email, shown in the UI, counted as
+    "reachable" by the sourcing gate (suppressing the Exa fallback the candidate
+    actually needs), and only fail at Launch PAIR. Worth guarding before Apollo
+    credits are topped up: an out-of-credits key 422s and never reaches here, so
+    restoring credits is exactly what would start surfacing these.
+    """
+    email = str(value or "").strip()
+    if not email or "@" not in email:
+        return ""
+    lowered = email.lower()
+    if any(marker in lowered for marker in _APOLLO_MASKED_EMAIL_MARKERS):
+        return ""
+    return email
+
+
 def extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     """Parse Apollo people-enrich response into canonical fields + a phone-candidate list."""
     person = payload.get("person") if isinstance(payload, dict) else {}
@@ -253,15 +280,19 @@ def extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
         seen_phone_candidates.add(candidate)
         phone_candidates.append(candidate)
 
-    work_email = _first_non_empty(person.get("email"), person.get("work_email"))
+    work_email = _apollo_real_email(
+        _first_non_empty(person.get("email"), person.get("work_email"))
+    )
 
     personal_email = ""
     personal_emails = person.get("personal_emails")
     if isinstance(personal_emails, list):
         for item in personal_emails:
-            candidate = _first_non_empty(
-                item.get("email") if isinstance(item, dict) else None,
-                item,
+            candidate = _apollo_real_email(
+                _first_non_empty(
+                    item.get("email") if isinstance(item, dict) else None,
+                    item,
+                )
             )
             if candidate:
                 personal_email = candidate
@@ -302,15 +333,34 @@ def extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
                 work_phone = number
             _add_phone_candidate(number)
 
+    # Employer switchboard numbers. Tracked separately: they are the COMPANY's
+    # line, not the candidate's, so they must never be promoted into
+    # mobilePhone/workPhone. Apollo returns an org phone on almost every matched
+    # record while personal phones need an explicit (credit-consuming) reveal, so
+    # the old blanket promotion below turned "we found the employer's front desk"
+    # into "this is the candidate's mobile" — measured on 5/5 probed profiles,
+    # including well-known ones with no personal phone in the payload at all.
+    # That pollutes outreach (texting a switchboard) and, since the sourcing gate
+    # treats any phone as reachable, it also suppressed the Exa fallback that
+    # could have found a real mobile. Kept in phoneCandidates as context.
+    org_phone_keys: set = set()
+
+    def _add_org_phone(raw_phone: Any) -> None:
+        normalised = _normalise_phone(str(raw_phone or "").strip())
+        if not normalised or sum(1 for ch in normalised if ch.isdigit()) < 7:
+            return
+        org_phone_keys.add(normalised)
+        _add_phone_candidate(raw_phone)
+
     person_organization = person.get("organization")
     if isinstance(person_organization, dict):
         for key in ("phone", "phone_number", "sanitized_phone", "work_phone", "main_phone", "direct_phone"):
-            _add_phone_candidate(person_organization.get(key))
+            _add_org_phone(person_organization.get(key))
 
     payload_organization = payload.get("organization") if isinstance(payload, dict) else None
     if isinstance(payload_organization, dict):
         for key in ("phone", "phone_number", "sanitized_phone", "work_phone", "main_phone", "direct_phone"):
-            _add_phone_candidate(payload_organization.get(key))
+            _add_org_phone(payload_organization.get(key))
 
     if not mobile_phone:
         mobile_phone = _extract_phone_value(payload.get("mobile_phone"))
@@ -321,12 +371,14 @@ def extract_apollo_contact_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     _add_phone_candidate(payload.get("phone") if isinstance(payload, dict) else "")
     _add_phone_candidate(payload.get("phone_number") if isinstance(payload, dict) else "")
 
-    if not mobile_phone and phone_candidates:
-        mobile_phone = phone_candidates[0]
-    if not work_phone and len(phone_candidates) > 1:
-        work_phone = phone_candidates[1]
-    elif not work_phone and phone_candidates:
-        work_phone = phone_candidates[0]
+    # Promote only person-level numbers into the candidate's phone slots.
+    personal_candidates = [p for p in phone_candidates if p not in org_phone_keys]
+    if not mobile_phone and personal_candidates:
+        mobile_phone = personal_candidates[0]
+    if not work_phone and len(personal_candidates) > 1:
+        work_phone = personal_candidates[1]
+    elif not work_phone and personal_candidates:
+        work_phone = personal_candidates[0]
 
     return {
         "mobilePhone": mobile_phone,
