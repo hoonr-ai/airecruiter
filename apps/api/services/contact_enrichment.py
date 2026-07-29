@@ -124,6 +124,12 @@ PER_JOB_CAP = 50
 # workers × cap).
 _JOB_EXA_COUNTERS: Dict[str, int] = {}
 
+# Cumulative Exa runs per job. Deliberately NOT cleared by reset_job_counter:
+# _JOB_EXA_COUNTERS is a per-RUN budget (reset each search so one filled counter
+# doesn't starve enrichment forever), which means it bounds nothing across
+# re-runs. This one is the spend ceiling.
+_JOB_EXA_LIFETIME: Dict[str, int] = {}
+
 # Exa enforces ~1/5-of-QPS concurrency on Agent runs (≥3 simultaneous runs
 # start 429ing on the default account). The sourcing fallback runs outside
 # _PROVIDER_SEMAPHORE (its slow polling would starve the cheap chain), so it
@@ -772,10 +778,19 @@ async def zoominfo_enrich_by_name(candidate_id: str, full_name: str) -> Dict[str
     return {"ok": True, "fields": fields}
 
 
-def reset_job_counter(jobdiva_id: str) -> None:
-    """Tests / explicit job-restart can clear the per-job cap counter."""
+def reset_job_counter(jobdiva_id: str, *, include_lifetime: bool = False) -> None:
+    """Clear the per-RUN cap counters for a job.
+
+    Called at the start of every search so a job that filled its budget once
+    isn't silently skipped for the rest of the worker's life. `_JOB_EXA_LIFETIME`
+    is intentionally left alone — it is the cumulative spend ceiling on the paid
+    Exa path and resetting it here would make that ceiling meaningless. Tests and
+    an explicit job restart can pass include_lifetime=True.
+    """
     _JOB_ENRICH_COUNTERS.pop(jobdiva_id, None)
     _JOB_EXA_COUNTERS.pop(jobdiva_id, None)
+    if include_lifetime:
+        _JOB_EXA_LIFETIME.pop(jobdiva_id, None)
 
 
 async def enrich_contact_for_sourcing(
@@ -876,30 +891,59 @@ async def enrich_contact_for_sourcing(
         if not getattr(_sc, "EXA_SOURCING_CONTACT_FALLBACK", True):
             return {}
         exa_cap = max(0, int(getattr(_sc, "EXA_SOURCING_CONTACT_CAP", 25) or 0))
+        exa_lifetime_cap = max(
+            0, int(getattr(_sc, "EXA_SOURCING_CONTACT_LIFETIME_CAP", 100) or 0)
+        )
         async with _JOB_ENRICH_LOCK:
+            # Lifetime ceiling first — this one is not reset between runs, so it
+            # is what actually bounds spend on a job the recruiter re-searches.
+            exa_total = _JOB_EXA_LIFETIME.get(job_key, 0)
+            if exa_total >= exa_lifetime_cap:
+                if exa_total == exa_lifetime_cap:
+                    logger.warning(
+                        "contact_enrichment: LIFETIME Exa cap (%d runs, ~$%.2f) reached "
+                        "for %s — no further sourcing-time Exa lookups for this job; "
+                        "on-demand enrichment still works",
+                        exa_lifetime_cap, exa_lifetime_cap * 0.115, job_key,
+                    )
+                    _JOB_EXA_LIFETIME[job_key] = exa_total + 1
+                return {}
             exa_used = _JOB_EXA_COUNTERS.get(job_key, 0)
             if exa_used >= exa_cap:
                 if exa_used == exa_cap:
                     logger.info(
-                        "contact_enrichment: per-job Exa cap (%d) reached for %s",
-                        exa_cap, job_key,
+                        "contact_enrichment: per-run Exa cap (%d) reached for %s "
+                        "(%d/%d lifetime)",
+                        exa_cap, job_key, exa_total, exa_lifetime_cap,
                     )
                     _JOB_EXA_COUNTERS[job_key] = exa_used + 1
                 return {}
             _JOB_EXA_COUNTERS[job_key] = exa_used + 1
+            _JOB_EXA_LIFETIME[job_key] = exa_total + 1
 
+        # Label the run by the CANDIDATE, not the job. `exa_enrich_by_linkedin`
+        # uses its first arg purely for logging, and passing job_key made every
+        # line for a job identical — useless for answering "which candidate did
+        # Exa resolve, and which timed out?".
+        exa_label = (full_name or "").strip() or linkedin_url
         try:
             async with _exa_semaphore():
                 exa_result = await exa_enrich_by_linkedin(
-                    job_key, linkedin_url, full_name or "", company or ""
+                    exa_label, linkedin_url, full_name or "", company or ""
                 )
         except Exception as e:
-            logger.warning("contact_enrichment Exa path raised for %s: %s", job_key, e)
+            logger.warning(
+                "contact_enrichment Exa path raised for %s (job %s): %s",
+                exa_label, job_key, e,
+            )
             exa_result = {"ok": False}
 
         if exa_result.get("ok") and _has_usable_field(exa_result.get("fields") or {}):
             fields = exa_result["fields"]
-            logger.info("contact_enrichment: exa hit for %s", job_key)
+            logger.info(
+                "contact_enrichment: exa hit for %s (job %s, %d/%d lifetime)",
+                exa_label, job_key, _JOB_EXA_LIFETIME.get(job_key, 0), exa_lifetime_cap,
+            )
             return {
                 "workEmail": fields.get("workEmail", ""),
                 "personalEmail": fields.get("personalEmail", ""),

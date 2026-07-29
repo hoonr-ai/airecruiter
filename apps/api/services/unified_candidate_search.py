@@ -114,6 +114,19 @@ logger = logging.getLogger(__name__)
 _UNKNOWN_DISTANCE_SENTINEL = 9999.0
 
 
+def _is_excluded_criterion(item: Dict[str, Any]) -> bool:
+    """Whether a rubric chip is an EXCLUDE, tolerant of spelling/casing.
+
+    The wizard emits lowercase "exclude", but other writers produce "must_not"
+    and capitalised forms, and an exact `== "exclude"` compare silently treats
+    those as INCLUDE — which is worse than ignoring them: the term becomes
+    something we actively search FOR. Mirrors the normalisation used by
+    sourcing_skills_with_priority and the boolean builder.
+    """
+    match_type = str(item.get("match_type", "must") or "must").lower()
+    return match_type.replace("_", " ").strip() in {"exclude", "must not"}
+
+
 class SearchCriteria(BaseModel):
     job_id: str
     title_criteria: List[Dict[str, Any]] = []
@@ -240,7 +253,7 @@ class SearchCriteria(BaseModel):
         for item in self.title_criteria or []:
             if not isinstance(item, dict):
                 continue
-            if item.get("match_type", "must") == "exclude":
+            if _is_excluded_criterion(item):
                 continue
             value = str(item.get("value", "")).strip()
             key = value.lower()
@@ -270,7 +283,7 @@ class SearchCriteria(BaseModel):
         for item in self.title_criteria or []:
             if not isinstance(item, dict):
                 continue
-            if item.get("match_type", "must") == "exclude":
+            if _is_excluded_criterion(item):
                 continue
             _add(item.get("value"))
             for similar in item.get("similar_terms") or []:

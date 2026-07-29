@@ -349,3 +349,18 @@ try:
     )
 except ValueError:
     EXA_SOURCING_CONTACT_CAP = 25
+
+# Lifetime ceiling on sourcing-time Exa contact runs per job, per worker.
+# EXA_SOURCING_CONTACT_CAP above is a PER-RUN budget — it is reset at the start
+# of every search so a job that filled it once isn't starved forever. That reset
+# also means it bounds nothing cumulatively: Step 5 re-runs are one click, and at
+# ~$0.115/run a job could bill the per-run cap over and over. This cap is NOT
+# reset between runs, so total sourcing-time Exa spend on one job stays bounded
+# (~100 x $0.115 ≈ $11.50 worst case). Recruiter-initiated on-demand enrichment
+# is a separate path and is not affected when this trips.
+try:
+    EXA_SOURCING_CONTACT_LIFETIME_CAP = int(
+        _os.getenv("EXA_SOURCING_CONTACT_LIFETIME_CAP", "100").strip() or "100"
+    )
+except ValueError:
+    EXA_SOURCING_CONTACT_LIFETIME_CAP = 100

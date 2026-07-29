@@ -166,10 +166,21 @@ function CandidateDetailsModalBase({
     ? buildJobDivaCandidateUrl(jobdivaCandidateId)
     : null;
   // JobDiva agent-search rows carry a high-level score only (no detailed AI
-  // skills match). Fall back on the source string for rows cached before
-  // scoring_mode existed.
+  // skills match). `scoring_mode` is authoritative: the backend stamps it on
+  // every row taking that path, including no-résumé/error rows.
+  //
+  // The source-string fallback exists only for rows cached before scoring_mode
+  // shipped, so it must NOT fire when the row plainly HAS a detailed analysis.
+  // Otherwise turning JOBAGENT_HIGH_LEVEL_SCORING off — advertised as a
+  // one-line revert — would leave this modal hiding a real score breakdown and
+  // skill audit behind a banner claiming the AI analysis was skipped.
+  const hasDetailedAnalysis =
+    (matchedSkills?.length ?? 0) > 0 ||
+    (missingSkills?.length ?? 0) > 0 ||
+    Object.values(matchScoreDetails || {}).some((d: any) => d?.weight > 0);
   const isAgentHighLevel =
-    scoringMode === "high_level" || source === "JobDiva-JobAgent";
+    scoringMode === "high_level" ||
+    (source === "JobDiva-JobAgent" && !hasDetailedAnalysis);
 
   const formattedTitle = toTitleCase(jobTitle || "");
   const formattedLocation = formatLocation(location || "");
