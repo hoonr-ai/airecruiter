@@ -13,6 +13,7 @@ from services.unipile import unipile_service
 from services.vetted import vetted_service
 from services.exa_service import exa_service, _extract_city_from_highlights
 from services.location import haversine_miles, normalize_location_string, within_radius
+from services.jobdiva_boolean_translator import strip_jobdiva_dialect
 from core.config import (
     SCORING_REQUIRED_WEIGHT,
     SCORING_PREFERRED_WEIGHT,
@@ -2033,13 +2034,20 @@ class UnifiedCandidateSearch:
             title_pull_variants = criteria.title_variants(
                 int(getattr(sc, "JOBDIVA_TALENT_TITLE_PULL_MAX_TITLES", 3) or 3)
             )
+            # JobDiva is the one consumer that speaks the native dialect, so an
+            # auto-built string is built as `jobdiva` here (roles in TITLES=,
+            # `IN {US}` for a remote role). The frontend's string still wins when
+            # present — it is what the recruiter sees and may have hand-edited.
             all_candidates = await self.jobdiva_service.search_candidates(
                 skills=list(criteria.skill_criteria or []),
                 location=criteria.location or "",
                 page=1,
                 limit=max_total,
                 job_id=None,
-                boolean_string=criteria.boolean_string or "",
+                boolean_string=(
+                    criteria.boolean_string
+                    or self._build_boolean_string(criteria, dialect="jobdiva")
+                ),
                 recent_days=getattr(criteria, "recent_days", None),
                 require_resume=getattr(criteria, "require_resume", True),
                 countries=countries,
@@ -5560,8 +5568,17 @@ class UnifiedCandidateSearch:
                 location=self._search_location_for_source(criteria),
                 open_to_work=criteria.open_to_work,
                 limit=criteria.page_size,
+                # The wizard sends ONE boolean, rendered in JobDiva's dialect
+                # whenever JobDiva is a selected source. LinkedIn Recruiter
+                # parses none of that, so `TITLES= (...)`, `IN {US}` and
+                # `OVER N YRS` are stripped rather than matched as literal
+                # keywords. Nothing is lost: titles ride in `skills` above and
+                # location in its own argument.
                 boolean_string=self._scope_boolean_to_us(
-                    criteria.boolean_string or self._build_boolean_string(criteria)
+                    strip_jobdiva_dialect(
+                        criteria.boolean_string
+                        or self._build_boolean_string(criteria, dialect="generic")
+                    )
                 ),
             )
 
@@ -5709,7 +5726,10 @@ class UnifiedCandidateSearch:
                 skills=criteria.skill_only_values(),
                 location=self._search_location_for_source(criteria),
                 limit=min(criteria.page_size, 50),
-                boolean_string=criteria.boolean_string or "",
+                # Exa parses plain expressions only — strip JobDiva's
+                # TITLES=/IN {US}/OVER N YRS before handing the shared wizard
+                # boolean over (titles ride in `titles=` just below).
+                boolean_string=strip_jobdiva_dialect(criteria.boolean_string or ""),
                 titles=criteria.sourcing_titles(),
                 min_experience_years=criteria.min_experience_years,
                 companies=criteria.companies,
@@ -5750,7 +5770,10 @@ class UnifiedCandidateSearch:
                 skills=criteria.skill_only_values(),
                 location=self._search_location_for_source(criteria),
                 limit=exa_limit,
-                boolean_string=criteria.boolean_string or "",
+                # Exa parses plain expressions only — strip JobDiva's
+                # TITLES=/IN {US}/OVER N YRS before handing the shared wizard
+                # boolean over (titles ride in `titles=` just below).
+                boolean_string=strip_jobdiva_dialect(criteria.boolean_string or ""),
                 titles=criteria.sourcing_titles(),
                 min_experience_years=criteria.min_experience_years,
                 companies=criteria.companies,

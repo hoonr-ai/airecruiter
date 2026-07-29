@@ -211,6 +211,48 @@ def sanitize_talent_term(term: str) -> str:
     return cleaned
 
 
+# JobDiva-only constructs. `, TITLES= (...)` is a separate field, `IN {US}` is a
+# structured country filter, `OVER N YRS` is JobDiva's years dialect.
+_TITLES_FIELD_RE = re.compile(r"\s*,?\s*TITLES\s*=\s*\([^)]*\)", flags=re.IGNORECASE)
+_IN_COUNTRY_RE = re.compile(r"(?:\bAND\b\s*)?\bIN\s*\{[^}]*\}", flags=re.IGNORECASE)
+
+
+def strip_jobdiva_dialect(boolean_str: str) -> str:
+    """Remove JobDiva-only syntax so a boolean can be handed to another source.
+
+    The wizard builds ONE boolean string and the frontend renders it in JobDiva's
+    native dialect whenever JobDiva is a selected source — but that same string
+    is also forwarded to Unipile (LinkedIn Recruiter) and Exa, neither of which
+    parses `TITLES= (...)`, `IN {US}` or `OVER N YRS`. Left in, those tokens are
+    matched as literal keywords and quietly wreck the query.
+
+    Dropping them loses nothing for those sources: titles and location are passed
+    to Unipile/Exa as their own arguments, and years-of-experience is scored
+    client-side. Dangling operators left behind by a removal are cleaned up so
+    the result stays a well-formed expression.
+    """
+    text = str(boolean_str or "")
+    if not text.strip():
+        return ""
+    text = _TITLES_FIELD_RE.sub(" ", text)
+    text = _IN_COUNTRY_RE.sub(" ", text)
+    text = _OVER_YRS_CLAUSE_RE.sub(" ", text)
+    text = re.sub(r"\(\s*\)", " ", text)
+    text = re.sub(r"\s*,\s*$", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    # Collapse operator runs ("A AND AND B") and trim leading/trailing ones.
+    prev = None
+    while prev != text:
+        prev = text
+        text = re.sub(r"\b(AND|OR)\s+(AND|OR)\b", r"\1", text, flags=re.IGNORECASE)
+        text = re.sub(r"^\s*(?:AND|OR)\b\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*\b(?:AND|OR)\s*$", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\(\s*(?:AND|OR)\b\s*", "(", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*\b(?:AND|OR)\s*\)", ")", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
 def term_appears_as_token(term: str, text: str) -> bool:
     """True when `term` appears in `text` as a whole token.
 
