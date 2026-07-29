@@ -122,8 +122,8 @@ export function CampaignForm({
   );
   const [phase1To2Hours, setPhase1To2Hours] = useState<string>(
     initial?.phase1_to_phase2_hours !== null && initial?.phase1_to_phase2_hours !== undefined
-      ? initial.phase1_to_phase2_hours === -1 ? "2.0" : initial.phase1_to_phase2_hours.toString()
-      : "2.0"
+      ? initial.phase1_to_phase2_hours === -1 ? "1.5" : initial.phase1_to_phase2_hours.toString()
+      : "1.5"
   );
   const [outreach3CallEnabled, setOutreach3CallEnabled] = useState(
     initial?.phase2_call_delay_mins !== -1
@@ -140,8 +140,8 @@ export function CampaignForm({
   );
   const [phase2To3Hours, setPhase2To3Hours] = useState<string>(
     initial?.phase2_to_phase3_hours !== null && initial?.phase2_to_phase3_hours !== undefined
-      ? initial.phase2_to_phase3_hours === -1 ? "6.0" : initial.phase2_to_phase3_hours.toString()
-      : "6.0"
+      ? initial.phase2_to_phase3_hours === -1 ? "3.0" : initial.phase2_to_phase3_hours.toString()
+      : "3.0"
   );
   const [outreach4CallEnabled, setOutreach4CallEnabled] = useState(
     initial?.phase3_call_delay_mins !== -1
@@ -419,7 +419,7 @@ export function CampaignForm({
             disabled={!outreach3Enabled}
             value={phase1To2Hours}
             onChange={(e) => setPhase1To2Hours(e.target.value)}
-            placeholder="2.0 hr"
+            placeholder="1.5 hr"
             className="text-xs h-8 text-center bg-white"
           />
           <Input
@@ -452,7 +452,7 @@ export function CampaignForm({
             disabled={!outreach4Enabled}
             value={phase2To3Hours}
             onChange={(e) => setPhase2To3Hours(e.target.value)}
-            placeholder="6.0 hr"
+            placeholder="3.0 hr"
             className="text-xs h-8 text-center bg-white"
           />
           <Input
