@@ -211,6 +211,30 @@ def sanitize_talent_term(term: str) -> str:
     return cleaned
 
 
+def term_named_in_title(term: str, title: str) -> bool:
+    """True when `term` appears in `title` as a whole token.
+
+    Shared by every "is this skill the role's core competency?" ranking so the
+    matching rule can't drift between call sites (jobdiva TalentSearch term
+    ordering and the sourcing boolean builder both use it).
+
+    Bounded by alphanumeric lookarounds rather than ``\\b``: skills routinely
+    end in non-word characters ("C++", "C#") where a trailing ``\\b`` never
+    matches. A plain substring test promoted the WRONG terms — "R" matched
+    "senio(r) data engineer", "Java" matched "(Java)Script Developer", "Go"
+    matched "(Go)lang" — which, against a capped AND, displaced genuinely
+    required skills. Erring strict is safe: a miss just leaves the term to be
+    ranked by its years/recency and chip order.
+    """
+    title_lc = str(title or "").strip().lower()
+    term_lc = str(term or "").strip().lower()
+    if not title_lc or not term_lc:
+        return False
+    return re.search(
+        rf"(?<![0-9A-Za-z]){re.escape(term_lc)}(?![0-9A-Za-z])", title_lc
+    ) is not None
+
+
 def extract_and_terms(boolean_str: str, max_terms: int = 4) -> List[str]:
     """Top-level AND-connected quoted terms from a wizard boolean, for the
     v2 TalentSearch `skills` array (which ANDs its elements server-side).

@@ -2520,6 +2520,44 @@ class UnifiedCandidateSearch:
         return terms
 
     def _build_boolean_string(self, criteria: SearchCriteria) -> str:
+        """Build the sourcing boolean from the Step 5 filters.
+
+        AND/OR *allocation* matters far more here than term count, because
+        every AND multiplies the constraint while every OR widens it:
+
+          - **Roles are alternatives** → one OR group, AND'ed in once. Nobody
+            is a "Senior Data Engineer" and an "ETL Developer" at the same
+            time, so ANDing title clauses matched ~nobody.
+          - **Skills are requirements** → they AND, but only the most
+            important `JOBDIVA_BOOLEAN_MUST_SKILL_CAP` of them. The ranked
+            overflow is demoted into the preferred OR group instead of being
+            dropped, so it still lifts ranking without gating the search.
+          - **Companies are alternatives** ("worked at any of these") → OR.
+          - **Excludes** → a single trailing `NOT (...)` group.
+
+        Importance ranking for the capped skill ANDs matches the structured
+        TalentSearch term selection (role-named skills first, then ones
+        carrying explicit years/recency), so the boolean a recruiter reads and
+        the query we actually run agree on what the core requirements are.
+        """
+        from services.jobdiva_boolean_translator import term_named_in_title
+        from core import sourcing_config as _sc_bool
+
+        must_skill_cap = max(
+            1, int(getattr(_sc_bool, "JOBDIVA_BOOLEAN_MUST_SKILL_CAP", 4) or 4)
+        )
+        # The role the skill ranking is measured against — the first included
+        # title chip. With no title chips the ranking simply falls back to
+        # years/recency then chip order.
+        primary_role = ""
+        for _t in criteria.title_criteria or []:
+            _mt = str(_t.get("match_type", "must") or "must").lower().replace("_", " ").strip()
+            if _mt in {"exclude", "must not"}:
+                continue
+            primary_role = str(_t.get("value", "")).strip()
+            if primary_role:
+                break
+
         def quote(value: str) -> str:
             return f'"{value.strip()}"'
 
@@ -2541,44 +2579,152 @@ class UnifiedCandidateSearch:
             seen.add(key)
             bucket.append(clause)
 
-        must_groups = []
-        can_terms = []
-        exclude_terms = []
+        def match_type_of(item: Dict[str, Any]) -> str:
+            """Normalized rubric match type.
+
+            The wizard emits must/can/exclude, but casing and `must_not`
+            spellings turn up from other writers. The old exact `== "exclude"`
+            compare fell through to the else-branch, promoting an EXCLUDED term
+            into the REQUIRED AND chain — the worst possible misread.
+            """
+            mt = str(item.get("match_type", "must") or "must").lower()
+            mt = mt.replace("_", " ").strip()
+            if mt in {"exclude", "must not"}:
+                return "exclude"
+            if mt in {"can", "preferred", "nice to have"}:
+                return "can"
+            return "must"
+
+        def variants_of(item: Dict[str, Any]) -> List[str]:
+            """Term + its recruiter-approved similar terms, registered for
+            dedup and returned quoted."""
+            out: List[str] = []
+            value = str(item.get("value", "")).strip()
+            if value:
+                source_keys.add(normalize_term(value))
+                out.append(value)
+            for similar in item.get("similar_terms", []) or []:
+                s = str(similar).strip()
+                if s:
+                    source_keys.add(normalize_term(s))
+                    out.append(s)
+            return out
+
+        must_groups: List[str] = []
+        can_terms: List[str] = []
+        exclude_terms: List[str] = []
         seen_must = set()
         seen_can = set()
         seen_exclude = set()
         source_keys = set()
 
-        for item in criteria.title_criteria + criteria.skill_criteria:
-            value = str(item.get("value", "")).strip()
-            if not value:
+        # ── Roles: alternatives, so ONE OR group ─────────────────────────
+        # A candidate is a "Senior Data Engineer" OR an "ETL Developer" —
+        # essentially never both. ANDing title clauses together was the single
+        # biggest recall killer in this builder: two ANDed titles already
+        # matched ~nobody, and the old workaround (truncate to the first two)
+        # both over-constrained AND discarded the remaining role variants.
+        # Collapsing every included title plus its similar titles into one OR
+        # group means extra variants now *widen* recall instead of destroying
+        # it, so none have to be thrown away.
+        role_terms: List[str] = []
+        seen_roles = set()
+        for item in criteria.title_criteria or []:
+            mt = match_type_of(item)
+            terms = variants_of(item)
+            if not terms:
                 continue
-            source_keys.add(normalize_term(value))
-            variants = [quote(value)]
-            for similar in item.get("similar_terms", []) or []:
-                if str(similar).strip():
-                    source_keys.add(normalize_term(str(similar)))
-                    variants.append(quote(str(similar)))
-            group = variants[0] if len(variants) == 1 else f"({' OR '.join(variants)})"
-            match_type = item.get("match_type", "must")
-            if match_type == "exclude":
-                add_unique(exclude_terms, seen_exclude, group, value)
-            elif match_type == "can":
-                add_unique(can_terms, seen_can, group, value)
+            if mt == "exclude":
+                group = (
+                    quote(terms[0]) if len(terms) == 1
+                    else f"({' OR '.join(quote(t) for t in terms)})"
+                )
+                add_unique(exclude_terms, seen_exclude, group, terms[0])
+                continue
+            for t in terms:
+                key = normalize_term(t)
+                if key and key not in seen_roles:
+                    seen_roles.add(key)
+                    role_terms.append(t)
+
+        # ── Skills: requirements, so they AND — but only the important few ──
+        # Rank by the same rule the TalentSearch term selection uses: skills
+        # named in the primary role first (the core competency), then those
+        # carrying an explicit years/recency requirement, then wizard chip
+        # order. Keep the top N as hard ANDs and demote the overflow into the
+        # preferred OR group rather than dropping it — it still lifts ranking
+        # without gating the search.
+        must_skill_items: List[Dict[str, Any]] = []
+        for item in criteria.skill_criteria or []:
+            mt = match_type_of(item)
+            terms = variants_of(item)
+            if not terms:
+                continue
+            group = (
+                quote(terms[0]) if len(terms) == 1
+                else f"({' OR '.join(quote(t) for t in terms)})"
+            )
+            if mt == "exclude":
+                add_unique(exclude_terms, seen_exclude, group, terms[0])
+            elif mt == "can":
+                add_unique(can_terms, seen_can, group, terms[0])
             else:
-                add_unique(must_groups, seen_must, group, value)
+                try:
+                    has_years = int(item.get("years") or 0) > 0
+                except (TypeError, ValueError):
+                    has_years = False
+                must_skill_items.append({
+                    "group": group,
+                    "value": terms[0],
+                    "in_role": term_named_in_title(terms[0], primary_role),
+                    "weighted": has_years or bool(item.get("recent")),
+                })
+
+        must_skill_items.sort(
+            key=lambda s: (0 if s["in_role"] else 1, 0 if s["weighted"] else 1)
+        )
+        for idx, s in enumerate(must_skill_items):
+            if idx < must_skill_cap:
+                add_unique(must_groups, seen_must, s["group"], s["value"])
+            else:
+                add_unique(can_terms, seen_can, s["group"], s["value"])
 
         for keyword in criteria.keywords:
             if keyword and keyword.strip():
                 add_unique(must_groups, seen_must, quote(keyword), keyword)
-        for company in criteria.companies:
-            if company and company.strip():
-                source_keys.add(normalize_term(company))
-                add_unique(must_groups, seen_must, quote(company), company)
 
-        parts = must_groups[:]
+        # ── Companies: alternatives too ("worked at any of these") ────────
+        # These were ANDed, which asked for someone employed by every listed
+        # company simultaneously.
+        company_terms: List[str] = []
+        seen_companies = set()
+        for company in criteria.companies:
+            c = str(company or "").strip()
+            key = normalize_term(c)
+            if c and key and key not in seen_companies:
+                seen_companies.add(key)
+                source_keys.add(key)
+                company_terms.append(c)
+
+        parts: List[str] = []
+        if role_terms:
+            parts.append(
+                quote(role_terms[0]) if len(role_terms) == 1
+                else f"({' OR '.join(quote(t) for t in role_terms)})"
+            )
+        parts.extend(must_groups)
+        if company_terms:
+            parts.append(
+                quote(company_terms[0]) if len(company_terms) == 1
+                else f"({' OR '.join(quote(c) for c in company_terms)})"
+            )
         if can_terms:
-            parts.append(f"({' OR '.join(can_terms)})")
+            # Singletons are flattened — `(A)` and `A` are equivalent, and the
+            # bare form reads better in the string the recruiter copies.
+            parts.append(
+                can_terms[0] if len(can_terms) == 1
+                else f"({' OR '.join(can_terms)})"
+            )
         if criteria.location:
             add_unique(parts, seen_must, quote(criteria.location), criteria.location)
 

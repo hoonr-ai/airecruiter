@@ -1587,6 +1587,7 @@ class JobDivaService:
             extract_and_terms,
             sanitize_talent_term,
             count_location_clauses,
+            term_named_in_title,
         )
         from core import sourcing_config as _sc
 
@@ -1636,30 +1637,12 @@ class JobDivaService:
         # deliberately.
         _primary_title_lc = str((titles or [None])[0] or title or "").strip().lower()
 
-        def _named_in_title(term: str) -> bool:
-            """True when `term` appears in the primary title as a whole token.
-
-            Bounded by alphanumeric lookarounds rather than `\\b`: skills
-            routinely end in non-word characters ("C++", "C#"), and a trailing
-            `\\b` never matches there. A plain substring test promoted the
-            WRONG skills — "R" matched "senio(r) data engineer", "Java"
-            matched "(Java)Script Developer", "Go" matched "(Go)lang" — and
-            because the AND is capped at max_terms immediately after this
-            sort, each spurious hit displaced a genuinely required skill from
-            the query. Erring strict is safe: a miss just leaves the term to
-            be ranked by its years/recency and chip order.
-            """
-            if not _primary_title_lc or not term:
-                return False
-            return re.search(
-                rf"(?<![0-9A-Za-z]){re.escape(term.lower())}(?![0-9A-Za-z])",
-                _primary_title_lc,
-            ) is not None
-
         # Resolved once per term (not inside the sort key) so the pattern is
-        # compiled O(terms) times rather than O(terms log terms).
+        # compiled O(terms) times rather than O(terms log terms). The
+        # whole-token rule lives in the translator so the boolean builder and
+        # this ranking can't drift apart — see term_named_in_title.
         for _m in must_meta:
-            _m["in_title"] = _named_in_title(_m["term"])
+            _m["in_title"] = term_named_in_title(_m["term"], _primary_title_lc)
         must_meta.sort(
             key=lambda m: (
                 0 if m["in_title"] else 1,

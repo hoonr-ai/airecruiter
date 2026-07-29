@@ -170,6 +170,15 @@ JOBDIVA_TALENT_MAX_SKILL_TERMS = 4
 # a separate pull merged by candidateId).
 JOBDIVA_TALENT_TITLE_PULL_ENABLED = True
 
+# Max must-have skills ANDed into the generated sourcing boolean (the string
+# recruiters paste into JobDiva's JobAgent criteria, and the one sent to
+# Unipile/Exa). Every AND multiplies the constraint, so past a handful the
+# search returns nothing — the ranked overflow is demoted into a preferred OR
+# group instead of dropped, where it still lifts recall without gating it.
+# Kept in step with JOBDIVA_TALENT_MAX_SKILL_TERMS so the boolean a recruiter
+# reads and the structured TalentSearch pull constrain to the same depth.
+JOBDIVA_BOOLEAN_MUST_SKILL_CAP = 4
+
 # Max distinct titleSearch pulls per TalentSearch. Recruiters' hand-written
 # agent strings OR several role variants; the structured titleSearch field
 # carries exactly one string, so we approximate the OR with up to N separate
