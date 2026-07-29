@@ -439,6 +439,8 @@ export function CandidateMatchTable({
                         phone={candidate.phone}
                         persist={false}
                         onSaved={(normalised) => onPhoneSaved(id, normalised)}
+                        linkedinUrl={candidate.profile_url}
+                        source={candidate.source}
                       />
                     ) : awaitingDetails(candidate) ? (
                       <Skeleton className="h-4 w-24" data-testid="shimmer-phone" />
@@ -449,6 +451,8 @@ export function CandidateMatchTable({
                         phone={candidate.phone}
                         persist={false}
                         onSaved={(normalised) => onPhoneSaved(id, normalised)}
+                        linkedinUrl={candidate.profile_url}
+                        source={candidate.source}
                       />
                     )}
                   </TableCell>

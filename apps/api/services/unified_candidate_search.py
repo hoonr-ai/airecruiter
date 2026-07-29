@@ -382,6 +382,15 @@ class UnifiedCandidateSearch:
                 # candidates we cannot otherwise reach at all.
                 seed_email=str(cand.get("email") or "").strip(),
                 seed_phone=str(cand.get("phone") or "").strip(),
+                # Sourcing never buys phone numbers. An email alone makes a
+                # candidate launchable (the PAIR gate is phone OR email) and
+                # renders on Step 5, while phones are the expensive half of every
+                # provider — Apollo gates them behind a per-record reveal, Exa
+                # charges per run. Hunting one for a candidate the recruiter may
+                # never shortlist is speculative spend, so it is deferred to
+                # Launch PAIR and to the per-candidate phone button on Step 5,
+                # both of which carry real intent.
+                want_phone=False,
             )
         except Exception as e:
             logger.warning("contact_enrichment failed for %s: %s", cand.get("id"), e)
@@ -1326,11 +1335,17 @@ class UnifiedCandidateSearch:
                         # ContactSearch. Without a name we skip ZoomInfo and
                         # go straight to Apollo (which does accept a URL).
                         is_exa_source = source_type == "LinkedIn-Exa"
-                        has_full_contact = bool(
-                            str(cand.get("email") or "").strip()
-                            and str(cand.get("phone") or "").strip()
-                        )
-                        if is_exa_source or not has_full_contact:
+                        # EMAIL is the only field sourcing spends on. 436 widened
+                        # this to "either field missing", which pulled every
+                        # phone-less candidate into the provider chain — and since
+                        # phones are the costly half (Apollo per-record reveal, Exa
+                        # per run), that was the bulk of sourcing enrichment spend,
+                        # incurred for candidates the recruiter had not shortlisted
+                        # yet. Phone acquisition now happens at Launch PAIR or on
+                        # the Step 5 phone button. The helper is also told
+                        # want_phone=False, so this is belt-and-braces.
+                        has_email = bool(str(cand.get("email") or "").strip())
+                        if is_exa_source or not has_email:
                             await self._apply_contact_enrichment(
                                 cand, criteria, overwrite=is_exa_source
                             )

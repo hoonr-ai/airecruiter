@@ -853,6 +853,7 @@ async def enrich_contact_for_sourcing(
     company: str = "",
     seed_email: str = "",
     seed_phone: str = "",
+    want_phone: bool = True,
 ) -> Dict[str, Any]:
     """First-hit-wins sourcing-time enrichment.
 
@@ -887,6 +888,15 @@ async def enrich_contact_for_sourcing(
             whether the paid Exa fallback is warranted at all — see
             EXA_SOURCING_CONTACT_ONLY_WHEN_NO_CONTACT. Exa should buy a
             candidate we otherwise cannot reach, not top up one we can.
+        want_phone: whether a PHONE is worth spending on. False at sourcing
+            time, where an email alone makes a candidate launchable (the PAIR
+            gate is phone OR email) and displayable on Step 5. Phone numbers
+            are the expensive half of every provider — Apollo gates them behind
+            a per-record reveal and Exa charges per run — so hunting one for a
+            candidate the recruiter may never shortlist is speculative spend.
+            Deferred to the moments where there is real intent: Launch PAIR, and
+            the per-candidate phone button on Step 5. When False the
+            phone-specific steps are skipped and an email in hand ends the chain.
     """
     from core import sourcing_config as _sc_cfg
 
@@ -910,6 +920,13 @@ async def enrich_contact_for_sourcing(
     seed_phone = (seed_phone or "").strip()
     if sum(1 for ch in _normalise_phone(seed_phone) if ch.isdigit()) < 7:
         seed_phone = ""
+
+    # Nothing left worth buying: the candidate already has the only field this
+    # call is allowed to spend on. Returning here — before the per-job counter is
+    # consumed, before any provider is touched — is what keeps sourcing free of
+    # speculative phone lookups.
+    if not want_phone and seed_email:
+        return {}
 
     linkedin_url = (linkedin_url or "").strip()
     if not linkedin_url or not _LINKEDIN_PROFILE_RE.search(linkedin_url):
@@ -970,7 +987,10 @@ async def enrich_contact_for_sourcing(
         # match a LinkedIn URL, but it can match an email — so this fills the
         # exact case that used to fall through to a paid Exa run. The on-demand
         # path has always done this; the sourcing path was missing the step.
-        seed_email_clean = seed_email  # already normalised / placeholder-stripped
+        # Only reachable when want_phone is True: with an email already in hand
+        # and no phone wanted, the call returned above. So this step exists purely
+        # to convert an email into a PHONE, which is why it is phone-gated.
+        seed_email_clean = seed_email if want_phone else ""
         if seed_email_clean and getattr(_sc_cfg, "ZOOMINFO_SOURCING_EMAIL_LOOKUP", True):
             try:
                 zi_email = await zoominfo_enrich_by_email(job_key, seed_email_clean)
