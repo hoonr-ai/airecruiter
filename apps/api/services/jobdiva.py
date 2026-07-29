@@ -1635,9 +1635,34 @@ class JobDivaService:
         # extractor already emits importance-first and recruiters reorder
         # deliberately.
         _primary_title_lc = str((titles or [None])[0] or title or "").strip().lower()
+
+        def _named_in_title(term: str) -> bool:
+            """True when `term` appears in the primary title as a whole token.
+
+            Bounded by alphanumeric lookarounds rather than `\\b`: skills
+            routinely end in non-word characters ("C++", "C#"), and a trailing
+            `\\b` never matches there. A plain substring test promoted the
+            WRONG skills — "R" matched "senio(r) data engineer", "Java"
+            matched "(Java)Script Developer", "Go" matched "(Go)lang" — and
+            because the AND is capped at max_terms immediately after this
+            sort, each spurious hit displaced a genuinely required skill from
+            the query. Erring strict is safe: a miss just leaves the term to
+            be ranked by its years/recency and chip order.
+            """
+            if not _primary_title_lc or not term:
+                return False
+            return re.search(
+                rf"(?<![0-9A-Za-z]){re.escape(term.lower())}(?![0-9A-Za-z])",
+                _primary_title_lc,
+            ) is not None
+
+        # Resolved once per term (not inside the sort key) so the pattern is
+        # compiled O(terms) times rather than O(terms log terms).
+        for _m in must_meta:
+            _m["in_title"] = _named_in_title(_m["term"])
         must_meta.sort(
             key=lambda m: (
-                0 if _primary_title_lc and m["term"].lower() in _primary_title_lc else 1,
+                0 if m["in_title"] else 1,
                 0 if (m["years"] or m["recent"]) else 1,
             )
         )
@@ -2085,19 +2110,24 @@ class JobDivaService:
         clean_titles = clean_titles[:max_title_pulls]
 
         if clean_titles and getattr(_sc, "JOBDIVA_TALENT_TITLE_PULL_ENABLED", True):
-            # Reserve room for title recall. The caller slices the merged
-            # rows to `limit` with skill rows first, so when the skill AND
-            # saturates the cap every title-matched candidate would be
-            # fetched then discarded. Keep the top ~2/3 of the skill rows by
-            # API order and let role-matched candidates take the rest.
-            if limit and len(rows) >= limit:
-                rows = rows[: max(1, (2 * limit) // 3)]
+            # Title recall competes with the skill pull for the caller's
+            # `limit` (it slices the merged rows with skill rows first). So
+            # collect the role-matched rows FIRST and trim the skill tail by
+            # only as many rows as we actually have to put in its place.
+            # Trimming up front instead threw away already-fetched skill rows
+            # even when every title pull came back empty or failed, silently
+            # costing ~1/3 of the results for no gain.
+            skill_row_count = len(rows)
             seen_ids = {
                 str(get_field(r, ["candidateId", "CANDIDATEID", "id", "ID"]) or "")
                 for r in rows
             }
+            # Cap the reservation at ~1/3 of `limit`: the skill AND is the
+            # more precise signal, so it keeps the majority of the slots.
+            title_budget = max(1, limit // 3) if limit else 0
+            new_title_rows: List[Dict[str, Any]] = []
             for title_clean in clean_titles:
-                if limit and len(rows) >= limit:
+                if title_budget and len(new_title_rows) >= title_budget:
                     break
                 title_body = dict(base_body)
                 title_body["titleSearch"] = title_clean
@@ -2116,12 +2146,27 @@ class JobDivaService:
                     if not cid or cid in seen_ids:
                         continue
                     seen_ids.add(cid)
-                    rows.append(r)
+                    new_title_rows.append(r)
                     added += 1
+                    if title_budget and len(new_title_rows) >= title_budget:
+                        break
                 logger.debug(
                     f"JobDiva Talent Search titleSearch pull {title_clean!r}: "
                     f"+{added} new rows ({len(title_rows)} returned)"
                 )
+
+            # Merge once, now that the real count is known. Nothing is dropped
+            # unless there is a role-matched row to take the slot.
+            if new_title_rows:
+                if limit and skill_row_count + len(new_title_rows) > limit:
+                    keep = max(1, limit - len(new_title_rows))
+                    logger.debug(
+                        "JobDiva Talent Search: trimming skill rows %d → %d to "
+                        "seat %d title-matched rows (limit=%d)",
+                        skill_row_count, keep, len(new_title_rows), limit,
+                    )
+                    rows = rows[:keep]
+                rows.extend(new_title_rows)
 
         if not must_terms and not clean_titles:
             logger.warning(
