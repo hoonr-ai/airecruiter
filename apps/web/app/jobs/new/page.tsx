@@ -9771,22 +9771,16 @@ return (
     {/* Page Header */}
     <div className="mb-7">
       <h1 className="text-[32px] font-bold text-slate-900 leading-tight">New Job</h1>
-      <div className="flex items-center gap-3 mt-1">
-        <p className="text-slate-500 text-[16px] font-medium">
-          {(() => {
-            const title = enhancedTitle || jobData?.enhanced_title || jobData?.title || jobTitle;
-            const customer = jobData?.customer_name || jobData?.customer || "";
-            if (!title && !customer) return "Enter a JobDiva Job ID to get started.";
-            if (title && customer) return `${title} · ${customer}`;
-            return title || customer;
-          })()}
-        </p>
-        {(jobdivaId || numericJobId) && (
-          <span className="text-xs text-slate-400 bg-slate-100 px-2 py-1 rounded">
-            ID: {jobdivaId || numericJobId}
-          </span>
-        )}
-      </div>
+      <p className="text-slate-500 text-[16px] font-medium mt-1">
+        {(() => {
+          const title = enhancedTitle || jobData?.enhanced_title || jobData?.title || jobTitle;
+          const customer = jobData?.customer_name || jobData?.customer || "";
+          const id = jobdivaId || numericJobId;
+          if (!title && !customer) return "Enter a JobDiva Job ID to get started.";
+          const base = title && customer ? `${title} · ${customer}` : title || customer;
+          return id ? `${base} · ${id}` : base;
+        })()}
+      </p>
     </div>
 
     {/* Step Indicator */}
