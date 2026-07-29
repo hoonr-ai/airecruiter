@@ -1587,7 +1587,7 @@ class JobDivaService:
             extract_and_terms,
             sanitize_talent_term,
             count_location_clauses,
-            term_named_in_title,
+            term_appears_as_token,
         )
         from core import sourcing_config as _sc
 
@@ -1640,9 +1640,9 @@ class JobDivaService:
         # Resolved once per term (not inside the sort key) so the pattern is
         # compiled O(terms) times rather than O(terms log terms). The
         # whole-token rule lives in the translator so the boolean builder and
-        # this ranking can't drift apart — see term_named_in_title.
+        # this ranking can't drift apart — see term_appears_as_token.
         for _m in must_meta:
-            _m["in_title"] = term_named_in_title(_m["term"], _primary_title_lc)
+            _m["in_title"] = term_appears_as_token(_m["term"], _primary_title_lc)
         must_meta.sort(
             key=lambda m: (
                 0 if m["in_title"] else 1,

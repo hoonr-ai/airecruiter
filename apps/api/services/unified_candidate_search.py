@@ -2540,7 +2540,7 @@ class UnifiedCandidateSearch:
         carrying explicit years/recency), so the boolean a recruiter reads and
         the query we actually run agree on what the core requirements are.
         """
-        from services.jobdiva_boolean_translator import term_named_in_title
+        from services.jobdiva_boolean_translator import term_appears_as_token
         from core import sourcing_config as _sc_bool
 
         must_skill_cap = max(
@@ -2676,7 +2676,7 @@ class UnifiedCandidateSearch:
                 must_skill_items.append({
                     "group": group,
                     "value": terms[0],
-                    "in_role": term_named_in_title(terms[0], primary_role),
+                    "in_role": term_appears_as_token(terms[0], primary_role),
                     "weighted": has_years or bool(item.get("recent")),
                 })
 
@@ -3342,6 +3342,36 @@ class UnifiedCandidateSearch:
         value = re.sub(r"\s+recent$", "", value)
         value = re.sub(r"\s+over\s+\d+\s+years?$", "", value)
         return re.sub(r"\s+", " ", value).strip()
+
+    def _skills_evidenced_in_text(self, text: str, criteria: SearchCriteria) -> List[str]:
+        """Rubric skill terms that literally appear in `text`, whole-token.
+
+        A no-LLM stand-in for résumé skill extraction, used on the JobAgent
+        high-level scoring path where the per-candidate LLM step is skipped.
+
+        Safer than the fallback it replaces: it can only ever return terms the
+        rubric already asked about, so unlike `_extract_candidate_skills`' title
+        inference it cannot invent skills (that path ends at a literal
+        ["Communication", "Problem Solving"] placeholder, which the Skills
+        dimension — 45% of the score — would otherwise be judged against).
+        Whole-token matching keeps "R" from matching "senior".
+        """
+        haystack = str(text or "")
+        if not haystack:
+            return []
+        from services.jobdiva_boolean_translator import term_appears_as_token
+
+        found: List[str] = []
+        seen = set()
+        for term in criteria.skill_only_values():
+            value = str(term or "").strip()
+            key = value.lower()
+            if not value or key in seen:
+                continue
+            if term_appears_as_token(value, haystack):
+                seen.add(key)
+                found.append(value)
+        return found
 
     def _candidate_profile(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
         enhanced = candidate.get("enhanced_info") or {}
@@ -4394,6 +4424,17 @@ class UnifiedCandidateSearch:
                 "label": "Skills",
                 "weight": 45.0,
                 "collections": ["skills"],
+                # Exclusions ("must not have X") are documented as ALWAYS hard
+                # filters, so they must not depend on extraction quality. The
+                # `skills` collection is only as good as whatever populated it
+                # — for JobDiva rows that's `_extract_candidate_skills`, which
+                # falls back to guessing from the job title and ultimately to a
+                # literal ["Communication", "Problem Solving"] placeholder. On
+                # the JobAgent high-level path the LLM never runs to replace
+                # those, so an exclusion scoped to `skills` alone could never
+                # fire. Matching exclusions against the résumé text too makes
+                # them real without touching how the 45% is *scored*.
+                "excluded_collections": ["skills", "text"],
                 "required": [],
                 "preferred": [],
                 "excluded": [],
@@ -5093,6 +5134,21 @@ class UnifiedCandidateSearch:
                     # extraction; the caller scores on the cheap deterministic
                     # signals (rank floor keeps JobDiva's ordering honored).
                     if skip_llm:
+                        # Ground the Skills dimension (45% of the score) and its
+                        # exclusions in the résumé we just fetched. Without this
+                        # the only skills on the row are whatever
+                        # `_extract_candidate_skills` produced — JobDiva's own
+                        # field when it exists, else a guess from the job title,
+                        # else the literal ["Communication", "Problem Solving"]
+                        # placeholder. The LLM pass that normally overwrites
+                        # those is exactly what we're skipping here, so scoring
+                        # and "must not have X" would otherwise be judged
+                        # against fiction. Literal scan — no LLM, no extra I/O.
+                        evidenced = self._skills_evidenced_in_text(
+                            candidate.get("resume_text") or "", criteria
+                        )
+                        if evidenced:
+                            candidate["skills"] = evidenced
                         await _keep("high_level")
                         return
 
