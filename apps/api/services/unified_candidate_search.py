@@ -376,6 +376,12 @@ class UnifiedCandidateSearch:
                 full_name=str(cand.get("name") or "").strip() or None,
                 include_exa=source.startswith("LinkedIn"),
                 company=company,
+                # What the candidate already has. Seeds the ZoomInfo
+                # match-by-email lookup (the cheap way to fill a missing phone)
+                # and gates the paid Exa fallback, which is reserved for
+                # candidates we cannot otherwise reach at all.
+                seed_email=str(cand.get("email") or "").strip(),
+                seed_phone=str(cand.get("phone") or "").strip(),
             )
         except Exception as e:
             logger.warning("contact_enrichment failed for %s: %s", cand.get("id"), e)

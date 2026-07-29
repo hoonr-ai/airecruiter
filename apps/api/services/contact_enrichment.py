@@ -799,8 +799,13 @@ async def enrich_contact_for_sourcing(
     full_name: Optional[str] = None,
     include_exa: bool = False,
     company: str = "",
+    seed_email: str = "",
+    seed_phone: str = "",
 ) -> Dict[str, Any]:
     """First-hit-wins sourcing-time enrichment.
+
+    Provider order is cheapest-useful-first, with the paid provider last:
+    ZoomInfo-by-name -> Apollo-by-URL -> ZoomInfo-by-email -> Exa Agent.
 
     Returns {workEmail, personalEmail, mobilePhone, workPhone, provider_used}
     on success, or `{}` when:
@@ -825,9 +830,34 @@ async def enrich_contact_for_sourcing(
             Gated by EXA_SOURCING_CONTACT_FALLBACK + EXA_CONTACT_ENRICH_ENABLED
             and capped per job at EXA_SOURCING_CONTACT_CAP.
         company: candidate's current company, sharpens the Exa Agent query.
+        seed_email / seed_phone: contact the candidate ALREADY has. Two uses:
+            they seed the ZoomInfo match-by-email lookup, and they decide
+            whether the paid Exa fallback is warranted at all — see
+            EXA_SOURCING_CONTACT_ONLY_WHEN_NO_CONTACT. Exa should buy a
+            candidate we otherwise cannot reach, not top up one we can.
     """
+    from core import sourcing_config as _sc_cfg
+
     if os.getenv("CONTACT_ENRICHMENT_INLINE_ENABLED", "true").strip().lower() != "true":
         return {}
+
+    # Normalise the seeds BEFORE they are allowed to influence anything. JobDiva
+    # hands out synthetic placeholders (`Auto_*@jobdiva.com`, "Available upon
+    # request") and unusable phone stubs; counting one as real contact would both
+    # seed a pointless ZoomInfo-by-email lookup and — worse — convince the gate
+    # below that an unreachable candidate is reachable, silently denying them the
+    # Exa fallback they actually need.
+    try:
+        from services.jobdiva import _is_placeholder_email as _is_placeholder
+    except Exception:  # pragma: no cover - defensive
+        def _is_placeholder(_email: str) -> bool:
+            return False
+    seed_email = (seed_email or "").strip()
+    if seed_email and (_is_placeholder(seed_email) or "@" not in seed_email):
+        seed_email = ""
+    seed_phone = (seed_phone or "").strip()
+    if sum(1 for ch in _normalise_phone(seed_phone) if ch.isdigit()) < 7:
+        seed_phone = ""
 
     linkedin_url = (linkedin_url or "").strip()
     if not linkedin_url or not _LINKEDIN_PROFILE_RE.search(linkedin_url):
@@ -882,14 +912,56 @@ async def enrich_contact_for_sourcing(
                 "provider_used": "apollo",
             }
 
+        # ZoomInfo match-by-EMAIL. Runs last among the cheap providers because it
+        # needs a seed email, but it is the RIGHT tool for the commonest gap: a
+        # candidate who has an email and is missing only a phone. ZoomInfo can't
+        # match a LinkedIn URL, but it can match an email — so this fills the
+        # exact case that used to fall through to a paid Exa run. The on-demand
+        # path has always done this; the sourcing path was missing the step.
+        seed_email_clean = seed_email  # already normalised / placeholder-stripped
+        if seed_email_clean and getattr(_sc_cfg, "ZOOMINFO_SOURCING_EMAIL_LOOKUP", True):
+            try:
+                zi_email = await zoominfo_enrich_by_email(job_key, seed_email_clean)
+            except Exception as e:
+                logger.warning(
+                    "contact_enrichment ZoomInfo-by-email raised for %s: %s", job_key, e
+                )
+                zi_email = {"ok": False}
+            if zi_email.get("ok") and _has_usable_field(zi_email.get("fields") or {}):
+                fields = zi_email["fields"]
+                logger.info("contact_enrichment: zoominfo-by-email hit for %s", job_key)
+                return {
+                    "workEmail": fields.get("workEmail", ""),
+                    "personalEmail": fields.get("personalEmail", ""),
+                    "mobilePhone": fields.get("mobilePhone", ""),
+                    "workPhone": fields.get("workPhone", ""),
+                    "provider_used": "zoominfo_email",
+                }
+
     # Exa Agent fallback — outside the provider semaphore (it has its own
     # slow polling loop and per-job budget; holding a ZoomInfo/Apollo slot
     # for up to EXA_CONTACT_ENRICH_TIMEOUT_S would starve the cheap chain).
     if include_exa:
-        from core import sourcing_config as _sc
+        _sc = _sc_cfg
 
         if not getattr(_sc, "EXA_SOURCING_CONTACT_FALLBACK", True):
             return {}
+
+        # Deprioritised: Exa only buys candidates we cannot otherwise reach.
+        # A candidate who already has an email or a phone is contactable, so
+        # spending ~$0.115 to complete the set is not worth it at sourcing time —
+        # the cheap providers above (including the new ZoomInfo-by-email step)
+        # get first refusal, and recruiter-initiated on-demand enrichment can
+        # still reach for Exa because that is a deliberate click.
+        if getattr(_sc, "EXA_SOURCING_CONTACT_ONLY_WHEN_NO_CONTACT", True):
+            if seed_email or seed_phone:
+                logger.info(
+                    "contact_enrichment: skipping paid Exa for %s — candidate is "
+                    "already reachable (email=%s phone=%s); cheap providers missed "
+                    "only the remaining field",
+                    job_key, bool(seed_email), bool(seed_phone),
+                )
+                return {}
         exa_cap = max(0, int(getattr(_sc, "EXA_SOURCING_CONTACT_CAP", 25) or 0))
         exa_lifetime_cap = max(
             0, int(getattr(_sc, "EXA_SOURCING_CONTACT_LIFETIME_CAP", 100) or 0)

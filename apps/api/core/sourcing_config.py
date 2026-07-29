@@ -350,6 +350,30 @@ try:
 except ValueError:
     EXA_SOURCING_CONTACT_CAP = 25
 
+# Restrict the sourcing-time Exa fallback to candidates with NO contact at all.
+# Exa is the expensive provider (~$0.115/run vs a ZoomInfo/Apollo API call), so
+# it should buy us a candidate we could not otherwise reach — not top up a
+# candidate we can already contact. Without this, any LinkedIn candidate missing
+# only a phone reached Exa, and because Apollo runs out of credits and ZoomInfo's
+# name match is accuracy-gated, that double-miss is the COMMON path rather than
+# an edge case: effectively every phone-less LinkedIn row billed an Exa run.
+# When True, a candidate who already has an email or a phone is left to the
+# cheap providers (now including ZoomInfo-by-email, see
+# ZOOMINFO_SOURCING_EMAIL_LOOKUP) and to recruiter-initiated on-demand
+# enrichment, which is a deliberate click and may still use Exa.
+EXA_SOURCING_CONTACT_ONLY_WHEN_NO_CONTACT = _os.getenv(
+    "EXA_SOURCING_CONTACT_ONLY_WHEN_NO_CONTACT", "true"
+).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+
+# Try ZoomInfo's match-by-EMAIL lookup at sourcing time when the candidate
+# already has an email but no phone. ZoomInfo cannot match a LinkedIn URL, but it
+# CAN match an email, so this is the cheap way to fill exactly the gap that used
+# to fall through to Exa. The on-demand path has always done this
+# (routers/candidates.py); the sourcing path was missing the step.
+ZOOMINFO_SOURCING_EMAIL_LOOKUP = _os.getenv(
+    "ZOOMINFO_SOURCING_EMAIL_LOOKUP", "true"
+).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+
 # Lifetime ceiling on sourcing-time Exa contact runs per job, per worker.
 # EXA_SOURCING_CONTACT_CAP above is a PER-RUN budget — it is reset at the start
 # of every search so a job that filled it once isn't starved forever. That reset
