@@ -21,6 +21,7 @@ from core import llm_cache
 from services.role_family import detect_role_family
 from services.taxonomy_service import extract_grounded_rubric
 from services import role_taxonomy
+from services import rubric_grounding
 import openai
 
 logger = logging.getLogger(__name__)
@@ -353,11 +354,17 @@ Return JSON:
   "other_requirements": [],
   "min_years_experience": 0,
   "skills": [
-     {{ "name": "Skill Name", "category": "hard/soft", "importance": "required/preferred", "min_years": 0, "evidence_type": "direct/inferred" }}
+     {{ "name": "Skill Name", "category": "hard/soft", "importance": "required/preferred", "min_years": 0, "evidence_type": "direct/inferred", "similar_skills": ["Synonym or sub-tool named in the JD"] }}
   ]
 }}
 
 IMPORTANT:
+- For each skill, "similar_skills" should list synonyms, sub-tools or sibling
+  technologies THAT THE JOB DESCRIPTION ITSELF NAMES (e.g. for "Adobe Creative
+  Cloud" on a JD that says "Adobe Creative Cloud (Photoshop, Illustrator,
+  InDesign)" -> those three). Do not invent tools the JD never mentions; they
+  are dropped by a JD-grounding gate anyway. Use [] when there are none.
+- "importance" must follow the JD's own Required vs Preferred sections.
 - All job_roles MUST have "match_type": "Similar" - this is mandatory.
 - Do not use any other match type values like "Exact", "Broad", etc.
 - job_roles MUST contain 3 to 5 entries (not just one), with the most
@@ -400,7 +407,7 @@ IMPORTANT:
         
         normalized_grounding_text = "".join(ch.lower() if ch.isalnum() else " " for ch in grounding_text)
 
-        def skill_priority(item: dict) -> tuple[int, int, int, str]:
+        def skill_priority(item: dict) -> tuple[int, int, int, int]:
             evidence_type = (item.get("evidence_type") or "").lower()
             importance = (item.get("importance") or "preferred").lower()
             value = item.get("value", "")
@@ -410,7 +417,14 @@ IMPORTANT:
             direct_rank = 0 if evidence_type == "direct" or is_direct_text_match else 1
             importance_rank = 0 if importance == "required" else 1
             inferred_rank = 0 if is_direct_text_match else 1
-            return (direct_rank, importance_rank, inferred_rank, value)
+            # Final tiebreak: where the JD first mentions the skill, NOT the
+            # skill name. Alphabetical order used to decide this, and since
+            # downstream consumers cap how many skills they AND together, that
+            # let "CSS"/"HTML" outrank "Instructional Design" purely on spelling
+            # (observed on 26-22970). JD position is a real importance signal —
+            # requirements are stated before nice-to-haves.
+            position = grounding_text.lower().find(value.lower()) if value else -1
+            return (direct_rank, importance_rank, inferred_rank, position if position >= 0 else 10**6)
 
         # Extract ALL Skills from LLM (Azure Agent disabled)
         skills_from_llm = phase2_result.get("skills", [])
@@ -491,6 +505,23 @@ IMPORTANT:
                 is_direct_text_match = bool(normalized_value and normalized_value in normalized_grounding_text)
                 is_direct_hard_skill = category == "hard" and (evidence_type == "direct" or is_direct_text_match)
                 required_label = "Required" if is_direct_hard_skill else ("Preferred" if category == "hard" else item.get('importance', 'preferred').capitalize())
+
+                # The JD's own section headers outrank both the LLM's guess and
+                # the is_direct_hard_skill heuristic above. That heuristic treats
+                # ANY direct mention as Required, which conflates "the JD says
+                # this word" with "the JD demands it" — on 26-22970 it marked
+                # HTML, CSS and SharePoint Required even though the JD lists
+                # them only under "Preferred Qualifications", while pushing
+                # eLearning content (a Key Responsibility) to Preferred. Only
+                # overrides when the term is actually found under a recognised
+                # header; otherwise the label above stands.
+                section_verdict = rubric_grounding.classify_by_jd_section(
+                    item["name"], grounding_text
+                )
+                if section_verdict == "required":
+                    required_label = "Required"
+                elif section_verdict == "preferred":
+                    required_label = "Preferred"
                 importance = required_label.lower()
 
                 skill_obj = {
@@ -501,7 +532,12 @@ IMPORTANT:
                     "required": required_label,
                     "minYears": skill_min_years if skill_min_years else min_years,
                     "category": category,
-                    "evidence_type": "direct" if is_direct_hard_skill else (evidence_type or ("direct" if is_direct_text_match else "inferred"))
+                    "evidence_type": "direct" if is_direct_hard_skill else (evidence_type or ("direct" if is_direct_text_match else "inferred")),
+                    # Filled in by the JD-grounded synonym pass below, once every
+                    # skill is known (peer skills must not become each other's
+                    # synonyms).
+                    "similar_skills": [],
+                    "_llm_similar_skills": item.get("similar_skills") or [],
                 }
 
                 # Separate into hard and soft skills based on category
@@ -513,6 +549,23 @@ IMPORTANT:
         grounded_hard_skills.sort(key=skill_priority)
         # Limit to a maximum of 8 hard skills (soft skills are not counted in this limit)
         grounded_hard_skills = grounded_hard_skills[:8]
+
+        # JD-grounded synonym clusters. Runs here, after the final skill set is
+        # known, so every other chip can be excluded as a peer rather than
+        # becoming this skill's "synonym". Each surviving alternative is a term
+        # the JD itself names, which is what turns a bare "Adobe Creative Cloud"
+        # chip into the recruiter's ("ADOBE CREATIVE CLOUD" OR PHOTOSHOP OR
+        # ILLUSTRATOR OR INDESIGN) — the JD spells those out in parentheses.
+        _peer_names = [s.get("value", "") for s in (grounded_hard_skills + grounded_soft_skills)]
+        for _s in grounded_hard_skills:
+            _s["similar_skills"] = rubric_grounding.ground_skill_synonyms(
+                _s.get("value", ""),
+                _s.pop("_llm_similar_skills", []) or [],
+                grounding_text,
+                peers=_peer_names,
+            )
+        for _s in grounded_soft_skills:
+            _s.pop("_llm_similar_skills", None)
                     
         # Extract Job roles using LLM - ALWAYS use "Similar" match type
         if not grounded_roles:
@@ -565,7 +618,11 @@ IMPORTANT:
         # in two groups. No padding: stop when relevant candidates run out.
         # Seed with every main title so a similar-title chip never duplicates a
         # title the recruiter is already searching as its own row.
-        MAX_SIMILAR = 10
+        # Capped at 7 — recruiters hand-write tight title lists (the 26-22970
+        # agent string used exactly 7). Ten slots per title meant a 5-title job
+        # emitted ~39 OR'd variants, which reads as thorough but is mostly
+        # noise: precision collapses and the group stops describing the role.
+        MAX_SIMILAR = 7
         claimed: set[str] = {
             (t.get("value") or "").lower()
             for t in final_titles
@@ -599,6 +656,22 @@ IMPORTANT:
             for cand_title in sources:
                 key = cand_title.lower()
                 if key in seen_local or key in claimed:
+                    continue
+                # Seniority gate. Neither the taxonomy siblings nor the LLM
+                # suggestions respect level, so "Creative Designer" was pulling
+                # in "Creative Department Head" and "Global Creative Director"
+                # while "Graphic Designer" pulled in "Visual Design Intern".
+                # Those are different jobs, not alternatives for the same one —
+                # OR-ing them in surfaces candidates no recruiter would submit.
+                # One rung of slack keeps the honest neighbours (Designer ↔
+                # Senior Designer).
+                if not rubric_grounding.seniority_compatible(main, cand_title):
+                    logger.debug(
+                        "similar_titles: dropping %r for %r (seniority %d vs %d)",
+                        cand_title, main,
+                        rubric_grounding.seniority_level(cand_title),
+                        rubric_grounding.seniority_level(main),
+                    )
                     continue
                 seen_local.add(key)
                 claimed.add(key)
@@ -656,6 +729,19 @@ IMPORTANT:
         for d in domain_raw:
             val = d.get("value", "") if isinstance(d, dict) else str(d)
             if not val.strip(): continue
+            # Domain is deliberately allowed to come from world knowledge of the
+            # CUSTOMER (Cummins → "Diesel Engines"), which is why it is not
+            # JD-grounded in general. But with no customer name there is nothing
+            # to have knowledge about, so an ungrounded sector is pure invention
+            # — 26-22970 (no customer, healthcare-finance JD) came back
+            # "Telecom", which then scores every résumé against the wrong
+            # industry. The prompt already says to return [] when unsure; this
+            # enforces it.
+            if not (customer_name or "").strip() and not rubric_grounding.is_grounded_term(val, grounding_text):
+                logger.info(
+                    "domain: dropping %r — no customer name and nothing in the JD supports it", val
+                )
+                continue
             if isinstance(d, dict): domain.append(d)
             elif isinstance(d, str): domain.append({"value": val, "required": "Required"})
 

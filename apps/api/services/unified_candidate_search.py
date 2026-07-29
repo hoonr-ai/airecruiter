@@ -2519,8 +2519,16 @@ class UnifiedCandidateSearch:
                 terms.append({"value": value.strip(), "match_type": "must"})
         return terms
 
-    def _build_boolean_string(self, criteria: SearchCriteria) -> str:
+    def _build_boolean_string(
+        self, criteria: SearchCriteria, dialect: str = "generic"
+    ) -> str:
         """Build the sourcing boolean from the Step 5 filters.
+
+        ``dialect="jobdiva"`` emits JobDiva's native shape — roles in the
+        dedicated ``TITLES= (...)`` field and ``IN {US}`` for a remote role's
+        geo, i.e. what a recruiter hand-writes into JobAgent criteria.
+        ``"generic"`` (the default) keeps a plain boolean expression, because
+        Unipile and Exa parse neither of those constructs.
 
         AND/OR *allocation* matters far more here than term count, because
         every AND multiplies the constraint while every OR widens it:
@@ -2707,11 +2715,6 @@ class UnifiedCandidateSearch:
                 company_terms.append(c)
 
         parts: List[str] = []
-        if role_terms:
-            parts.append(
-                quote(role_terms[0]) if len(role_terms) == 1
-                else f"({' OR '.join(quote(t) for t in role_terms)})"
-            )
         parts.extend(must_groups)
         if company_terms:
             parts.append(
@@ -2725,15 +2728,46 @@ class UnifiedCandidateSearch:
                 can_terms[0] if len(can_terms) == 1
                 else f"({' OR '.join(can_terms)})"
             )
-        if criteria.location:
+
+        is_jobdiva = str(dialect or "generic").strip().lower() == "jobdiva"
+
+        # Roles. In JobDiva's dialect they ride in the dedicated TITLES= field,
+        # which matches the candidate's job title rather than anywhere in the
+        # résumé body — so a keyword-chain role group both over-matches (someone
+        # who merely mentions the title) and competes with the skill ANDs. Every
+        # other consumer (Unipile, Exa) only understands a plain expression, so
+        # there the role group is AND'ed into the chain as before.
+        titles_suffix = ""
+        if role_terms:
+            role_clause = " OR ".join(quote(t) for t in role_terms)
+            if is_jobdiva:
+                titles_suffix = f" , TITLES= ({role_clause})"
+            else:
+                parts.insert(
+                    0,
+                    quote(role_terms[0]) if len(role_terms) == 1 else f"({role_clause})",
+                )
+
+        # Geo. A remote role must NOT carry a city keyword: `AND "Dallas, TX"` is
+        # a literal résumé-text match, so on a 100%-remote job it rejects every
+        # candidate who doesn't happen to name that city — the opposite of the
+        # intent. JobDiva has a structured country filter for this (`IN {US}`,
+        # what recruiters hand-write); other dialects have no equivalent, so we
+        # simply omit the constraint and let the caller's own location argument
+        # and the client-side location scorer handle it.
+        location_type = str(getattr(criteria, "location_type", "") or "").strip().lower()
+        if location_type == "remote":
+            if is_jobdiva:
+                parts.append("IN {US}")
+        elif criteria.location:
             add_unique(parts, seen_must, quote(criteria.location), criteria.location)
 
         boolean_string = " AND ".join(part for part in parts if part and part != "()") or "*"
         if exclude_terms:
             boolean_string = f"{boolean_string} NOT ({' OR '.join(exclude_terms)})"
-        
+
         logger.info(f"Boolean string built from Page 5 sourcing filters only: {boolean_string[:150]}...")
-        return boolean_string
+        return boolean_string + titles_suffix
 
     def _filter_candidates(
         self,

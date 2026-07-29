@@ -5453,9 +5453,17 @@ function NewJobPageContent() {
         if (group) addUnique(exclude, seenExclude, group, title.value);
         return;
       }
-      if (title.matchType === "can") {
+      // A "can" title is still a ROLE ALTERNATIVE, so it belongs in the role
+      // group — not in the shared preferred OR bucket, where it would sit
+      // beside preferred *skills* and produce nonsense like
+      // ("Creative Designer" OR "Storyboarding"). This matters more than it
+      // looks: the extractor labels title chips required:"Preferred", so every
+      // rubric-derived title arrives here as "can" and would otherwise bypass
+      // the role group entirely. Only an explicit user-assigned OR group is
+      // honored as a separate bucket.
+      if (title.matchType === "can" && (title.orGroup ?? 1) > 1) {
         const group = criterionGroup(title.value, title.selectedSimilarTitles || [], title.years, title.recent);
-        if (group) addToOrGroup(title.orGroup ?? 1, group, title.value);
+        if (group) addToOrGroup(title.orGroup as number, group, title.value);
         return;
       }
       if (title.years > 0 || title.recent) {
@@ -5466,12 +5474,12 @@ function NewJobPageContent() {
       pushRole(title.value);
       (title.selectedSimilarTitles || []).forEach(pushRole);
     });
-    if (roleTerms.length) {
-      const roleClause = isJobDiva || roleTerms.length > 1
-        ? `(${roleTerms.join(" OR ")})`
-        : roleTerms[0];
-      must.unshift(roleClause);
-    }
+    // Emitted at the very end for JobDiva (as `, TITLES= (...)`), or AND'ed
+    // into the keyword chain for every other dialect — see the assembly below.
+    const roleClause = roleTerms.length
+      ? (isJobDiva || roleTerms.length > 1 ? `(${roleTerms.join(" OR ")})` : roleTerms[0])
+      : "";
+    if (roleClause && !isJobDiva) must.unshift(roleClause);
 
     // SKILLS ARE REQUIREMENTS — they AND, but only the important few.
     // Every extra AND multiplies the constraint, so rank by the same rule the
@@ -5564,7 +5572,18 @@ function NewJobPageContent() {
         addSourceKey(location.value);
         locationClauses.push(`${quote(location.value)} ${location.radius}`);
       });
-    if (locationClauses.length === 1) {
+    // A remote role must not carry a city keyword: the quoted `"Dallas, TX" 25`
+    // clause is a literal résumé-text match, so on a 100%-remote job it rejects
+    // everyone who doesn't happen to name that city. JobDiva has a structured
+    // country filter for exactly this (`IN {US}`, what recruiters hand-write);
+    // other dialects have no equivalent, so the constraint is simply dropped and
+    // left to the location scorer.
+    // Same helper the search payload uses (line ~5924), so the string the
+    // recruiter reads and the request we send agree on what "remote" means —
+    // it also catches the city === "REMOTE" records.
+    if (isRemoteJob(jobData)) {
+      if (isJobDiva) must.push("IN {US}");
+    } else if (locationClauses.length === 1) {
       must.push(locationClauses[0]);
     } else if (locationClauses.length > 1) {
       must.push(`(${locationClauses.join(" OR ")})`);
@@ -5582,6 +5601,10 @@ function NewJobPageContent() {
     });
     let booleanString = parts.length ? parts.join(" AND ") : (isValidBoolean(jobTitle) ? jobTitle : quote(jobTitle || "Role"));
     if (exclude.length) booleanString += ` NOT (${exclude.join(" OR ")})`;
+    // JobDiva matches TITLES= against the candidate's actual job title rather
+    // than anywhere in the résumé body, so roles belong there instead of in the
+    // keyword chain where they both over-match and compete with the skill ANDs.
+    if (isJobDiva && roleClause) booleanString += ` , TITLES= ${roleClause}`;
     return booleanString;
   };
 
