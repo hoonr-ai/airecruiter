@@ -5507,8 +5507,48 @@ function NewJobPageContent() {
         from = i + 1;
       }
     };
+    // Industry chips get their own AND'ed clause and skip the must-skill cap.
+    // Industry and capability are different axes: merging a preferred industry
+    // into the shared OR bucket would emit
+    // `(Articulate OR Captivate OR Healthcare)`, so a healthcare candidate with
+    // no eLearning tool would satisfy the eLearning requirement — the merge
+    // weakens the query rather than sharpening it. Recruiters keep them separate
+    // for the same reason.
+    // Mirrors rubric_grounding._INDUSTRY_SYNONYMS (services/rubric_grounding.py);
+    // keep the two in step if either gains a vertical.
+    const INDUSTRY_TERMS = new Set([
+      "healthcare", "health", "hospital", "clinical", "medical", "provider", "payer",
+      "financial services", "financial", "finance", "banking", "fintech", "capital markets",
+      "insurance", "insurtech", "underwriting", "claims",
+      "pharmaceuticals", "pharmaceutical", "pharma", "biotech", "life sciences", "clinical trials",
+      "telecom", "telecommunications", "wireless", "carrier",
+      "retail", "e-commerce", "ecommerce", "merchandising", "consumer goods",
+      "manufacturing", "industrial", "plant", "factory", "production floor",
+      "automotive", "oem", "vehicle", "mobility",
+      "aerospace", "aviation", "defense", "defence",
+      "government", "public sector", "federal", "municipal", "civic",
+      "education", "higher education", "academic", "university", "k-12",
+      "energy", "oil & gas", "oil and gas", "utilities", "power", "renewables",
+      "logistics", "supply chain", "transportation", "freight", "warehousing",
+      "hospitality", "hotel", "restaurant", "travel", "food service",
+      "media", "entertainment", "publishing", "broadcast", "streaming",
+      "legal", "law firm", "litigation support",
+      "real estate", "property management", "proptech", "commercial real estate",
+      "nonprofit", "non-profit", "ngo", "charitable",
+    ]);
+    const isIndustryChip = (value: string) =>
+      INDUSTRY_TERMS.has(String(value || "").trim().toLowerCase());
+
+    sourceSkills.forEach(skill => {
+      if (skill.matchType === "exclude" || !isIndustryChip(skill.value)) return;
+      const group = criterionGroup(
+        skill.value, skill.selectedSimilarSkills || [], skill.years, skill.recent,
+      );
+      if (group) addUnique(must, seenMust, group, skill.value);
+    });
+
     const mustSkills = sourceSkills.filter(
-      s => s.matchType !== "exclude" && s.matchType !== "can"
+      s => s.matchType !== "exclude" && s.matchType !== "can" && !isIndustryChip(s.value)
     );
     const rankedMustSkills = mustSkills
       .map((skill, idx) => ({
@@ -5523,6 +5563,8 @@ function NewJobPageContent() {
 
     sourceSkills.forEach(skill => {
       if (skill.matchType !== "exclude" && skill.matchType !== "can") return;
+      // Industry chips already emitted as their own AND'ed clause above.
+      if (skill.matchType === "can" && isIndustryChip(skill.value)) return;
       const group = criterionGroup(skill.value, skill.selectedSimilarSkills || [], skill.years, skill.recent);
       if (!group) return;
       if (skill.matchType === "exclude") addUnique(exclude, seenExclude, group, skill.value);

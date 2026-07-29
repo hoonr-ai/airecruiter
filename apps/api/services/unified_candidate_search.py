@@ -2591,6 +2591,7 @@ class UnifiedCandidateSearch:
         the query we actually run agree on what the core requirements are.
         """
         from services.jobdiva_boolean_translator import term_appears_as_token
+        from services.rubric_grounding import is_industry_term as term_is_industry
         from core import sourcing_config as _sc_bool
 
         must_skill_cap = max(
@@ -2704,6 +2705,16 @@ class UnifiedCandidateSearch:
         # order. Keep the top N as hard ANDs and demote the overflow into the
         # preferred OR group rather than dropping it — it still lifts ranking
         # without gating the search.
+        # Industry chips get their own AND'ed cluster and skip the must-skill cap:
+        # industry and capability are different axes. Folding a preferred industry
+        # into the shared OR bucket would emit
+        # `(Articulate OR Captivate OR Healthcare)`, i.e. a healthcare candidate
+        # with no eLearning tool satisfies the eLearning requirement — the merge
+        # weakens the query instead of sharpening it. Recruiters write them as
+        # separate groups for the same reason.
+        industry_groups: List[str] = []
+        seen_industry = set()
+
         must_skill_items: List[Dict[str, Any]] = []
         for item in criteria.skill_criteria or []:
             mt = match_type_of(item)
@@ -2716,6 +2727,8 @@ class UnifiedCandidateSearch:
             )
             if mt == "exclude":
                 add_unique(exclude_terms, seen_exclude, group, terms[0])
+            elif term_is_industry(terms[0]):
+                add_unique(industry_groups, seen_industry, group, terms[0])
             elif mt == "can":
                 add_unique(can_terms, seen_can, group, terms[0])
             else:
@@ -2758,6 +2771,8 @@ class UnifiedCandidateSearch:
 
         parts: List[str] = []
         parts.extend(must_groups)
+        # Own AND'ed clause(s), never merged into the preferred bucket.
+        parts.extend(industry_groups)
         if company_terms:
             parts.append(
                 quote(company_terms[0]) if len(company_terms) == 1

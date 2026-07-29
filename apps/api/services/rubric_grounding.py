@@ -332,6 +332,191 @@ def classify_by_jd_section(term: str, jd_text: str) -> Optional[str]:
     return None
 
 
+# ── Candidate domain / industry experience ────────────────────────────────
+# Distinct from the rubric's `domain` field, which is the CUSTOMER's sector and
+# comes from world knowledge of the account (AT&T -> Telecom). This is the
+# industry the CANDIDATE is asked to have worked in, which a JD states in its own
+# words ("...and healthcare or healthcare finance environments"). Recruiters
+# reliably turn that into an AND'ed cluster —
+# `(HEALTHCARE OR HOSPITAL OR "HEALTHCARE FINANCE" OR HEALTH)` — and we had no
+# concept for it at all, so it never reached the sourcing query.
+
+# canonical industry -> sibling terms. Unlike skill synonyms these are NOT
+# JD-grounded, deliberately: the members only ever appear OR'd inside one
+# cluster, so an extra sibling can only widen recall, never over-constrain. It is
+# also how a recruiter writes them — HOSPITAL is in the 26-22970 string although
+# the JD never says "hospital".
+_INDUSTRY_SYNONYMS: Dict[str, Tuple[str, ...]] = {
+    "healthcare": ("health", "hospital", "clinical", "medical", "provider", "payer"),
+    "financial services": ("financial", "finance", "banking", "fintech", "capital markets"),
+    "insurance": ("insurtech", "underwriting", "claims"),
+    "pharmaceuticals": ("pharmaceutical", "pharma", "biotech", "life sciences", "clinical trials"),
+    "telecom": ("telecommunications", "wireless", "carrier"),
+    "retail": ("e-commerce", "ecommerce", "merchandising", "consumer goods"),
+    "manufacturing": ("industrial", "plant", "factory", "production floor"),
+    "automotive": ("oem", "vehicle", "mobility"),
+    "aerospace": ("aviation", "defense", "defence"),
+    "government": ("public sector", "federal", "municipal", "civic"),
+    "education": ("higher education", "academic", "university", "k-12"),
+    "energy": ("oil & gas", "oil and gas", "utilities", "power", "renewables"),
+    "logistics": ("supply chain", "transportation", "freight", "warehousing"),
+    "hospitality": ("hotel", "restaurant", "travel", "food service"),
+    "media": ("entertainment", "publishing", "broadcast", "streaming"),
+    "legal": ("law firm", "litigation support"),
+    "real estate": ("property management", "proptech", "commercial real estate"),
+    "nonprofit": ("non-profit", "ngo", "charitable"),
+}
+
+# A sentence must show one of these to count as a REQUIREMENT about the
+# candidate's background, rather than merely naming an industry in passing.
+_EXPERIENCE_CUES = (
+    "experience", "background", "exposure", "worked", "working", "familiarity",
+    "environment", "industry", "domain", "sector", "vertical", "setting",
+    "clients in", "knowledge of", "understanding of",
+)
+
+# Boilerplate that mentions industries for reasons unrelated to the role. This
+# guard is the whole ballgame: nearly every JD carries a benefits paragraph, and
+# 26-22970's reads "health insurance (medical, dental, vision)" — mining that
+# would make "Healthcare" a requirement on essentially every job we source.
+_BOILERPLATE_MARKERS = (
+    # NB: "health insurance" not bare "insurance" — insurance is a major
+    # vertical, and banning the word suppressed every legitimate
+    # insurance-industry requirement. The benefits paragraph is still caught by
+    # the other markers around it (benefit / 401(k) / dental / PTO).
+    "benefit", "health insurance", "401(k)", "401k", "paid sick", "paid time",
+    "dental", "vision", "pto", "salary", "pay range", "pr range", "hourly",
+    "per hour", "/hr", "compensation", "equal opportunity", "eeo", "e-verify",
+    "background check", "drug screen", "duration:", "contract to",
+)
+
+
+def is_industry_term(value: str) -> bool:
+    """Whether a chip names an INDUSTRY rather than a skill or tool.
+
+    Lets the boolean builder give industry chips their own AND'ed cluster. They
+    must not be folded into the shared "preferred" OR bucket alongside tooling:
+    `(Articulate OR Captivate OR Healthcare)` says a candidate with healthcare
+    experience and no eLearning tool satisfies the eLearning requirement, which
+    silently WEAKENS the query rather than sharpening it. Industry and capability
+    are different axes, which is exactly why recruiters write them as separate
+    AND'ed groups. Being a different axis is also why these chips are exempt from
+    the must-skill cap — an industry should not have to win a slot against
+    Photoshop.
+
+    Backed by the same closed, curated vocabulary as extract_domain_experience,
+    so this is a lookup rather than a guess.
+    """
+    term = str(value or "").strip().lower()
+    if not term:
+        return False
+    if term in _INDUSTRY_SYNONYMS:
+        return True
+    return any(term in siblings for siblings in _INDUSTRY_SYNONYMS.values())
+
+
+def extract_domain_experience(jd_text: str, *, max_industries: int = 2) -> List[Dict]:
+    """Industries the JD asks the CANDIDATE to have worked in.
+
+    Returns ``[{"value", "similar_skills", "importance"}]``, ready to be added as
+    rubric chips so the existing synonym/boolean machinery renders them as a
+    cluster. Empty when the JD names no industry in a requirement-shaped
+    sentence — silence is the correct answer for the many JDs that are
+    industry-agnostic.
+
+    Two filters do the work: the sentence must carry an experience cue, and it
+    must not look like benefits/compensation boilerplate.
+    """
+    text = str(jd_text or "")
+    if not text.strip():
+        return []
+
+    out: List[Dict] = []
+    claimed: set = set()
+    for raw_sentence in re.split(r"[.\n;]", text):
+        sentence = raw_sentence.strip()
+        if len(sentence) < 12:
+            continue
+        lowered = sentence.lower()
+        if any(marker in lowered for marker in _BOILERPLATE_MARKERS):
+            continue
+        if not any(cue in lowered for cue in _EXPERIENCE_CUES):
+            continue
+
+        for canonical, siblings in _INDUSTRY_SYNONYMS.items():
+            if canonical in claimed:
+                continue
+            # Match the canonical name or any sibling, as a whole token so
+            # "health" doesn't fire on "healthy" and "power" not on "powerful".
+            hit = None
+            for term in (canonical,) + siblings:
+                if term_appears_as_token(term, sentence):
+                    hit = term
+                    break
+            if not hit:
+                continue
+            claimed.add(canonical)
+
+            # Cluster members: the matched wording first (it is the JD's own
+            # phrasing), then the canonical, then siblings. Multi-word variants
+            # the JD spells out ("healthcare finance") are folded in from the
+            # sentence so the recruiter's exact terms survive.
+            members: List[str] = []
+            seen_members = set()
+
+            def _push(value: str) -> None:
+                v = value.strip()
+                key = v.lower()
+                if v and key not in seen_members:
+                    seen_members.add(key)
+                    members.append(v)
+
+            # Canonical leads, so the chip reads predictably regardless of which
+            # spelling the JD happened to use ("pharmaceutical or biotech" must
+            # not become a "Biotech" chip just because the plural canonical
+            # missed on a word-boundary match).
+            _push(canonical)
+            _push(hit)
+            # Compound phrases the JD spells out around the industry word, e.g.
+            # "healthcare finance". Run as TWO separate scans: a single
+            # alternation lets the left-hand branch match "and healthcare" first
+            # and consume the industry word, hiding the "healthcare finance"
+            # that follows it.
+            for pattern in (
+                rf"\b{re.escape(canonical)}\s+([A-Za-z]+)\b",
+                rf"\b([A-Za-z]+)\s+{re.escape(canonical)}\b",
+            ):
+                for neighbour in re.findall(pattern, sentence, flags=re.IGNORECASE):
+                    if re.fullmatch(
+                        r"and|or|with|the|in|of|for|a|an|to|is|are|be|our|their|its",
+                        neighbour, flags=re.IGNORECASE,
+                    ):
+                        continue
+                    ordered = (
+                        f"{canonical} {neighbour}" if pattern.startswith(rf"\b{re.escape(canonical)}")
+                        else f"{neighbour} {canonical}"
+                    )
+                    _push(" ".join(ordered.split()))
+            for sibling in siblings:
+                _push(sibling)
+
+            verdict = classify_by_jd_section(hit, text)
+            out.append({
+                "value": canonical.title(),
+                "similar_skills": [m for m in members[1:6]],
+                "importance": verdict or "preferred",
+            })
+            if len(out) >= max_industries:
+                return out
+            # One industry per sentence. Without this, "healthcare finance"
+            # ALSO matched the financial-services vocabulary and emitted a second,
+            # unrelated `(finance OR banking OR fintech ...)` cluster — which
+            # would then be AND'ed into the query and exclude every genuine
+            # healthcare candidate.
+            break
+    return out
+
+
 def skill_rank_key(skill: Dict, jd_text: str = "") -> Tuple[int, int, int]:
     """Sort key that puts the skills a recruiter would AND first.
 

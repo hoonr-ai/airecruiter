@@ -566,6 +566,7 @@ IMPORTANT:
             )
         for _s in grounded_soft_skills:
             _s.pop("_llm_similar_skills", None)
+
                     
         # Extract Job roles using LLM - ALWAYS use "Similar" match type
         if not grounded_roles:
@@ -953,6 +954,48 @@ IMPORTANT:
         logger.info("=" * 80)
         logger.info("✅ [Success] Full rubric extraction complete")
         logger.info("=" * 80)
+
+        # Candidate DOMAIN EXPERIENCE — the industry the JD asks the candidate to
+        # have worked in. Distinct from the `domain` field below, which is the
+        # CUSTOMER's sector and comes from world knowledge of the account (AT&T ->
+        # Telecom); this comes from the JD's own words ("...and healthcare or
+        # healthcare finance environments") and belongs in the sourcing query,
+        # where recruiters reliably put it as a cluster. We had no concept for it,
+        # so it never reached the search at all.
+        #
+        # Appended after EVERY cap and the non-IT rescue pass — there are two
+        # separate 8-skill truncations in this function, and an earlier insertion
+        # point was silently re-truncated away. Kept off the cap on purpose: it is a different axis from
+        # tooling, so it should not have to win a slot against Photoshop. Emitted
+        # as a hard-skill chip so it flows through the existing similar_skills /
+        # boolean machinery unchanged, and it inherits Required/Preferred from the
+        # JD section that stated it (Preferred on 26-22970 — the recruiter chose
+        # to harden it, which the recruiter can still do in the UI).
+        try:
+            _existing_skill_keys = {
+                str(s.get("value", "")).strip().lower()
+                for s in (grounded_hard_skills + grounded_soft_skills)
+            }
+            for _dom in rubric_grounding.extract_domain_experience(grounding_text):
+                if str(_dom["value"]).strip().lower() in _existing_skill_keys:
+                    continue
+                grounded_hard_skills.append({
+                    "value": _dom["value"],
+                    "source": "PAIR",
+                    "matchType": "Similar",
+                    "importance": _dom["importance"],
+                    "required": _dom["importance"].capitalize(),
+                    "minYears": 0,
+                    "category": "hard",
+                    "evidence_type": "direct",
+                    "similar_skills": _dom["similar_skills"],
+                })
+                logger.info(
+                    "domain experience: added %r (%s) with cluster %s",
+                    _dom["value"], _dom["importance"], _dom["similar_skills"],
+                )
+        except Exception as exc:
+            logger.warning("domain-experience extraction skipped: %s", exc)
 
         return JobRubric(
             job_id=job_id, 
