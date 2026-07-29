@@ -327,7 +327,8 @@ export function UserActivityLogModal({
                                 Candidate completed the interview successfully.
                               </p>
                             )}
-                            {typeof (log.activity_type === "interview_completed" && typeof resolvedQuestionsCompleted === "number"
+                            {!['interview_started_web', 'interview_started_call'].includes(log.activity_type) &&
+                             typeof (log.activity_type === "interview_completed" && typeof resolvedQuestionsCompleted === "number"
                               ? resolvedQuestionsCompleted
                               : log.details.questions_completed) === "number" && (
                               <p className="text-slate-700">
