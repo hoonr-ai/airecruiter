@@ -211,6 +211,73 @@ def sanitize_talent_term(term: str) -> str:
     return cleaned
 
 
+# JobDiva-only constructs. `, TITLES= (...)` is a separate field, `IN {US}` is a
+# structured country filter, `OVER N YRS` is JobDiva's years dialect.
+_TITLES_FIELD_RE = re.compile(r"\s*,?\s*TITLES\s*=\s*\([^)]*\)", flags=re.IGNORECASE)
+_IN_COUNTRY_RE = re.compile(r"(?:\bAND\b\s*)?\bIN\s*\{[^}]*\}", flags=re.IGNORECASE)
+
+
+def strip_jobdiva_dialect(boolean_str: str) -> str:
+    """Remove JobDiva-only syntax so a boolean can be handed to another source.
+
+    The wizard builds ONE boolean string and the frontend renders it in JobDiva's
+    native dialect whenever JobDiva is a selected source — but that same string
+    is also forwarded to Unipile (LinkedIn Recruiter) and Exa, neither of which
+    parses `TITLES= (...)`, `IN {US}` or `OVER N YRS`. Left in, those tokens are
+    matched as literal keywords and quietly wreck the query.
+
+    Dropping them loses nothing for those sources: titles and location are passed
+    to Unipile/Exa as their own arguments, and years-of-experience is scored
+    client-side. Dangling operators left behind by a removal are cleaned up so
+    the result stays a well-formed expression.
+    """
+    text = str(boolean_str or "")
+    if not text.strip():
+        return ""
+    text = _TITLES_FIELD_RE.sub(" ", text)
+    text = _IN_COUNTRY_RE.sub(" ", text)
+    text = _OVER_YRS_CLAUSE_RE.sub(" ", text)
+    text = re.sub(r"\(\s*\)", " ", text)
+    text = re.sub(r"\s*,\s*$", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    # Collapse operator runs ("A AND AND B") and trim leading/trailing ones.
+    prev = None
+    while prev != text:
+        prev = text
+        text = re.sub(r"\b(AND|OR)\s+(AND|OR)\b", r"\1", text, flags=re.IGNORECASE)
+        text = re.sub(r"^\s*(?:AND|OR)\b\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*\b(?:AND|OR)\s*$", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\(\s*(?:AND|OR)\b\s*", "(", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*\b(?:AND|OR)\s*\)", ")", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def term_appears_as_token(term: str, text: str) -> bool:
+    """True when `term` appears in `text` as a whole token.
+
+    Shared by every whole-token containment test so the matching rule can't
+    drift between call sites: the TalentSearch term ordering, the sourcing
+    boolean builder's "is this skill the role's core competency?" ranking, and
+    the résumé skill-evidence scan on the high-level scoring path.
+
+    Bounded by alphanumeric lookarounds rather than ``\\b``: skills routinely
+    end in non-word characters ("C++", "C#") where a trailing ``\\b`` never
+    matches. A plain substring test promoted the WRONG terms — "R" matched
+    "senio(r) data engineer", "Java" matched "(Java)Script Developer", "Go"
+    matched "(Go)lang" — which, against a capped AND, displaced genuinely
+    required skills. Erring strict is safe: a miss just leaves the term to be
+    ranked by its years/recency and chip order.
+    """
+    text_lc = str(text or "").strip().lower()
+    term_lc = str(term or "").strip().lower()
+    if not text_lc or not term_lc:
+        return False
+    return re.search(
+        rf"(?<![0-9A-Za-z]){re.escape(term_lc)}(?![0-9A-Za-z])", text_lc
+    ) is not None
+
+
 def extract_and_terms(boolean_str: str, max_terms: int = 4) -> List[str]:
     """Top-level AND-connected quoted terms from a wizard boolean, for the
     v2 TalentSearch `skills` array (which ANDs its elements server-side).

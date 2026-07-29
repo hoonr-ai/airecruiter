@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Phone, Loader2, Check, X as XIcon } from "lucide-react";
+import { Phone, Loader2, Check, Search, X as XIcon } from "lucide-react";
 import { API_BASE, authFetch } from "@/lib/api";
 import { logger } from "@/lib/logger";
 
@@ -13,6 +13,11 @@ interface PhoneIndicatorProps {
   onSaved: (normalisedPhone: string) => void;
   persist?: boolean;
   title?: string;
+  /** LinkedIn profile URL. Required for the "Find phone" provider lookup —
+   *  ZoomInfo/Apollo/Exa all key off it. Without one, only manual entry works. */
+  linkedinUrl?: string;
+  /** Candidate source, forwarded to the enrichment endpoint for attribution. */
+  source?: string;
 }
 
 function countDigits(s: string) {
@@ -28,11 +33,14 @@ export function PhoneIndicator({
   onSaved,
   persist = true,
   title,
+  linkedinUrl,
+  source,
 }: PhoneIndicatorProps) {
   const hasPhone = !!(phone && countDigits(phone) >= 7);
   const [open, setOpen] = useState(false);
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
+  const [finding, setFinding] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Coords for the portal-rendered popup. The candidate table is wrapped in
   // an `overflow-hidden` container, so an `absolute` popup gets clipped when
@@ -127,7 +135,64 @@ export function PhoneIndicator({
     }
   }
 
-  const tooltip = title || (hasPhone ? phone || "Phone number on file" : "Click to add phone number");
+  // Look the phone up through the provider chain (ZoomInfo → Apollo → Exa).
+  // Sourcing deliberately does not buy phone numbers — they are the expensive
+  // half of every provider, so spending on a candidate nobody has shortlisted is
+  // speculative. This button (and Launch PAIR) are the moments with real intent,
+  // so the lookup happens here, on demand, one candidate at a time.
+  async function findPhone() {
+    if (!linkedinUrl) {
+      setError("No LinkedIn URL on this candidate to look up");
+      return;
+    }
+    setFinding(true);
+    setError(null);
+    try {
+      const res = await authFetch(`${API_BASE}/candidates/enrich-contact`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          candidate_id: candidateId,
+          jobdiva_id: jobdivaId,
+          linkedin_url: linkedinUrl,
+          source,
+        }),
+      });
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(data?.detail || `Lookup failed (${res.status})`);
+
+      // `phone` is the endpoint's already-normalised primary pick; mobile/work
+      // are the raw per-slot values it also returns, kept as fallbacks.
+      const found = String(
+        data?.phone || data?.mobilePhone || data?.workPhone || "",
+      ).trim();
+      if (!found || countDigits(found) < 7) {
+        // Not an error — the providers genuinely may not hold a number. Leave
+        // the field ready so the recruiter can enter one they sourced elsewhere.
+        setError(
+          data?.provider
+            ? `No phone found (tried ${data.provider})`
+            : "No phone found by any provider — enter one manually",
+        );
+        return;
+      }
+      // Prefill rather than auto-commit: the recruiter sees what was found and
+      // confirms with Save, matching how a manually typed number is handled.
+      setValue(found);
+      inputRef.current?.focus();
+    } catch (e: any) {
+      logger.error("phone_indicator.find.error", { candidateId, message: e?.message });
+      setError(e?.message || "Lookup failed");
+    } finally {
+      setFinding(false);
+    }
+  }
+
+  const tooltip =
+    title ||
+    (hasPhone
+      ? phone || "Phone number on file"
+      : "Click to look up or add a phone number");
 
   const popup = open && popupCoords && typeof document !== "undefined"
     ? createPortal(
@@ -173,7 +238,26 @@ export function PhoneIndicator({
             className="w-full h-9 px-3 rounded-lg border border-slate-300 text-[13px] focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
           />
           {error && <p className="text-[11px] text-rose-600 mt-1.5">{error}</p>}
-          <div className="flex items-center justify-end gap-2 mt-2.5">
+          <div className="flex items-center justify-between gap-2 mt-2.5">
+            <button
+              type="button"
+              onClick={findPhone}
+              disabled={finding || saving || !linkedinUrl}
+              title={
+                linkedinUrl
+                  ? "Look this number up via ZoomInfo → Apollo → Exa"
+                  : "No LinkedIn URL on this candidate to look up"
+              }
+              className="text-[12px] px-2.5 py-1.5 rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50 font-medium disabled:opacity-50 flex items-center gap-1.5 shrink-0"
+            >
+              {finding ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : (
+                <Search className="w-3 h-3" />
+              )}
+              {finding ? "Looking…" : "Find phone"}
+            </button>
+            <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={() => {
@@ -193,6 +277,7 @@ export function PhoneIndicator({
               {saving ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
               Save
             </button>
+            </div>
           </div>
         </div>,
         document.body,

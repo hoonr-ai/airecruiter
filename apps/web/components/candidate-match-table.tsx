@@ -172,6 +172,7 @@ function getSourceBadge(source: string | undefined, sources?: string[]) {
   const isDeepOnly = !hasExa && hasDeep;
   const isLinkedIn = src.startsWith("LinkedIn") || hasExa || hasDeep;
   const isJobDivaTalent = src === "JobDiva-TalentSearch";
+  const isJobAgent = src === "JobDiva-JobAgent";
   const isJobDiva = src.toLowerCase().startsWith("jobdiva");
   const colors = isBothExa
     ? "bg-[#eef2ff] text-[#4338ca] border-[#c7d2fe]"
@@ -179,7 +180,7 @@ function getSourceBadge(source: string | undefined, sources?: string[]) {
       ? "bg-[#f5f3ff] text-[#7c3aed] border-[#ddd6fe]"
       : isLinkedIn
         ? "bg-[#eff6ff] text-[#1d4ed8] border-[#bfdbfe]"
-        : isJobDivaTalent
+        : isJobDivaTalent || isJobAgent
           ? "bg-[#fff7ed] text-[#c2410c] border-[#fed7aa]"
           : isJobDiva
             ? "bg-[#f5f3ff] text-[#6366f1] border-[#ddd6fe]"
@@ -190,10 +191,12 @@ function getSourceBadge(source: string | undefined, sources?: string[]) {
       ? "LinkedIn Deep"
       : isLinkedIn
         ? "LinkedIn"
-        : isJobDivaTalent
-          ? "JobDiva"
-          : src || "JobDiva";
-  const Icon = isLinkedIn ? Linkedin : isJobDivaTalent ? Zap : ShieldCheck;
+        : isJobAgent
+          ? "JobDiva Agent"
+          : isJobDivaTalent
+            ? "JobDiva"
+            : src || "JobDiva";
+  const Icon = isLinkedIn ? Linkedin : isJobDivaTalent || isJobAgent ? Zap : ShieldCheck;
   return { colors, label, Icon, isLinkedIn };
 }
 
@@ -436,6 +439,8 @@ export function CandidateMatchTable({
                         phone={candidate.phone}
                         persist={false}
                         onSaved={(normalised) => onPhoneSaved(id, normalised)}
+                        linkedinUrl={candidate.profile_url}
+                        source={candidate.source}
                       />
                     ) : awaitingDetails(candidate) ? (
                       <Skeleton className="h-4 w-24" data-testid="shimmer-phone" />
@@ -446,6 +451,8 @@ export function CandidateMatchTable({
                         phone={candidate.phone}
                         persist={false}
                         onSaved={(normalised) => onPhoneSaved(id, normalised)}
+                        linkedinUrl={candidate.profile_url}
+                        source={candidate.source}
                       />
                     )}
                   </TableCell>

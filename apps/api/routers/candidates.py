@@ -2043,6 +2043,16 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
             seed_email = str(existing_rows[0].get("email") or "").strip()
         if not seed_phone:
             seed_phone = str(existing_rows[0].get("phone") or "").strip()
+    # Synthetic JobDiva placeholders (Auto_*@jobdiva.com etc.) are not real
+    # contact info — treating one as a seed short-circuits the chain before
+    # Apollo/Exa ever look for a genuine address, and it can't be messaged.
+    from services.jobdiva import _is_placeholder_email
+    if seed_email and _is_placeholder_email(seed_email):
+        logger.info(
+            "enrich_contact: ignoring synthetic seed email %s for %s",
+            seed_email, candidate_id,
+        )
+        seed_email = ""
 
     def _have_email_and_phone() -> bool:
         have_email = bool(seed_email) or bool(str(extracted.get("workEmail") or extracted.get("personalEmail") or "").strip())
@@ -2269,10 +2279,18 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
 
 
 @router.post("/candidates/enrich-contact")
-async def enrich_candidate_contact_body(request: EnrichCandidateContactRequest):
+async def enrich_candidate_contact_body(
+    request: EnrichCandidateContactRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
     """
     Body-based enrich endpoint to avoid URL/path encoding edge cases for
     candidate IDs containing reserved/non-ASCII characters.
+
+    Authenticated: every call can spend real money (ZoomInfo / Apollo credits and
+    a paid Exa Agent run), so an anonymous caller could drain enrichment budget at
+    will. There is no global auth middleware in this app — each endpoint carries
+    its own dependency — so the absence of one here was an open, billable hole.
     """
     candidate_id = str(request.candidate_id or "").strip()
     if not candidate_id:
@@ -2281,7 +2299,12 @@ async def enrich_candidate_contact_body(request: EnrichCandidateContactRequest):
 
 
 @router.post("/candidates/{candidate_id:path}/enrich-contact")
-async def enrich_candidate_contact(candidate_id: str, request: EnrichCandidateContactRequest):
+async def enrich_candidate_contact(
+    candidate_id: str,
+    request: EnrichCandidateContactRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Path variant of the above. Same billable-spend reasoning applies."""
     return await _enrich_candidate_contact_impl(candidate_id, request)
 
 
