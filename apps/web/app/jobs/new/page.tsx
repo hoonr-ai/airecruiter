@@ -5428,38 +5428,177 @@ function NewJobPageContent() {
       addUnique(orGroups.get(gid)!, orGroupSeen.get(gid)!, clause, keyValue);
     };
 
-    // Boolean string sent to JobDiva uses only the top 2 titles. Adding
-    // every rubric-derived title would over-narrow the JobDiva search
-    // (5 ANDed title clauses ≈ 0 results). The remaining titles still flow
-    // through `title_criteria` in the API payload below, where they feed
-    // the in-app title-boost scoring without affecting what JobDiva returns.
-    // Exclude titles are always emitted (they only narrow the JobDiva search).
-    const includedTitles = sourceTitles.filter(t => t.matchType !== "exclude").slice(0, 2);
-    const excludeTitles = sourceTitles.filter(t => t.matchType === "exclude");
-    [...includedTitles, ...excludeTitles].forEach(title => {
-      const group = criterionGroup(title.value, title.selectedSimilarTitles || [], title.years, title.recent);
-      if (!group) return;
-      if (title.matchType === "exclude") addUnique(exclude, seenExclude, group, title.value);
-      else if (title.matchType === "can") addToOrGroup(title.orGroup ?? 1, group, title.value);
-      else addUnique(must, seenMust, group, title.value);
+    // ROLES ARE ALTERNATIVES — one OR group, AND'ed in once.
+    // A candidate is a "Senior Data Engineer" OR an "ETL Developer",
+    // essentially never both, so ANDing title clauses matched ~nobody. This
+    // used to be worked around by keeping only the top 2 titles, which still
+    // ANDed those two AND threw the other role variants away. Collapsing every
+    // included title (plus its selected similar titles) into a single OR group
+    // means extra variants now WIDEN recall instead of destroying it, so none
+    // have to be discarded. Titles carrying an explicit years/recent
+    // requirement keep their own clause — that constraint is deliberate and
+    // can't be merged into a shared group without changing its meaning.
+    const roleTerms: string[] = [];
+    const seenRoles = new Set<string>();
+    const pushRole = (value: string) => {
+      const key = normalizeTerm(value);
+      if (!key || seenRoles.has(key)) return;
+      seenRoles.add(key);
+      addSourceKey(value);
+      roleTerms.push(quote(value));
+    };
+    sourceTitles.forEach(title => {
+      if (title.matchType === "exclude") {
+        const group = criterionGroup(title.value, title.selectedSimilarTitles || [], title.years, title.recent);
+        if (group) addUnique(exclude, seenExclude, group, title.value);
+        return;
+      }
+      // A "can" title is still a ROLE ALTERNATIVE, so it belongs in the role
+      // group — not in the shared preferred OR bucket, where it would sit
+      // beside preferred *skills* and produce nonsense like
+      // ("Creative Designer" OR "Storyboarding"). This matters more than it
+      // looks: the extractor labels title chips required:"Preferred", so every
+      // rubric-derived title arrives here as "can" and would otherwise bypass
+      // the role group entirely. Only an explicit user-assigned OR group is
+      // honored as a separate bucket.
+      if (title.matchType === "can" && (title.orGroup ?? 1) > 1) {
+        const group = criterionGroup(title.value, title.selectedSimilarTitles || [], title.years, title.recent);
+        if (group) addToOrGroup(title.orGroup as number, group, title.value);
+        return;
+      }
+      if (title.years > 0 || title.recent) {
+        const group = criterionGroup(title.value, title.selectedSimilarTitles || [], title.years, title.recent);
+        if (group) addUnique(must, seenMust, group, title.value);
+        return;
+      }
+      pushRole(title.value);
+      (title.selectedSimilarTitles || []).forEach(pushRole);
     });
+    // Emitted at the very end for JobDiva (as `, TITLES= (...)`), or AND'ed
+    // into the keyword chain for every other dialect — see the assembly below.
+    const roleClause = roleTerms.length
+      ? (isJobDiva || roleTerms.length > 1 ? `(${roleTerms.join(" OR ")})` : roleTerms[0])
+      : "";
+    if (roleClause && !isJobDiva) must.unshift(roleClause);
+
+    // SKILLS ARE REQUIREMENTS — they AND, but only the important few.
+    // Every extra AND multiplies the constraint, so rank by the same rule the
+    // backend TalentSearch term selection uses (skills named in the primary
+    // role first, then ones carrying explicit years/recency, then chip order),
+    // keep the top MUST_SKILL_CAP as hard ANDs, and demote the overflow into
+    // the preferred OR group rather than dropping it — it still lifts ranking
+    // without gating the search.
+    const MUST_SKILL_CAP = 4; // keep in step with JOBDIVA_BOOLEAN_MUST_SKILL_CAP
+    const primaryRole = (sourceTitles.find(t => t.matchType !== "exclude")?.value || "").toLowerCase();
+    // Whole-token match. A bare substring test promoted the wrong skills
+    // ("R" inside "senio(r)", "Java" inside "(Java)Script", "Go" inside
+    // "(Go)lang"). Boundaries are checked against alphanumerics rather than
+    // \b so skills ending in non-word characters ("C++", "C#") still match.
+    // Done by index scan, not regex: lookbehind is ES2018 and this project
+    // targets ES2017 (and it needs no escaping).
+    const namedInRole = (term: string) => {
+      const t = term.trim().toLowerCase();
+      if (!primaryRole || !t) return false;
+      const isAlnum = (ch: string | undefined) => !!ch && /[0-9a-z]/.test(ch);
+      for (let from = 0; ; ) {
+        const i = primaryRole.indexOf(t, from);
+        if (i < 0) return false;
+        if (!isAlnum(primaryRole[i - 1]) && !isAlnum(primaryRole[i + t.length])) return true;
+        from = i + 1;
+      }
+    };
+    // Industry chips get their own AND'ed clause and skip the must-skill cap.
+    // Industry and capability are different axes: merging a preferred industry
+    // into the shared OR bucket would emit
+    // `(Articulate OR Captivate OR Healthcare)`, so a healthcare candidate with
+    // no eLearning tool would satisfy the eLearning requirement — the merge
+    // weakens the query rather than sharpening it. Recruiters keep them separate
+    // for the same reason.
+    // Mirrors rubric_grounding._INDUSTRY_SYNONYMS (services/rubric_grounding.py);
+    // keep the two in step if either gains a vertical.
+    const INDUSTRY_TERMS = new Set([
+      "healthcare", "health", "hospital", "clinical", "medical", "provider", "payer",
+      "financial services", "financial", "finance", "banking", "fintech", "capital markets",
+      "insurance", "insurtech", "underwriting", "claims",
+      "pharmaceuticals", "pharmaceutical", "pharma", "biotech", "life sciences", "clinical trials",
+      "telecom", "telecommunications", "wireless", "carrier",
+      "retail", "e-commerce", "ecommerce", "merchandising", "consumer goods",
+      "manufacturing", "industrial", "plant", "factory", "production floor",
+      "automotive", "oem", "vehicle", "mobility",
+      "aerospace", "aviation", "defense", "defence",
+      "government", "public sector", "federal", "municipal", "civic",
+      "education", "higher education", "academic", "university", "k-12",
+      "energy", "oil & gas", "oil and gas", "utilities", "power", "renewables",
+      "logistics", "supply chain", "transportation", "freight", "warehousing",
+      "hospitality", "hotel", "restaurant", "travel", "food service",
+      "media", "entertainment", "publishing", "broadcast", "streaming",
+      "legal", "law firm", "litigation support",
+      "real estate", "property management", "proptech", "commercial real estate",
+      "nonprofit", "non-profit", "ngo", "charitable",
+    ]);
+    const isIndustryChip = (value: string) =>
+      INDUSTRY_TERMS.has(String(value || "").trim().toLowerCase());
 
     sourceSkills.forEach(skill => {
+      if (skill.matchType === "exclude" || !isIndustryChip(skill.value)) return;
+      const group = criterionGroup(
+        skill.value, skill.selectedSimilarSkills || [], skill.years, skill.recent,
+      );
+      if (group) addUnique(must, seenMust, group, skill.value);
+    });
+
+    const mustSkills = sourceSkills.filter(
+      s => s.matchType !== "exclude" && s.matchType !== "can" && !isIndustryChip(s.value)
+    );
+    const rankedMustSkills = mustSkills
+      .map((skill, idx) => ({
+        skill,
+        idx,
+        rank: [
+          namedInRole(skill.value) ? 0 : 1,
+          skill.years > 0 || skill.recent ? 0 : 1,
+        ] as [number, number],
+      }))
+      .sort((a, b) => a.rank[0] - b.rank[0] || a.rank[1] - b.rank[1] || a.idx - b.idx);
+
+    sourceSkills.forEach(skill => {
+      if (skill.matchType !== "exclude" && skill.matchType !== "can") return;
+      // Industry chips already emitted as their own AND'ed clause above.
+      if (skill.matchType === "can" && isIndustryChip(skill.value)) return;
       const group = criterionGroup(skill.value, skill.selectedSimilarSkills || [], skill.years, skill.recent);
       if (!group) return;
       if (skill.matchType === "exclude") addUnique(exclude, seenExclude, group, skill.value);
-      else if (skill.matchType === "can") addToOrGroup(skill.orGroup ?? 1, group, skill.value);
-      else addUnique(must, seenMust, group, skill.value);
+      else addToOrGroup(skill.orGroup ?? 1, group, skill.value);
+    });
+    rankedMustSkills.forEach(({ skill }, position) => {
+      const group = criterionGroup(skill.value, skill.selectedSimilarSkills || [], skill.years, skill.recent);
+      if (!group) return;
+      if (position < MUST_SKILL_CAP) addUnique(must, seenMust, group, skill.value);
+      else addToOrGroup(1, group, skill.value);
     });
 
     sourceKeywords.filter(Boolean).forEach(keyword => {
       addSourceKey(keyword);
       addUnique(must, seenMust, quote(keyword), keyword);
     });
+    // COMPANIES ARE ALTERNATIVES ("worked at any of these"). ANDing them asked
+    // for someone employed by every listed company simultaneously.
+    const companyTerms: string[] = [];
+    const seenCompanies = new Set<string>();
     sourceCompanies.filter(Boolean).forEach(company => {
+      const key = normalizeTerm(company);
+      if (!key || seenCompanies.has(key)) return;
+      seenCompanies.add(key);
       addSourceKey(company);
-      addUnique(must, seenMust, quote(company), company);
+      companyTerms.push(quote(company));
     });
+    if (companyTerms.length) {
+      must.push(
+        isJobDiva || companyTerms.length > 1
+          ? `(${companyTerms.join(" OR ")})`
+          : companyTerms[0]
+      );
+    }
     // Multiple sourcing locations are always alternatives — a candidate in
     // any of them satisfies the location criterion — so OR them together
     // inside a single clause instead of pushing each into `must` (which
@@ -5475,7 +5614,18 @@ function NewJobPageContent() {
         addSourceKey(location.value);
         locationClauses.push(`${quote(location.value)} ${location.radius}`);
       });
-    if (locationClauses.length === 1) {
+    // A remote role must not carry a city keyword: the quoted `"Dallas, TX" 25`
+    // clause is a literal résumé-text match, so on a 100%-remote job it rejects
+    // everyone who doesn't happen to name that city. JobDiva has a structured
+    // country filter for exactly this (`IN {US}`, what recruiters hand-write);
+    // other dialects have no equivalent, so the constraint is simply dropped and
+    // left to the location scorer.
+    // Same helper the search payload uses (line ~5924), so the string the
+    // recruiter reads and the request we send agree on what "remote" means —
+    // it also catches the city === "REMOTE" records.
+    if (isRemoteJob(jobData)) {
+      if (isJobDiva) must.push("IN {US}");
+    } else if (locationClauses.length === 1) {
       must.push(locationClauses[0]);
     } else if (locationClauses.length > 1) {
       must.push(`(${locationClauses.join(" OR ")})`);
@@ -5493,6 +5643,10 @@ function NewJobPageContent() {
     });
     let booleanString = parts.length ? parts.join(" AND ") : (isValidBoolean(jobTitle) ? jobTitle : quote(jobTitle || "Role"));
     if (exclude.length) booleanString += ` NOT (${exclude.join(" OR ")})`;
+    // JobDiva matches TITLES= against the candidate's actual job title rather
+    // than anywhere in the résumé body, so roles belong there instead of in the
+    // keyword chain where they both over-match and compete with the skill ANDs.
+    if (isJobDiva && roleClause) booleanString += ` , TITLES= ${roleClause}`;
     return booleanString;
   };
 
@@ -9334,6 +9488,7 @@ function NewJobPageContent() {
                           jobdivaCandidateId:
                             candidate.jobdiva_candidate_id ?? candidate.data?.jobdiva_candidate_id,
                           source: candidate.source,
+                          scoringMode: candidate.scoring_mode,
                         });
                         setDetailsModalOpen(true);
                       }}
@@ -9620,9 +9775,10 @@ return (
         {(() => {
           const title = enhancedTitle || jobData?.enhanced_title || jobData?.title || jobTitle;
           const customer = jobData?.customer_name || jobData?.customer || "";
+          const id = jobdivaId || numericJobId;
           if (!title && !customer) return "Enter a JobDiva Job ID to get started.";
-          if (title && customer) return `${title} · ${customer}`;
-          return title || customer;
+          const base = title && customer ? `${title} · ${customer}` : title || customer;
+          return id ? `${base} · ${id}` : base;
         })()}
       </p>
     </div>
@@ -10034,6 +10190,7 @@ return (
         explainability={selectedCandidateForDetails.explainability}
         jobdivaCandidateId={selectedCandidateForDetails.jobdivaCandidateId}
         source={selectedCandidateForDetails.source}
+        scoringMode={selectedCandidateForDetails.scoringMode}
         onClose={() => {
           setDetailsModalOpen(false);
           setSelectedCandidateForDetails(null);

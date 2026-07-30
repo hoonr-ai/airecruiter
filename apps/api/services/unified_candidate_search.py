@@ -13,6 +13,7 @@ from services.unipile import unipile_service
 from services.vetted import vetted_service
 from services.exa_service import exa_service, _extract_city_from_highlights
 from services.location import haversine_miles, normalize_location_string, within_radius
+from services.jobdiva_boolean_translator import strip_jobdiva_dialect
 from core.config import (
     SCORING_REQUIRED_WEIGHT,
     SCORING_PREFERRED_WEIGHT,
@@ -111,6 +112,19 @@ logger = logging.getLogger(__name__)
 # to always exceed the UI's within_miles radius so the BEYOND 25MI badge
 # counts these rows instead of silently passing them as in-radius.
 _UNKNOWN_DISTANCE_SENTINEL = 9999.0
+
+
+def _is_excluded_criterion(item: Dict[str, Any]) -> bool:
+    """Whether a rubric chip is an EXCLUDE, tolerant of spelling/casing.
+
+    The wizard emits lowercase "exclude", but other writers produce "must_not"
+    and capitalised forms, and an exact `== "exclude"` compare silently treats
+    those as INCLUDE — which is worse than ignoring them: the term becomes
+    something we actively search FOR. Mirrors the normalisation used by
+    sourcing_skills_with_priority and the boolean builder.
+    """
+    match_type = str(item.get("match_type", "must") or "must").lower()
+    return match_type.replace("_", " ").strip() in {"exclude", "must not"}
 
 
 class SearchCriteria(BaseModel):
@@ -239,7 +253,7 @@ class SearchCriteria(BaseModel):
         for item in self.title_criteria or []:
             if not isinstance(item, dict):
                 continue
-            if item.get("match_type", "must") == "exclude":
+            if _is_excluded_criterion(item):
                 continue
             value = str(item.get("value", "")).strip()
             key = value.lower()
@@ -248,6 +262,33 @@ class SearchCriteria(BaseModel):
             seen.add(key)
             titles.append(value)
         return titles
+
+    def title_variants(self, max_titles: int = 3) -> List[str]:
+        """Role variants for multi-pull title searches, most important first.
+
+        Order: primary title chip, then ITS selected similar titles
+        (`similar_terms`, the recruiter-approved grounded variants), then the
+        next title chip and its variants. Deduped case-insensitively and
+        capped at `max_titles` so the per-variant TalentSearch pulls stay
+        bounded."""
+        variants: List[str] = []
+        seen = set()
+
+        def _add(value: Any) -> None:
+            v = str(value or "").strip()
+            if v and v.lower() not in seen:
+                seen.add(v.lower())
+                variants.append(v)
+
+        for item in self.title_criteria or []:
+            if not isinstance(item, dict):
+                continue
+            if _is_excluded_criterion(item):
+                continue
+            _add(item.get("value"))
+            for similar in item.get("similar_terms") or []:
+                _add(similar)
+        return variants[: max(1, int(max_titles or 1))]
 
 class UnifiedCandidateSearch:
     def __init__(self):
@@ -310,15 +351,46 @@ class UnifiedCandidateSearch:
         accept linkedinUrl as a match input — it needs firstName + lastName for
         ContactSearch). Without a name we skip ZoomInfo and go straight to
         Apollo (which does accept a URL). Mutates ``cand`` in place; never raises.
+
+        LinkedIn-sourced candidates additionally fall through to the Exa Agent
+        contact run when ZoomInfo + Apollo both miss (``include_exa``): ZoomInfo
+        can't match by LinkedIn URL and Apollo credits run dry, so URL-only
+        profiles would otherwise stream in with no contact at all. Budgeted
+        separately inside the helper (EXA_SOURCING_CONTACT_CAP per job).
         """
         profile_url = str(cand.get("profile_url") or "").strip()
         if "linkedin.com/in/" not in profile_url.lower():
             return
+        source = str(cand.get("source") or "")
+        enhanced = cand.get("enhanced_info") if isinstance(cand.get("enhanced_info"), dict) else {}
+        company = str(
+            cand.get("current_company")
+            or enhanced.get("current_company")
+            or enhanced.get("company")
+            or ""
+        ).strip()
         try:
             enrich = await contact_enrichment.enrich_contact_for_sourcing(
                 profile_url,
                 criteria.job_id,
                 full_name=str(cand.get("name") or "").strip() or None,
+                include_exa=source.startswith("LinkedIn"),
+                company=company,
+                # What the candidate already has. Seeds the ZoomInfo
+                # match-by-email lookup (the cheap way to fill a missing phone)
+                # and gates the paid Exa fallback, which is reserved for
+                # candidates we cannot otherwise reach at all.
+                seed_email=str(cand.get("email") or "").strip(),
+                seed_phone=str(cand.get("phone") or "").strip(),
+                # Sourcing never buys phone numbers. An email alone makes a
+                # candidate launchable (the PAIR gate is phone OR email) and
+                # renders on Step 5, while phones are the expensive half of every
+                # provider — Apollo gates them behind a per-record reveal, Exa
+                # charges per run. Hunting one for a candidate the recruiter may
+                # never shortlist is speculative spend, so it is deferred to
+                # Launch PAIR and to the per-candidate phone button on Step 5,
+                # both of which carry real intent.
+                want_phone=False,
             )
         except Exception as e:
             logger.warning("contact_enrichment failed for %s: %s", cand.get("id"), e)
@@ -359,6 +431,16 @@ class UnifiedCandidateSearch:
         start_time = time.time()
         self._log_stage("Start", f"job={criteria.job_id} sources={', '.join(criteria.sources or [])}")
 
+        # Fresh per-run enrichment budget. The provider caps
+        # (PER_JOB_CAP / EXA_SOURCING_CONTACT_CAP) are in-process per-worker
+        # counters that nothing else resets — without this, a job whose
+        # counter filled up once would silently skip enrichment on every
+        # re-run for the rest of the worker's lifetime.
+        try:
+            contact_enrichment.reset_job_counter(str(criteria.job_id or ""))
+        except Exception:
+            pass
+
         # Detect role family once per search. Stored on the instance so
         # `_fuzzy_term_score` can swap between the global EMBEDDING_SKILL_MATCH
         # flag (legacy IT behavior) and the per-family override
@@ -381,6 +463,11 @@ class UnifiedCandidateSearch:
                 logger.warning(f"query-term embedding warm failed: {exc}")
 
         seen_ids = set()
+        # candidate_ids matched by the JobDiva JobAgent (recruiter-authored
+        # criteria). The TalentSearch min-score gate exempts these: when the
+        # same person surfaces via both pools, the surviving row may carry the
+        # TalentSearch label, but a JobAgent match must never be dropped.
+        jobagent_matched_ids: set = set()
         # Cross-source dedup ownership map: dedup key (strong identity —
         # email, phone+name, normalised LinkedIn URL) -> the already-emitted
         # "owner" candidate dict that claimed it. The legacy `seen_ids` set
@@ -429,6 +516,12 @@ class UnifiedCandidateSearch:
             cand["matched_skills"] = score_result.get("matched_skills", [])
             cand["explainability"] = score_result["explainability"]
             cand["match_score_details"] = score_result.get("score_details", {})
+
+            if cand.get("scoring_mode") == "high_level":
+                cand["explainability"] = [
+                    "High-level score — matched by JobDiva agent search; "
+                    "detailed AI skills analysis skipped"
+                ] + list(cand["explainability"] or [])[:5]
 
             # JobAgent-rank floor: JobDiva's JobAgent endpoint pre-ranks
             # candidates by their own relevance matcher. After refactor
@@ -678,7 +771,7 @@ class UnifiedCandidateSearch:
                 "zipcode", "distance_miles", "location_out_of_radius",
                 "location_match_reason",
                 "qualifications", "employee_status", "available",
-                "availability_status", "current_company",
+                "availability_status", "current_company", "scoring_mode",
             ):
                 v = cand.get(key)
                 if v not in (None, "", [], {}):
@@ -688,13 +781,19 @@ class UnifiedCandidateSearch:
             await queue.put({"type": "candidate", "data": agent_payload})
             return True
 
-        async def emit_jobdiva_scored(cand, assessment, qualified_counter_key=None):
+        async def emit_jobdiva_scored(cand, assessment, qualified_counter_key=None, min_score=None):
             """Stage 3 of progressive JobDiva flow: score the (now-enriched)
             candidate and emit a ``candidate_detail`` patch with the scored
             payload. Mirrors :py:func:`emit_candidate` for dedup +
             non-US drop semantics, but emits a patch (the row already
             exists from emit_jobdiva_agent_result) instead of a fresh
             ``candidate`` event.
+
+            ``min_score``: when set, rows scoring strictly below it are
+            removed via a ``dropped`` patch instead of shown. Used for
+            JobDiva-TalentSearch (machine-generated query → only surface
+            >JOBDIVA_TALENTSEARCH_MIN_SCORE matches). Unscoreable rows
+            (``detail_failed`` → match_score None) are always kept.
             """
             cid = str(cand.get("candidate_id") or cand.get("id") or "")
             location_reason = assessment.get("location_failure_reason") if isinstance(assessment, dict) else None
@@ -723,6 +822,35 @@ class UnifiedCandidateSearch:
                     logger.warning(f"candidate-skill embedding warm failed: {exc}")
 
             cand = finalize_candidate(cand)
+
+            # Min-score gate (TalentSearch only). Runs after finalize so the
+            # score already includes the source-tier bonus / title boost.
+            # Unscoreable rows (detail_failed → None) stay visible as
+            # "Limited data" — we can't fairly judge them.
+            if (
+                min_score is not None
+                and cand.get("match_score") is not None
+                and int(cand.get("match_score") or 0) < int(min_score)
+                and cid not in jobagent_matched_ids
+            ):
+                self._log_stage(
+                    "ScoreGate",
+                    f"dropping candidate_id={cid} source={cand.get('source')} "
+                    f"match_score={cand.get('match_score')} < min_score={min_score}",
+                )
+                # Release the id: the JobAgent pool shares seen_ids, and its
+                # copy of this person may have been suppressed as a duplicate
+                # when this row painted first. Freeing the id lets the
+                # never-dropped JobAgent copy re-emit if it arrives later.
+                if cid:
+                    seen_ids.discard(cid)
+                await queue.put({
+                    "type": "candidate_detail",
+                    "candidate_id": cid,
+                    "stage": "dropped",
+                    "patch": {"_stage": "dropped", "_drop_reason": "below_min_score"},
+                })
+                return
 
             # Cross-source dedup runs here (not at agent_result) since the
             # keys depend on email / phone / linkedin URL, which are only
@@ -805,6 +933,9 @@ class UnifiedCandidateSearch:
                 # Candidate-details failure flag → UI renders "N/A" + keeps the
                 # row launchable (vs. a 0% drop).
                 "detail_failed",
+                # "high_level" for JobDiva-JobAgent rows (LLM skills-match
+                # skipped) → popup labels the score "JobDiva agent search".
+                "scoring_mode",
             ):
                 v = cand.get(key)
                 if v is not None:
@@ -953,6 +1084,8 @@ class UnifiedCandidateSearch:
                     stage_name: str,
                     source_label: str,
                     cap_label: str,
+                    min_score: Optional[int] = None,
+                    high_level_scoring: bool = False,
                 ) -> None:
                     talent_pool = talent_res.get("candidates", [])
 
@@ -981,7 +1114,9 @@ class UnifiedCandidateSearch:
                         return
 
                     from core import sourcing_config as _sc_talent
-                    async for event in self._enrich_filtered_jobdiva_progressive(fresh_talent, criteria):
+                    async for event in self._enrich_filtered_jobdiva_progressive(
+                        fresh_talent, criteria, skip_llm=high_level_scoring
+                    ):
                         ev_type = event.get("type")
                         if ev_type == "candidate_detail":
                             await queue.put(event)
@@ -996,29 +1131,47 @@ class UnifiedCandidateSearch:
                                     stage_name,
                                     f"yielding unqualified candidate_id={cand.get('candidate_id')} missing={assessment['missing'][:3]} excluded={assessment['excluded'][:3]}",
                                 )
-                            await emit_jobdiva_scored(cand, assessment, "qualified_talent")
+                            await emit_jobdiva_scored(
+                                cand, assessment, "qualified_talent", min_score=min_score
+                            )
 
                 async def _run_jobagent_pool():
+                    from core import sourcing_config as _sc_pool
                     self._log_stage("JobDiva", "Running JobDiva JobAgent search...")
                     jobagent_res = await self._search_jobdiva_talent(criteria)
                     if jobagent_res.get("jobdiva_criteria_unconfigured"):
                         summary["jobdiva_criteria_unconfigured"] = True
+                    for _c in jobagent_res.get("candidates") or []:
+                        _jc = str(_c.get("candidate_id") or _c.get("id") or "")
+                        if _jc:
+                            jobagent_matched_ids.add(_jc)
                     await _process_talent_pool(
                         jobagent_res,
                         stage_name="JobDiva",
                         source_label="JobDiva-JobAgent",
                         cap_label="JobAgent rank",
+                        # Recruiter-authored criteria in JobDiva + its own
+                        # ranking → trust the results: high-level score only
+                        # (no per-candidate LLM skills-match), never dropped.
+                        high_level_scoring=bool(
+                            getattr(_sc_pool, "JOBAGENT_HIGH_LEVEL_SCORING", True)
+                        ),
                     )
 
                 async def _run_talent_search_pool():
+                    from core import sourcing_config as _sc_pool
                     self._log_stage("TalentSearch", "Running JobDiva Talent boolean search...")
                     talent_res = await self._search_jobdiva_talent_search(criteria)
                     summary["talent_search_count"] = len(talent_res.get("candidates", []))
+                    _min_score = getattr(_sc_pool, "JOBDIVA_TALENTSEARCH_MIN_SCORE", None)
                     await _process_talent_pool(
                         talent_res,
                         stage_name="TalentSearch",
                         source_label="JobDiva-TalentSearch",
                         cap_label="TalentSearch rank",
+                        # Machine-generated query → only surface strong
+                        # matches; the sub-threshold tail is noise.
+                        min_score=int(_min_score) if _min_score else None,
                     )
 
                 # Overlap both independent JobDiva talent searches to halve wall-clock latency
@@ -1162,15 +1315,19 @@ class UnifiedCandidateSearch:
                                     if s2 and not cand.get("state"):
                                         cand["state"] = s2
 
-                        # In-line ZoomInfo → Apollo enrichment.
+                        # In-line ZoomInfo → Apollo (→ Exa Agent for LinkedIn
+                        # sources) enrichment.
                         #   - LinkedIn-Exa: ALWAYS run; the result overwrites any
-                        #     pre-existing email/phone. ZoomInfo→Apollo is the
-                        #     source of truth for Exa-sourced contact info.
-                        #   - Other sources (JobDiva/Dice/Unipile): only run as a
-                        #     backfill when both email and phone are missing, to
-                        #     bound enrichment cost.
+                        #     pre-existing email/phone. The enrichment chain is
+                        #     the source of truth for Exa-sourced contact info.
+                        #   - Other sources (Dice/Unipile): run as a backfill
+                        #     whenever email OR phone is missing — Unipile never
+                        #     supplies contact itself, so ZoomInfo/Apollo (and
+                        #     the Exa fallback for LinkedIn-*) fill the gaps;
+                        #     only empty fields are written (overwrite=False).
                         # Gated by CONTACT_ENRICHMENT_INLINE_ENABLED inside the
-                        # helper; capped per-job at contact_enrichment.PER_JOB_CAP.
+                        # helper; capped per-job at contact_enrichment.PER_JOB_CAP
+                        # (+ EXA_SOURCING_CONTACT_CAP for the Exa fallback).
                         #
                         # `full_name` is required for the ZoomInfo path — the
                         # new Data API doesn't accept linkedinUrl as a match
@@ -1178,11 +1335,17 @@ class UnifiedCandidateSearch:
                         # ContactSearch. Without a name we skip ZoomInfo and
                         # go straight to Apollo (which does accept a URL).
                         is_exa_source = source_type == "LinkedIn-Exa"
-                        has_existing_contact = bool(
-                            str(cand.get("email") or "").strip()
-                            or str(cand.get("phone") or "").strip()
-                        )
-                        if is_exa_source or not has_existing_contact:
+                        # EMAIL is the only field sourcing spends on. 436 widened
+                        # this to "either field missing", which pulled every
+                        # phone-less candidate into the provider chain — and since
+                        # phones are the costly half (Apollo per-record reveal, Exa
+                        # per run), that was the bulk of sourcing enrichment spend,
+                        # incurred for candidates the recruiter had not shortlisted
+                        # yet. Phone acquisition now happens at Launch PAIR or on
+                        # the Step 5 phone button. The helper is also told
+                        # want_phone=False, so this is belt-and-braces.
+                        has_email = bool(str(cand.get("email") or "").strip())
+                        if is_exa_source or not has_email:
                             await self._apply_contact_enrichment(
                                 cand, criteria, overwrite=is_exa_source
                             )
@@ -1900,14 +2063,25 @@ class UnifiedCandidateSearch:
             # returns the full filtered set in one response (live probe
             # 2026-07-19) — the old page loop just re-fetched identical rows.
             # One fetch capped at max_total; progressive batching slices it.
-            sourcing_titles = criteria.sourcing_titles()
+            # Titles: primary chip + its recruiter-approved similar titles,
+            # one titleSearch pull per variant (bounded in jobdiva service).
+            title_pull_variants = criteria.title_variants(
+                int(getattr(sc, "JOBDIVA_TALENT_TITLE_PULL_MAX_TITLES", 3) or 3)
+            )
+            # JobDiva is the one consumer that speaks the native dialect, so an
+            # auto-built string is built as `jobdiva` here (roles in TITLES=,
+            # `IN {US}` for a remote role). The frontend's string still wins when
+            # present — it is what the recruiter sees and may have hand-edited.
             all_candidates = await self.jobdiva_service.search_candidates(
                 skills=list(criteria.skill_criteria or []),
                 location=criteria.location or "",
                 page=1,
                 limit=max_total,
                 job_id=None,
-                boolean_string=criteria.boolean_string or "",
+                boolean_string=(
+                    criteria.boolean_string
+                    or self._build_boolean_string(criteria, dialect="jobdiva")
+                ),
                 recent_days=getattr(criteria, "recent_days", None),
                 require_resume=getattr(criteria, "require_resume", True),
                 countries=countries,
@@ -1915,7 +2089,7 @@ class UnifiedCandidateSearch:
                 page_number=0,
                 zip_code=geo_zip,
                 within_miles=getattr(criteria, "within_miles", 25),
-                title=sourcing_titles[0] if sourcing_titles else "",
+                titles=title_pull_variants,
             )
 
             self._log_stage(
@@ -2387,7 +2561,54 @@ class UnifiedCandidateSearch:
                 terms.append({"value": value.strip(), "match_type": "must"})
         return terms
 
-    def _build_boolean_string(self, criteria: SearchCriteria) -> str:
+    def _build_boolean_string(
+        self, criteria: SearchCriteria, dialect: str = "generic"
+    ) -> str:
+        """Build the sourcing boolean from the Step 5 filters.
+
+        ``dialect="jobdiva"`` emits JobDiva's native shape — roles in the
+        dedicated ``TITLES= (...)`` field and ``IN {US}`` for a remote role's
+        geo, i.e. what a recruiter hand-writes into JobAgent criteria.
+        ``"generic"`` (the default) keeps a plain boolean expression, because
+        Unipile and Exa parse neither of those constructs.
+
+        AND/OR *allocation* matters far more here than term count, because
+        every AND multiplies the constraint while every OR widens it:
+
+          - **Roles are alternatives** → one OR group, AND'ed in once. Nobody
+            is a "Senior Data Engineer" and an "ETL Developer" at the same
+            time, so ANDing title clauses matched ~nobody.
+          - **Skills are requirements** → they AND, but only the most
+            important `JOBDIVA_BOOLEAN_MUST_SKILL_CAP` of them. The ranked
+            overflow is demoted into the preferred OR group instead of being
+            dropped, so it still lifts ranking without gating the search.
+          - **Companies are alternatives** ("worked at any of these") → OR.
+          - **Excludes** → a single trailing `NOT (...)` group.
+
+        Importance ranking for the capped skill ANDs matches the structured
+        TalentSearch term selection (role-named skills first, then ones
+        carrying explicit years/recency), so the boolean a recruiter reads and
+        the query we actually run agree on what the core requirements are.
+        """
+        from services.jobdiva_boolean_translator import term_appears_as_token
+        from services.rubric_grounding import is_industry_term as term_is_industry
+        from core import sourcing_config as _sc_bool
+
+        must_skill_cap = max(
+            1, int(getattr(_sc_bool, "JOBDIVA_BOOLEAN_MUST_SKILL_CAP", 4) or 4)
+        )
+        # The role the skill ranking is measured against — the first included
+        # title chip. With no title chips the ranking simply falls back to
+        # years/recency then chip order.
+        primary_role = ""
+        for _t in criteria.title_criteria or []:
+            _mt = str(_t.get("match_type", "must") or "must").lower().replace("_", " ").strip()
+            if _mt in {"exclude", "must not"}:
+                continue
+            primary_role = str(_t.get("value", "")).strip()
+            if primary_role:
+                break
+
         def quote(value: str) -> str:
             return f'"{value.strip()}"'
 
@@ -2409,53 +2630,201 @@ class UnifiedCandidateSearch:
             seen.add(key)
             bucket.append(clause)
 
-        must_groups = []
-        can_terms = []
-        exclude_terms = []
+        def match_type_of(item: Dict[str, Any]) -> str:
+            """Normalized rubric match type.
+
+            The wizard emits must/can/exclude, but casing and `must_not`
+            spellings turn up from other writers. The old exact `== "exclude"`
+            compare fell through to the else-branch, promoting an EXCLUDED term
+            into the REQUIRED AND chain — the worst possible misread.
+            """
+            mt = str(item.get("match_type", "must") or "must").lower()
+            mt = mt.replace("_", " ").strip()
+            if mt in {"exclude", "must not"}:
+                return "exclude"
+            if mt in {"can", "preferred", "nice to have"}:
+                return "can"
+            return "must"
+
+        def variants_of(item: Dict[str, Any]) -> List[str]:
+            """Term + its recruiter-approved similar terms, registered for
+            dedup and returned quoted."""
+            out: List[str] = []
+            value = str(item.get("value", "")).strip()
+            if value:
+                source_keys.add(normalize_term(value))
+                out.append(value)
+            for similar in item.get("similar_terms", []) or []:
+                s = str(similar).strip()
+                if s:
+                    source_keys.add(normalize_term(s))
+                    out.append(s)
+            return out
+
+        must_groups: List[str] = []
+        can_terms: List[str] = []
+        exclude_terms: List[str] = []
         seen_must = set()
         seen_can = set()
         seen_exclude = set()
         source_keys = set()
 
-        for item in criteria.title_criteria + criteria.skill_criteria:
-            value = str(item.get("value", "")).strip()
-            if not value:
+        # ── Roles: alternatives, so ONE OR group ─────────────────────────
+        # A candidate is a "Senior Data Engineer" OR an "ETL Developer" —
+        # essentially never both. ANDing title clauses together was the single
+        # biggest recall killer in this builder: two ANDed titles already
+        # matched ~nobody, and the old workaround (truncate to the first two)
+        # both over-constrained AND discarded the remaining role variants.
+        # Collapsing every included title plus its similar titles into one OR
+        # group means extra variants now *widen* recall instead of destroying
+        # it, so none have to be thrown away.
+        role_terms: List[str] = []
+        seen_roles = set()
+        for item in criteria.title_criteria or []:
+            mt = match_type_of(item)
+            terms = variants_of(item)
+            if not terms:
                 continue
-            source_keys.add(normalize_term(value))
-            variants = [quote(value)]
-            for similar in item.get("similar_terms", []) or []:
-                if str(similar).strip():
-                    source_keys.add(normalize_term(str(similar)))
-                    variants.append(quote(str(similar)))
-            group = variants[0] if len(variants) == 1 else f"({' OR '.join(variants)})"
-            match_type = item.get("match_type", "must")
-            if match_type == "exclude":
-                add_unique(exclude_terms, seen_exclude, group, value)
-            elif match_type == "can":
-                add_unique(can_terms, seen_can, group, value)
+            if mt == "exclude":
+                group = (
+                    quote(terms[0]) if len(terms) == 1
+                    else f"({' OR '.join(quote(t) for t in terms)})"
+                )
+                add_unique(exclude_terms, seen_exclude, group, terms[0])
+                continue
+            for t in terms:
+                key = normalize_term(t)
+                if key and key not in seen_roles:
+                    seen_roles.add(key)
+                    role_terms.append(t)
+
+        # ── Skills: requirements, so they AND — but only the important few ──
+        # Rank by the same rule the TalentSearch term selection uses: skills
+        # named in the primary role first (the core competency), then those
+        # carrying an explicit years/recency requirement, then wizard chip
+        # order. Keep the top N as hard ANDs and demote the overflow into the
+        # preferred OR group rather than dropping it — it still lifts ranking
+        # without gating the search.
+        # Industry chips get their own AND'ed cluster and skip the must-skill cap:
+        # industry and capability are different axes. Folding a preferred industry
+        # into the shared OR bucket would emit
+        # `(Articulate OR Captivate OR Healthcare)`, i.e. a healthcare candidate
+        # with no eLearning tool satisfies the eLearning requirement — the merge
+        # weakens the query instead of sharpening it. Recruiters write them as
+        # separate groups for the same reason.
+        industry_groups: List[str] = []
+        seen_industry = set()
+
+        must_skill_items: List[Dict[str, Any]] = []
+        for item in criteria.skill_criteria or []:
+            mt = match_type_of(item)
+            terms = variants_of(item)
+            if not terms:
+                continue
+            group = (
+                quote(terms[0]) if len(terms) == 1
+                else f"({' OR '.join(quote(t) for t in terms)})"
+            )
+            if mt == "exclude":
+                add_unique(exclude_terms, seen_exclude, group, terms[0])
+            elif term_is_industry(terms[0]):
+                add_unique(industry_groups, seen_industry, group, terms[0])
+            elif mt == "can":
+                add_unique(can_terms, seen_can, group, terms[0])
             else:
-                add_unique(must_groups, seen_must, group, value)
+                try:
+                    has_years = int(item.get("years") or 0) > 0
+                except (TypeError, ValueError):
+                    has_years = False
+                must_skill_items.append({
+                    "group": group,
+                    "value": terms[0],
+                    "in_role": term_appears_as_token(terms[0], primary_role),
+                    "weighted": has_years or bool(item.get("recent")),
+                })
+
+        must_skill_items.sort(
+            key=lambda s: (0 if s["in_role"] else 1, 0 if s["weighted"] else 1)
+        )
+        for idx, s in enumerate(must_skill_items):
+            if idx < must_skill_cap:
+                add_unique(must_groups, seen_must, s["group"], s["value"])
+            else:
+                add_unique(can_terms, seen_can, s["group"], s["value"])
 
         for keyword in criteria.keywords:
             if keyword and keyword.strip():
                 add_unique(must_groups, seen_must, quote(keyword), keyword)
-        for company in criteria.companies:
-            if company and company.strip():
-                source_keys.add(normalize_term(company))
-                add_unique(must_groups, seen_must, quote(company), company)
 
-        parts = must_groups[:]
+        # ── Companies: alternatives too ("worked at any of these") ────────
+        # These were ANDed, which asked for someone employed by every listed
+        # company simultaneously.
+        company_terms: List[str] = []
+        seen_companies = set()
+        for company in criteria.companies:
+            c = str(company or "").strip()
+            key = normalize_term(c)
+            if c and key and key not in seen_companies:
+                seen_companies.add(key)
+                source_keys.add(key)
+                company_terms.append(c)
+
+        parts: List[str] = []
+        parts.extend(must_groups)
+        # Own AND'ed clause(s), never merged into the preferred bucket.
+        parts.extend(industry_groups)
+        if company_terms:
+            parts.append(
+                quote(company_terms[0]) if len(company_terms) == 1
+                else f"({' OR '.join(quote(c) for c in company_terms)})"
+            )
         if can_terms:
-            parts.append(f"({' OR '.join(can_terms)})")
-        if criteria.location:
+            # Singletons are flattened — `(A)` and `A` are equivalent, and the
+            # bare form reads better in the string the recruiter copies.
+            parts.append(
+                can_terms[0] if len(can_terms) == 1
+                else f"({' OR '.join(can_terms)})"
+            )
+
+        is_jobdiva = str(dialect or "generic").strip().lower() == "jobdiva"
+
+        # Roles. In JobDiva's dialect they ride in the dedicated TITLES= field,
+        # which matches the candidate's job title rather than anywhere in the
+        # résumé body — so a keyword-chain role group both over-matches (someone
+        # who merely mentions the title) and competes with the skill ANDs. Every
+        # other consumer (Unipile, Exa) only understands a plain expression, so
+        # there the role group is AND'ed into the chain as before.
+        titles_suffix = ""
+        if role_terms:
+            role_clause = " OR ".join(quote(t) for t in role_terms)
+            if is_jobdiva:
+                titles_suffix = f" , TITLES= ({role_clause})"
+            else:
+                parts.insert(
+                    0,
+                    quote(role_terms[0]) if len(role_terms) == 1 else f"({role_clause})",
+                )
+
+        # Geo. A remote role must NOT carry a city keyword: `AND "Dallas, TX"` is
+        # a literal résumé-text match, so on a 100%-remote job it rejects every
+        # candidate who doesn't happen to name that city — the opposite of the
+        # intent. JobDiva has a structured country filter for this (`IN {US}`,
+        # what recruiters hand-write); other dialects have no equivalent, so we
+        # simply omit the constraint and let the caller's own location argument
+        # and the client-side location scorer handle it.
+        location_type = str(getattr(criteria, "location_type", "") or "").strip().lower()
+        if location_type == "remote":
+            if is_jobdiva:
+                parts.append("IN {US}")
+        elif criteria.location:
             add_unique(parts, seen_must, quote(criteria.location), criteria.location)
 
         boolean_string = " AND ".join(part for part in parts if part and part != "()") or "*"
         if exclude_terms:
             boolean_string = f"{boolean_string} NOT ({' OR '.join(exclude_terms)})"
-        
+
         logger.info(f"Boolean string built from Page 5 sourcing filters only: {boolean_string[:150]}...")
-        return boolean_string
+        return boolean_string + titles_suffix
 
     def _filter_candidates(
         self,
@@ -3064,6 +3433,36 @@ class UnifiedCandidateSearch:
         value = re.sub(r"\s+recent$", "", value)
         value = re.sub(r"\s+over\s+\d+\s+years?$", "", value)
         return re.sub(r"\s+", " ", value).strip()
+
+    def _skills_evidenced_in_text(self, text: str, criteria: SearchCriteria) -> List[str]:
+        """Rubric skill terms that literally appear in `text`, whole-token.
+
+        A no-LLM stand-in for résumé skill extraction, used on the JobAgent
+        high-level scoring path where the per-candidate LLM step is skipped.
+
+        Safer than the fallback it replaces: it can only ever return terms the
+        rubric already asked about, so unlike `_extract_candidate_skills`' title
+        inference it cannot invent skills (that path ends at a literal
+        ["Communication", "Problem Solving"] placeholder, which the Skills
+        dimension — 45% of the score — would otherwise be judged against).
+        Whole-token matching keeps "R" from matching "senior".
+        """
+        haystack = str(text or "")
+        if not haystack:
+            return []
+        from services.jobdiva_boolean_translator import term_appears_as_token
+
+        found: List[str] = []
+        seen = set()
+        for term in criteria.skill_only_values():
+            value = str(term or "").strip()
+            key = value.lower()
+            if not value or key in seen:
+                continue
+            if term_appears_as_token(value, haystack):
+                seen.add(key)
+                found.append(value)
+        return found
 
     def _candidate_profile(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
         enhanced = candidate.get("enhanced_info") or {}
@@ -4116,6 +4515,17 @@ class UnifiedCandidateSearch:
                 "label": "Skills",
                 "weight": 45.0,
                 "collections": ["skills"],
+                # Exclusions ("must not have X") are documented as ALWAYS hard
+                # filters, so they must not depend on extraction quality. The
+                # `skills` collection is only as good as whatever populated it
+                # — for JobDiva rows that's `_extract_candidate_skills`, which
+                # falls back to guessing from the job title and ultimately to a
+                # literal ["Communication", "Problem Solving"] placeholder. On
+                # the JobAgent high-level path the LLM never runs to replace
+                # those, so an exclusion scoped to `skills` alone could never
+                # fire. Matching exclusions against the résumé text too makes
+                # them real without touching how the 45% is *scored*.
+                "excluded_collections": ["skills", "text"],
                 "required": [],
                 "preferred": [],
                 "excluded": [],
@@ -4674,6 +5084,7 @@ class UnifiedCandidateSearch:
         self,
         candidates: List[Dict[str, Any]],
         criteria: SearchCriteria,
+        skip_llm: bool = False,
     ):
         """Progressive variant of :py:meth:`_enrich_filtered_jobdiva_candidates`.
 
@@ -4694,6 +5105,13 @@ class UnifiedCandidateSearch:
         scores + shows the row — hard-filter-fails surface at 0% and are
         excluded only at Launch PAIR, never hidden on Step 5. The only row
         removal left is cross-source dedup, handled in ``emit_jobdiva_scored``.
+
+        ``skip_llm=True`` (JobDiva-JobAgent high-level scoring): the résumé +
+        profile fields are still fetched and streamed, but the per-candidate
+        LLM extraction is skipped for EVERY candidate — JobDiva's recruiter-
+        configured agent already vetted them, so they get the cheap
+        deterministic score only. Rows are tagged ``scoring_mode="high_level"``
+        so the UI can label the score "JobDiva agent search".
         """
         from services.sourced_candidates_storage import process_jobdiva_candidate
 
@@ -4727,6 +5145,10 @@ class UnifiedCandidateSearch:
                 cid = str(candidate.get("candidate_id") or candidate.get("id") or "")
                 if not cid:
                     return
+                if skip_llm:
+                    # Tag before any keep-path so even no-resume/error rows
+                    # carry the provenance label for the UI popup.
+                    candidate["scoring_mode"] = "high_level"
 
                 async def _keep(status: str, *, detail_failed: bool = False):
                     # Policy: JobDiva (agentsearch) candidates are never removed
@@ -4797,6 +5219,29 @@ class UnifiedCandidateSearch:
                         "stage": "jobdiva_details",
                         "patch": details_patch,
                     })
+
+                    # High-level scoring (JobDiva-JobAgent): résumé + profile
+                    # fields are in hand — stop here. No pre-LLM gates, no LLM
+                    # extraction; the caller scores on the cheap deterministic
+                    # signals (rank floor keeps JobDiva's ordering honored).
+                    if skip_llm:
+                        # Ground the Skills dimension (45% of the score) and its
+                        # exclusions in the résumé we just fetched. Without this
+                        # the only skills on the row are whatever
+                        # `_extract_candidate_skills` produced — JobDiva's own
+                        # field when it exists, else a guess from the job title,
+                        # else the literal ["Communication", "Problem Solving"]
+                        # placeholder. The LLM pass that normally overwrites
+                        # those is exactly what we're skipping here, so scoring
+                        # and "must not have X" would otherwise be judged
+                        # against fiction. Literal scan — no LLM, no extra I/O.
+                        evidenced = self._skills_evidenced_in_text(
+                            candidate.get("resume_text") or "", criteria
+                        )
+                        if evidenced:
+                            candidate["skills"] = evidenced
+                        await _keep("high_level")
+                        return
 
                     # PR-B: cheap pre-LLM YOE gate.
                     if self._candidate_below_min_years_pre_llm(candidate, criteria):
@@ -5172,8 +5617,17 @@ class UnifiedCandidateSearch:
                 location=self._search_location_for_source(criteria),
                 open_to_work=criteria.open_to_work,
                 limit=criteria.page_size,
+                # The wizard sends ONE boolean, rendered in JobDiva's dialect
+                # whenever JobDiva is a selected source. LinkedIn Recruiter
+                # parses none of that, so `TITLES= (...)`, `IN {US}` and
+                # `OVER N YRS` are stripped rather than matched as literal
+                # keywords. Nothing is lost: titles ride in `skills` above and
+                # location in its own argument.
                 boolean_string=self._scope_boolean_to_us(
-                    criteria.boolean_string or self._build_boolean_string(criteria)
+                    strip_jobdiva_dialect(
+                        criteria.boolean_string
+                        or self._build_boolean_string(criteria, dialect="generic")
+                    )
                 ),
             )
 
@@ -5321,7 +5775,10 @@ class UnifiedCandidateSearch:
                 skills=criteria.skill_only_values(),
                 location=self._search_location_for_source(criteria),
                 limit=min(criteria.page_size, 50),
-                boolean_string=criteria.boolean_string or "",
+                # Exa parses plain expressions only — strip JobDiva's
+                # TITLES=/IN {US}/OVER N YRS before handing the shared wizard
+                # boolean over (titles ride in `titles=` just below).
+                boolean_string=strip_jobdiva_dialect(criteria.boolean_string or ""),
                 titles=criteria.sourcing_titles(),
                 min_experience_years=criteria.min_experience_years,
                 companies=criteria.companies,
@@ -5362,7 +5819,10 @@ class UnifiedCandidateSearch:
                 skills=criteria.skill_only_values(),
                 location=self._search_location_for_source(criteria),
                 limit=exa_limit,
-                boolean_string=criteria.boolean_string or "",
+                # Exa parses plain expressions only — strip JobDiva's
+                # TITLES=/IN {US}/OVER N YRS before handing the shared wizard
+                # boolean over (titles ride in `titles=` just below).
+                boolean_string=strip_jobdiva_dialect(criteria.boolean_string or ""),
                 titles=criteria.sourcing_titles(),
                 min_experience_years=criteria.min_experience_years,
                 companies=criteria.companies,

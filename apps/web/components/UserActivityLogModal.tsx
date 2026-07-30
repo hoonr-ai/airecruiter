@@ -256,7 +256,16 @@ export function UserActivityLogModal({
               <div className="absolute left-4 top-0 bottom-0 w-0.5 bg-slate-100" />
 
               <div className="space-y-8 relative">
-                {logs.map((log, index) => (
+                {logs.map((log, index) => {
+                  const questionsCompletedValue =
+                    log.activity_type === "interview_completed" && typeof resolvedQuestionsCompleted === "number"
+                      ? resolvedQuestionsCompleted
+                      : typeof log.details?.questions_completed === "number"
+                        ? log.details.questions_completed
+                        : log.activity_type === "questionnaire_submitted" && typeof log.details?.answer_count === "number"
+                          ? log.details.answer_count
+                          : null;
+                  return (
                   <div key={log.id || index} className="flex gap-6 group">
                     {/* Icon Point */}
                     <div className={`relative z-10 w-9 h-9 rounded-full border-4 border-white shadow-sm flex items-center justify-center shrink-0 ${getStatusColor(log.status)} transition-transform group-hover:scale-110`}>
@@ -327,13 +336,10 @@ export function UserActivityLogModal({
                                 Candidate completed the interview successfully.
                               </p>
                             )}
-                            {typeof (log.activity_type === "interview_completed" && typeof resolvedQuestionsCompleted === "number"
-                              ? resolvedQuestionsCompleted
-                              : log.details.questions_completed) === "number" && (
+                            {!['interview_started_web', 'interview_started_call'].includes(log.activity_type) &&
+                             questionsCompletedValue !== null && (
                               <p className="text-slate-700">
-                                Questions completed: {log.activity_type === "interview_completed" && typeof resolvedQuestionsCompleted === "number"
-                                  ? resolvedQuestionsCompleted
-                                  : log.details.questions_completed}
+                                Questions completed: {questionsCompletedValue}
                               </p>
                             )}
                             {log.details.session_started_at && (
@@ -355,7 +361,8 @@ export function UserActivityLogModal({
                       </div>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}

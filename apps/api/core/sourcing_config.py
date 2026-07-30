@@ -170,6 +170,38 @@ JOBDIVA_TALENT_MAX_SKILL_TERMS = 4
 # a separate pull merged by candidateId).
 JOBDIVA_TALENT_TITLE_PULL_ENABLED = True
 
+# Max must-have skills ANDed into the generated sourcing boolean (the string
+# recruiters paste into JobDiva's JobAgent criteria, and the one sent to
+# Unipile/Exa). Every AND multiplies the constraint, so past a handful the
+# search returns nothing — the ranked overflow is demoted into a preferred OR
+# group instead of dropped, where it still lifts recall without gating it.
+# Kept in step with JOBDIVA_TALENT_MAX_SKILL_TERMS so the boolean a recruiter
+# reads and the structured TalentSearch pull constrain to the same depth.
+JOBDIVA_BOOLEAN_MUST_SKILL_CAP = 4
+
+# Max distinct titleSearch pulls per TalentSearch. Recruiters' hand-written
+# agent strings OR several role variants; the structured titleSearch field
+# carries exactly one string, so we approximate the OR with up to N separate
+# pulls (primary title chip first, then its selected similar titles, then
+# further title chips), merged by candidateId. Each pull is one API call.
+JOBDIVA_TALENT_TITLE_PULL_MAX_TITLES = 3
+
+# Minimum match_score for a JobDiva-TalentSearch row to stay visible on
+# Step 5. TalentSearch queries are machine-generated (top skills AND'd +
+# title pulls) and the long tail below this bar is noise recruiters have to
+# wade through. Sub-threshold rows are removed via a `dropped` patch after
+# scoring. Applies ONLY to JobDiva-TalentSearch: JobAgent results reflect
+# recruiter-authored criteria inside JobDiva and are never dropped, and
+# unscoreable rows (detail_failed → "Limited data") are always kept.
+JOBDIVA_TALENTSEARCH_MIN_SCORE = 60
+
+# High-level scoring for JobDiva-JobAgent results. The JobAgent criteria
+# are authored by recruiters inside JobDiva and its matcher pre-ranks the
+# results, so the expensive per-candidate LLM skills-match adds little —
+# skip it and score on the cheap signals (title/skills/location/rank floor).
+# The UI labels these rows "JobDiva agent search" with a high-level score.
+JOBAGENT_HIGH_LEVEL_SCORING = True
+
 # Per-search result cap for Unipile LinkedIn Recruiter searches. Protects
 # the attached LinkedIn accounts from rate/abuse flags; enforced inside
 # unipile_service.search_candidates regardless of the caller's page size.
@@ -298,3 +330,61 @@ try:
     EXA_AGENT_CONCURRENCY = int(_os.getenv("EXA_AGENT_CONCURRENCY", "1").strip() or "1")
 except ValueError:
     EXA_AGENT_CONCURRENCY = 1
+
+# Exa Agent as the sourcing-time contact fallback for LinkedIn-sourced
+# candidates. ZoomInfo can't match by LinkedIn URL (name→personId only) and
+# Apollo credits run dry, so URL-only LinkedIn/Exa candidates were streaming
+# in with no contact info until the recruiter clicked enrich. When True,
+# `enrich_contact_for_sourcing` falls through to the Exa Agent contact run
+# (still gated by EXA_CONTACT_ENRICH_ENABLED + EXA_API_KEY) for LinkedIn-*
+# sources. Capped per job by EXA_SOURCING_CONTACT_CAP to bound spend
+# (~$0.115/run).
+EXA_SOURCING_CONTACT_FALLBACK = _os.getenv(
+    "EXA_SOURCING_CONTACT_FALLBACK", "true"
+).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+
+try:
+    EXA_SOURCING_CONTACT_CAP = int(
+        _os.getenv("EXA_SOURCING_CONTACT_CAP", "25").strip() or "25"
+    )
+except ValueError:
+    EXA_SOURCING_CONTACT_CAP = 25
+
+# Restrict the sourcing-time Exa fallback to candidates with NO contact at all.
+# Exa is the expensive provider (~$0.115/run vs a ZoomInfo/Apollo API call), so
+# it should buy us a candidate we could not otherwise reach — not top up a
+# candidate we can already contact. Without this, any LinkedIn candidate missing
+# only a phone reached Exa, and because Apollo runs out of credits and ZoomInfo's
+# name match is accuracy-gated, that double-miss is the COMMON path rather than
+# an edge case: effectively every phone-less LinkedIn row billed an Exa run.
+# When True, a candidate who already has an email or a phone is left to the
+# cheap providers (now including ZoomInfo-by-email, see
+# ZOOMINFO_SOURCING_EMAIL_LOOKUP) and to recruiter-initiated on-demand
+# enrichment, which is a deliberate click and may still use Exa.
+EXA_SOURCING_CONTACT_ONLY_WHEN_NO_CONTACT = _os.getenv(
+    "EXA_SOURCING_CONTACT_ONLY_WHEN_NO_CONTACT", "true"
+).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+
+# Try ZoomInfo's match-by-EMAIL lookup at sourcing time when the candidate
+# already has an email but no phone. ZoomInfo cannot match a LinkedIn URL, but it
+# CAN match an email, so this is the cheap way to fill exactly the gap that used
+# to fall through to Exa. The on-demand path has always done this
+# (routers/candidates.py); the sourcing path was missing the step.
+ZOOMINFO_SOURCING_EMAIL_LOOKUP = _os.getenv(
+    "ZOOMINFO_SOURCING_EMAIL_LOOKUP", "true"
+).strip().lower() in {"1", "true", "yes", "on", "y", "t"}
+
+# Lifetime ceiling on sourcing-time Exa contact runs per job, per worker.
+# EXA_SOURCING_CONTACT_CAP above is a PER-RUN budget — it is reset at the start
+# of every search so a job that filled it once isn't starved forever. That reset
+# also means it bounds nothing cumulatively: Step 5 re-runs are one click, and at
+# ~$0.115/run a job could bill the per-run cap over and over. This cap is NOT
+# reset between runs, so total sourcing-time Exa spend on one job stays bounded
+# (~100 x $0.115 ≈ $11.50 worst case). Recruiter-initiated on-demand enrichment
+# is a separate path and is not affected when this trips.
+try:
+    EXA_SOURCING_CONTACT_LIFETIME_CAP = int(
+        _os.getenv("EXA_SOURCING_CONTACT_LIFETIME_CAP", "100").strip() or "100"
+    )
+except ValueError:
+    EXA_SOURCING_CONTACT_LIFETIME_CAP = 100

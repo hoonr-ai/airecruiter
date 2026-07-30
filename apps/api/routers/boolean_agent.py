@@ -1,20 +1,23 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from services.job_rubric_db import JobRubricDB
 from services.jobdiva import jobdiva_service
 import psycopg2
 import psycopg2.extras
 from core.config import DATABASE_URL
 from core.db import get_db_connection
+from core.auth import get_current_user, UserIdentity
+from routers.jobs import _verify_job_access_by_id
 import json
 
 router = APIRouter(tags=["Boolean Agent Integration"])
 
 @router.get("/jobs/{job_id}/context")
-async def get_boolean_agent_context(job_id: str):
+async def get_boolean_agent_context(job_id: str, user: UserIdentity = Depends(get_current_user)):
     """
     Returns a unified JSON object for the Boolean String Generator agent team.
     Strictly follows Page 5 (Sourcing) UI state requirements.
     """
+    _verify_job_access_by_id(str(job_id), user)
     try:
         # 1. Resolve ID (Ref code vs Numeric)
         ref_id = job_id

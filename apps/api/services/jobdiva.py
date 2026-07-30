@@ -971,6 +971,7 @@ class JobDivaService:
         zip_code: str = "",
         within_miles: Optional[int] = None,
         title: str = "",
+        titles: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search for candidates.
@@ -1005,6 +1006,7 @@ class JobDivaService:
             zip_code=zip_code or "",
             within_miles=within_miles,
             title=title,
+            titles=titles,
         )
 
     async def _search_job_applicants(self, job_id: str, limit: int, token: str, skills: List[Any] = None, location: str = "") -> List[Dict[str, Any]]:
@@ -1551,6 +1553,7 @@ class JobDivaService:
         zip_code: str = "",
         within_miles: Optional[int] = None,
         title: str = "",
+        titles: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search the JobDiva Talent Pool via the v2 TalentSearch contract.
@@ -1584,6 +1587,7 @@ class JobDivaService:
             extract_and_terms,
             sanitize_talent_term,
             count_location_clauses,
+            term_appears_as_token,
         )
         from core import sourcing_config as _sc
 
@@ -1597,23 +1601,55 @@ class JobDivaService:
         # the boolean's top-level AND terms, then at most two preferred chips
         # (a mild constraint beats posting an unconstrained search).
         max_terms = max(1, int(getattr(_sc, "JOBDIVA_TALENT_MAX_SKILL_TERMS", 4) or 4))
-        must_terms: List[str] = []
+        must_meta: List[Dict[str, Any]] = []
         preferred_terms: List[str] = []
         seen_terms = set()
         for skill in skills or []:
+            has_years = False
+            is_recent = False
             if isinstance(skill, dict):
                 match_type = str(skill.get("match_type", "must") or "must").lower().replace("_", " ").strip()
                 if match_type in ("exclude", "must not"):
                     continue
                 raw_term = skill.get("value") or skill.get("name") or ""
                 is_preferred = match_type in ("can", "preferred", "nice to have")
+                try:
+                    has_years = int(skill.get("years") or 0) > 0
+                except (TypeError, ValueError):
+                    has_years = False
+                is_recent = bool(skill.get("recent"))
             else:
                 raw_term = str(skill)
                 is_preferred = False
             term = sanitize_talent_term(raw_term)
             if term and term.lower() not in seen_terms:
                 seen_terms.add(term.lower())
-                (preferred_terms if is_preferred else must_terms).append(term)
+                if is_preferred:
+                    preferred_terms.append(term)
+                else:
+                    must_meta.append({"term": term, "years": has_years, "recent": is_recent})
+
+        # Focus the capped AND on the most IMPORTANT must-have skills: chips
+        # named in the primary job title (the role's core competency) rank
+        # first, then chips carrying an explicit years/recency requirement.
+        # Stable sort — ties keep the wizard's chip order, which the skill
+        # extractor already emits importance-first and recruiters reorder
+        # deliberately.
+        _primary_title_lc = str((titles or [None])[0] or title or "").strip().lower()
+
+        # Resolved once per term (not inside the sort key) so the pattern is
+        # compiled O(terms) times rather than O(terms log terms). The
+        # whole-token rule lives in the translator so the boolean builder and
+        # this ranking can't drift apart — see term_appears_as_token.
+        for _m in must_meta:
+            _m["in_title"] = term_appears_as_token(_m["term"], _primary_title_lc)
+        must_meta.sort(
+            key=lambda m: (
+                0 if m["in_title"] else 1,
+                0 if (m["years"] or m["recent"]) else 1,
+            )
+        )
+        must_terms: List[str] = [m["term"] for m in must_meta]
         if not must_terms and boolean_string:
             must_terms = extract_and_terms(boolean_string, max_terms=max_terms)
         if not must_terms:
@@ -1653,8 +1689,20 @@ class JobDivaService:
             base_body["zipCode"] = zip5
             base_body["withinMiles"] = zip_radius_miles
 
+        # Title variants for the titleSearch recall pulls. Callers can pass a
+        # ranked list (primary chip + its selected similar titles); the legacy
+        # single `title` arg is folded in for back-compat. Deduped, order
+        # preserved, capped inside _fetch_talent_search_rows.
+        title_list: List[str] = []
+        _seen_titles = set()
+        for t in [*(titles or []), title]:
+            tc = str(t or "").strip()
+            if tc and tc.lower() not in _seen_titles:
+                _seen_titles.add(tc.lower())
+                title_list.append(tc)
+
         logger.debug(
-            f"JobDiva Talent Search v2 — terms={must_terms!r} title={title!r} | "
+            f"JobDiva Talent Search v2 — terms={must_terms!r} titles={title_list!r} | "
             f"countries={base_body['countries']!r} states={base_body.get('states')!r} "
             f"zipCode={base_body.get('zipCode', '')!r} withinMiles={zip_radius_miles or ''}"
         )
@@ -1663,7 +1711,8 @@ class JobDivaService:
         profile_only_results: List[Dict[str, Any]] = []
         try:
             candidates = await self._fetch_talent_search_rows(
-                token, base_body, must_terms, title=title
+                token, base_body, must_terms, titles=title_list,
+                limit=max(1, int(limit or 1)),
             )
             # The server ignores pageSize — cap client-side so the detail/
             # resume enrichment below stays bounded.
@@ -1951,23 +2000,33 @@ class JobDivaService:
         base_body: Dict[str, Any],
         must_terms: List[str],
         title: str = "",
+        titles: Optional[List[str]] = None,
+        limit: int = 0,
     ) -> List[Dict[str, Any]]:
         """Run the v2 TalentSearch pulls and merge their raw rows.
 
-        Pull 1: `skills` = AND of must_terms, relaxed to the two
-        highest-priority terms when the full AND matches nothing (server
-        AND semantics can zero out long must-lists). Pull 2: `titleSearch`
-        recall pull — title matches surface candidates whose resume wording
-        differs from the skill terms. Rows dedupe by candidateId, pull 1
-        first. Never posts an empty search definition: the server answers
-        one with its full unfiltered dump.
+        Pull 1: `skills` = AND of must_terms, relaxed progressively (full →
+        top-3 → top-2) when the AND matches nothing — must_terms arrive in
+        importance order, so each relaxation keeps the highest-priority
+        skills (server AND semantics can zero out long must-lists).
+        Pulls 2..N: `titleSearch` recall pulls, one per role variant
+        (primary title chip, then its similar titles) capped at
+        JOBDIVA_TALENT_TITLE_PULL_MAX_TITLES — title matches surface
+        candidates whose resume wording differs from the skill terms.
+        Rows dedupe by candidateId, skill pull first. Never posts an empty
+        search definition: the server answers one with its full unfiltered
+        dump.
         """
         from core import sourcing_config as _sc
 
         url = f"{self.api_url}/apiv2/jobdiva/TalentSearch"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-        async def _post(body: Dict[str, Any]) -> List[Dict[str, Any]]:
+        async def _post(body: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+            """Returns rows on success, [] on a genuine empty result, and
+            None on an HTTP/transport failure — the relaxation ladder must
+            not mistake a 429/5xx for "no matches" and hammer the endpoint
+            with progressively looser pulls."""
             for attempt in range(3):
                 try:
                     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -1976,7 +2035,7 @@ class JobDivaService:
                         logger.warning(
                             f"JobDiva Talent Search failed: {response.status_code} - {response.text[:200]}"
                         )
-                        return []
+                        return None
                     data = response.json()
                     if isinstance(data, dict):
                         return data.get("data") or data.get("candidates") or data.get("results") or []
@@ -1987,45 +2046,112 @@ class JobDivaService:
                         f"JobDiva Talent Search transport retry {attempt + 1}/3: {exc!r}"
                     )
                     await asyncio.sleep(1.5 * (attempt + 1))
-            return []
+            return None
 
         rows: List[Dict[str, Any]] = []
         if must_terms:
             body = dict(base_body)
-            body["skills"] = list(must_terms)
-            rows = await _post(body)
-            if not rows and len(must_terms) > 2:
-                body["skills"] = list(must_terms[:2])
-                logger.info(
-                    f"JobDiva Talent Search: 0 rows for {len(must_terms)}-term AND, "
-                    f"relaxing to {body['skills']!r}"
-                )
-                rows = await _post(body)
+            # Progressive relaxation: must_terms are importance-ordered, so
+            # each retry drops the least-important tail rather than jumping
+            # straight to a 2-term floor. Relax ONLY on a genuine empty
+            # result — an HTTP failure (429/5xx → None) aborts the ladder,
+            # otherwise a throttled full-AND pull silently degrades into the
+            # much looser top-2 dump while worsening the throttle.
+            relax_steps = [len(must_terms)]
+            for n in (3, 2):
+                if n < relax_steps[-1]:
+                    relax_steps.append(n)
+            for step_idx, n_terms in enumerate(relax_steps):
+                body["skills"] = list(must_terms[:n_terms])
+                resp = await _post(body)
+                if resp is None:
+                    logger.warning(
+                        f"JobDiva Talent Search: {n_terms}-term skill pull failed "
+                        f"(HTTP/transport) — aborting relaxation ladder"
+                    )
+                    break
+                rows = resp
+                if rows:
+                    break
+                if step_idx + 1 < len(relax_steps):
+                    logger.info(
+                        f"JobDiva Talent Search: 0 rows for {n_terms}-term AND, "
+                        f"relaxing to top {relax_steps[step_idx + 1]} terms"
+                    )
 
-        title_clean = str(title or "").strip()
-        if title_clean and getattr(_sc, "JOBDIVA_TALENT_TITLE_PULL_ENABLED", True):
-            title_body = dict(base_body)
-            title_body["titleSearch"] = title_clean
-            title_rows = await _post(title_body)
-            if title_rows:
-                seen_ids = {
-                    str(get_field(r, ["candidateId", "CANDIDATEID", "id", "ID"]) or "")
-                    for r in rows
-                }
+        # Title recall pulls — one per role variant, merged by candidateId.
+        clean_titles: List[str] = []
+        _seen_t = set()
+        for t in [*(titles or []), title]:
+            tc = str(t or "").strip()
+            if tc and tc.lower() not in _seen_t:
+                _seen_t.add(tc.lower())
+                clean_titles.append(tc)
+        max_title_pulls = max(
+            1, int(getattr(_sc, "JOBDIVA_TALENT_TITLE_PULL_MAX_TITLES", 3) or 3)
+        )
+        clean_titles = clean_titles[:max_title_pulls]
+
+        if clean_titles and getattr(_sc, "JOBDIVA_TALENT_TITLE_PULL_ENABLED", True):
+            # Title recall competes with the skill pull for the caller's
+            # `limit` (it slices the merged rows with skill rows first). So
+            # collect the role-matched rows FIRST and trim the skill tail by
+            # only as many rows as we actually have to put in its place.
+            # Trimming up front instead threw away already-fetched skill rows
+            # even when every title pull came back empty or failed, silently
+            # costing ~1/3 of the results for no gain.
+            skill_row_count = len(rows)
+            seen_ids = {
+                str(get_field(r, ["candidateId", "CANDIDATEID", "id", "ID"]) or "")
+                for r in rows
+            }
+            # Cap the reservation at ~1/3 of `limit`: the skill AND is the
+            # more precise signal, so it keeps the majority of the slots.
+            title_budget = max(1, limit // 3) if limit else 0
+            new_title_rows: List[Dict[str, Any]] = []
+            for title_clean in clean_titles:
+                if title_budget and len(new_title_rows) >= title_budget:
+                    break
+                title_body = dict(base_body)
+                title_body["titleSearch"] = title_clean
+                title_rows = await _post(title_body)
+                if title_rows is None:
+                    logger.warning(
+                        "JobDiva Talent Search: titleSearch pull failed "
+                        "(HTTP/transport) — skipping remaining title pulls"
+                    )
+                    break
+                if not title_rows:
+                    continue
                 added = 0
                 for r in title_rows:
                     cid = str(get_field(r, ["candidateId", "CANDIDATEID", "id", "ID"]) or "")
                     if not cid or cid in seen_ids:
                         continue
                     seen_ids.add(cid)
-                    rows.append(r)
+                    new_title_rows.append(r)
                     added += 1
+                    if title_budget and len(new_title_rows) >= title_budget:
+                        break
                 logger.debug(
-                    f"JobDiva Talent Search titleSearch pull: +{added} new rows "
-                    f"({len(title_rows)} returned)"
+                    f"JobDiva Talent Search titleSearch pull {title_clean!r}: "
+                    f"+{added} new rows ({len(title_rows)} returned)"
                 )
 
-        if not must_terms and not title_clean:
+            # Merge once, now that the real count is known. Nothing is dropped
+            # unless there is a role-matched row to take the slot.
+            if new_title_rows:
+                if limit and skill_row_count + len(new_title_rows) > limit:
+                    keep = max(1, limit - len(new_title_rows))
+                    logger.debug(
+                        "JobDiva Talent Search: trimming skill rows %d → %d to "
+                        "seat %d title-matched rows (limit=%d)",
+                        skill_row_count, keep, len(new_title_rows), limit,
+                    )
+                    rows = rows[:keep]
+                rows.extend(new_title_rows)
+
+        if not must_terms and not clean_titles:
             logger.warning(
                 "JobDiva Talent Search: no usable skill terms or title — skipping "
                 "(an empty search definition returns the unfiltered dump)"
