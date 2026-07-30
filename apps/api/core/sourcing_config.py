@@ -195,6 +195,27 @@ JOBDIVA_TALENT_TITLE_PULL_MAX_TITLES = 3
 # unscoreable rows (detail_failed → "Limited data") are always kept.
 JOBDIVA_TALENTSEARCH_MIN_SCORE = 60
 
+# Minimum match_score for EXTERNAL-source rows (LinkedIn-Exa,
+# LinkedIn-Unipile, LinkedIn-DeepSearch, Dice, VettedDB) to be shown /
+# launchable. Same rationale as JOBDIVA_TALENTSEARCH_MIN_SCORE — these
+# queries are machine-generated and their sub-threshold tail is noise —
+# and these sources previously had NO score gate at all, so a
+# 0%-match profile stayed selectable and could be launched. Unscoreable
+# rows (match_score None) are kept, mirroring the TalentSearch gate.
+# Exempt: JobDiva-JobAgent (recruiter-authored criteria inside JobDiva)
+# and JobDiva-Applicants (real applicants to this job are never dropped).
+EXTERNAL_SOURCE_MIN_SCORE = 60
+EXTERNAL_MIN_SCORE_EXEMPT_SOURCES = ("JobDiva-JobAgent", "JobDiva-Applicants")
+
+# Hard-drop rows whose location is CONFIRMED outside the job's location
+# (state/province mismatch, or a real measured distance beyond the radius)
+# for every source except JobDiva-JobAgent / JobDiva-Applicants. Unknown or
+# unparseable candidate locations are NOT confirmed mismatches — those stay
+# soft-kept per the existing policy. JobAgent rows keep the soft
+# out-of-radius badge instead of dropping (JobDiva's own matcher is
+# trusted; the recruiter narrows via the UI chips).
+EXTERNAL_LOCATION_CONFIRMED_MISMATCH_DROP = True
+
 # High-level scoring for JobDiva-JobAgent results. The JobAgent criteria
 # are authored by recruiters inside JobDiva and its matcher pre-ranks the
 # results, so the expensive per-candidate LLM skills-match adds little —

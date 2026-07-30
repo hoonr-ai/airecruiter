@@ -75,7 +75,7 @@ async def _score_and_save_resume(job_row: dict, name: str, email: str, phone: st
         candidate["email"] = enhanced_info.get("email") or candidate["email"]
         candidate["phone"] = enhanced_info.get("phone") or candidate["phone"]
         candidate["title"] = enhanced_info.get("job_title") or candidate["title"]
-        candidate["location"] = enhanced_info.get("current_location") or candidate["location"]
+        candidate["location"] = candidate["location"] or enhanced_info.get("current_location")
         candidate["skills"] = enhanced_info.get("structured_skills") or enhanced_info.get("skills") or []
         candidate["years_of_experience"] = enhanced_info.get("years_of_experience")
 

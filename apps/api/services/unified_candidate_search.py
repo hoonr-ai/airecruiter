@@ -699,6 +699,44 @@ class UnifiedCandidateSearch:
 
             cand = finalize_candidate(cand)
             cid = str(cand.get("candidate_id") or cand.get("id"))
+
+            # Relevance gate for machine-queried sources (Exa / Unipile /
+            # DeepSearch / Dice / Vetted). JobDiva-JobAgent (recruiter-authored
+            # criteria) and JobDiva-Applicants (real applicants) are exempt.
+            # Mirrors the TalentSearch ScoreGate: rows the recruiter must not
+            # launch (confirmed wrong location, or below the score floor) are
+            # never emitted. Unscoreable rows (match_score None) stay visible.
+            from core import sourcing_config as _sc_gate
+            _src = str(cand.get("source") or "")
+            _exempt = set(getattr(_sc_gate, "EXTERNAL_MIN_SCORE_EXEMPT_SOURCES",
+                                  ("JobDiva-JobAgent", "JobDiva-Applicants")))
+            if _src not in _exempt:
+                if (
+                    bool(getattr(_sc_gate, "EXTERNAL_LOCATION_CONFIRMED_MISMATCH_DROP", True))
+                    and cand.get("location_veto_reason")
+                ):
+                    summary["location_mismatch_dropped"] = summary.get("location_mismatch_dropped", 0) + 1
+                    self._log_stage(
+                        "LocationGate",
+                        f"dropping candidate_id={cid} source={_src} "
+                        f"reason={cand.get('location_veto_reason')} "
+                        f"distance={cand.get('distance_miles')}",
+                    )
+                    return
+                _min_score = getattr(_sc_gate, "EXTERNAL_SOURCE_MIN_SCORE", None)
+                if (
+                    _min_score is not None
+                    and cand.get("match_score") is not None
+                    and int(cand.get("match_score") or 0) < int(_min_score)
+                ):
+                    summary["below_min_score_dropped"] = summary.get("below_min_score_dropped", 0) + 1
+                    self._log_stage(
+                        "ScoreGate",
+                        f"dropping candidate_id={cid} source={_src} "
+                        f"match_score={cand.get('match_score')} < min_score={_min_score}",
+                    )
+                    return
+
             if cid and cid in seen_ids:
                 return
             cross_keys = self._dedup_keys(cand)
@@ -1236,7 +1274,14 @@ class UnifiedCandidateSearch:
                                         provider_id, account_id=cand.get("unipile_account_id")
                                     )
                                     if full_profile:
+                                        # The search row's `title` is the
+                                        # LinkedIn headline; keep it reachable
+                                        # for the role-anchor check when the
+                                        # profile supplies a real job title.
+                                        _headline = str(cand.get("title") or "")
                                         cand.update(self._extract_linkedin_profile_data(full_profile))
+                                        if _headline and not cand.get("headline"):
+                                            cand["headline"] = _headline
                                 except Exception as e:
                                     logger.warning(f"Failed to fetch full profile for LinkedIn candidate {provider_id}: {e}")
                             # After enrichment, run the same role-anchor check.
@@ -1277,7 +1322,10 @@ class UnifiedCandidateSearch:
                             cand["email"] = cand["enhanced_info"].get("email") or cand.get("email")
                             cand["phone"] = cand["enhanced_info"].get("phone") or cand.get("phone")
                         cand["title"] = cand["enhanced_info"].get("job_title") or cand.get("title")
-                        cand["location"] = cand["enhanced_info"].get("current_location") or cand.get("location")
+                        # Source-native location is authoritative; the LLM's
+                        # resume-parsed current_location only fills a blank
+                        # (it can latch onto a past employer / education city).
+                        cand["location"] = cand.get("location") or cand["enhanced_info"].get("current_location")
                         if cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills"):
                             cand["skills"] = cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills")
 
@@ -1352,12 +1400,23 @@ class UnifiedCandidateSearch:
                         return {"status": "success", "candidate": cand}
 
                 process_tasks = [asyncio.create_task(_process_external_single(c)) for c in ext_candidates]
+                # Per-status drop accounting: these gates used to discard rows
+                # with no counter or log line, so "Exa found 50, UI shows 1"
+                # was undiagnosable from the stream log.
+                _status_counts: Dict[str, int] = {}
                 for task in asyncio.as_completed(process_tasks):
                     result = await task
+                    _status_counts[result["status"]] = _status_counts.get(result["status"], 0) + 1
                     if result["status"] == "success":
                         cand = result["candidate"]
                         assessment = self._filter_assessment(cand, criteria, enforce_years=False)
                         await emit_candidate(cand, assessment)
+                if _status_counts:
+                    self._log_stage(
+                        name,
+                        f"processed {len(ext_candidates)} {source_type} candidates: "
+                        + ", ".join(f"{k}={v}" for k, v in sorted(_status_counts.items())),
+                    )
             except Exception as e:
                 logger.error(f"{name} search stage failed: {e}", exc_info=True)
             finally:
@@ -1849,6 +1908,13 @@ class UnifiedCandidateSearch:
                         patch["city"] = str(city).strip()
                     if state:
                         patch["state"] = str(state).strip()
+                    # Rebuild the display string too — the UI reads `location`
+                    # first, so patching only city/state leaves a stale (or
+                    # LLM-corrupted) `location` on screen forever.
+                    if city or state:
+                        patch["location"] = ", ".join(
+                            p for p in [str(city).strip(), str(state).strip()] if p
+                        )
 
                     quals = detail.get("qualifications") or detail.get("QUALIFICATIONS") or quals_map.get(str(cand_id)) or []
                     if quals:
@@ -2165,6 +2231,15 @@ class UnifiedCandidateSearch:
         "DC",
     })
 
+    # Canadian province/territory codes. Disjoint from _US_STATE_CODES, so a
+    # 2-letter token identifies its country unambiguously — EXCEPT the codes
+    # that collide with _COUNTRY_ALIASES ("CA", "IN", "DE", "NL"): a token in
+    # the state slot always resolves as a state/province, never a country.
+    _CA_PROVINCE_CODES = frozenset({
+        "AB", "BC", "MB", "NB", "NL", "NS", "NT", "NU", "ON", "PE",
+        "QC", "SK", "YT",
+    })
+
     # Country aliases → JobDiva expects the 2-letter code in talentSearchDef.
     _COUNTRY_ALIASES = {
         "US": "US", "USA": "US", "U.S.": "US", "U.S.A.": "US",
@@ -2246,29 +2321,30 @@ class UnifiedCandidateSearch:
             # No location criteria at all → still scope to US-only.
             return ["US"], [], ""
 
-        # Strip the zip before tokenizing — "Tempe, AZ 85281" must yield
-        # the token "AZ", not "AZ 85281".
-        loc_no_zip = re.sub(r"\b\d{5}(?:-\d{4})?\b", " ", loc)
-        tokens = [t.strip() for t in loc_no_zip.split(",") if t.strip()]
-
-        # Walk tokens right-to-left for a country match.
-        consumed: set = set()
-        for idx in range(len(tokens) - 1, -1, -1):
-            token_upper = tokens[idx].upper()
-            if token_upper in self._COUNTRY_ALIASES:
-                countries.append(self._COUNTRY_ALIASES[token_upper])
-                consumed.add(idx)
-                break
+        # Country comes from the parser, whose state-slot rule disambiguates
+        # "CA": "Los Angeles, CA" is California ⇒ US (the old right-to-left
+        # token walk here matched CA-the-country first and scoped every
+        # California job to Canada), while "Ajax, ON CA" / "Toronto, ON" ⇒
+        # Canada via the trailing token / the ON province code.
+        parsed_country = (parsed.get("country") or "").upper()
+        if parsed_country:
+            countries.append(parsed_country)
 
         # State: prefer the robust parser (handles "AZ", "Arizona",
-        # "AZ 85281"), fall back to the raw token walk.
+        # "AZ 85281", and Canadian provinces like "ON"/"Ontario"), fall back
+        # to the raw token walk.
+        loc_no_zip = re.sub(r"\b\d{5}(?:-\d{4})?\b", " ", loc)
+        tokens = [t.strip() for t in loc_no_zip.split(",") if t.strip()]
         parsed_state = (parsed.get("state") or "").upper()
         if parsed_state and parsed_state in self._US_STATE_CODES:
             states.append(parsed_state)
+        elif parsed_state and parsed_state in self._CA_PROVINCE_CODES:
+            # JobDiva's talentSearchDef `states` carries provinces for
+            # country=CA searches (its own UI labels the field
+            # "State/Province").
+            states.append(parsed_state)
         else:
             for idx in range(len(tokens) - 1, -1, -1):
-                if idx in consumed:
-                    continue
                 token_upper = tokens[idx].upper()
                 if len(token_upper) == 2 and token_upper in self._US_STATE_CODES:
                     states.append(token_upper)
@@ -2355,6 +2431,7 @@ class UnifiedCandidateSearch:
         from core import sourcing_config as _sc_loc
         soft_keep = bool(getattr(_sc_loc, "JOBDIVA_LOCATION_SOFT_KEEP", True))
         enforce_location = self._should_enforce_location(criteria)
+        job_country = self._target_country(criteria)
 
         kept: List[Dict[str, Any]] = []
         non_us_dropped = 0
@@ -2363,7 +2440,7 @@ class UnifiedCandidateSearch:
         geocode_failed = 0
 
         for c in candidates:
-            if self._is_likely_non_us(c):
+            if self._is_likely_outside_country(c, job_country):
                 non_us_dropped += 1
                 continue
 
@@ -2866,13 +2943,14 @@ class UnifiedCandidateSearch:
 
         filtered = []
         non_us_dropped = 0
+        job_country = self._target_country(criteria)
         for candidate in candidates:
             haystack = self._candidate_summary_text(candidate)
 
-            # US-only scope: drop only when the candidate's country/location
-            # text is positive evidence of a non-US location. Silent records
-            # are treated as US (kept).
-            if self._is_likely_non_us(candidate):
+            # Country scope: drop only when the candidate's country/location
+            # text is positive evidence of a location outside the job's
+            # country. Silent records are treated as in-country (kept).
+            if self._is_likely_outside_country(candidate, job_country):
                 non_us_dropped += 1
                 continue
 
@@ -2961,9 +3039,16 @@ class UnifiedCandidateSearch:
         they worked in five years ago.
 
         Order of preference:
-        1. ``enhanced_info.current_location`` (LLM-extracted from resume header)
+        1. ``candidate.city + ", " + candidate.state`` (live source field —
+           for JobDiva rows this is the CRM record; background detail
+           hydration refreshes it)
         2. ``candidate.location`` (live source field)
-        3. ``candidate.city + ", " + candidate.state`` (live source field)
+        3. ``enhanced_info.current_location`` (LLM-extracted from resume) —
+           ONLY consulted when the source fields are blank. The LLM value can
+           latch onto a past-employer/education city, and because this list
+           feeds ``_is_likely_outside_country`` / radius verdicts, a wrong
+           entry here can veto a genuinely local candidate (or pass a remote
+           one), so it must never ride alongside authoritative source data.
         """
         enhanced = candidate.get("enhanced_info") or {}
         enhanced_dict = enhanced if isinstance(enhanced, dict) else {}
@@ -2972,11 +3057,10 @@ class UnifiedCandidateSearch:
         state = str(candidate.get("state") or "").strip()
         city_state = f"{city}, {state}".strip(", ") if (city or state) else ""
 
-        location_values = [
-            enhanced_dict.get("current_location"),
-            candidate.get("location"),
-            city_state,
-        ]
+        source_native = [city_state, candidate.get("location")]
+        location_values = list(source_native)
+        if not any(str(v or "").strip() for v in source_native):
+            location_values.append(enhanced_dict.get("current_location"))
         cleaned: List[str] = []
         seen = set()
         for value in location_values:
@@ -2988,89 +3072,128 @@ class UnifiedCandidateSearch:
             cleaned.append(loc)
         return cleaned
 
+    # Display names for the countries the sourcing pipeline can scope to.
+    _COUNTRY_DISPLAY_NAMES = {"US": "United States", "CA": "Canada"}
+
+    def _target_country(self, criteria: SearchCriteria) -> str:
+        """The job's country code ("US" default, "CA" for Canadian jobs).
+
+        Resolved from explicit ``criteria.countries`` when the frontend sent
+        them, else parsed from ``criteria.location`` ("Toronto, ON" ⇒ CA via
+        the province code; "Los Angeles, CA" ⇒ US via the state-slot rule).
+        Every non-JobDiva query scope and the outside-country candidate gate
+        key off this, so a Canadian job stops searching (and keeping) US-only
+        candidates and vice versa.
+        """
+        for c in (criteria.countries or []):
+            code = self._COUNTRY_ALIASES.get(str(c).strip().upper())
+            if code:
+                return code
+        parsed = self._parse_location(criteria.location or "")
+        return (parsed.get("country") or "US").upper()
+
+    def _country_display_name(self, country_code: str) -> str:
+        return self._COUNTRY_DISPLAY_NAMES.get(
+            (country_code or "US").upper(), "United States"
+        )
+
     def _search_location_for_source(self, criteria: SearchCriteria) -> str:
         """Location string to hand external sources (Exa, Dice, Unipile).
 
-        Remote jobs search nationwide — anchoring a remote search to the
+        Remote jobs search country-wide — anchoring a remote search to the
         office city just biases discovery toward one metro for no reason.
-        Onsite/hybrid keep the US-scoped job location.
+        Onsite/hybrid keep the job location scoped to the job's country.
         """
+        country = self._target_country(criteria)
         if str(getattr(criteria, "location_type", "") or "").strip().lower() == "remote":
-            return "United States"
-        return self._scope_location_to_us(criteria.location)
+            return self._country_display_name(country)
+        return self._scope_location_to_country(criteria.location, country)
 
-    def _scope_location_to_us(self, location: Any) -> str:
-        """Append ", United States" to a location string when no country is
-        already named, so downstream services (Exa, Dice, Vetted, Unipile)
-        scope their lookups to the US.
+    def _scope_location_to_country(self, location: Any, country_code: str) -> str:
+        """Append the job's country name to a location string when no country
+        is already named, so downstream services (Exa, Dice, Vetted, Unipile)
+        scope their lookups correctly. A Canadian job used to get ", United
+        States" appended here, which made Exa/Unipile search the wrong
+        country entirely.
 
-        Returns ``"United States"`` when the input is empty.
+        Returns the bare country name when the input is empty.
         """
+        country_name = self._country_display_name(country_code)
         text = str(location or "").strip().strip(",")
         if not text:
-            return "United States"
+            return country_name
 
         upper_tokens = {t.strip().upper() for t in text.split(",")}
         if upper_tokens & set(self._COUNTRY_ALIASES.keys()):
             return text
-        return f"{text}, United States"
+        return f"{text}, {country_name}"
 
-    def _scope_boolean_to_us(self, boolean_string: Any) -> str:
-        """Ensure the boolean keyword string carries a US-scope hint.
+    def _scope_location_to_us(self, location: Any) -> str:
+        """Back-compat wrapper — US-scoped variant of
+        :py:meth:`_scope_location_to_country`."""
+        return self._scope_location_to_country(location, "US")
 
-        The downstream Exa free-text query and Unipile's keyword fallback both
-        consume this string verbatim, so the cheapest way to bias them toward
-        US results is to append a literal country phrase when no country is
-        already mentioned.
+    # Country-field spellings that positively identify Canada.
+    _CA_COUNTRY_TOKENS = frozenset({"ca", "can", "canada"})
+
+    def _candidate_country_code(self, candidate: Dict[str, Any]) -> str:
+        """Best-effort country code ("US"/"CA"/…) from the candidate record.
+
+        Returns "" when the field is absent or unrecognizable — an
+        unparseable value (JobDiva can return ids or free text) is treated
+        as "unknown", never as evidence of being abroad.
         """
-        text = str(boolean_string or "").strip()
-        if not text:
-            return '"United States"'
+        enhanced = candidate.get("enhanced_info")
+        enhanced_country = (
+            enhanced.get("current_country") if isinstance(enhanced, dict) else None
+        )
+        for raw in (candidate.get("country"), enhanced_country):
+            text = str(raw or "").strip().upper()
+            if not text:
+                continue
+            code = self._COUNTRY_ALIASES.get(text)
+            if code:
+                return code
+        return ""
 
-        upper = text.upper()
-        if any(
-            token in upper
-            for token in (
-                "UNITED STATES",
-                "UNITED STATES OF AMERICA",
-                '"USA"',
-                " USA ",
-                " USA,",
-                "(USA)",
-                "U.S.",
-                "U.S.A.",
-            )
-        ):
-            return text
-        return f'({text}) AND "United States"'
+    def _is_likely_outside_country(
+        self, candidate: Dict[str, Any], country_code: str = "US"
+    ) -> bool:
+        """Return True only when the candidate is clearly outside the job's
+        country (default US; "CA" for Canadian jobs).
 
-    def _is_likely_non_us(self, candidate: Dict[str, Any]) -> bool:
-        """Return True only when the candidate is clearly outside the US.
-
-        Used to enforce an unconditional US-only scope on every search.
-        Defaults to False (treat as US) when the candidate's country and
-        location text are silent — we want to keep observed candidates
-        unless we have positive evidence they're abroad.
+        Defaults to False (treat as in-country) when the candidate's country
+        and location text are silent — we want to keep observed candidates
+        unless we have positive evidence they're abroad. A Canadian job must
+        NOT drop "Toronto, Ontario, Canada" candidates (the old US-only gate
+        did exactly that, leaving near-empty external results for CA jobs).
         """
-        country = str(candidate.get("country") or "").strip().lower()
-        if country and country not in self._US_COUNTRY_TOKENS:
+        country_code = (country_code or "US").upper()
+
+        known_code = self._candidate_country_code(candidate)
+        if known_code and known_code != country_code:
             return True
 
-        enhanced = candidate.get("enhanced_info") or {}
-        if isinstance(enhanced, dict):
-            enhanced_country = str(enhanced.get("current_country") or "").strip().lower()
-            if enhanced_country and enhanced_country not in self._US_COUNTRY_TOKENS:
-                return True
+        if country_code == "CA":
+            foreign_tokens = (self._NON_US_LOCATION_TOKENS - {"canada"}) | {
+                "united states", "usa", "u.s.", "u.s.a.",
+            }
+        else:
+            foreign_tokens = self._NON_US_LOCATION_TOKENS
 
         locs = self._candidate_structured_locations(candidate)
         if locs:
             padded = " " + " | ".join(loc.lower() for loc in locs) + " "
-            for token in self._NON_US_LOCATION_TOKENS:
+            for token in foreign_tokens:
                 # Match as bounded substring to avoid false positives
                 # (e.g. "india" must not hit "indianapolis").
                 if f" {token} " in padded or f" {token}," in padded:
                     return True
         return False
+
+    def _is_likely_non_us(self, candidate: Dict[str, Any]) -> bool:
+        """Back-compat wrapper: outside-US check (US jobs)."""
+        return self._is_likely_outside_country(candidate, "US")
 
     def _location_match_verdict(
         self,
@@ -3300,6 +3423,15 @@ class UnifiedCandidateSearch:
             "south dakota": "sd", "tennessee": "tn", "texas": "tx", "utah": "ut",
             "vermont": "vt", "virginia": "va", "washington": "wa", "west virginia": "wv",
             "wisconsin": "wi", "wyoming": "wy", "district of columbia": "dc",
+            # Canadian provinces/territories — full names map to their
+            # 2-letter codes (disjoint from every US state code), so
+            # "Toronto, Ontario" and "Toronto, ON" compare equal.
+            "alberta": "ab", "british columbia": "bc", "manitoba": "mb",
+            "new brunswick": "nb", "newfoundland and labrador": "nl",
+            "newfoundland": "nl", "nova scotia": "ns",
+            "northwest territories": "nt", "nunavut": "nu", "ontario": "on",
+            "prince edward island": "pe", "quebec": "qc", "québec": "qc",
+            "saskatchewan": "sk", "yukon": "yt",
         }
         from services.us_state_index import resolve_state_code
 
@@ -3354,6 +3486,40 @@ class UnifiedCandidateSearch:
 
         normalized_state = state_aliases.get(self._normalize_term(state), self._normalize_term(state))
 
+        # ---- country detection -------------------------------------------
+        # Rule: a token in the STATE SLOT (right after the city) is always a
+        # state/province, never a country — "Los Angeles, CA" is California,
+        # not Canada. Countries are read from the tokens AFTER the state
+        # ("Ajax, ON CA", "Toronto, Ontario, Canada"), or inferred from the
+        # state code itself (ON ⇒ Canada, TX ⇒ US). A state-slot token that
+        # is ONLY a country name ("Toronto, Canada") moves to country.
+        country = ""
+        after_state_tokens: List[str] = []
+        if len(parts) > 1:
+            after_state_tokens.extend(parts[1].split()[1:])
+        for extra_part in parts[2:]:
+            after_state_tokens.extend(extra_part.split())
+        for tok in reversed([t.strip() for t in after_state_tokens if t.strip()]):
+            tok_upper = tok.upper()
+            if tok_upper in self._COUNTRY_ALIASES:
+                country = self._COUNTRY_ALIASES[tok_upper]
+                break
+        # Multi-word country names split across tokens ("United States").
+        if not country and len(parts) > 1:
+            tail_text = " ".join(after_state_tokens).upper().strip(" .")
+            if tail_text in self._COUNTRY_ALIASES:
+                country = self._COUNTRY_ALIASES[tail_text]
+        state_upper = normalized_state.upper()
+        if not country and state_upper:
+            if state_upper in self._CA_PROVINCE_CODES:
+                country = "CA"
+            elif state_upper in self._US_STATE_CODES:
+                country = "US"
+            elif state_upper in self._COUNTRY_ALIASES:
+                # "Toronto, Canada" — the state slot held a country name.
+                country = self._COUNTRY_ALIASES[state_upper]
+                normalized_state = ""
+
         # Cross-validate the zip against the state: a street number in an
         # address-style string ("10001 W Main St, Mesa, AZ") can collide
         # with a real zip on the other side of the country. When any part
@@ -3385,6 +3551,7 @@ class UnifiedCandidateSearch:
             "city": self._normalize_term(city),
             "state": normalized_state,
             "zip": zip_code,
+            "country": country,
         }
 
     def _resume_filter_term(self, filter_item: Dict[str, Any]) -> str:
@@ -3568,10 +3735,12 @@ class UnifiedCandidateSearch:
                 elif isinstance(item, str):
                     certification_terms.append(item)
 
+        # Source-native location first; LLM-extracted current_location is a
+        # last-resort fallback (it can name a past-employer/education city).
         location_terms = unique_terms([
-            enhanced.get("current_location", ""),
-            candidate.get("location", ""),
             f"{candidate.get('city', '')}, {candidate.get('state', '')}".strip(", "),
+            candidate.get("location", ""),
+            enhanced.get("current_location", ""),
         ])
 
         resume_years = 0
@@ -3862,13 +4031,15 @@ class UnifiedCandidateSearch:
         matched: List[str] = []
         excluded: List[str] = []
 
-        # US-only scope is enforced at every stage (see `_filter_candidates`
+        # Country scope is enforced at every stage (see `_filter_candidates`
         # and `_filter_by_state`). Soft-fail: only drop on positive evidence
-        # of a non-US location.
-        if self._is_likely_non_us(candidate):
+        # of a location outside the job's country. (The reason key stays
+        # "non_us_candidate" for wire-compat with the UI drop vocabulary.)
+        job_country = self._target_country(criteria)
+        if self._is_likely_outside_country(candidate, job_country):
             return {
                 "passes": False,
-                "missing": ["Location: outside US"],
+                "missing": [f"Location: outside {self._country_display_name(job_country)}"],
                 "matched": self._dedupe_terms(matched),
                 "excluded": self._dedupe_terms(excluded),
                 "location_failure_reason": "non_us_candidate",
@@ -4159,6 +4330,9 @@ class UnifiedCandidateSearch:
             candidate["location_out_of_radius"] = True
             candidate.setdefault("location_match_reason", reason)
         if reason in ("state_mismatch", "relocation_excluded_by_filter"):
+            # Machine-readable veto marker for the emit-time drop gates and
+            # telemetry (the human string below feeds explainability only).
+            candidate["location_veto_reason"] = reason
             return f"location outside {criteria.location}"
         if (
             reason == "outside_radius_soft_keep"
@@ -4166,6 +4340,7 @@ class UnifiedCandidateSearch:
             and distance != _UNKNOWN_DISTANCE_SENTINEL
             and distance > miles
         ):
+            candidate["location_veto_reason"] = "outside_radius_confirmed"
             return f"location {round(float(distance))}mi outside {criteria.location} ({miles}mi radius)"
         return None
 
@@ -5012,14 +5187,19 @@ class UnifiedCandidateSearch:
                     candidate["email"] = candidate["enhanced_info"].get("email") or candidate.get("email")
                     candidate["phone"] = candidate["enhanced_info"].get("phone") or candidate.get("phone")
                     candidate["title"] = candidate["enhanced_info"].get("job_title") or candidate.get("title")
-                    candidate["location"] = candidate["enhanced_info"].get("current_location") or candidate.get("location")
+                    # JobDiva's structured city/state is authoritative for
+                    # residence; the LLM's resume-parsed current_location only
+                    # fills a blank (it can latch onto a past employer or
+                    # education city — e.g. a candidate living in Ajax, ON
+                    # whose resume mentions Hyderabad).
+                    candidate["location"] = candidate.get("location") or candidate["enhanced_info"].get("current_location")
                     candidate["education"] = candidate["enhanced_info"].get("candidate_education", [])
                     candidate["certifications"] = candidate["enhanced_info"].get("candidate_certification", [])
                     candidate["urls"] = candidate["enhanced_info"].get("urls", {})
                     candidate["experience_years"] = candidate["enhanced_info"].get("years_of_experience") or candidate.get("experience_years")
                     if candidate["enhanced_info"].get("structured_skills") or candidate["enhanced_info"].get("skills"):
                         candidate["skills"] = candidate["enhanced_info"].get("structured_skills") or candidate["enhanced_info"].get("skills")
-                    
+
                     self._log_stage("LLM", f"COMPLETED LLM extraction for candidate_id={candidate_id}")
                     return {"status": "success", "candidate": candidate}
                 except Exception as e:
@@ -5391,7 +5571,9 @@ class UnifiedCandidateSearch:
                     candidate["email"] = candidate["enhanced_info"].get("email") or candidate.get("email")
                     candidate["phone"] = candidate["enhanced_info"].get("phone") or candidate.get("phone")
                     candidate["title"] = candidate["enhanced_info"].get("job_title") or candidate.get("title")
-                    candidate["location"] = candidate["enhanced_info"].get("current_location") or candidate.get("location")
+                    # Source-native location wins; LLM extraction fills blanks
+                    # only (resume text can name past-employer/education cities).
+                    candidate["location"] = candidate.get("location") or candidate["enhanced_info"].get("current_location")
                     candidate["education"] = candidate["enhanced_info"].get("candidate_education", [])
                     candidate["certifications"] = candidate["enhanced_info"].get("candidate_certification", [])
                     candidate["urls"] = candidate["enhanced_info"].get("urls", {})
@@ -5498,7 +5680,9 @@ class UnifiedCandidateSearch:
                 candidate["email"] = candidate["enhanced_info"].get("email") or candidate.get("email")
                 candidate["phone"] = candidate["enhanced_info"].get("phone") or candidate.get("phone")
                 candidate["title"] = candidate["enhanced_info"].get("job_title") or candidate.get("title")
-                candidate["location"] = candidate["enhanced_info"].get("current_location") or candidate.get("location")
+                # LinkedIn profile location is authoritative; LLM extraction
+                # from the synthesized profile text only fills a blank.
+                candidate["location"] = candidate.get("location") or candidate["enhanced_info"].get("current_location")
                 candidate["education"] = candidate["enhanced_info"].get("candidate_education", [])
                 candidate["certifications"] = candidate["enhanced_info"].get("candidate_certification", [])
                 candidate["urls"] = candidate["enhanced_info"].get("urls", {})
@@ -5546,7 +5730,12 @@ class UnifiedCandidateSearch:
                 candidate["email"] = enhanced.get("email") or candidate.get("email")
                 candidate["phone"] = enhanced.get("phone") or candidate.get("phone")
                 candidate["title"] = enhanced.get("job_title") or candidate.get("title")
-                candidate["location"] = enhanced.get("current_location") or candidate.get("location")
+                # The cached current_location was LLM-extracted from the resume
+                # on some PRIOR run (any job/source) — it must never clobber the
+                # live source-native location. This exact overwrite put a stale
+                # "Hyderabad, India" on a JobAgent row whose JobDiva record
+                # said "Ajax, ON" (Job 26-22448).
+                candidate["location"] = candidate.get("location") or enhanced.get("current_location")
                 candidate["education"] = enhanced.get("candidate_education", [])
                 candidate["certifications"] = enhanced.get("candidate_certification", [])
                 candidate["urls"] = enhanced.get("urls", {})
@@ -5623,11 +5812,17 @@ class UnifiedCandidateSearch:
                 # `OVER N YRS` are stripped rather than matched as literal
                 # keywords. Nothing is lost: titles ride in `skills` above and
                 # location in its own argument.
-                boolean_string=self._scope_boolean_to_us(
-                    strip_jobdiva_dialect(
-                        criteria.boolean_string
-                        or self._build_boolean_string(criteria, dialect="generic")
-                    )
+                #
+                # Deliberately NOT country-scoped: LinkedIn Recruiter keywords
+                # are free-text matched against profile BODIES, so a literal
+                # AND "United States" collapses results to near-zero — the
+                # exact failure mode documented for the removed "Open to
+                # Work" literal (see unipile.py). Geo scoping is handled by
+                # the structured location URN + the post-search country/
+                # radius gates.
+                boolean_string=strip_jobdiva_dialect(
+                    criteria.boolean_string
+                    or self._build_boolean_string(criteria, dialect="generic")
                 ),
             )
 
@@ -5664,19 +5859,42 @@ class UnifiedCandidateSearch:
     def _extract_linkedin_profile_data(self, profile: Dict[str, Any]) -> Dict[str, Any]:
         """Extract detailed data from full LinkedIn profile for enrichment."""
         extracted = {}
-        
-        # Extract experience
-        experience = profile.get("experience", []) or profile.get("work_history", [])
+
+        # Profile-level location: more precise than the search row's coarse
+        # area string, and required for the radius/country gates to place
+        # Unipile candidates at all. Tolerant to Unipile schema variants.
+        profile_location = profile.get("location") or profile.get("location_name")
+        if not profile_location and isinstance(profile.get("profile"), dict):
+            profile_location = profile["profile"].get("location")
+        if isinstance(profile_location, dict):
+            profile_location = profile_location.get("name") or profile_location.get("default")
+        if profile_location and str(profile_location).strip():
+            extracted["location"] = str(profile_location).strip()
+
+        # Extract experience (Unipile has been observed to use both
+        # `experience` and `work_experience` for LinkedIn payloads)
+        experience = (
+            profile.get("experience")
+            or profile.get("work_experience")
+            or profile.get("work_history")
+            or []
+        )
         if experience:
             company_exp = []
             for exp in experience[:10]:  # Limit to last 10 positions
                 company_exp.append({
                     "company": exp.get("company", exp.get("company_name", "")),
-                    "title": exp.get("title", exp.get("job_title", "")),
+                    "title": exp.get("title", exp.get("job_title", exp.get("position", ""))),
                     "start_date": exp.get("start_date", exp.get("start", "")),
                     "end_date": exp.get("end_date", exp.get("end", "Present"))
                 })
             extracted["company_experience"] = company_exp
+            # Current job title from the most recent position — the search
+            # row's `title` is the LinkedIn HEADLINE ("Dreamer | Builder"),
+            # which is what the role-anchor gate used to run against.
+            recent_title = str(company_exp[0].get("title") or "").strip()
+            if recent_title:
+                extracted["title"] = recent_title
         
         # Extract education
         education = profile.get("education", [])
@@ -5750,7 +5968,13 @@ class UnifiedCandidateSearch:
             # downstream filters rather than dropping blind.
             return True
 
-        snippet = str(cand.get("resume_text") or "")[:500].lower()
+        # Exa's `title` is a page title ("Jane Doe | LinkedIn"), not a job
+        # title, so the phrase check leans on the highlight text. 500 chars
+        # was dropping legitimate matches whose role line sat deeper in the
+        # blob; the widened window only affects the exact-PHRASE check —
+        # token-level matching still requires the title/headline fields —
+        # and the score/location gates downstream now enforce precision.
+        snippet = str(cand.get("resume_text") or "")[:2000].lower()
         hay = " ".join(p for p in (title_text, headline_text, snippet) if p)
 
         for title in must_titles:
@@ -5934,12 +6158,24 @@ class UnifiedCandidateSearch:
 
         return changed
 
+    # Generic company-inbox local parts: a valid, deliverable address that is
+    # nonetheless NOT personal identity — contact enrichment can return the
+    # same info@/hr@ address for N different profiles at one employer, and an
+    # email dedup key would silently collapse all N rows into one.
+    _GENERIC_INBOX_LOCALPARTS = frozenset({
+        "info", "hr", "careers", "jobs", "contact", "hello", "admin",
+        "office", "sales", "support", "recruiting", "recruitment", "team",
+        "hiring", "talent",
+    })
+
     def _dedup_keys(self, candidate: Dict[str, Any]) -> List[str]:
         """Cross-source dedup keys for one candidate.
 
         Only *strong* identity signals are used so two different people never
         collide (a false merge is worse than a duplicate row):
-          - `email:` — a real, well-formed, non-synthetic address.
+          - `email:` — a real, well-formed, non-synthetic, non-generic-inbox
+            address (info@/hr@/… are deliverable but shared, so they are not
+            identity).
           - `phone-name:` — a phone (>=7 digits, >=4 distinct, not a shared/
             placeholder line) paired with a full name.
           - `linkedin:` — a normalised LinkedIn URL.
@@ -5949,7 +6185,11 @@ class UnifiedCandidateSearch:
         keys: List[str] = []
 
         email = str(candidate.get("email") or "").strip().lower()
-        if email and "@" in email and not _is_placeholder_email(email):
+        if (
+            email and "@" in email
+            and not _is_placeholder_email(email)
+            and email.split("@", 1)[0] not in self._GENERIC_INBOX_LOCALPARTS
+        ):
             keys.append(f"email:{email}")
 
         first = str(candidate.get("firstName") or "").strip().lower()

@@ -109,7 +109,7 @@ async def tira_match_resume(
         candidate["email"] = enhanced.get("email") or candidate["email"]
         candidate["phone"] = enhanced.get("phone") or candidate["phone"]
         candidate["title"] = enhanced.get("job_title") or candidate["title"]
-        candidate["location"] = enhanced.get("current_location") or candidate["location"]
+        candidate["location"] = candidate["location"] or enhanced.get("current_location")
         candidate["skills"] = enhanced.get("structured_skills") or enhanced.get("skills") or []
         candidate["years_of_experience"] = enhanced.get("years_of_experience")
 

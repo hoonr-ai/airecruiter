@@ -479,10 +479,16 @@ def _common_people_fields(result: Any) -> Dict[str, Any]:
     if getattr(result, "highlights", None):
         highlights_text = "\n".join(result.highlights)
 
+    # Prefer the confidence-ordered header extraction (first 400 chars,
+    # location-line patterns) over the loose full-text scan — the latter
+    # returns the FIRST "City, ST" anywhere in ~6k chars, which is often a
+    # past employer's HQ or a university town, and `location` outranks
+    # city/state everywhere downstream.
     extracted_city, extracted_state = _extract_city_from_highlights(highlights_text)
-    extracted_location = extract_us_location_from_text(f"{title}\n{highlights_text}")
-    if not extracted_location and (extracted_city or extracted_state):
+    if extracted_city or extracted_state:
         extracted_location = ", ".join(p for p in [extracted_city, extracted_state] if p)
+    else:
+        extracted_location = extract_us_location_from_text(f"{title}\n{highlights_text}")
 
     return {
         "firstName": first_name,
@@ -544,11 +550,21 @@ class ExaService:
         )
 
         per_query: List[List[Any]] = []
+        failed_queries = 0
         for q, resp in zip(queries, responses):
             if isinstance(resp, BaseException):
+                failed_queries += 1
                 logger.warning("Exa people search failed for query %r: %s", q, resp)
                 continue
             per_query.append(list(getattr(resp, "results", None) or []))
+        if failed_queries:
+            # Loud one-liner: partial fan-out failure used to be invisible —
+            # "Found 17 profiles" with 2 of 3 queries dead reads like a thin
+            # market instead of an outage.
+            logger.error(
+                "Exa people search: %d/%d queries failed — results are PARTIAL (%d rows from %d surviving queries)",
+                failed_queries, len(queries), sum(len(r) for r in per_query), len(per_query),
+            )
 
         merged: List[Any] = []
         seen = set()

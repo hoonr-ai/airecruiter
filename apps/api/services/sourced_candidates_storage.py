@@ -1190,6 +1190,10 @@ async def extract_enhanced_info_with_llm(resume_text: str) -> Dict[str, Any]:
         "}\n\n"
         "Instructions:\n"
         "1. Fill every field in the JSON from the resume text whenever the resume contains that information.\n"
+        "1b. current_location must be the candidate's CURRENT place of residence as explicitly stated in the resume "
+        "(contact header, address block, or an explicit 'Location:' line). Never infer it from education, past "
+        "employers, project locations, or phone area codes. If the current location is not explicitly stated, "
+        "use an empty string \"\".\n"
         "2. job_title must be the candidate's current or most recent title from the latest experience entry.\n"
         "3. years_of_experience must be a numeric total based on the resume timeline or explicit summary.\n"
         "4. Extract concrete professional skills into skills[].name. Include all meaningful technical and functional skills stated in the resume.\n"
@@ -1351,7 +1355,10 @@ async def _process_candidate_common(
         "phone": _clean_extracted_value(enhanced_info_result.get("phone")) or _clean_extracted_value(fallbacks.get("phone")),
         "job_title": _clean_extracted_value(extracted_job_title),
         "years_of_experience": enhanced_info_result.get("years_of_experience"),
-        "current_location": _clean_extracted_value(enhanced_info_result.get("current_location")) or _clean_extracted_value(fallbacks.get("location")),
+        # Source-native location (JobDiva record / LinkedIn profile) is
+        # authoritative; the LLM's resume-parsed location only fills a blank —
+        # resumes routinely name past-employer or education cities.
+        "current_location": _clean_extracted_value(fallbacks.get("location")) or _clean_extracted_value(enhanced_info_result.get("current_location")),
 
         "company_experience": company_exp_llm or fallbacks.get("company_experience", []),
         "candidate_education": enhanced_info_result.get("candidate_education", []) or fallbacks.get("education", []),
@@ -1466,6 +1473,16 @@ Experience:
     for skill in skills:
         skill_name = skill.get("name", skill) if isinstance(skill, dict) else skill
         linkedin_profile_text += f"- {skill_name}\n"
+
+    # Exa rows carry their signal in resume_text (the search-highlight blob)
+    # and deep_text (full fetched profile) — not in the structured fields
+    # above, which Exa never populates. Without this, the extractor LLM ran
+    # on an empty stub: it billed a call, returned no skills, and every Exa
+    # row then scored off the parsing-gap floor instead of real skill
+    # evidence. Unipile profile fetch failures get the same rescue.
+    profile_body = str(candidate.get("deep_text") or candidate.get("resume_text") or "").strip()
+    if profile_body and not (profile_summary or company_exp or skills):
+        linkedin_profile_text += f"\nProfile Text:\n{profile_body[:12000]}\n"
 
     fallbacks = {
         "name": candidate_name,
