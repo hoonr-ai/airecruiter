@@ -12,7 +12,12 @@ from services.jobdiva import JobDivaService, _is_placeholder_email
 from services.unipile import unipile_service
 from services.vetted import vetted_service
 from services.exa_service import exa_service, _extract_city_from_highlights
-from services.location import haversine_miles, normalize_location_string, within_radius
+from services.location import (
+    haversine_miles,
+    normalize_location_string,
+    sanitize_candidate_location,
+    within_radius,
+)
 from services.jobdiva_boolean_translator import strip_jobdiva_dialect
 from core.config import (
     SCORING_REQUIRED_WEIGHT,
@@ -500,6 +505,24 @@ class UnifiedCandidateSearch:
             # Ensure name is title-cased if it exists
             if cand.get("name"):
                 cand["name"] = str(cand["name"]).title()
+
+            # Location hygiene at the emit choke-point: no path may display or
+            # persist a work-arrangement string ("Remote"/"Hybrid"/"WFH") as
+            # the candidate's location — it isn't a place, it dodges the
+            # radius gate (can't geocode → unknown → soft-keep), and it hides
+            # the CRM's real city/state. Blank it and rebuild from the
+            # structured fields; an empty location is honest.
+            loc = sanitize_candidate_location(cand.get("location"))
+            if not loc:
+                # CRM city fields can literally say "REMOTE" ("REMOTE, GA"),
+                # so the rebuild is sanitized too.
+                loc = sanitize_candidate_location(", ".join(
+                    p for p in [
+                        str(cand.get("city") or "").strip(),
+                        str(cand.get("state") or "").strip(),
+                    ] if p
+                ))
+            cand["location"] = loc
 
             if criteria.bypass_screening:
                 cand["match_score"] = 0
@@ -1325,7 +1348,12 @@ class UnifiedCandidateSearch:
                         # Source-native location is authoritative; the LLM's
                         # resume-parsed current_location only fills a blank
                         # (it can latch onto a past employer / education city).
-                        cand["location"] = cand.get("location") or cand["enhanced_info"].get("current_location")
+                        # Both sides sanitized: "Remote"/"Hybrid" is a work
+                        # arrangement, never a place.
+                        cand["location"] = (
+                            sanitize_candidate_location(cand.get("location"))
+                            or sanitize_candidate_location(cand["enhanced_info"].get("current_location"))
+                        )
                         if cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills"):
                             cand["skills"] = cand["enhanced_info"].get("structured_skills") or cand["enhanced_info"].get("skills")
 
@@ -1910,11 +1938,15 @@ class UnifiedCandidateSearch:
                         patch["state"] = str(state).strip()
                     # Rebuild the display string too — the UI reads `location`
                     # first, so patching only city/state leaves a stale (or
-                    # LLM-corrupted) `location` on screen forever.
+                    # LLM-corrupted) `location` on screen forever. Sanitized:
+                    # CRM city fields can literally say "REMOTE", and this
+                    # patch bypasses the finalize_candidate choke-point.
                     if city or state:
-                        patch["location"] = ", ".join(
+                        rebuilt_loc = sanitize_candidate_location(", ".join(
                             p for p in [str(city).strip(), str(state).strip()] if p
-                        )
+                        ))
+                        if rebuilt_loc:
+                            patch["location"] = rebuilt_loc
 
                     quals = detail.get("qualifications") or detail.get("QUALIFICATIONS") or quals_map.get(str(cand_id)) or []
                     if quals:
@@ -3057,10 +3089,18 @@ class UnifiedCandidateSearch:
         state = str(candidate.get("state") or "").strip()
         city_state = f"{city}, {state}".strip(", ") if (city or state) else ""
 
-        source_native = [city_state, candidate.get("location")]
+        # Work-arrangement strings ("Remote"/"Hybrid") are stripped before the
+        # values feed the geo verdict — they can't geocode, and their presence
+        # here used to mask the real residence signal.
+        source_native = [
+            sanitize_candidate_location(city_state),
+            sanitize_candidate_location(candidate.get("location")),
+        ]
         location_values = list(source_native)
         if not any(str(v or "").strip() for v in source_native):
-            location_values.append(enhanced_dict.get("current_location"))
+            location_values.append(
+                sanitize_candidate_location(enhanced_dict.get("current_location"))
+            )
         cleaned: List[str] = []
         seen = set()
         for value in location_values:
@@ -3737,10 +3777,14 @@ class UnifiedCandidateSearch:
 
         # Source-native location first; LLM-extracted current_location is a
         # last-resort fallback (it can name a past-employer/education city).
+        # Arrangement strings are stripped — "Remote" must not be scored as a
+        # place.
         location_terms = unique_terms([
-            f"{candidate.get('city', '')}, {candidate.get('state', '')}".strip(", "),
-            candidate.get("location", ""),
-            enhanced.get("current_location", ""),
+            sanitize_candidate_location(
+                f"{candidate.get('city', '')}, {candidate.get('state', '')}".strip(", ")
+            ),
+            sanitize_candidate_location(candidate.get("location", "")),
+            sanitize_candidate_location(enhanced.get("current_location", "")),
         ])
 
         resume_years = 0
@@ -5191,8 +5235,12 @@ class UnifiedCandidateSearch:
                     # residence; the LLM's resume-parsed current_location only
                     # fills a blank (it can latch onto a past employer or
                     # education city — e.g. a candidate living in Ajax, ON
-                    # whose resume mentions Hyderabad).
-                    candidate["location"] = candidate.get("location") or candidate["enhanced_info"].get("current_location")
+                    # whose resume mentions Hyderabad). Both sides sanitized:
+                    # a work-arrangement string is never a place.
+                    candidate["location"] = (
+                        sanitize_candidate_location(candidate.get("location"))
+                        or sanitize_candidate_location(candidate["enhanced_info"].get("current_location"))
+                    )
                     candidate["education"] = candidate["enhanced_info"].get("candidate_education", [])
                     candidate["certifications"] = candidate["enhanced_info"].get("candidate_certification", [])
                     candidate["urls"] = candidate["enhanced_info"].get("urls", {})
@@ -5386,7 +5434,8 @@ class UnifiedCandidateSearch:
                     details_patch: Dict[str, Any] = {"_stage": "details_loaded"}
                     for k in (
                         "resume_text", "resume_id", "email", "phone",
-                        "title", "location", "experience_years", "headline",
+                        "title", "location", "city", "state", "zipcode",
+                        "experience_years", "headline",
                         "qualifications", "employee_status", "available",
                         "availability_status", "current_company",
                     ):
@@ -5572,8 +5621,13 @@ class UnifiedCandidateSearch:
                     candidate["phone"] = candidate["enhanced_info"].get("phone") or candidate.get("phone")
                     candidate["title"] = candidate["enhanced_info"].get("job_title") or candidate.get("title")
                     # Source-native location wins; LLM extraction fills blanks
-                    # only (resume text can name past-employer/education cities).
-                    candidate["location"] = candidate.get("location") or candidate["enhanced_info"].get("current_location")
+                    # only (resume text can name past-employer/education
+                    # cities). Both sides sanitized: a work-arrangement string
+                    # is never a place.
+                    candidate["location"] = (
+                        sanitize_candidate_location(candidate.get("location"))
+                        or sanitize_candidate_location(candidate["enhanced_info"].get("current_location"))
+                    )
                     candidate["education"] = candidate["enhanced_info"].get("candidate_education", [])
                     candidate["certifications"] = candidate["enhanced_info"].get("candidate_certification", [])
                     candidate["urls"] = candidate["enhanced_info"].get("urls", {})
@@ -5681,8 +5735,12 @@ class UnifiedCandidateSearch:
                 candidate["phone"] = candidate["enhanced_info"].get("phone") or candidate.get("phone")
                 candidate["title"] = candidate["enhanced_info"].get("job_title") or candidate.get("title")
                 # LinkedIn profile location is authoritative; LLM extraction
-                # from the synthesized profile text only fills a blank.
-                candidate["location"] = candidate.get("location") or candidate["enhanced_info"].get("current_location")
+                # from the synthesized profile text only fills a blank. Both
+                # sides sanitized: LinkedIn areas can literally read "Remote".
+                candidate["location"] = (
+                    sanitize_candidate_location(candidate.get("location"))
+                    or sanitize_candidate_location(candidate["enhanced_info"].get("current_location"))
+                )
                 candidate["education"] = candidate["enhanced_info"].get("candidate_education", [])
                 candidate["certifications"] = candidate["enhanced_info"].get("candidate_certification", [])
                 candidate["urls"] = candidate["enhanced_info"].get("urls", {})
@@ -5724,6 +5782,12 @@ class UnifiedCandidateSearch:
                 enhanced = rows.get(candidate_id)
                 if not enhanced:
                     continue
+                # Sanitize the cached value in the dict itself — this blob
+                # rides to the UI as enhanced_info, and rows written before
+                # the work-arrangement guard can carry "Remote"/"Hybrid".
+                enhanced["current_location"] = sanitize_candidate_location(
+                    enhanced.get("current_location")
+                )
                 candidate["enhanced_info"] = enhanced
                 candidate["enhanced_info_status"] = enhanced.get("resume_extraction_status") or "cached"
                 candidate["name"] = enhanced.get("candidate_name") or candidate.get("name")
@@ -5735,7 +5799,10 @@ class UnifiedCandidateSearch:
                 # live source-native location. This exact overwrite put a stale
                 # "Hyderabad, India" on a JobAgent row whose JobDiva record
                 # said "Ajax, ON" (Job 26-22448).
-                candidate["location"] = candidate.get("location") or enhanced.get("current_location")
+                candidate["location"] = (
+                    sanitize_candidate_location(candidate.get("location"))
+                    or enhanced.get("current_location")
+                )
                 candidate["education"] = enhanced.get("candidate_education", [])
                 candidate["certifications"] = enhanced.get("candidate_certification", [])
                 candidate["urls"] = enhanced.get("urls", {})

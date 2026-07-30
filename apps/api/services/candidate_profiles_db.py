@@ -6,6 +6,7 @@ from datetime import datetime
 import psycopg2.extras
 
 from core.db import get_db_connection
+from services.location import sanitize_candidate_location
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,15 @@ class CandidateProfilesDB:
                             )
 
                         title = c.get("job_title") or c.get("title") or c.get("headline")
-                        location = c.get("current_location") or c.get("location") or c.get("city")
+                        # Source-native location/city beats the LLM-parsed
+                        # current_location, and work-arrangement strings
+                        # ("Remote"/"Hybrid") are never a residence.
+                        location = (
+                            sanitize_candidate_location(c.get("location"))
+                            or sanitize_candidate_location(c.get("city"))
+                            or sanitize_candidate_location(c.get("current_location"))
+                            or None
+                        )
 
                         skill_source = "reported" if source != "JobDiva" else "predicted"
                         skills_raw = c.get("structured_skills") or c.get("skills") or []

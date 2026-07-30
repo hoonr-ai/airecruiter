@@ -17,6 +17,7 @@ from core.config import (
 import httpx
 from models import SourcedCandidate
 from services.candidate_profiles_db import candidate_profiles_db
+from services.location import sanitize_candidate_location
 from core.db import get_db_connection
 
 logger = logging.getLogger(__name__)
@@ -225,6 +226,17 @@ def _clean_extracted_value(value: Any) -> Optional[str]:
             return None
             
     return cleaned
+
+
+def _clean_location_value(value: Any) -> Optional[str]:
+    """Location-specific cleanup: placeholder markers AND work-arrangement
+    strings ("Remote", "Hybrid", "WFH") are both rejected — an arrangement is
+    not a place, and persisting one poisons every later display/geo check of
+    the candidate."""
+    cleaned = _clean_extracted_value(value)
+    if not cleaned:
+        return None
+    return sanitize_candidate_location(cleaned) or None
 
 
 def _has_real_resume_text(resume_text: str) -> bool:
@@ -564,8 +576,30 @@ class SourcedCandidatesStorage:
                                 c_dict['work_state'] = data['work_state']
                             if data.get('work_location'):
                                 c_dict['work_location'] = data['work_location']
+                            # Structured geo fields (saved by newer writers)
+                            # back the location rebuild below and the UI's
+                            # city/state fallback.
+                            for geo_key in ('city', 'state', 'zipcode', 'country'):
+                                if data.get(geo_key) and not c_dict.get(geo_key):
+                                    c_dict[geo_key] = data[geo_key]
                     except Exception as e:
                         print(f"Error parsing candidate data: {e}")
+
+                # Location hygiene on reload: rows persisted before the
+                # work-arrangement guard (or by the old LLM-first merge) can
+                # carry "Remote"/"Hybrid" as the candidate's location. Blank
+                # that and rebuild from structured city/state when available —
+                # an unknown location is honest; an arrangement string shown
+                # as a residence is not.
+                clean_loc = sanitize_candidate_location(c_dict.get('location'))
+                if not clean_loc:
+                    clean_loc = sanitize_candidate_location(", ".join(
+                        p for p in [
+                            str(c_dict.get('city') or '').strip(),
+                            str(c_dict.get('state') or '').strip(),
+                        ] if p
+                    ))
+                c_dict['location'] = clean_loc
                 if c_dict.get('created_at'):
                     c_dict['created_at'] = str(c_dict['created_at'])
                 
@@ -1008,7 +1042,10 @@ def _lookup_cached_enhanced_info_by_resume_hash(resume_hash: str) -> Optional[Di
                 "email": row_map.get("email"),
                 "phone": row_map.get("phone"),
                 "job_title": row_map.get("job_title"),
-                "current_location": row_map.get("current_location"),
+                # Sanitize on read: rows written before the work-arrangement
+                # guard can carry "Remote"/"Hybrid" here; never let a poisoned
+                # cache re-infect fresh candidates.
+                "current_location": sanitize_candidate_location(row_map.get("current_location")) or None,
                 "years_of_experience": row_map.get("years_of_experience"),
                 "structured_skills": _j(row_map.get("key_skills")),
                 "key_skills": _j(row_map.get("key_skills")),
@@ -1194,6 +1231,10 @@ async def extract_enhanced_info_with_llm(resume_text: str) -> Dict[str, Any]:
         "(contact header, address block, or an explicit 'Location:' line). Never infer it from education, past "
         "employers, project locations, or phone area codes. If the current location is not explicitly stated, "
         "use an empty string \"\".\n"
+        "1c. Work arrangements are NOT locations: never return 'Remote', 'Hybrid', 'Onsite', 'WFH', "
+        "'Work from home', or similar as current_location — those words describe how someone works, not where "
+        "they live (e.g. 'Acme Corp - Remote' on an employer line says nothing about residence). If the resume "
+        "states only a work arrangement and no city, use an empty string \"\".\n"
         "2. job_title must be the candidate's current or most recent title from the latest experience entry.\n"
         "3. years_of_experience must be a numeric total based on the resume timeline or explicit summary.\n"
         "4. Extract concrete professional skills into skills[].name. Include all meaningful technical and functional skills stated in the resume.\n"
@@ -1357,8 +1398,11 @@ async def _process_candidate_common(
         "years_of_experience": enhanced_info_result.get("years_of_experience"),
         # Source-native location (JobDiva record / LinkedIn profile) is
         # authoritative; the LLM's resume-parsed location only fills a blank —
-        # resumes routinely name past-employer or education cities.
-        "current_location": _clean_extracted_value(fallbacks.get("location")) or _clean_extracted_value(enhanced_info_result.get("current_location")),
+        # resumes routinely name past-employer or education cities. Both sides
+        # go through the work-arrangement sanitizer: "Remote"/"Hybrid" must
+        # never be stored as a residence (this also heals poisoned
+        # resume-hash-cache hits, which flow in via enhanced_info_result).
+        "current_location": _clean_location_value(fallbacks.get("location")) or _clean_location_value(enhanced_info_result.get("current_location")),
 
         "company_experience": company_exp_llm or fallbacks.get("company_experience", []),
         "candidate_education": enhanced_info_result.get("candidate_education", []) or fallbacks.get("education", []),
@@ -1625,13 +1669,27 @@ def save_sourced_candidate(candidate: Dict[str, Any], enhanced_info: Dict[str, A
     try:
         engine = _get_engine()
         with engine.connect() as conn:
+            # Source-native location wins at PERSIST time too — this row is
+            # what Step-5 reloads read, so an LLM-first merge here would
+            # re-poison the display no matter what the live stream showed.
+            # Both sides run through the work-arrangement sanitizer.
+            clean_location = (
+                sanitize_candidate_location(candidate.get("location"))
+                or sanitize_candidate_location(enhanced_info.get("current_location"))
+            )
             sourced_payload = {
                 "candidate_name": enhanced_info.get("candidate_name") or candidate.get("name"),
                 "email": enhanced_info.get("email") or candidate.get("email"),
                 "phone": enhanced_info.get("phone") or candidate.get("phone"),
                 "job_title": enhanced_info.get("job_title") or candidate.get("title") or candidate.get("headline"),
                 "years_of_experience": enhanced_info.get("years_of_experience"),
-                "current_location": enhanced_info.get("current_location") or candidate.get("location"),
+                "current_location": clean_location,
+                # Structured geo fields so reloads can rebuild a display
+                # string even when `location` is blank.
+                "city": candidate.get("city") or "",
+                "state": candidate.get("state") or "",
+                "zipcode": candidate.get("zipcode") or "",
+                "country": candidate.get("country") or "",
                 "skills": enhanced_info.get("structured_skills", []),
                 "company_experience": enhanced_info.get("company_experience", []),
                 "candidate_education": enhanced_info.get("candidate_education", []),
@@ -1658,7 +1716,10 @@ def save_sourced_candidate(candidate: Dict[str, Any], enhanced_info: Dict[str, A
                 "email": sourced_payload["email"],
                 "phone": sourced_payload["phone"],
                 "headline": sourced_payload["job_title"],
-                "location": sourced_payload["current_location"],
+                # Bind None when we have no clean value so COALESCE keeps the
+                # existing column (e.g. a hydrated city/state) instead of
+                # blanking it with an empty string.
+                "location": sourced_payload["current_location"] or None,
                 "resume_text": sourced_payload["resume_text"],
                 "data": json.dumps(sourced_payload),
                 "jobdiva_id": candidate.get("jobdiva_id"),
