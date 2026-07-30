@@ -1385,6 +1385,7 @@ class JobDivaService:
                 get_field(c, ["state", "STATE", "PROVINCE", "province", "locationState"])
                 or ""
             )
+            country = get_field(c, ["country", "COUNTRY", "locationCountry"]) or ""
             location_str = ", ".join(p for p in [city, state] if p).strip()
 
             resume_text = self._extract_resume_text(c)
@@ -1408,7 +1409,8 @@ class JobDivaService:
                 "email": _get_candidate_email(c),
                 "city": city,
                 "state": state,
-                "zipcode": get_field(c, ["zipcode", "ZIPCODE", "zip", "ZIP"]) or "",
+                "zipcode": get_field(c, ["zipcode", "ZIPCODE", "zip", "ZIP", "postalCode", "POSTALCODE"]) or "",
+                "country": country,
                 "location": location_str,
                 "work_city": "",
                 "work_state": "",
@@ -1752,6 +1754,7 @@ class JobDivaService:
                         "email": get_field(c, ["email", "EMAIL"]) or "",
                         "city": get_field(c, ["city", "locationCity", "CITY"]) or "",
                         "state": get_field(c, ["state", "locationState", "STATE"]) or "",
+                        "country": get_field(c, ["country", "COUNTRY", "locationCountry"]) or "",
                         "location": ", ".join([p for p in [
                             get_field(c, ["city", "locationCity", "CITY"]) or "",
                             get_field(c, ["state", "locationState", "STATE"]) or "",
@@ -1796,6 +1799,7 @@ class JobDivaService:
                 city = get_field(c, ["city", "locationCity", "CITY"]) or ""
                 state = get_field(c, ["state", "locationState", "STATE"]) or ""
                 zipcode = get_field(c, ["zipcode", "ZIPCODE", "zip", "ZIP", "postalCode", "POSTALCODE"]) or ""
+                country = get_field(c, ["country", "COUNTRY", "locationCountry"]) or ""
                 location_str = ", ".join([p for p in [city, state] if p]).strip()
 
                 # Abstract: prefer an explicit summary/comments field if JobDiva
@@ -1848,6 +1852,7 @@ class JobDivaService:
                     "city": city,
                     "state": state,
                     "zipcode": zipcode,
+                    "country": country,
                     "location": location_str,
                     "work_city": "",
                     "work_state": "",

@@ -26,6 +26,76 @@ def normalize_location_string(value: str) -> str:
     return re.sub(r"\s+", " ", text).strip(" ,")
 
 
+# Work-arrangement strings routinely land in candidate location fields:
+# resumes state them on employer lines ("ToroNet Software — Remote"), LLM
+# extraction and profile scrapes pass them through, and once persisted they
+# masquerade as the candidate's residence forever. They are not places — they
+# can't geocode (so the radius gate soft-keeps the row as "unknown"), and they
+# display instead of the CRM's real city/state (JobDiva #26-23319: a
+# New York, NY candidate rendered as "Remote").
+#
+# Multiword phrases are stripped first (longest wins), then single words.
+_ARRANGEMENT_HINT_RE = re.compile(
+    r"remote|hybrid|on-?\s?site|wfh|telecommut|telework|work\s*from\s*home"
+    r"|virtual|anywhere",
+    re.IGNORECASE,
+)
+_ARRANGEMENT_PHRASE_RE = re.compile(
+    r"\b(?:work[\s-]*from[\s-]*home|open\s+to\s+remote|remote[\s-]*(?:only|first|work|role|position|friendly)"
+    r"|(?:fully|mostly|currently|100%)\s*remote|work\s+remotely|on[\s-]*site)\b",
+    re.IGNORECASE,
+)
+_ARRANGEMENT_WORD_RE = re.compile(
+    r"\b(?:remote|hybrid|onsite|wfh|telecommute|telecommuting|telework|teleworking"
+    r"|virtual|anywhere)\b",
+    re.IGNORECASE,
+)
+# Words that ride along with an arrangement ("Hybrid - 3 days onsite",
+# "Remote OK", "WFH preferred") but never name a place on their own. They are
+# only used for the residue check — a string whose alphabetic tokens are all
+# residue carries no place and is blanked.
+_ARRANGEMENT_RESIDUE_WORDS = frozenset({
+    "a", "an", "and", "arrangement", "available", "day", "days", "environment",
+    "flex", "flexible", "friendly", "from", "home", "in", "job", "office",
+    "ok", "okay", "only", "open", "opportunity", "optional", "or", "per",
+    "position", "preferred", "role", "schedule", "setting", "the", "to",
+    "week", "weeks", "willing", "with", "work", "working", "x",
+})
+
+
+def sanitize_candidate_location(value) -> str:
+    """Strip work-arrangement noise from a candidate-location string.
+
+    Returns the real place portion ("Remote - Austin, TX" → "Austin, TX",
+    "New York (Remote)" → "New York"), or "" when the string names no place
+    at all ("Remote", "Hybrid - 3 days onsite", "WFH"). "" means unknown —
+    callers fall through to their next location source (structured
+    city/state, CRM detail hydration). Strings with no arrangement wording
+    pass through untouched.
+    """
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    if not text or not _ARRANGEMENT_HINT_RE.search(text):
+        return text
+
+    cleaned = _ARRANGEMENT_PHRASE_RE.sub(" ", text)
+    cleaned = _ARRANGEMENT_WORD_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"\(\s*\)|\[\s*\]", " ", cleaned)
+    # Re-assemble comma segments, dropping ones the strip emptied out.
+    parts = []
+    for part in cleaned.split(","):
+        part = re.sub(r"\s+", " ", part.strip(" \t-–—/|;:")).strip()
+        if part:
+            parts.append(part)
+    cleaned = ", ".join(parts)
+
+    alpha_tokens = re.findall(r"[A-Za-z]+", cleaned)
+    if not alpha_tokens:
+        return ""
+    if all(t.lower() in _ARRANGEMENT_RESIDUE_WORDS for t in alpha_tokens):
+        return ""
+    return cleaned
+
+
 def haversine_miles(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     earth_radius_miles = 3958.7613
     d_lat = math.radians(lat2 - lat1)

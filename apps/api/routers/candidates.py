@@ -16,6 +16,7 @@ from services.sourced_candidates_storage import sourced_candidates_storage
 from services.dnc_storage import load_dnc_phone_set
 from services.unified_candidate_search import SearchCriteria, unified_search_service
 from services.gender_logic import normalize_gender_prediction, to_gender_fields, infer_gender_from_name_ai
+from services.location import sanitize_candidate_location
 from services import contact_enrichment
 from utils.phone import normalize_phone
 from models import (
@@ -260,7 +261,18 @@ def _candidate_to_persist_row(job_id: str, cand: Dict[str, Any]) -> Dict[str, An
         "email": cand.get("email") or enhanced.get("email"),
         "phone": cand.get("phone") or enhanced.get("phone"),
         "headline": cand.get("headline") or enhanced.get("job_title"),
-        "location": cand.get("location") or enhanced.get("current_location"),
+        # Source-native first, LLM fill-in second, and never a
+        # work-arrangement string — this column is what reloads display.
+        "location": (
+            sanitize_candidate_location(cand.get("location"))
+            or sanitize_candidate_location(", ".join(
+                p for p in [
+                    str(cand.get("city") or "").strip(),
+                    str(cand.get("state") or "").strip(),
+                ] if p
+            ))
+            or sanitize_candidate_location(enhanced.get("current_location"))
+        ),
         "profile_url": (
             cand.get("profile_url")
             or cand.get("linkedin_url")

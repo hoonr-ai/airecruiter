@@ -213,10 +213,12 @@ def test_hard_gate_no_veto_for_remote_job(svc):
 
 # ---------------------------------------------- review-confirmed regressions
 
-def test_verdict_unresolved_higher_priority_signal_still_geocodes(svc, monkeypatch):
-    """Review bug 1: a stale-but-offline-resolvable signal ("Tucson, AZ")
-    must not confirm the candidate outside while an offline-unresolvable
-    signal ("Phoenix Metropolitan Area") would geocode in-radius."""
+def test_verdict_source_native_location_beats_llm_extraction(svc, monkeypatch):
+    """Policy 2026-07-30 (Job 26-22448): the source-native location is
+    authoritative. When `candidate.location` is present, the LLM-extracted
+    `enhanced_info.current_location` is NOT consulted — a resume-derived
+    string ("Hyderabad, India" on a candidate whose JobDiva record says
+    "Ajax, ON") must be able to neither rescue nor condemn the candidate."""
     import services.unified_candidate_search as ucs
 
     geocoded = []
@@ -233,9 +235,36 @@ def test_verdict_unresolved_higher_priority_signal_still_geocodes(svc, monkeypat
         },
         _criteria(),
     )
+    # Tucson resolves offline ~100mi from Tempe → confirmed-outside signal
+    # (soft-keep verdict; _location_hard_gate turns the real distance into a
+    # veto). The LLM string is ignored entirely — no Nominatim call, so the
+    # unresolvable "Phoenix Metropolitan Area" cannot rescue the row.
+    assert ok and reason == "outside_radius_soft_keep"
+    assert dist is not None and dist > 25
+    assert geocoded == []
+
+
+def test_verdict_llm_location_used_only_when_source_blank(svc, monkeypatch):
+    """When the source provides NO location at all, the LLM-extracted
+    string is still a usable last-resort signal (geocoded as before)."""
+    import services.unified_candidate_search as ucs
+
+    geocoded = []
+
+    def fake_within_radius(candidate_loc, target, miles):
+        geocoded.append(candidate_loc)
+        return True, "ok", 16.3
+
+    monkeypatch.setattr(ucs, "within_radius", fake_within_radius)
+    ok, reason, dist = svc._location_match_verdict(
+        {
+            "enhanced_info": {"current_location": "Phoenix Metropolitan Area"},
+            "location": "",
+        },
+        _criteria(),
+    )
     assert ok and reason == "within_radius"
     assert dist == 16.3
-    # Only the offline-unresolvable string goes to Nominatim.
     assert geocoded == ["Phoenix Metropolitan Area"]
 
 

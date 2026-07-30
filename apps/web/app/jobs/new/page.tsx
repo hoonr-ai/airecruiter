@@ -9167,10 +9167,16 @@ function NewJobPageContent() {
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-800 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50 hover:text-slate-800 hover:border-slate-200"
                       onClick={() => {
                         const n = Math.max(1, selectBestN);
-                        const firstN = candidates
+                        // Slice the SORTED + FILTERED table view, not the raw
+                        // SSE-arrival array: "Select Best 100" must honor the
+                        // sort (match score) and the MIN MATCH / location /
+                        // source filters the recruiter has applied — the old
+                        // arrival-order slice could select low-score rows the
+                        // table was hiding.
+                        const firstN = sortedCandidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                            return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
+                            return !dncCandidateKeys.has(key);
                           })
                           .slice(0, n);
 
@@ -9200,10 +9206,10 @@ function NewJobPageContent() {
                       <Star className="w-3.5 h-3.5 fill-slate-700" />
                       {(() => {
                         const n = Math.max(1, selectBestN);
-                        const firstN = candidates
+                        const firstN = sortedCandidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                            return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
+                            return !dncCandidateKeys.has(key);
                           })
                           .slice(0, n);
                         const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.jobdiva_candidate_id || c.id));
@@ -9239,9 +9245,12 @@ function NewJobPageContent() {
                       variant="outline"
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-800 bg-white shadow-sm hover:bg-slate-50 hover:text-slate-800 hover:border-slate-200"
                       onClick={() => {
-                        const eligible = candidates.filter(c => {
+                        // Same rule as Select Best: act on the rows the
+                        // recruiter can SEE (sorted + filtered), never on
+                        // rows hidden by the min-match/location filters.
+                        const eligible = sortedCandidates.filter(c => {
                           const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                          return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
+                          return !dncCandidateKeys.has(key);
                         });
                         const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
