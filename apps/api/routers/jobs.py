@@ -291,18 +291,7 @@ def _backfill_monitored_jobs_counters_sync() -> None:
                             m.job_id,
                             m.jobdiva_id,
                             COUNT(DISTINCT sc.candidate_id) AS cs,
-                            COUNT(DISTINCT CASE
-                                WHEN (
-                                    COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''
-                                    OR EXISTS (
-                                        SELECT 1 FROM engage_interview_audit ea
-                                        WHERE ea.candidate_id = sc.candidate_id
-                                          AND (ea.jobdiva_id = m.jobdiva_id OR ea.jobdiva_id = m.job_id::text)
-                                          AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
-                                    )
-                                )
-                                THEN sc.candidate_id
-                            END) AS cl,
+                            COUNT(DISTINCT NULLIF(sc.data->>'engage_interview_id', '')) AS cl,
                             COUNT(DISTINCT CASE
                                 WHEN sc.data->>'engage_status' IN
                                     ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
@@ -2142,17 +2131,7 @@ def _aggregate_candidate_metrics(cursor, jobdiva_keys: List[str]) -> Dict[str, D
         SELECT
             sc.jobdiva_id,
             COUNT(DISTINCT sc.candidate_id)                                              AS candidates_sourced,
-            COUNT(DISTINCT CASE 
-                WHEN sc.data->>'engage_status' IS NOT NULL AND sc.data->>'engage_status' != '' 
-                 AND (
-                     sc.data->>'engage_interview_id' IS NOT NULL AND sc.data->>'engage_interview_id' != ''
-                     OR EXISTS (
-                         SELECT 1 FROM engage_interview_audit ea
-                         WHERE ea.candidate_id = sc.candidate_id
-                     )
-                 )
-                THEN sc.candidate_id 
-            END)                                                                       AS candidates_launched,
+            COUNT(DISTINCT NULLIF(sc.data->>'engage_interview_id', ''))               AS candidates_launched,
             COUNT(DISTINCT CASE
                 WHEN sc.data->>'engage_status' IN ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
                 THEN sc.candidate_id
