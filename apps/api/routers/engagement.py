@@ -1624,12 +1624,17 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 )
                 if not interview_info:
                     interview_info = interview_by_email.get(submitted_email) or {}
-                if not interview_info and idx < len(data_list) and isinstance(data_list[idx], dict):
-                    # Legacy positional fallback: only used when the email
-                    # match missed AND a positional entry actually exists.
-                    # Avoids dropping data when pairbot returns entries
-                    # without a candidate_email field.
-                    interview_info = data_list[idx]
+                # NOTE: The legacy positional fallback (data_list[idx]) has been
+                # intentionally removed. When the Bot API skips a candidate (e.g.
+                # missing email and phone) its response data[] is shorter than the
+                # submitted candidate list. Grabbing data_list[idx] in that case
+                # assigns a *different* candidate's interview_id to the skipped
+                # candidate, causing Curate to mark them as "sent" even though no
+                # interview was ever created for them. The source_candidate_id lookup
+                # above already handles pairbot responses that lack candidate_email,
+                # so the positional fallback is no longer needed. If both lookups
+                # miss, interview_info stays {}, interview_id stays empty, and
+                # engage_status is correctly set to "failed".
 
                 interview_id = str(interview_info.get("interview_id") or "")
                 candidate_name = interview_info.get("candidate_name", "")
