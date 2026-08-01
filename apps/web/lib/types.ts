@@ -4,7 +4,9 @@
 
 export type Source =
   | "JobDiva"
+  | "JobDiva-JobAgent"
   | "JobDiva-TalentSearch"
+  | "JobDiva-Applicants"
   | "LinkedIn"
   | "LinkedIn-Unipile"
   | "LinkedIn-Exa"

@@ -942,16 +942,27 @@ function NewJobPageContent() {
   // Step 5 - Sourcing state
   // Recruiter QA 5.1 / 5.2: the "JobDiva Applicants" toggle was misleading —
   // applicants auto-enroll via jobdiva_applicant_auto_sync. It's off the
-  // switchboard now. JobDiva Talent Search and LinkedIn are pre-ticked
+  // switchboard now. The two JobDiva talent pools and LinkedIn are pre-ticked
   // (LinkedIn sourcing now round-robins across all attached Unipile
   // accounts, so default-on no longer risks burning a single account);
   // the recruiter opts in to Dice/Exa explicitly.
+  //
+  // `jobdiva_agent` (JobDiva's own AI matcher, driven by the criteria the
+  // recruiter set inside JobDiva) and `jobdiva_talent` (the boolean string
+  // below, run through Talent Search) used to be one `jobdiva` checkbox that
+  // always fired both. They're separate now so the recruiter can put the
+  // search budget on whichever pool actually works for the req. Both default
+  // on, which reproduces the old behaviour.
   const [searchSources, setSearchSources] = useState({
-    jobdiva: true,
+    jobdiva_agent: true,
+    jobdiva_talent: true,
     linkedin: true,
     dice: false,
     exa: false,
   });
+  // Either JobDiva pool selected — for the bits of Step 5 that care about
+  // "is JobDiva in play at all" (Search-more button, result chips).
+  const jobdivaSelected = searchSources.jobdiva_agent || searchSources.jobdiva_talent;
   // 5.6: JobDiva Talent Search freshness window. Default 90 days — recent
   // enough to weed out stale resumes while still surfacing passive candidates.
   // 0 / null means "Any" (no freshness filter).
@@ -2159,9 +2170,24 @@ function NewJobPageContent() {
         const sf = draft.sourcing_filters;
         if (sf.sources) {
           // Strip the retired jobdiva_hotlist flag from persisted drafts so
-          // saved jobs don't resurrect the removed checkbox.
-          const { jobdiva_hotlist: _removed, ...cleanSources } = sf.sources as Record<string, boolean>;
-          setSearchSources(prev => ({ ...prev, ...cleanSources }));
+          // saved jobs don't resurrect the removed checkbox. The single
+          // `jobdiva` flag was likewise split into jobdiva_agent /
+          // jobdiva_talent — migrate it to both (that's what it used to run)
+          // and drop the old key so it isn't persisted forward.
+          const {
+            jobdiva_hotlist: _removedHotlist,
+            jobdiva: legacyJobdiva,
+            ...cleanSources
+          } = sf.sources as Record<string, boolean>;
+          const migrated: Record<string, boolean> =
+            typeof legacyJobdiva === "boolean"
+              ? {
+                  jobdiva_agent: legacyJobdiva,
+                  jobdiva_talent: legacyJobdiva,
+                  ...cleanSources,
+                }
+              : cleanSources;
+          setSearchSources(prev => ({ ...prev, ...migrated }));
         }
         if (sf.titles) setSourceTitles(sf.titles);
         if (sf.skills) setSourceSkills(sf.skills);
@@ -5201,7 +5227,10 @@ function NewJobPageContent() {
 
   useEffect(() => {
     if (currentStep !== 5) return;
-    if (!searchSources.jobdiva) return;
+    // "Criteria Not Assigned" is a JobAgent-only condition — the boolean
+    // Talent Search doesn't read JobDiva-side criteria, so don't nag about
+    // them when the recruiter has JobDiva Agent unticked.
+    if (!searchSources.jobdiva_agent) return;
     if (hasCheckedJobdivaCriteria) return;
 
     const jobRef = String(jobdivaId || numericJobId || "").trim();
@@ -5241,7 +5270,7 @@ function NewJobPageContent() {
     return () => {
       cancelled = true;
     };
-  }, [currentStep, searchSources.jobdiva, jobdivaId, numericJobId, hasCheckedJobdivaCriteria]);
+  }, [currentStep, searchSources.jobdiva_agent, jobdivaId, numericJobId, hasCheckedJobdivaCriteria]);
 
   const addSourceTitle = (value: string) => {
     const cleanValue = value.trim();
@@ -5353,12 +5382,15 @@ function NewJobPageContent() {
     // JobDiva's Talent Search parser speaks a different dialect than the
     // generic "X" AND "N+ years" form used for LinkedIn/Dice/Exa: it wants
     // uppercase quoted terms and `"TERM" OVER N YRS` for experience clauses
-    // (see apps/api/services/jobdiva_boolean_translator.py). When JobDiva is
-    // the active source we render the string in its native syntax so the
+    // (see apps/api/services/jobdiva_boolean_translator.py). When JobDiva
+    // Talent Search is on we render the string in its native syntax so the
     // recruiter sees what JobDiva will actually run — no more "Databricks
     // AND 5+ years" looking correct in the UI but silently getting rewritten
-    // by the backend translator.
-    const isJobDiva = !!searchSources.jobdiva;
+    // by the backend translator. Keyed off jobdiva_talent, not JobDiva as a
+    // whole: JobDiva Agent never consumes this string (it runs the criteria
+    // configured inside JobDiva), so with only Agent ticked the boolean is
+    // for LinkedIn/Exa and should render in the generic dialect.
+    const isJobDiva = !!searchSources.jobdiva_talent;
     const quote = (value: string) => {
       const body = (isJobDiva ? value.toUpperCase() : value).replace(/"/g, '\\"');
       return `"${body}"`;
@@ -5686,7 +5718,10 @@ function NewJobPageContent() {
     }, 150);
 
     return () => window.clearTimeout(timeoutId);
-  }, [sourceTitles, sourceSkills, sourceLocations, sourceCompanies, sourceKeywords, resumeMatchFilters, jobTitle, booleanUserEdited]);
+    // searchSources.jobdiva_talent is a dep because it picks the boolean
+    // dialect (JobDiva Talent Search syntax vs the generic LinkedIn/Exa form)
+    // — without it, unticking JobDiva Talent leaves a stale string on screen.
+  }, [sourceTitles, sourceSkills, sourceLocations, sourceCompanies, sourceKeywords, resumeMatchFilters, jobTitle, booleanUserEdited, searchSources.jobdiva_talent]);
 
   const relaxStructuralOverrides = (
     tier: number,
@@ -5947,7 +5982,10 @@ function NewJobPageContent() {
         // `jobdiva_applicants` was removed as a toggle (5.1). Applicants
         // still land via the auto-sync path; they're just not gated by a
         // recruiter checkbox on Step 5 anymore.
-        if (k === 'jobdiva') return 'JobDiva';
+        // The backend still accepts bare 'JobDiva' as "run both pools";
+        // we always send the explicit pool names so only what's ticked runs.
+        if (k === 'jobdiva_agent') return 'JobDiva-JobAgent';
+        if (k === 'jobdiva_talent') return 'JobDiva-TalentSearch';
         if (k === 'linkedin') return 'LinkedIn';
         if (k === 'dice') return 'Dice';
         if (k === 'exa') return 'Exa';
@@ -6408,7 +6446,13 @@ function NewJobPageContent() {
   };
 
   const handleSearchMoreJobDiva = async () => {
-    if (isSearching || hasFetchedMoreJobDiva || !searchSources.jobdiva) return;
+    if (isSearching || hasFetchedMoreJobDiva || !jobdivaSelected) return;
+    // Next tranche from whichever JobDiva pools are ticked — never re-run the
+    // one the recruiter switched off.
+    const jobdivaSourcesOverride = [
+      ...(searchSources.jobdiva_agent ? ['JobDiva-JobAgent'] : []),
+      ...(searchSources.jobdiva_talent ? ['JobDiva-TalentSearch'] : []),
+    ];
     const query = generatedBoolean || resolvedGeneratedBoolean;
     const runStartMs = Date.now();
     let runResults: Parameters<typeof collectCandidateQualityStats>[0] = [];
@@ -6423,11 +6467,12 @@ function NewJobPageContent() {
       query: truncateForTelemetry(query, 260),
       jobdiva_offset: 150,
       jobdiva_batch_size: 150,
+      sources: jobdivaSourcesOverride,
     });
 
     try {
       runResults = await runSearchStream(query, "append", {
-        sourcesOverride: ["JobDiva"],
+        sourcesOverride: jobdivaSourcesOverride,
         jobdivaOffset: 150,
         jobdivaBatchSize: 150,
       });
@@ -8122,7 +8167,7 @@ function NewJobPageContent() {
           <div className="flex-1 text-left">
             <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight mb-1">Source</h2>
             <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">
-              Build your candidate search using structured filters. Hoonr-Curate generates the Boolean string and runs JobDiva Talent Search. JobDiva applicants are synced automatically and shown on the rank-list page with source as Job-Diva Applicant.
+              Build your candidate search using structured filters. Hoonr-Curate generates the Boolean string and runs JobDiva Talent Search; JobDiva Agent runs the criteria set on this req inside JobDiva. Tick either or both. JobDiva applicants are synced automatically and shown on the rank-list page with source as Job-Diva Applicant.
             </p>
           </div>
         </div>
@@ -8150,15 +8195,21 @@ function NewJobPageContent() {
                       // auto-enroll via jobdiva_applicant_auto_sync regardless
                       // of this switchboard. Exposing it here implied they
                       // were a gated source, which they aren't.
-                      { id: 'jobdiva', label: 'JobDiva Talent', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false },
-                      { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: false },
+                      // Two independent JobDiva talent pools. JobDiva Agent =
+                      // JobDiva's own AI matcher against the criteria set on
+                      // the req inside JobDiva; JobDiva Talent = the boolean
+                      // string below run through Talent Search. Both on by
+                      // default; untick one to skip that search entirely.
+                      { id: 'jobdiva_agent', label: 'JobDiva Agent', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false, hint: "JobDiva's AI matcher, using the search criteria set on this req inside JobDiva" },
+                      { id: 'jobdiva_talent', label: 'JobDiva Talent', icon: <ShieldCheck className="w-4 h-4 text-[#8b5cf6]" />, disabled: false, hint: "JobDiva Talent Search, using the Boolean string generated below" },
+                      { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: false, hint: "" },
                       // Dice source hidden from the sourcing switchboard. Backend
                       // wiring (`Dice` source string, `_search_dice`) is left intact
                       // so re-enabling is a one-line revert; the results chip below
                       // self-hides at count 0.
-                      { id: 'exa', label: 'Exa', icon: <Search className="w-4 h-4 text-pink-500" />, disabled: false }
+                      { id: 'exa', label: 'Exa', icon: <Search className="w-4 h-4 text-pink-500" />, disabled: false, hint: "" }
                     ].map(source => (
-                      <label key={source.id} className={`flex items-center gap-2 ${source.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer group'}`} title={source.disabled ? "Integration coming soon" : ""}>
+                      <label key={source.id} className={`flex items-center gap-2 ${source.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer group'}`} title={source.disabled ? "Integration coming soon" : source.hint}>
                         <Checkbox
                           checked={source.disabled ? false : (searchSources as any)[source.id]}
                           onCheckedChange={(checked) => {
@@ -9111,7 +9162,7 @@ function NewJobPageContent() {
                       Restored from last run · Re-run to refresh
                     </p>
                   )}
-                  {isCheckingJobdivaCriteria && !isSearching && searchSources.jobdiva && (
+                  {isCheckingJobdivaCriteria && !isSearching && searchSources.jobdiva_agent && (
                     <p className="text-[11.5px] font-medium text-slate-600 bg-slate-50 border border-slate-200 rounded-md px-2 py-1 mt-2 inline-flex items-center gap-1.5">
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
                       Checking JobDiva AI matcher criteria...
@@ -9121,8 +9172,11 @@ function NewJobPageContent() {
                     <div className="flex items-center gap-1.5 mt-3 flex-wrap">
                       {([
                         { id: "all", label: "All", count: totalCandidatesCount },
-                        { id: "jobdiva", label: "JobDiva", count: sourceCounts["jobdiva"] || 0 },
-                        { id: "talent-search", label: "Talent Search", count: sourceCounts["talent-search"] || 0 },
+                        // Labels mirror the Search Sources checkboxes so the
+                        // recruiter can tie a result bucket back to the pool
+                        // that produced it.
+                        { id: "jobdiva", label: "JobDiva Agent", count: sourceCounts["jobdiva"] || 0 },
+                        { id: "talent-search", label: "JobDiva Talent", count: sourceCounts["talent-search"] || 0 },
                         { id: "linkedin-unipile", label: "LinkedIn-Unipile", count: sourceCounts["linkedin-unipile"] || 0 },
                         { id: "linkedin-exa", label: "LinkedIn-Exa", count: sourceCounts["linkedin-exa"] || 0 },
                         { id: "dice", label: "Dice", count: sourceCounts["dice"] || 0 },
@@ -9147,7 +9201,7 @@ function NewJobPageContent() {
                 </div>
                 {candidates.length > 0 && (
                   <div className="flex items-center gap-2">
-                    {hasSearched && !isSearching && !hasFetchedMoreJobDiva && searchSources.jobdiva && (
+                    {hasSearched && !isSearching && !hasFetchedMoreJobDiva && jobdivaSelected && (
                       <Button
                         variant="outline"
                         className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-800 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50 hover:text-slate-800 hover:border-slate-200"
