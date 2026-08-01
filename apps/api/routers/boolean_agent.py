@@ -11,6 +11,34 @@ import json
 
 router = APIRouter(tags=["Boolean Agent Integration"])
 
+# Step-5 switchboard keys -> canonical source names. The wizard persists its
+# own checkbox ids in sourcing_filters.sources; this endpoint reports the
+# source names the search actually runs, matching the fallback branch below.
+# `jobdiva` is the retired combined checkbox (now split into agent/talent) and
+# still appears in saved drafts — it maps to both talent pools.
+_UI_SOURCE_KEY_TO_NAMES = {
+    "jobdiva": ["JobDiva-JobAgent", "JobDiva-TalentSearch"],
+    "jobdiva_agent": ["JobDiva-JobAgent"],
+    "jobdiva_talent": ["JobDiva-TalentSearch"],
+    "linkedin": ["LinkedIn"],
+    "dice": ["Dice"],
+    "exa": ["Exa"],
+}
+
+
+def _canonical_sources(ui_sources) -> list:
+    """Flatten the wizard's {checkbox_id: bool} map to canonical source names."""
+    if not isinstance(ui_sources, dict):
+        return []
+    names = []
+    for key, active in ui_sources.items():
+        if not active:
+            continue
+        for name in _UI_SOURCE_KEY_TO_NAMES.get(key, [key]):
+            if name not in names:
+                names.append(name)
+    return names
+
 @router.get("/jobs/{job_id}/context")
 async def get_boolean_agent_context(job_id: str, user: UserIdentity = Depends(get_current_user)):
     """
@@ -90,8 +118,7 @@ async def get_boolean_agent_context(job_id: str, user: UserIdentity = Depends(ge
             keywords = sourcing_filters.get('keywords', [])
             companies = sourcing_filters.get('companies', [])
             
-            ui_sources = sourcing_filters.get('sources', {})
-            sources = [name for name, active in ui_sources.items() if active] if isinstance(ui_sources, dict) else []
+            sources = _canonical_sources(sourcing_filters.get('sources', {}))
         else:
             # FALLBACK TO RUBRIC IF NO PAGE 5 STATE YET
             rubric_db = JobRubricDB()
@@ -121,7 +148,7 @@ async def get_boolean_agent_context(job_id: str, user: UserIdentity = Depends(ge
             if job_base.get('city') and job_base.get('state'):
                 locations.append({"value": f"{job_base['city']}, {job_base['state']}", "radius": "within 25 mi"})
             
-            sources = ["JobDiva", "JobDiva Hotlist", "LinkedIn", "Dice", "Exa"]
+            sources = ["JobDiva-JobAgent", "JobDiva-TalentSearch", "LinkedIn", "Dice", "Exa"]
             keywords = []
             companies = []
 

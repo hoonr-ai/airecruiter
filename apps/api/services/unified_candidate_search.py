@@ -5,7 +5,7 @@ import math
 import os
 import re
 import time
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Sequence, Tuple
 from pydantic import BaseModel
 
 from services.jobdiva import JobDivaService, _is_placeholder_email
@@ -130,6 +130,33 @@ def _is_excluded_criterion(item: Dict[str, Any]) -> bool:
     """
     match_type = str(item.get("match_type", "must") or "must").lower()
     return match_type.replace("_", " ").strip() in {"exclude", "must not"}
+
+
+def resolve_jobdiva_sources(sources: Sequence[str]) -> Dict[str, bool]:
+    """Which JobDiva producers a request's `sources` list selects.
+
+    JobDiva is three independent producers, each with its own Step-5
+    checkbox (or, for Applicants, its own auto-sync path):
+
+      - Applicants:   people who applied to this job_id (no boolean)
+      - JobAgent:     JobDiva's AI matcher, driven by the criteria the
+                      recruiter configured on the req inside JobDiva
+      - TalentSearch: the boolean query Hoonr-Curate generates
+
+    Bare ``"JobDiva"`` is the legacy combined value — older saved drafts
+    and non-wizard callers still send it, and it keeps meaning "run both
+    talent pools". Separating them lets a recruiter spend the search
+    budget on whichever pool is actually productive for the req.
+    """
+    selected = set(sources or ())
+    legacy_both = "JobDiva" in selected
+    return {
+        "applicants": bool(
+            {"JobDiva Applicants", "JobDiva-Applicants"} & selected
+        ),
+        "jobagent": legacy_both or "JobDiva-JobAgent" in selected,
+        "talentsearch": legacy_both or "JobDiva-TalentSearch" in selected,
+    }
 
 
 class SearchCriteria(BaseModel):
@@ -635,19 +662,15 @@ class UnifiedCandidateSearch:
 
             return cand
 
-        # JobDiva is split into two explicit sources:
-        #   - "JobDiva Applicants": people who applied to this job_id (no boolean)
-        #   - "JobDiva": talent-pool boolean search only
-        # Product requirement (Apr 2026): Step-5 sourcing must NOT fetch applicants.
-        # Applicants are surfaced automatically via sync + rank-list.
-        applicants_selected = (
-            "JobDiva Applicants" in criteria.sources
-            or "JobDiva-Applicants" in criteria.sources
-        )
-        talent_selected = (
-            "JobDiva" in criteria.sources
-            or "JobDiva-TalentSearch" in criteria.sources
-        )
+        # Which JobDiva producers this request selects — see
+        # resolve_jobdiva_sources for the source-name contract.
+        # Product requirement (Apr 2026): Step-5 sourcing must NOT fetch
+        # applicants; they're surfaced automatically via sync + rank-list.
+        _jobdiva_selection = resolve_jobdiva_sources(criteria.sources)
+        applicants_selected = _jobdiva_selection["applicants"]
+        jobagent_selected = _jobdiva_selection["jobagent"]
+        talentsearch_selected = _jobdiva_selection["talentsearch"]
+        talent_selected = jobagent_selected or talentsearch_selected
 
         queue: asyncio.Queue = asyncio.Queue()
         SENTINEL = object()
@@ -1132,12 +1155,24 @@ class UnifiedCandidateSearch:
         async def produce_jobdiva_talent():
             """
             Run the JobDiva talent-pool sources.
-            Independent of Applicants — runs whenever "JobDiva" is in sources.
+            Independent of Applicants — runs whenever JobAgent and/or
+            TalentSearch is in sources. Each pool is gated separately so
+            selecting only one halves the JobDiva work for the request.
             """
             try:
                 if not talent_selected:
                     return
-                await queue.put({"type": "stage", "data": "Searching JobDiva..."})
+                pool_label = " + ".join(
+                    label
+                    for label, on in (
+                        ("JobAgent", jobagent_selected),
+                        ("Talent Search", talentsearch_selected),
+                    )
+                    if on
+                )
+                await queue.put(
+                    {"type": "stage", "data": f"Searching JobDiva ({pool_label})..."}
+                )
 
                 async def _process_talent_pool(
                     talent_res: Dict[str, Any],
@@ -1235,8 +1270,20 @@ class UnifiedCandidateSearch:
                         min_score=int(_min_score) if _min_score else None,
                     )
 
-                # Overlap both independent JobDiva talent searches to halve wall-clock latency
-                await asyncio.gather(_run_jobagent_pool(), _run_talent_search_pool())
+                # Overlap the selected JobDiva talent searches to halve
+                # wall-clock latency when both are on.
+                pools = []
+                if jobagent_selected:
+                    pools.append(_run_jobagent_pool())
+                if talentsearch_selected:
+                    pools.append(_run_talent_search_pool())
+                self._log_stage(
+                    "JobDiva",
+                    f"talent pools selected: jobagent={jobagent_selected} "
+                    f"talent_search={talentsearch_selected}",
+                )
+                if pools:
+                    await asyncio.gather(*pools)
             except Exception as e:
                 logger.error(f"JobDiva Talent stage failed: {e}", exc_info=True)
             finally:
