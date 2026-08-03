@@ -1563,26 +1563,16 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
             if not isinstance(data_list, list):
                 data_list = [response_data] if response_data else []
 
-            # Map pairbot response entries by a stable per-candidate key first,
-            # then fall back to email for older responses.
-            interview_by_source_candidate_id: Dict[str, Dict[str, Any]] = {}
+            # Pairbot does not echo source_candidate_id in data[]; match entries by email.
+            # First-write-wins: prevents a duplicate email in data[] from
+            # silently overwriting an earlier valid match.
             interview_by_email: Dict[str, Dict[str, Any]] = {}
             for item in data_list:
                 if not isinstance(item, dict):
                     continue
-                item_source_id = str(item.get("source_candidate_id") or "").strip()
-                if item_source_id:
-                    interview_by_source_candidate_id[item_source_id] = item
                 item_email = str(item.get("candidate_email") or "").lower().strip()
-                # First-write-wins: prevents a duplicate email in data[] from
-                # silently overwriting an earlier valid match.
                 if item_email and item_email not in interview_by_email:
                     interview_by_email[item_email] = item
-
-            entries_without_source_id = sum(
-                1 for item in data_list
-                if isinstance(item, dict) and not str(item.get("source_candidate_id") or "").strip()
-            )
 
             # Position N in real_candidate_ids corresponds to position N in
             # payload_obj.resumes (both built from the same selection in
@@ -1624,24 +1614,16 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                     if idx < len(submitted_email_by_idx)
                     else ""
                 )
-                interview_info = (
-                    interview_by_source_candidate_id.get(submitted_source_id)
-                    if submitted_source_id
-                    else {}
-                )
-                if not interview_info:
-                    # Pop so a shared email cannot match two different candidates.
-                    interview_info = interview_by_email.pop(submitted_email, {}) if submitted_email else {}
+                # Pop so a shared email cannot match two different candidates.
+                interview_info = interview_by_email.pop(submitted_email, {}) if submitted_email else {}
                 # NOTE: The legacy positional fallback (data_list[idx]) has been
                 # intentionally removed. When the Bot API skips a candidate (e.g.
                 # missing email and phone) its response data[] is shorter than the
                 # submitted candidate list. Grabbing data_list[idx] in that case
                 # assigns a *different* candidate's interview_id to the skipped
                 # candidate, causing Curate to mark them as "sent" even though no
-                # interview was ever created for them. The source_candidate_id lookup
-                # above already handles pairbot responses that lack candidate_email,
-                # so the positional fallback is no longer needed. If both lookups
-                # miss, interview_info stays {}, interview_id stays empty, and
+                # interview was ever created for them. If the email lookup misses,
+                # interview_info stays {}, interview_id stays empty, and
                 # engage_status is correctly set to "failed".
 
                 interview_id = str(interview_info.get("interview_id") or "")
@@ -1650,12 +1632,11 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
 
                 if not interview_id:
                     logger.warning(
-                        "engagement_no_interview_match candidate_id=%s submitted_source_id=%s submitted_email=%s response_data_count=%d entries_without_source_id=%d request_count=%d",
+                        "engagement_no_interview_match candidate_id=%s submitted_source_id=%s submitted_email=%s response_data_count=%d request_count=%d",
                         candidate_id,
                         submitted_source_id,
                         submitted_email,
                         len(data_list),
-                        entries_without_source_id,
                         len(request.real_candidate_ids),
                     )
 
