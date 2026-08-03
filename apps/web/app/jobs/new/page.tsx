@@ -298,10 +298,12 @@ function deriveCountry(stateCode: string | null | undefined): string {
 }
 
 // Provenance chip text for rubric items (titles, skills, education, domain).
-// Items extracted by the AI keep the existing "Hoonr-Curate" label; items
-// added manually by the recruiter via the "Add" buttons get "Recruiter".
+// Only "recruiter" is matched explicitly (set by the manual "Add" buttons);
+// everything else is AI-extracted and renders as "PAIR". That fallback is what
+// lets pre-rebrand rows still carrying source='Hoonr-Curate' render correctly
+// without a data migration.
 function sourceLabel(source: string | null | undefined): string {
-  return (source || "").toLowerCase() === "recruiter" ? "Recruiter" : "Hoonr-Curate";
+  return (source || "").toLowerCase() === "recruiter" ? "Recruiter" : "PAIR";
 }
 function isRecruiterSource(source: string | null | undefined): boolean {
   return (source || "").toLowerCase() === "recruiter";
@@ -414,7 +416,7 @@ const STEP_LABELS = {
 
 const STEP_DESCRIPTIONS: Record<Step, string> = {
   1: "Enter a JobDiva Job ID to get started.",
-  2: "Review your Hoonr-Curate-enhanced job posting and select where to publish externally.",
+  2: "Review your PAIR-enhanced job posting and select where to publish externally.",
   3: "Define evaluation criteria and rubric for candidate assessment.",
   4: "Configure filters and requirements for candidate matching.",
   5: "Launch sourcing and begin candidate collection."
@@ -942,16 +944,27 @@ function NewJobPageContent() {
   // Step 5 - Sourcing state
   // Recruiter QA 5.1 / 5.2: the "JobDiva Applicants" toggle was misleading —
   // applicants auto-enroll via jobdiva_applicant_auto_sync. It's off the
-  // switchboard now. JobDiva Talent Search and LinkedIn are pre-ticked
+  // switchboard now. The two JobDiva talent pools and LinkedIn are pre-ticked
   // (LinkedIn sourcing now round-robins across all attached Unipile
   // accounts, so default-on no longer risks burning a single account);
   // the recruiter opts in to Dice/Exa explicitly.
+  //
+  // `jobdiva_agent` (JobDiva's own AI matcher, driven by the criteria the
+  // recruiter set inside JobDiva) and `jobdiva_talent` (the boolean string
+  // below, run through Talent Search) used to be one `jobdiva` checkbox that
+  // always fired both. They're separate now so the recruiter can put the
+  // search budget on whichever pool actually works for the req. Both default
+  // on, which reproduces the old behaviour.
   const [searchSources, setSearchSources] = useState({
-    jobdiva: true,
+    jobdiva_agent: true,
+    jobdiva_talent: true,
     linkedin: true,
     dice: false,
     exa: false,
   });
+  // Either JobDiva pool selected — for the bits of Step 5 that care about
+  // "is JobDiva in play at all" (Search-more button, result chips).
+  const jobdivaSelected = searchSources.jobdiva_agent || searchSources.jobdiva_talent;
   // 5.6: JobDiva Talent Search freshness window. Default 90 days — recent
   // enough to weed out stale resumes while still surfacing passive candidates.
   // 0 / null means "Any" (no freshness filter).
@@ -2159,9 +2172,24 @@ function NewJobPageContent() {
         const sf = draft.sourcing_filters;
         if (sf.sources) {
           // Strip the retired jobdiva_hotlist flag from persisted drafts so
-          // saved jobs don't resurrect the removed checkbox.
-          const { jobdiva_hotlist: _removed, ...cleanSources } = sf.sources as Record<string, boolean>;
-          setSearchSources(prev => ({ ...prev, ...cleanSources }));
+          // saved jobs don't resurrect the removed checkbox. The single
+          // `jobdiva` flag was likewise split into jobdiva_agent /
+          // jobdiva_talent — migrate it to both (that's what it used to run)
+          // and drop the old key so it isn't persisted forward.
+          const {
+            jobdiva_hotlist: _removedHotlist,
+            jobdiva: legacyJobdiva,
+            ...cleanSources
+          } = sf.sources as Record<string, boolean>;
+          const migrated: Record<string, boolean> =
+            typeof legacyJobdiva === "boolean"
+              ? {
+                  jobdiva_agent: legacyJobdiva,
+                  jobdiva_talent: legacyJobdiva,
+                  ...cleanSources,
+                }
+              : cleanSources;
+          setSearchSources(prev => ({ ...prev, ...migrated }));
         }
         if (sf.titles) setSourceTitles(sf.titles);
         if (sf.skills) setSourceSkills(sf.skills);
@@ -2707,7 +2735,7 @@ function NewJobPageContent() {
           await handleEnhanceJob(nextTitle);
         }
 
-        showToast("Title enhanced by Hoonr-Curate.", "success");
+        showToast("Title enhanced by PAIR.", "success");
         trackEvent("job_wizard_step2_title_enhance_success", {
           step: 2,
           title: truncateForTelemetry(data?.title),
@@ -3032,7 +3060,7 @@ function NewJobPageContent() {
         <FileInput className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[20px] font-semibold text-slate-900 leading-tight tracking-tight">Intake</h2>
-          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Fetch job details from JobDiva, then add any additional context for Hoonr-Curate.</p>
+          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Fetch job details from JobDiva, then add any additional context for PAIR.</p>
         </div>
       </div>
 
@@ -3095,7 +3123,7 @@ function NewJobPageContent() {
         ) : !isFetched ? (
           <div className="space-y-5">
             <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-[13px] text-amber-800 leading-relaxed">
-              <strong className="font-semibold">External Requirement</strong> — not linked to JobDiva. Paste the job description; Hoonr-Curate will extract skills and rubric. JobDiva-specific fields (applicant list, UDFs) will be skipped.
+              <strong className="font-semibold">External Requirement</strong> — not linked to JobDiva. Paste the job description; PAIR will extract skills and rubric. JobDiva-specific fields (applicant list, UDFs) will be skipped.
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div>
@@ -3126,7 +3154,7 @@ function NewJobPageContent() {
                 rows={10}
                 className="bg-white border-slate-200 text-[13px] leading-relaxed"
               />
-              <p className="text-[11px] text-slate-500 mt-2">Hoonr-Curate will extract the rubric (titles, skills, education) from this text.</p>
+              <p className="text-[11px] text-slate-500 mt-2">PAIR will extract the rubric (titles, skills, education) from this text.</p>
             </div>
             <div>
               <button
@@ -3264,10 +3292,10 @@ function NewJobPageContent() {
 
               <div className="border-t border-slate-100 my-6" />
 
-              {/* Hoonr-Curate Setup Section */}
+              {/* PAIR Setup Section */}
               <div className="flex items-center gap-2 mb-5">
                 <Settings className="w-5 h-5 text-slate-700 flex-shrink-0" />
-                <span className="text-[14px] font-bold text-slate-900">Hoonr-Curate Setup</span>
+                <span className="text-[14px] font-bold text-slate-900">PAIR Setup</span>
                 <span className="text-[12px] text-slate-500 font-normal">Configure your screening before proceeding</span>
               </div>
 
@@ -3350,7 +3378,7 @@ function NewJobPageContent() {
               {/* Screening Level */}
               <div>
                 <label className="block text-[14px] font-medium text-slate-900 mb-1">Screening Level</label>
-                <p className="text-[13px] text-slate-500 mb-4">How deeply should Hoonr-Curate screen each candidate?</p>
+                <p className="text-[13px] text-slate-500 mb-4">How deeply should PAIR screen each candidate?</p>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                   {/* L0.5 */}
                   <div
@@ -3444,7 +3472,7 @@ function NewJobPageContent() {
         <Megaphone className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight">Publish</h2>
-          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Review your Hoonr-Curate-enhanced job posting and select where to publish externally.</p>
+          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Review your PAIR-enhanced job posting and select where to publish externally.</p>
         </div>
       </div>
       <div className="p-7">
@@ -3486,7 +3514,7 @@ function NewJobPageContent() {
             <div className="flex items-center justify-between mb-3 mt-8">
               <div className="bg-[#eef2ff] text-[#4f46e5] flex items-center gap-1.5 px-4 py-1.5 rounded-full text-[12.5px] font-medium border border-[#ddd6fe]">
                 <Sparkles className="w-3.5 h-3.5" />
-                Hoonr-Curate-Enhanced Job Posting
+                PAIR-Enhanced Job Posting
               </div>
               <Button
                 variant="outline"
@@ -3591,7 +3619,7 @@ function NewJobPageContent() {
             <div className="flex items-start gap-2 mt-5 px-1">
               <Info className="w-4 h-4 text-slate-400 mt-0.5 flex-shrink-0" />
               <p className="text-[12px] text-slate-500 leading-snug font-medium">
-                Job posting team will receive your request to post after you Launch Hoonr-Curate.
+                Job posting team will receive your request to post after you Launch PAIR.
               </p>
             </div>
 
@@ -3783,7 +3811,7 @@ function NewJobPageContent() {
       const updated = { ...prev };
       if (!updated[category]) updated[category] = [];
       // Titles preserve the source from the call site (AI extractor passes
-      // 'Hoonr-Curate'; the manual "Add Title" button passes 'Recruiter') so
+      // 'PAIR'; the manual "Add Title" button passes 'Recruiter') so
       // the chip label can reflect provenance.
       if (category === 'titles') {
         const pairTitle = getNormalizedTitleItem({
@@ -3817,14 +3845,14 @@ function NewJobPageContent() {
         <ListChecks className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[21px] font-medium text-slate-900 leading-tight tracking-tight">Establish Rubric</h2>
-          <p className="text-slate-500 text-[15px] mt-1 leading-relaxed">Hoonr-Curate-extracted rubric items from the job description. These become the rubric by which candidates are graded. Edit freely.</p>
+          <p className="text-slate-500 text-[15px] mt-1 leading-relaxed">PAIR-extracted rubric items from the job description. These become the rubric by which candidates are graded. Edit freely.</p>
         </div>
       </div>
 
       {isGeneratingRubric ? (
         <div className="p-20 flex flex-col items-center justify-center gap-4">
           <div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
-          <p className="text-[15px] font-medium text-slate-600 animate-pulse">Extracting criteria from Hoonr-Curate Job Description...</p>
+          <p className="text-[15px] font-medium text-slate-600 animate-pulse">Extracting criteria from PAIR Job Description...</p>
         </div>
       ) : rubricData ? (
         <div className="p-7 space-y-7">
@@ -4110,7 +4138,7 @@ function NewJobPageContent() {
                 <h3 className="text-[14px] font-bold text-slate-800">Education & Certificates</h3>
               </div>
               <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                <Sparkles className="w-3 h-3" /> Hoonr-Curate detected
+                <Sparkles className="w-3 h-3" /> PAIR detected
               </span>
             </div>
 
@@ -4254,7 +4282,7 @@ function NewJobPageContent() {
               <UserCheck className="w-4 h-4 text-slate-900 flex-shrink-0" />
               <h3 className="text-[14px] font-bold text-slate-800">Customer Requirements</h3>
               <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                <Sparkles className="w-3 h-3" /> Hoonr-Curate generated
+                <Sparkles className="w-3 h-3" /> PAIR generated
               </span>
             </div>
 
@@ -5201,7 +5229,10 @@ function NewJobPageContent() {
 
   useEffect(() => {
     if (currentStep !== 5) return;
-    if (!searchSources.jobdiva) return;
+    // "Criteria Not Assigned" is a JobAgent-only condition — the boolean
+    // Talent Search doesn't read JobDiva-side criteria, so don't nag about
+    // them when the recruiter has JobDiva Agent unticked.
+    if (!searchSources.jobdiva_agent) return;
     if (hasCheckedJobdivaCriteria) return;
 
     const jobRef = String(jobdivaId || numericJobId || "").trim();
@@ -5241,7 +5272,7 @@ function NewJobPageContent() {
     return () => {
       cancelled = true;
     };
-  }, [currentStep, searchSources.jobdiva, jobdivaId, numericJobId, hasCheckedJobdivaCriteria]);
+  }, [currentStep, searchSources.jobdiva_agent, jobdivaId, numericJobId, hasCheckedJobdivaCriteria]);
 
   const addSourceTitle = (value: string) => {
     const cleanValue = value.trim();
@@ -5353,12 +5384,15 @@ function NewJobPageContent() {
     // JobDiva's Talent Search parser speaks a different dialect than the
     // generic "X" AND "N+ years" form used for LinkedIn/Dice/Exa: it wants
     // uppercase quoted terms and `"TERM" OVER N YRS` for experience clauses
-    // (see apps/api/services/jobdiva_boolean_translator.py). When JobDiva is
-    // the active source we render the string in its native syntax so the
+    // (see apps/api/services/jobdiva_boolean_translator.py). When JobDiva
+    // Talent Search is on we render the string in its native syntax so the
     // recruiter sees what JobDiva will actually run — no more "Databricks
     // AND 5+ years" looking correct in the UI but silently getting rewritten
-    // by the backend translator.
-    const isJobDiva = !!searchSources.jobdiva;
+    // by the backend translator. Keyed off jobdiva_talent, not JobDiva as a
+    // whole: JobDiva Agent never consumes this string (it runs the criteria
+    // configured inside JobDiva), so with only Agent ticked the boolean is
+    // for LinkedIn/Exa and should render in the generic dialect.
+    const isJobDiva = !!searchSources.jobdiva_talent;
     const quote = (value: string) => {
       const body = (isJobDiva ? value.toUpperCase() : value).replace(/"/g, '\\"');
       return `"${body}"`;
@@ -5686,7 +5720,10 @@ function NewJobPageContent() {
     }, 150);
 
     return () => window.clearTimeout(timeoutId);
-  }, [sourceTitles, sourceSkills, sourceLocations, sourceCompanies, sourceKeywords, resumeMatchFilters, jobTitle, booleanUserEdited]);
+    // searchSources.jobdiva_talent is a dep because it picks the boolean
+    // dialect (JobDiva Talent Search syntax vs the generic LinkedIn/Exa form)
+    // — without it, unticking JobDiva Talent leaves a stale string on screen.
+  }, [sourceTitles, sourceSkills, sourceLocations, sourceCompanies, sourceKeywords, resumeMatchFilters, jobTitle, booleanUserEdited, searchSources.jobdiva_talent]);
 
   const relaxStructuralOverrides = (
     tier: number,
@@ -5947,7 +5984,10 @@ function NewJobPageContent() {
         // `jobdiva_applicants` was removed as a toggle (5.1). Applicants
         // still land via the auto-sync path; they're just not gated by a
         // recruiter checkbox on Step 5 anymore.
-        if (k === 'jobdiva') return 'JobDiva';
+        // The backend still accepts bare 'JobDiva' as "run both pools";
+        // we always send the explicit pool names so only what's ticked runs.
+        if (k === 'jobdiva_agent') return 'JobDiva-JobAgent';
+        if (k === 'jobdiva_talent') return 'JobDiva-TalentSearch';
         if (k === 'linkedin') return 'LinkedIn';
         if (k === 'dice') return 'Dice';
         if (k === 'exa') return 'Exa';
@@ -6316,7 +6356,7 @@ function NewJobPageContent() {
     try {
       const initial = resolvedGeneratedBoolean;
       setGeneratedBoolean(initial);
-      const attempts: { query: string; label: string }[] = [{ query: initial, label: "Hoonr-Curate generated" }];
+      const attempts: { query: string; label: string }[] = [{ query: initial, label: "PAIR generated" }];
       setBooleanAttempts(attempts);
       currentAttempts = attempts;
       setSearchStatus("Connecting to source portals...");
@@ -6328,7 +6368,7 @@ function NewJobPageContent() {
       runBreakdown = [
         {
           attempt: 1,
-          label: "Hoonr-Curate generated",
+          label: "PAIR generated",
           query: truncateForTelemetry(initial, 260),
           duration_seconds: Number(((Date.now() - firstRunStartMs) / 1000).toFixed(2)),
           results_count: firstRun.length,
@@ -6408,7 +6448,13 @@ function NewJobPageContent() {
   };
 
   const handleSearchMoreJobDiva = async () => {
-    if (isSearching || hasFetchedMoreJobDiva || !searchSources.jobdiva) return;
+    if (isSearching || hasFetchedMoreJobDiva || !jobdivaSelected) return;
+    // Next tranche from whichever JobDiva pools are ticked — never re-run the
+    // one the recruiter switched off.
+    const jobdivaSourcesOverride = [
+      ...(searchSources.jobdiva_agent ? ['JobDiva-JobAgent'] : []),
+      ...(searchSources.jobdiva_talent ? ['JobDiva-TalentSearch'] : []),
+    ];
     const query = generatedBoolean || resolvedGeneratedBoolean;
     const runStartMs = Date.now();
     let runResults: Parameters<typeof collectCandidateQualityStats>[0] = [];
@@ -6423,11 +6469,12 @@ function NewJobPageContent() {
       query: truncateForTelemetry(query, 260),
       jobdiva_offset: 150,
       jobdiva_batch_size: 150,
+      sources: jobdivaSourcesOverride,
     });
 
     try {
       runResults = await runSearchStream(query, "append", {
-        sourcesOverride: ["JobDiva"],
+        sourcesOverride: jobdivaSourcesOverride,
         jobdivaOffset: 150,
         jobdivaBatchSize: 150,
       });
@@ -6471,7 +6518,7 @@ function NewJobPageContent() {
     const relaxed = relaxBooleanString(base, tier);
     const nextAttempts = booleanAttempts.length
       ? [...booleanAttempts, { query: relaxed.query, label: relaxed.label }]
-      : [{ query: base, label: "Hoonr-Curate generated" }, { query: relaxed.query, label: relaxed.label }];
+      : [{ query: base, label: "PAIR generated" }, { query: relaxed.query, label: relaxed.label }];
     setBooleanAttempts(nextAttempts);
     setGeneratedBoolean(relaxed.query);
     setBooleanUserEdited(true);
@@ -6629,7 +6676,7 @@ function NewJobPageContent() {
         <Filter className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight">Set Filters</h2>
-          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Each rubric item from Establish Rubric is evaluated here. Toggle, edit, or add filters for resume matching and the Hoonr-Curate phone screen.</p>
+          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Each rubric item from Establish Rubric is evaluated here. Toggle, edit, or add filters for resume matching and the PAIR phone screen.</p>
         </div>
       </div>
 
@@ -6642,7 +6689,7 @@ function NewJobPageContent() {
             <span className="text-[12px] font-normal text-slate-500">Hard filters applied during resume matching</span>
             <span className="ml-auto bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
               <Sparkles className="w-3 h-3 inline mr-1" />
-              Hoonr-Curate pre-filled
+              PAIR pre-filled
             </span>
           </div>
 
@@ -6695,7 +6742,7 @@ function NewJobPageContent() {
                   <div className="w-[220px] flex-shrink-0 flex items-center justify-end gap-2">
                     {filter.ai && (
                       <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
-                        Hoonr-Curate
+                        PAIR
                       </span>
                     )}
                     {filter.fromRubric && (
@@ -6759,7 +6806,7 @@ function NewJobPageContent() {
                   <div className="w-[220px] flex-shrink-0 flex items-center justify-end gap-2">
                     {filter.ai && (
                       <span className="bg-slate-100 text-slate-400 text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
-                        Hoonr-Curate
+                        PAIR
                       </span>
                     )}
                     {filter.fromRubric && (
@@ -6804,7 +6851,7 @@ function NewJobPageContent() {
           <div className="flex items-center gap-2 mb-4">
             <Users className="w-4 h-4 text-slate-900 flex-shrink-0" />
             <h3 className="text-[14px] font-bold text-slate-800">Screen</h3>
-            <span className="text-[12px] font-normal text-slate-500">Questions asked during Hoonr-Curate phone screen</span>
+            <span className="text-[12px] font-normal text-slate-500">Questions asked during PAIR phone screen</span>
             <span className="ml-auto text-slate-400 text-[11px] font-bold">
               {screenQuestions.length} question{screenQuestions.length === 1 ? "" : "s"}
             </span>
@@ -7154,7 +7201,7 @@ function NewJobPageContent() {
       }
     };
 
-    console.log(`🚀 Launching Hoonr-Curate with ${candidatesPayload.length} candidates in ${batches.length} batch(es) of ${LAUNCH_BATCH_SIZE}`);
+    console.log(`🚀 Launching PAIR with ${candidatesPayload.length} candidates in ${batches.length} batch(es) of ${LAUNCH_BATCH_SIZE}`);
 
     let totalSaved = 0;
     let totalEngaged = 0;
@@ -8122,7 +8169,7 @@ function NewJobPageContent() {
           <div className="flex-1 text-left">
             <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight mb-1">Source</h2>
             <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">
-              Build your candidate search using structured filters. Hoonr-Curate generates the Boolean string and runs JobDiva Talent Search. JobDiva applicants are synced automatically and shown on the rank-list page with source as Job-Diva Applicant.
+              Build your candidate search using structured filters. PAIR generates the Boolean string and runs JobDiva Talent Search; JobDiva Agent runs the criteria set on this req inside JobDiva. Tick either or both. JobDiva applicants are synced automatically and shown on the rank-list page with source as Job-Diva Applicant.
             </p>
           </div>
         </div>
@@ -8131,12 +8178,12 @@ function NewJobPageContent() {
           {/* Inner Content Box - Exact Screenshot Structure */}
           <div className="border border-slate-200 rounded-2xl bg-white shadow-sm overflow-hidden p-7 space-y-8">
             <div className="space-y-8">
-              {/* 5.5: Top row now shows only the Hoonr-Curate badge. Run/Stop
+              {/* 5.5: Top row now shows only the PAIR badge. Run/Stop
                   buttons live below the Boolean string so the recruiter can
                   inspect + edit the query before kicking off the search. */}
               <div className="flex items-center justify-between mb-2">
                 <div className="bg-[#ede9fe] text-[#6366f1] text-[11px] font-bold px-3 py-1 rounded-lg border border-[#ddd6fe] flex items-center gap-2">
-                  <Sparkles className="w-3.5 h-3.5" /> Hoonr-Curate Pre-filled from Rubric
+                  <Sparkles className="w-3.5 h-3.5" /> PAIR Pre-filled from Rubric
                 </div>
               </div>
 
@@ -8150,15 +8197,21 @@ function NewJobPageContent() {
                       // auto-enroll via jobdiva_applicant_auto_sync regardless
                       // of this switchboard. Exposing it here implied they
                       // were a gated source, which they aren't.
-                      { id: 'jobdiva', label: 'JobDiva Talent', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false },
-                      { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: false },
+                      // Two independent JobDiva talent pools. JobDiva Agent =
+                      // JobDiva's own AI matcher against the criteria set on
+                      // the req inside JobDiva; JobDiva Talent = the boolean
+                      // string below run through Talent Search. Both on by
+                      // default; untick one to skip that search entirely.
+                      { id: 'jobdiva_agent', label: 'JobDiva Agent', icon: <ShieldCheck className="w-4 h-4 text-[#6366f1]" />, disabled: false, hint: "JobDiva's AI matcher, using the search criteria set on this req inside JobDiva" },
+                      { id: 'jobdiva_talent', label: 'JobDiva Talent', icon: <ShieldCheck className="w-4 h-4 text-[#8b5cf6]" />, disabled: false, hint: "JobDiva Talent Search, using the Boolean string generated below" },
+                      { id: 'linkedin', label: 'LinkedIn', icon: <Linkedin className="w-4 h-4 text-[#0A66C2] fill-[#0A66C2]" />, disabled: false, hint: "" },
                       // Dice source hidden from the sourcing switchboard. Backend
                       // wiring (`Dice` source string, `_search_dice`) is left intact
                       // so re-enabling is a one-line revert; the results chip below
                       // self-hides at count 0.
-                      { id: 'exa', label: 'Exa', icon: <Search className="w-4 h-4 text-pink-500" />, disabled: false }
+                      { id: 'exa', label: 'Exa', icon: <Search className="w-4 h-4 text-pink-500" />, disabled: false, hint: "" }
                     ].map(source => (
-                      <label key={source.id} className={`flex items-center gap-2 ${source.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer group'}`} title={source.disabled ? "Integration coming soon" : ""}>
+                      <label key={source.id} className={`flex items-center gap-2 ${source.disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer group'}`} title={source.disabled ? "Integration coming soon" : source.hint}>
                         <Checkbox
                           checked={source.disabled ? false : (searchSources as any)[source.id]}
                           onCheckedChange={(checked) => {
@@ -8877,7 +8930,7 @@ function NewJobPageContent() {
                             <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
                               <div className="flex items-center gap-2 flex-wrap">
                                 <span className="text-[11px] font-bold uppercase tracking-widest text-[#5b21b6] bg-[#f5f3ff] px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">
-                                  {booleanUserEdited ? "Edited" : "Hoonr-Curate Generated"}
+                                  {booleanUserEdited ? "Edited" : "PAIR Generated"}
                                 </span>
                                 {booleanAttempts.length > 0 && (
                                   <span className="text-[11px] font-bold uppercase tracking-widest text-slate-500 bg-slate-50 px-2.5 py-0.5 rounded-full border border-slate-200">
@@ -9111,7 +9164,7 @@ function NewJobPageContent() {
                       Restored from last run · Re-run to refresh
                     </p>
                   )}
-                  {isCheckingJobdivaCriteria && !isSearching && searchSources.jobdiva && (
+                  {isCheckingJobdivaCriteria && !isSearching && searchSources.jobdiva_agent && (
                     <p className="text-[11.5px] font-medium text-slate-600 bg-slate-50 border border-slate-200 rounded-md px-2 py-1 mt-2 inline-flex items-center gap-1.5">
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
                       Checking JobDiva AI matcher criteria...
@@ -9121,8 +9174,11 @@ function NewJobPageContent() {
                     <div className="flex items-center gap-1.5 mt-3 flex-wrap">
                       {([
                         { id: "all", label: "All", count: totalCandidatesCount },
-                        { id: "jobdiva", label: "JobDiva", count: sourceCounts["jobdiva"] || 0 },
-                        { id: "talent-search", label: "Talent Search", count: sourceCounts["talent-search"] || 0 },
+                        // Labels mirror the Search Sources checkboxes so the
+                        // recruiter can tie a result bucket back to the pool
+                        // that produced it.
+                        { id: "jobdiva", label: "JobDiva Agent", count: sourceCounts["jobdiva"] || 0 },
+                        { id: "talent-search", label: "JobDiva Talent", count: sourceCounts["talent-search"] || 0 },
                         { id: "linkedin-unipile", label: "LinkedIn-Unipile", count: sourceCounts["linkedin-unipile"] || 0 },
                         { id: "linkedin-exa", label: "LinkedIn-Exa", count: sourceCounts["linkedin-exa"] || 0 },
                         { id: "dice", label: "Dice", count: sourceCounts["dice"] || 0 },
@@ -9147,7 +9203,7 @@ function NewJobPageContent() {
                 </div>
                 {candidates.length > 0 && (
                   <div className="flex items-center gap-2">
-                    {hasSearched && !isSearching && !hasFetchedMoreJobDiva && searchSources.jobdiva && (
+                    {hasSearched && !isSearching && !hasFetchedMoreJobDiva && jobdivaSelected && (
                       <Button
                         variant="outline"
                         className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-800 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50 hover:text-slate-800 hover:border-slate-200"
@@ -9167,10 +9223,16 @@ function NewJobPageContent() {
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-800 bg-white shadow-sm flex items-center gap-2 hover:bg-slate-50 hover:text-slate-800 hover:border-slate-200"
                       onClick={() => {
                         const n = Math.max(1, selectBestN);
-                        const firstN = candidates
+                        // Slice the SORTED + FILTERED table view, not the raw
+                        // SSE-arrival array: "Select Best 100" must honor the
+                        // sort (match score) and the MIN MATCH / location /
+                        // source filters the recruiter has applied — the old
+                        // arrival-order slice could select low-score rows the
+                        // table was hiding.
+                        const firstN = sortedCandidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                            return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
+                            return !dncCandidateKeys.has(key);
                           })
                           .slice(0, n);
 
@@ -9200,10 +9262,10 @@ function NewJobPageContent() {
                       <Star className="w-3.5 h-3.5 fill-slate-700" />
                       {(() => {
                         const n = Math.max(1, selectBestN);
-                        const firstN = candidates
+                        const firstN = sortedCandidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                            return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
+                            return !dncCandidateKeys.has(key);
                           })
                           .slice(0, n);
                         const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.jobdiva_candidate_id || c.id));
@@ -9239,9 +9301,12 @@ function NewJobPageContent() {
                       variant="outline"
                       className="h-8 px-4 text-[13px] font-bold border-slate-200 text-slate-800 bg-white shadow-sm hover:bg-slate-50 hover:text-slate-800 hover:border-slate-200"
                       onClick={() => {
-                        const eligible = candidates.filter(c => {
+                        // Same rule as Select Best: act on the rows the
+                        // recruiter can SEE (sorted + filtered), never on
+                        // rows hidden by the min-match/location filters.
+                        const eligible = sortedCandidates.filter(c => {
                           const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                          return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
+                          return !dncCandidateKeys.has(key);
                         });
                         const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
@@ -9670,7 +9735,7 @@ function NewJobPageContent() {
                     variant="outline"
                     className="h-[42px] px-4 font-semibold text-[14px] rounded-xl flex items-center gap-2 border-slate-300 text-slate-700 hover:bg-slate-50"
                     onClick={() => window.open("/", "_blank", "noopener,noreferrer")}
-                    title="Open the Curate home page in a new tab so you can keep working while sourcing runs"
+                    title="Open the PAIR home page in a new tab so you can keep working while sourcing runs"
                   >
                     <ExternalLink className="w-4 h-4" />
                     New tab

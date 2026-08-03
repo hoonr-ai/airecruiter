@@ -31,16 +31,17 @@ export function Sidebar() {
 
     return (
         <div className="w-[260px] border-r border-slate-200 bg-white h-screen flex flex-col fixed left-0 top-0 p-6">
-            {/* Brand wordmark — stacked "Hoonr./Curate" with the arrow
-                flourishes baked into the PNG. Source: apps/web/public/hoonr-curate-logo.png.
-                `unoptimized` skips Next's image pipeline since the source PNG is oversized
-                (2730×1536, 4MB) and we just want the raw asset rendered by the browser. */}
+            {/* PAIR brand wordmark. Source: apps/web/public/pair-logo.png — 800×242
+                (3.3:1), already trimmed to the artwork so there is no dead canvas to
+                letterbox. width/height below must keep that ratio or the reserved box
+                shifts on load. Plain <img> rather than next/image: it is a fixed-size
+                brand asset, so the resize pipeline buys nothing. */}
             <div className="brand flex items-center justify-center mb-10">
                 <img
-                    src="/hoonr-curate-logo.png"
-                    alt="Hoonr.Curate"
+                    src="/pair-logo.png"
+                    alt="PAIR"
                     width={200}
-                    height={112}
+                    height={61}
                     className="object-contain"
                     style={{ width: 200, height: "auto" }}
                 />

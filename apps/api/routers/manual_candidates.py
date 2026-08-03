@@ -19,6 +19,7 @@ async def _score_and_save_resume(job_row: dict, name: str, email: str, phone: st
     import time as _time
     from services.unified_candidate_search import unified_search_service, SearchCriteria
     from services.sourced_candidates_storage import process_jobdiva_candidate
+    from services.location import sanitize_candidate_location
 
     jobdiva_ref = job_row.get("jobdiva_id") or str(job_row.get("job_id"))
     sourcing_filters = job_row.get("sourcing_filters") or {}
@@ -75,7 +76,12 @@ async def _score_and_save_resume(job_row: dict, name: str, email: str, phone: st
         candidate["email"] = enhanced_info.get("email") or candidate["email"]
         candidate["phone"] = enhanced_info.get("phone") or candidate["phone"]
         candidate["title"] = enhanced_info.get("job_title") or candidate["title"]
-        candidate["location"] = enhanced_info.get("current_location") or candidate["location"]
+        # Recruiter-entered location wins; LLM fills a blank. Neither side may
+        # be a work-arrangement string ("Remote" is not a place).
+        candidate["location"] = (
+            sanitize_candidate_location(candidate["location"])
+            or sanitize_candidate_location(enhanced_info.get("current_location"))
+        )
         candidate["skills"] = enhanced_info.get("structured_skills") or enhanced_info.get("skills") or []
         candidate["years_of_experience"] = enhanced_info.get("years_of_experience")
 

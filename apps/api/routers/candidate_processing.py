@@ -12,6 +12,7 @@ from models import (
     Skill
 )
 from services.jobdiva import JobDivaService
+from services.location import sanitize_candidate_location
 from core.config import DATABASE_URL, SUPABASE_DB_URL
 
 logger = logging.getLogger(__name__)
@@ -549,7 +550,9 @@ async def get_candidate_enhanced_info(candidate_id: str) -> Dict[str, Any]:
                 "email": row[2],
                 "phone": row[3],
                 "job_title": row[4],
-                "location": row[5],
+                # Sanitize on read: rows written before the work-arrangement
+                # guard can carry "Remote"/"Hybrid" as a residence.
+                "location": sanitize_candidate_location(row[5]) or None,
                 "years_experience": row[6],
                 "skills": row[7] or [],
                 "company_experience": row[8] or [],

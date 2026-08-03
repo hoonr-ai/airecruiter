@@ -109,7 +109,13 @@ async def tira_match_resume(
         candidate["email"] = enhanced.get("email") or candidate["email"]
         candidate["phone"] = enhanced.get("phone") or candidate["phone"]
         candidate["title"] = enhanced.get("job_title") or candidate["title"]
-        candidate["location"] = enhanced.get("current_location") or candidate["location"]
+        # LLM fills the blank location, but a work-arrangement string
+        # ("Remote") is not a place — sanitize before accepting.
+        from services.location import sanitize_candidate_location
+        candidate["location"] = (
+            sanitize_candidate_location(candidate["location"])
+            or sanitize_candidate_location(enhanced.get("current_location"))
+        )
         candidate["skills"] = enhanced.get("structured_skills") or enhanced.get("skills") or []
         candidate["years_of_experience"] = enhanced.get("years_of_experience")
 
@@ -315,7 +321,7 @@ def _send_bug_email(
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = recipient
-    msg["Subject"] = f"[Hoonr bug] {title[:120]}"
+    msg["Subject"] = f"[PAIR bug] {title[:120]}"
     body_lines = [
         description.strip() or "(no description provided)",
         "",

@@ -249,7 +249,9 @@ export default function CampaignDetailPage() {
   const jobs = campaign.jobs ?? [];
   const launchedCount = jobs.filter((j) => j.pair_launched_at).length;
   const openSource = (j: CampaignChildJob) =>
-    router.push(`/jobs/new?jobId=${encodeURIComponent(j.jobdiva_id || j.job_id)}&mode=source&step=5`);
+    router.push(
+      `/jobs/new?jobId=${encodeURIComponent(j.jobdiva_id || j.job_id)}&mode=${j.pair_launched_at ? "source" : "edit"}&step=5`
+    );
 
   return (
     <div className="max-w-7xl mx-auto p-8 pb-24">

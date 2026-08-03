@@ -277,7 +277,7 @@ async def lifespan(app: FastAPI):
         logger.error(f"dnc_schema_init_failed: {e}; continuing")
 
     # 7. Provision `source` column on job_skills / job_education so the
-    # Step 3 rubric chip can show "Recruiter" vs "Hoonr-Curate" provenance
+    # Step 3 rubric chip can show "Recruiter" vs "PAIR" provenance
     # and have it survive save+reload. Idempotent ALTER TABLE ADD COLUMN
     # IF NOT EXISTS — safe across redeploys.
     try:

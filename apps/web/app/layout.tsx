@@ -13,8 +13,7 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 const outfit = Outfit({ subsets: ["latin"], variable: "--font-outfit" });
 
 export const metadata: Metadata = {
-  title: "Hoonr.ai | Deployment OS",
-  description: "Advanced Talent Operating System",
+  title: "PAIR",
 };
 
 export default function RootLayout({

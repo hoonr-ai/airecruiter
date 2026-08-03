@@ -128,6 +128,10 @@ class CandidateSearchRequest(BaseModel):
     companies: List[str] = []  # Target companies
     resume_match_filters: List[ResumeMatchFilter] = []
     location_type: str = "Unspecified"
+    # Producers to run. JobDiva's two talent pools are independently
+    # selectable: "JobDiva-JobAgent" (JobDiva's AI matcher) and
+    # "JobDiva-TalentSearch" (our generated boolean). Bare "JobDiva" is the
+    # legacy combined value and still runs both.
     sources: List[str] = ["JobDiva"]
     open_to_work: bool = True
     boolean_string: str = ""

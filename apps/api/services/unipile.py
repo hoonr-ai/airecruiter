@@ -293,6 +293,13 @@ class UnipileService:
             return _COOLDOWN_RATE_LIMIT_S
         if status_code >= 500:
             return _COOLDOWN_TRANSIENT_S
+        # 404/422 can be account-scoped (e.g. a seat without Recruiter access,
+        # or an account-specific resource) — bench briefly and let the caller
+        # try a sibling. A genuinely bad payload fails on every sibling and
+        # still ends as an empty result, so rotating costs little; treating
+        # these as fatal used to zero the whole channel on one bad account.
+        if status_code in (404, 422):
+            return _COOLDOWN_TRANSIENT_S
         return None
 
     def _clean_candidate_name(self, value: Optional[str]) -> Optional[str]:
@@ -454,7 +461,6 @@ class UnipileService:
         self,
         boolean_string: str,
         resolved_skill_names: List[str],
-        has_location_id: bool,
     ) -> str:
         s = boolean_string or ""
         # Drop years-of-experience phrases — LinkedIn profiles rarely contain the exact "10+ years" literal
@@ -464,10 +470,20 @@ class UnipileService:
         # JobDiva, so these tokens leak into LinkedIn searches and match nothing.
         s = re.sub(r'\bOVER\s+\d+\s+YRS?\b', "", s, flags=re.IGNORECASE)
         s = re.sub(r'\s+AND\s+recent', "", s, flags=re.IGNORECASE)
-        # Drop location radius clauses when we've already resolved the location to an ID
-        if has_location_id:
-            s = re.sub(r'"[^"]+"\s+within\s+\d+\s+mi', "", s, flags=re.IGNORECASE)
-            s = re.sub(r'within\s+\d+\s+mi', "", s, flags=re.IGNORECASE)
+        # Drop location radius clauses UNCONDITIONALLY. These were only
+        # stripped when the location resolved to a geo ID — exactly backwards:
+        # when resolution FAILED, the literal `"Dallas, TX" within 25 mi`
+        # stayed in the keyword string, and LinkedIn keyword search ANDs it
+        # against profile bodies, collapsing results to near-zero. A location
+        # literal never helps keyword search; geo filtering rides on the
+        # structured location URN plus our post-search gates.
+        s = re.sub(r'"[^"]+"\s+within\s+\d+\s+mi', "", s, flags=re.IGNORECASE)
+        s = re.sub(r'within\s+\d+\s+mi', "", s, flags=re.IGNORECASE)
+        # Same class of failure: a literal country phrase ANDed into keywords
+        # (historic server-side scoping, or a wizard-authored clause) matches
+        # almost no profile body. Strip the known spellings.
+        s = re.sub(r'\s+AND\s+"(?:United States|United States of America|USA|U\.S\.A?\.?|Canada)"', "", s, flags=re.IGNORECASE)
+        s = re.sub(r'"(?:United States|United States of America|USA|U\.S\.A?\.?|Canada)"', "", s, flags=re.IGNORECASE)
         # Drop quoted skill terms we've already resolved to IDs
         for name in resolved_skill_names:
             escaped = re.escape(name)
@@ -552,10 +568,15 @@ class UnipileService:
         tried: set = set()
         for _ in range(max_attempts):
             account_id = await self.acquire_account()
-            if not account_id or account_id in tried:
-                # No account available, or rotation cycled back to one we've
-                # already searched — the pool of distinct accounts is exhausted.
+            if not account_id:
+                # No account available at all.
                 break
+            if account_id in tried:
+                # Under multi-worker SKIP LOCKED contention the LRU claim can
+                # hand back an id we already searched while an untried sibling
+                # exists — burn this attempt and re-claim instead of aborting
+                # the whole rotation (max_attempts bounds the loop).
+                continue
             tried.add(account_id)
             results, outcome = await self._search_candidates_once(
                 account_id, skills, location, open_to_work, limit, boolean_string
@@ -629,13 +650,23 @@ class UnipileService:
                          priority = "CAN_HAVE"
                      skill_ids.append({"id": s_id, "priority": priority, "name_ref": name})
         
-        # 2. Resolve Location ID
+        # 2. Resolve Location ID. Try the most-specific form first:
+        # "Dallas, TX" disambiguates against LinkedIn's geo index (which
+        # ranks a bare "Dallas" query by prominence and can hand back the
+        # wrong same-name town/region), then fall back to the city alone.
         location_ids = []
         if location and location.strip():
-             loc_term = location.split(",")[0].strip()
-             l_id = await self._resolve_id("location", loc_term, account_id=account_id)
-             if l_id:
-                 location_ids.append(l_id)
+             loc_parts = [p.strip() for p in location.split(",") if p.strip()]
+             attempts = []
+             if len(loc_parts) >= 2:
+                 attempts.append(", ".join(loc_parts[:2]))
+             if loc_parts:
+                 attempts.append(loc_parts[0])
+             for loc_term in attempts:
+                 l_id = await self._resolve_id("location", loc_term, account_id=account_id)
+                 if l_id:
+                     location_ids.append(l_id)
+                     break
 
         # 3. Build Payload using Recruiter API structure
         url = f"{self.api_url}/linkedin/search"
@@ -647,7 +678,6 @@ class UnipileService:
             final_keywords = self._sanitize_linkedin_keywords(
                 boolean_string,
                 resolved_skill_names=[s["name_ref"].lower() for s in skill_ids if s.get("name_ref")],
-                has_location_id=bool(location_ids),
             )
             logger.info(f"Unipile keywords sanitized: '{boolean_string[:120]}...' -> '{final_keywords[:120]}...'")
         else:
@@ -729,6 +759,14 @@ class UnipileService:
                             "firstName": first_name,
                             "lastName": last_name,
                             "email": "",
+                            # LinkedIn's area string ("Toronto, Ontario,
+                            # Canada" / "Greater Chicago Area"). Exposing it
+                            # as `location` (not just `city`) lets the parser
+                            # split city/state/country so the radius and
+                            # country gates can actually place Unipile rows —
+                            # with state hardcoded "" they were unplaceable
+                            # and every location check soft-kept them.
+                            "location": item.get("location", ""),
                             "city": item.get("location", ""),
                             "state": "",
                             "title": item.get("headline", ""),
@@ -761,8 +799,8 @@ class UnipileService:
                         # rotate to a sibling.
                         await self.mark_account_failure(account_id, f"search {resp.status_code}: {body[:200]}", cooldown_s)
                         return [], "rotate"
-                    # Bad-payload 4xx (400/404/422 …): the same request would
-                    # fail identically on every account — don't rotate.
+                    # Bad-payload 400: the same request would fail identically
+                    # on every account — don't rotate.
                     return [], "fatal"
 
         except Exception as e:

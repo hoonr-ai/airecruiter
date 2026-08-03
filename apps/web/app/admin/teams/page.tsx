@@ -398,7 +398,7 @@ export default function AdminTeamsPage() {
                 id="team-leads"
                 value={form.lead_emails}
                 onChange={(e) => setForm((f) => ({ ...f, lead_emails: e.target.value }))}
-                placeholder="lead1@hoonr.com, lead2@hoonr.com"
+                placeholder="lead1@example.com, lead2@example.com"
                 className="min-h-[64px] text-[13px]"
               />
               <p className="text-[11.5px] text-slate-400">
@@ -414,7 +414,7 @@ export default function AdminTeamsPage() {
                 id="team-members"
                 value={form.member_emails}
                 onChange={(e) => setForm((f) => ({ ...f, member_emails: e.target.value }))}
-                placeholder="recruiter1@hoonr.com, recruiter2@hoonr.com"
+                placeholder="recruiter1@example.com, recruiter2@example.com"
                 className="min-h-[88px] text-[13px]"
               />
               <p className="text-[11.5px] text-slate-400">
