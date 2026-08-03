@@ -455,7 +455,7 @@ export default function AdminAnalyticsPage() {
 
     const sm = data.submission_metrics || {};
     const lines = [
-      "Hoonr Curate - Executive Analytics Report",
+      "PAIR - Executive Analytics Report",
       `Generated: ${new Date().toLocaleDateString()}`,
       `Scope: ${data.team_scope ? `Team - ${data.team_scope.team_name}` : "All Teams (System-wide)"}`,
       "",
@@ -514,7 +514,7 @@ export default function AdminAnalyticsPage() {
       ...(data.top_recruiters || []).map((r, idx) => `#${idx + 1},${escapeCsvField(r.email)},${r.active_jobs},${r.total_candidates}`),
       "",
       "--- JOB LAUNCH TIMELINE ---",
-      "Job Title,JobDiva Ref,Client,Posted on JobDiva,Added to Curate,Launched on Curate,Lag (days),PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals",
+      "Job Title,JobDiva Ref,Client,Posted on JobDiva,Added to PAIR,Launched on PAIR,Lag (days),PAIR Status,Candidates Sourced,Candidates Launched,JobDiva Submittals",
       ...(data.jobs_timeline || []).map((job) =>
         [
           escapeCsvField(job.title),
@@ -562,7 +562,7 @@ export default function AdminAnalyticsPage() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.setAttribute("download", `hoonr-curate-analytics-${new Date().toISOString().split("T")[0]}.csv`);
+    link.setAttribute("download", `pair-analytics-${new Date().toISOString().split("T")[0]}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -782,13 +782,13 @@ export default function AdminAnalyticsPage() {
                 )}
               </div>
             )}
-            <div className="text-[12px] text-slate-400 mt-1.5 font-medium">JobDiva post → Curate launch</div>
+            <div className="text-[12px] text-slate-400 mt-1.5 font-medium">JobDiva post → PAIR launch</div>
           </div>
         </div>
 
         <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-sm flex flex-col justify-between">
           <div className="flex items-center justify-between">
-            <span className="text-[13px] font-semibold text-slate-500">Jobs Launched on Curate</span>
+            <span className="text-[13px] font-semibold text-slate-500">Jobs Launched on PAIR</span>
             <div className="w-8 h-8 rounded-lg bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600">
               <Rocket className="w-4 h-4" />
             </div>
@@ -1434,7 +1434,7 @@ export default function AdminAnalyticsPage() {
                 <CalendarClock className="w-4 h-4 text-indigo-600" />
                 Job Launch Timeline
               </h2>
-              <p className="text-[12px] text-slate-500 mt-0.5">JobDiva posting → Curate launch lifecycle, most recent first</p>
+              <p className="text-[12px] text-slate-500 mt-0.5">JobDiva posting → PAIR launch lifecycle, most recent first</p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <div className="relative">
@@ -1484,8 +1484,8 @@ export default function AdminAnalyticsPage() {
                 <th className="py-3 px-6">Job</th>
                 <th className="py-3 px-6">Client</th>
                 <th className="py-3 px-6">Posted (JobDiva)</th>
-                <th className="py-3 px-6">Added (Curate)</th>
-                <th className="py-3 px-6">Launched (Curate)</th>
+                <th className="py-3 px-6">Added (PAIR)</th>
+                <th className="py-3 px-6">Launched (PAIR)</th>
                 <th className="py-3 px-6 text-center">Lag</th>
                 <th className="py-3 px-6 text-center">PAIR Status</th>
                 <th className="py-3 px-6 text-center">Sourced</th>

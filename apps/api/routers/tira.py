@@ -321,7 +321,7 @@ def _send_bug_email(
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = recipient
-    msg["Subject"] = f"[Hoonr bug] {title[:120]}"
+    msg["Subject"] = f"[PAIR bug] {title[:120]}"
     body_lines = [
         description.strip() or "(no description provided)",
         "",

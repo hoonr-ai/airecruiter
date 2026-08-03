@@ -26,10 +26,11 @@ export function LoginPage() {
                     <div className="flex items-center justify-center mb-8">
                         {/* <Bot className="w-10 h-10 text-primary" strokeWidth={2.5} /> */}
                         {/* <span className="text-4xl font-bold tracking-tight text-primary font-outfit">PAIR</span> */}
-                        <img src="/hoonr-curate-logo.png" alt="Hoonr Curate" className="h-28 w-auto object-contain" />
+                        {/* h-16, not h-28: the wordmark is 3.3:1, so 112px tall would
+                            render ~370px wide and overflow this 360px card interior. */}
+                        <img src="/pair-logo.png" alt="PAIR" className="h-16 w-auto object-contain" />
                     </div>
-                    <h1 className="text-2xl font-semibold text-slate-900 mb-2 tracking-tight">Sign in to your account</h1>
-                    <p className="text-slate-500 text-[15px]">Hoonr.ai • Advanced Talent Operating System</p>
+                    <h1 className="text-2xl font-semibold text-slate-900 tracking-tight">Sign in to your account</h1>
                 </div>
                 
                 <button 

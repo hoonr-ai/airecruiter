@@ -16,10 +16,15 @@ def _ensure_rubric_schema_sync() -> None:
 
     1. `source` columns — recruiter-added vs AI-extracted rubric items need
        to round-trip provenance so the chip in Step 3 ("Recruiter" /
-       "Hoonr-Curate") survives save+reload. `job_titles.source` already
+       "PAIR") survives save+reload. `job_titles.source` already
        existed pre-change; `job_skills.source` and `job_education.source`
        are added here as nullable TEXT so legacy rows are read as
-       Hoonr-Curate by the reader's COALESCE.
+       PAIR by the reader's COALESCE.
+
+       The non-recruiter sentinel is written as 'PAIR' post-rebrand; rows
+       written before it still hold 'Hoonr-Curate'. No migration is needed
+       because the only consumer (sourceLabel in the wizard) tests for
+       'recruiter' and treats every other value as PAIR.
 
     2. Unique indexes on (jobdiva_id, LOWER(skill_name)) and
        (jobdiva_id, LOWER(title)) — defense-in-depth against duplicate
@@ -174,7 +179,7 @@ class JobRubricDB:
                             (s.get('importance', s.get('required', 'Required')) == 'Required'),
                             s.get('category', 'hard'),
                             s.get('similar_skills', []), # psycopg2 handles list as postgres ARRAY
-                            s.get('source') or 'Hoonr-Curate',
+                            s.get('source') or 'PAIR',
                         ))
 
                     # 3. Save Titles / Experience
@@ -206,7 +211,7 @@ class JobRubricDB:
                             e.get('degree', ''),
                             e.get('field', ''),
                             e.get('required', 'Required') == 'Required',
-                            e.get('source') or 'Hoonr-Curate',
+                            e.get('source') or 'PAIR',
                         ))
 
                     # 5. Save Customer Requirements
@@ -317,7 +322,7 @@ class JobRubricDB:
                             "recent": r.get('recent'),
                             "matchType": 'Similar' if not match_type or match_type.lower() == 'similar' else match_type,
                             "required": "Required" if r.get('is_required') else "Preferred",
-                            "source": r.get('source') or 'Hoonr-Curate',
+                            "source": r.get('source') or 'PAIR',
                             "similar_skills": list(r.get('similar_skills')) if r.get('similar_skills') else []
                         }
                         if r.get('category') == 'soft':
@@ -334,7 +339,7 @@ class JobRubricDB:
                             "recent": r.get('recent'),
                             "matchType": 'Similar' if not match_type or match_type.lower() == 'similar' else match_type,
                             "required": "Required" if r.get('is_required') else "Preferred",
-                            "source": r.get('source') or 'Hoonr-Curate',
+                            "source": r.get('source') or 'PAIR',
                             "similar_titles": list(r.get('similar_titles')) if r.get('similar_titles') else []
                         })
 
@@ -342,7 +347,7 @@ class JobRubricDB:
                         "degree": r.get('degree'),
                         "field": r.get('field'),
                         "required": "Required" if r.get('is_required') else "Preferred",
-                        "source": r.get('source') or 'Hoonr-Curate'
+                        "source": r.get('source') or 'PAIR'
                     } for r in (row.get('education_rows') or [])]
 
                     customer_reqs = [
