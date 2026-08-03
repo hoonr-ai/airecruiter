@@ -1574,8 +1574,15 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 if item_source_id:
                     interview_by_source_candidate_id[item_source_id] = item
                 item_email = str(item.get("candidate_email") or "").lower().strip()
-                if item_email:
+                # First-write-wins: prevents a duplicate email in data[] from
+                # silently overwriting an earlier valid match.
+                if item_email and item_email not in interview_by_email:
                     interview_by_email[item_email] = item
+
+            entries_without_source_id = sum(
+                1 for item in data_list
+                if isinstance(item, dict) and not str(item.get("source_candidate_id") or "").strip()
+            )
 
             # Position N in real_candidate_ids corresponds to position N in
             # payload_obj.resumes (both built from the same selection in
@@ -1623,7 +1630,8 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                     else {}
                 )
                 if not interview_info:
-                    interview_info = interview_by_email.get(submitted_email) or {}
+                    # Pop so a shared email cannot match two different candidates.
+                    interview_info = interview_by_email.pop(submitted_email, {}) if submitted_email else {}
                 # NOTE: The legacy positional fallback (data_list[idx]) has been
                 # intentionally removed. When the Bot API skips a candidate (e.g.
                 # missing email and phone) its response data[] is shorter than the
@@ -1642,10 +1650,12 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
 
                 if not interview_id:
                     logger.warning(
-                        "engagement_no_interview_match candidate_id=%s submitted_email=%s response_data_count=%d request_count=%d",
+                        "engagement_no_interview_match candidate_id=%s submitted_source_id=%s submitted_email=%s response_data_count=%d entries_without_source_id=%d request_count=%d",
                         candidate_id,
+                        submitted_source_id,
                         submitted_email,
                         len(data_list),
+                        entries_without_source_id,
                         len(request.real_candidate_ids),
                     )
 
