@@ -298,10 +298,12 @@ function deriveCountry(stateCode: string | null | undefined): string {
 }
 
 // Provenance chip text for rubric items (titles, skills, education, domain).
-// Items extracted by the AI keep the existing "Hoonr-Curate" label; items
-// added manually by the recruiter via the "Add" buttons get "Recruiter".
+// Only "recruiter" is matched explicitly (set by the manual "Add" buttons);
+// everything else is AI-extracted and renders as "PAIR". That fallback is what
+// lets pre-rebrand rows still carrying source='Hoonr-Curate' render correctly
+// without a data migration.
 function sourceLabel(source: string | null | undefined): string {
-  return (source || "").toLowerCase() === "recruiter" ? "Recruiter" : "Hoonr-Curate";
+  return (source || "").toLowerCase() === "recruiter" ? "Recruiter" : "PAIR";
 }
 function isRecruiterSource(source: string | null | undefined): boolean {
   return (source || "").toLowerCase() === "recruiter";
@@ -414,7 +416,7 @@ const STEP_LABELS = {
 
 const STEP_DESCRIPTIONS: Record<Step, string> = {
   1: "Enter a JobDiva Job ID to get started.",
-  2: "Review your Hoonr-Curate-enhanced job posting and select where to publish externally.",
+  2: "Review your PAIR-enhanced job posting and select where to publish externally.",
   3: "Define evaluation criteria and rubric for candidate assessment.",
   4: "Configure filters and requirements for candidate matching.",
   5: "Launch sourcing and begin candidate collection."
@@ -2733,7 +2735,7 @@ function NewJobPageContent() {
           await handleEnhanceJob(nextTitle);
         }
 
-        showToast("Title enhanced by Hoonr-Curate.", "success");
+        showToast("Title enhanced by PAIR.", "success");
         trackEvent("job_wizard_step2_title_enhance_success", {
           step: 2,
           title: truncateForTelemetry(data?.title),
@@ -3058,7 +3060,7 @@ function NewJobPageContent() {
         <FileInput className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[20px] font-semibold text-slate-900 leading-tight tracking-tight">Intake</h2>
-          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Fetch job details from JobDiva, then add any additional context for Hoonr-Curate.</p>
+          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Fetch job details from JobDiva, then add any additional context for PAIR.</p>
         </div>
       </div>
 
@@ -3121,7 +3123,7 @@ function NewJobPageContent() {
         ) : !isFetched ? (
           <div className="space-y-5">
             <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 text-[13px] text-amber-800 leading-relaxed">
-              <strong className="font-semibold">External Requirement</strong> — not linked to JobDiva. Paste the job description; Hoonr-Curate will extract skills and rubric. JobDiva-specific fields (applicant list, UDFs) will be skipped.
+              <strong className="font-semibold">External Requirement</strong> — not linked to JobDiva. Paste the job description; PAIR will extract skills and rubric. JobDiva-specific fields (applicant list, UDFs) will be skipped.
             </div>
             <div className="grid grid-cols-2 gap-4">
               <div>
@@ -3152,7 +3154,7 @@ function NewJobPageContent() {
                 rows={10}
                 className="bg-white border-slate-200 text-[13px] leading-relaxed"
               />
-              <p className="text-[11px] text-slate-500 mt-2">Hoonr-Curate will extract the rubric (titles, skills, education) from this text.</p>
+              <p className="text-[11px] text-slate-500 mt-2">PAIR will extract the rubric (titles, skills, education) from this text.</p>
             </div>
             <div>
               <button
@@ -3290,10 +3292,10 @@ function NewJobPageContent() {
 
               <div className="border-t border-slate-100 my-6" />
 
-              {/* Hoonr-Curate Setup Section */}
+              {/* PAIR Setup Section */}
               <div className="flex items-center gap-2 mb-5">
                 <Settings className="w-5 h-5 text-slate-700 flex-shrink-0" />
-                <span className="text-[14px] font-bold text-slate-900">Hoonr-Curate Setup</span>
+                <span className="text-[14px] font-bold text-slate-900">PAIR Setup</span>
                 <span className="text-[12px] text-slate-500 font-normal">Configure your screening before proceeding</span>
               </div>
 
@@ -3376,7 +3378,7 @@ function NewJobPageContent() {
               {/* Screening Level */}
               <div>
                 <label className="block text-[14px] font-medium text-slate-900 mb-1">Screening Level</label>
-                <p className="text-[13px] text-slate-500 mb-4">How deeply should Hoonr-Curate screen each candidate?</p>
+                <p className="text-[13px] text-slate-500 mb-4">How deeply should PAIR screen each candidate?</p>
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
                   {/* L0.5 */}
                   <div
@@ -3470,7 +3472,7 @@ function NewJobPageContent() {
         <Megaphone className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight">Publish</h2>
-          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Review your Hoonr-Curate-enhanced job posting and select where to publish externally.</p>
+          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Review your PAIR-enhanced job posting and select where to publish externally.</p>
         </div>
       </div>
       <div className="p-7">
@@ -3512,7 +3514,7 @@ function NewJobPageContent() {
             <div className="flex items-center justify-between mb-3 mt-8">
               <div className="bg-[#eef2ff] text-[#4f46e5] flex items-center gap-1.5 px-4 py-1.5 rounded-full text-[12.5px] font-medium border border-[#ddd6fe]">
                 <Sparkles className="w-3.5 h-3.5" />
-                Hoonr-Curate-Enhanced Job Posting
+                PAIR-Enhanced Job Posting
               </div>
               <Button
                 variant="outline"
@@ -3617,7 +3619,7 @@ function NewJobPageContent() {
             <div className="flex items-start gap-2 mt-5 px-1">
               <Info className="w-4 h-4 text-slate-400 mt-0.5 flex-shrink-0" />
               <p className="text-[12px] text-slate-500 leading-snug font-medium">
-                Job posting team will receive your request to post after you Launch Hoonr-Curate.
+                Job posting team will receive your request to post after you Launch PAIR.
               </p>
             </div>
 
@@ -3809,7 +3811,7 @@ function NewJobPageContent() {
       const updated = { ...prev };
       if (!updated[category]) updated[category] = [];
       // Titles preserve the source from the call site (AI extractor passes
-      // 'Hoonr-Curate'; the manual "Add Title" button passes 'Recruiter') so
+      // 'PAIR'; the manual "Add Title" button passes 'Recruiter') so
       // the chip label can reflect provenance.
       if (category === 'titles') {
         const pairTitle = getNormalizedTitleItem({
@@ -3843,14 +3845,14 @@ function NewJobPageContent() {
         <ListChecks className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[21px] font-medium text-slate-900 leading-tight tracking-tight">Establish Rubric</h2>
-          <p className="text-slate-500 text-[15px] mt-1 leading-relaxed">Hoonr-Curate-extracted rubric items from the job description. These become the rubric by which candidates are graded. Edit freely.</p>
+          <p className="text-slate-500 text-[15px] mt-1 leading-relaxed">PAIR-extracted rubric items from the job description. These become the rubric by which candidates are graded. Edit freely.</p>
         </div>
       </div>
 
       {isGeneratingRubric ? (
         <div className="p-20 flex flex-col items-center justify-center gap-4">
           <div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
-          <p className="text-[15px] font-medium text-slate-600 animate-pulse">Extracting criteria from Hoonr-Curate Job Description...</p>
+          <p className="text-[15px] font-medium text-slate-600 animate-pulse">Extracting criteria from PAIR Job Description...</p>
         </div>
       ) : rubricData ? (
         <div className="p-7 space-y-7">
@@ -4136,7 +4138,7 @@ function NewJobPageContent() {
                 <h3 className="text-[14px] font-bold text-slate-800">Education & Certificates</h3>
               </div>
               <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                <Sparkles className="w-3 h-3" /> Hoonr-Curate detected
+                <Sparkles className="w-3 h-3" /> PAIR detected
               </span>
             </div>
 
@@ -4280,7 +4282,7 @@ function NewJobPageContent() {
               <UserCheck className="w-4 h-4 text-slate-900 flex-shrink-0" />
               <h3 className="text-[14px] font-bold text-slate-800">Customer Requirements</h3>
               <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
-                <Sparkles className="w-3 h-3" /> Hoonr-Curate generated
+                <Sparkles className="w-3 h-3" /> PAIR generated
               </span>
             </div>
 
@@ -6354,7 +6356,7 @@ function NewJobPageContent() {
     try {
       const initial = resolvedGeneratedBoolean;
       setGeneratedBoolean(initial);
-      const attempts: { query: string; label: string }[] = [{ query: initial, label: "Hoonr-Curate generated" }];
+      const attempts: { query: string; label: string }[] = [{ query: initial, label: "PAIR generated" }];
       setBooleanAttempts(attempts);
       currentAttempts = attempts;
       setSearchStatus("Connecting to source portals...");
@@ -6366,7 +6368,7 @@ function NewJobPageContent() {
       runBreakdown = [
         {
           attempt: 1,
-          label: "Hoonr-Curate generated",
+          label: "PAIR generated",
           query: truncateForTelemetry(initial, 260),
           duration_seconds: Number(((Date.now() - firstRunStartMs) / 1000).toFixed(2)),
           results_count: firstRun.length,
@@ -6516,7 +6518,7 @@ function NewJobPageContent() {
     const relaxed = relaxBooleanString(base, tier);
     const nextAttempts = booleanAttempts.length
       ? [...booleanAttempts, { query: relaxed.query, label: relaxed.label }]
-      : [{ query: base, label: "Hoonr-Curate generated" }, { query: relaxed.query, label: relaxed.label }];
+      : [{ query: base, label: "PAIR generated" }, { query: relaxed.query, label: relaxed.label }];
     setBooleanAttempts(nextAttempts);
     setGeneratedBoolean(relaxed.query);
     setBooleanUserEdited(true);
@@ -6674,7 +6676,7 @@ function NewJobPageContent() {
         <Filter className="w-[22px] h-[22px] text-primary mt-0.5 flex-shrink-0" />
         <div>
           <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight">Set Filters</h2>
-          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Each rubric item from Establish Rubric is evaluated here. Toggle, edit, or add filters for resume matching and the Hoonr-Curate phone screen.</p>
+          <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">Each rubric item from Establish Rubric is evaluated here. Toggle, edit, or add filters for resume matching and the PAIR phone screen.</p>
         </div>
       </div>
 
@@ -6687,7 +6689,7 @@ function NewJobPageContent() {
             <span className="text-[12px] font-normal text-slate-500">Hard filters applied during resume matching</span>
             <span className="ml-auto bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
               <Sparkles className="w-3 h-3 inline mr-1" />
-              Hoonr-Curate pre-filled
+              PAIR pre-filled
             </span>
           </div>
 
@@ -6740,7 +6742,7 @@ function NewJobPageContent() {
                   <div className="w-[220px] flex-shrink-0 flex items-center justify-end gap-2">
                     {filter.ai && (
                       <span className="bg-[#ede9fe] text-[#6d28d9] text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
-                        Hoonr-Curate
+                        PAIR
                       </span>
                     )}
                     {filter.fromRubric && (
@@ -6804,7 +6806,7 @@ function NewJobPageContent() {
                   <div className="w-[220px] flex-shrink-0 flex items-center justify-end gap-2">
                     {filter.ai && (
                       <span className="bg-slate-100 text-slate-400 text-[10.5px] font-bold px-2 py-0.5 rounded-full tracking-tight flex-shrink-0">
-                        Hoonr-Curate
+                        PAIR
                       </span>
                     )}
                     {filter.fromRubric && (
@@ -6849,7 +6851,7 @@ function NewJobPageContent() {
           <div className="flex items-center gap-2 mb-4">
             <Users className="w-4 h-4 text-slate-900 flex-shrink-0" />
             <h3 className="text-[14px] font-bold text-slate-800">Screen</h3>
-            <span className="text-[12px] font-normal text-slate-500">Questions asked during Hoonr-Curate phone screen</span>
+            <span className="text-[12px] font-normal text-slate-500">Questions asked during PAIR phone screen</span>
             <span className="ml-auto text-slate-400 text-[11px] font-bold">
               {screenQuestions.length} question{screenQuestions.length === 1 ? "" : "s"}
             </span>
@@ -7199,7 +7201,7 @@ function NewJobPageContent() {
       }
     };
 
-    console.log(`🚀 Launching Hoonr-Curate with ${candidatesPayload.length} candidates in ${batches.length} batch(es) of ${LAUNCH_BATCH_SIZE}`);
+    console.log(`🚀 Launching PAIR with ${candidatesPayload.length} candidates in ${batches.length} batch(es) of ${LAUNCH_BATCH_SIZE}`);
 
     let totalSaved = 0;
     let totalEngaged = 0;
@@ -8167,7 +8169,7 @@ function NewJobPageContent() {
           <div className="flex-1 text-left">
             <h2 className="text-[20px] font-medium text-slate-900 leading-tight tracking-tight mb-1">Source</h2>
             <p className="text-slate-500 text-[14px] mt-1 leading-relaxed">
-              Build your candidate search using structured filters. Hoonr-Curate generates the Boolean string and runs JobDiva Talent Search; JobDiva Agent runs the criteria set on this req inside JobDiva. Tick either or both. JobDiva applicants are synced automatically and shown on the rank-list page with source as Job-Diva Applicant.
+              Build your candidate search using structured filters. PAIR generates the Boolean string and runs JobDiva Talent Search; JobDiva Agent runs the criteria set on this req inside JobDiva. Tick either or both. JobDiva applicants are synced automatically and shown on the rank-list page with source as Job-Diva Applicant.
             </p>
           </div>
         </div>
@@ -8176,12 +8178,12 @@ function NewJobPageContent() {
           {/* Inner Content Box - Exact Screenshot Structure */}
           <div className="border border-slate-200 rounded-2xl bg-white shadow-sm overflow-hidden p-7 space-y-8">
             <div className="space-y-8">
-              {/* 5.5: Top row now shows only the Hoonr-Curate badge. Run/Stop
+              {/* 5.5: Top row now shows only the PAIR badge. Run/Stop
                   buttons live below the Boolean string so the recruiter can
                   inspect + edit the query before kicking off the search. */}
               <div className="flex items-center justify-between mb-2">
                 <div className="bg-[#ede9fe] text-[#6366f1] text-[11px] font-bold px-3 py-1 rounded-lg border border-[#ddd6fe] flex items-center gap-2">
-                  <Sparkles className="w-3.5 h-3.5" /> Hoonr-Curate Pre-filled from Rubric
+                  <Sparkles className="w-3.5 h-3.5" /> PAIR Pre-filled from Rubric
                 </div>
               </div>
 
@@ -8928,7 +8930,7 @@ function NewJobPageContent() {
                             <div className="flex items-center justify-between mb-2 gap-2 flex-wrap">
                               <div className="flex items-center gap-2 flex-wrap">
                                 <span className="text-[11px] font-bold uppercase tracking-widest text-[#5b21b6] bg-[#f5f3ff] px-2.5 py-0.5 rounded-full border border-[#ddd6fe]">
-                                  {booleanUserEdited ? "Edited" : "Hoonr-Curate Generated"}
+                                  {booleanUserEdited ? "Edited" : "PAIR Generated"}
                                 </span>
                                 {booleanAttempts.length > 0 && (
                                   <span className="text-[11px] font-bold uppercase tracking-widest text-slate-500 bg-slate-50 px-2.5 py-0.5 rounded-full border border-slate-200">
@@ -9733,7 +9735,7 @@ function NewJobPageContent() {
                     variant="outline"
                     className="h-[42px] px-4 font-semibold text-[14px] rounded-xl flex items-center gap-2 border-slate-300 text-slate-700 hover:bg-slate-50"
                     onClick={() => window.open("/", "_blank", "noopener,noreferrer")}
-                    title="Open the Curate home page in a new tab so you can keep working while sourcing runs"
+                    title="Open the PAIR home page in a new tab so you can keep working while sourcing runs"
                   >
                     <ExternalLink className="w-4 h-4" />
                     New tab

@@ -141,7 +141,7 @@ def resolve_jobdiva_sources(sources: Sequence[str]) -> Dict[str, bool]:
       - Applicants:   people who applied to this job_id (no boolean)
       - JobAgent:     JobDiva's AI matcher, driven by the criteria the
                       recruiter configured on the req inside JobDiva
-      - TalentSearch: the boolean query Hoonr-Curate generates
+      - TalentSearch: the boolean query PAIR generates
 
     Bare ``"JobDiva"`` is the legacy combined value — older saved drafts
     and non-wizard callers still send it, and it keeps meaning "run both

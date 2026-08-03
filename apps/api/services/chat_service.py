@@ -1,7 +1,7 @@
 """Tira chat service.
 
 Wraps gpt-4o-mini with OpenAI tool-calling so Tira can answer questions about
-live Hoonr state (job status, candidate counts, portfolio snapshot) by calling
+live PAIR state (job status, candidate counts, portfolio snapshot) by calling
 typed tools backed by direct SQL. No vector DB, no RAG — just narrow,
 deterministic lookups.
 """
@@ -21,10 +21,10 @@ logger = logging.getLogger(__name__)
 
 
 _SYSTEM_PROMPT = (
-    "You are Tira, a recruiting sidekick inside Hoonr. You help recruiters find "
+    "You are Tira, a recruiting sidekick inside PAIR. You help recruiters find "
     "candidates, shape job rubrics, score resumes, and move submissions forward. "
     "Keep replies short, specific, and action-oriented. Refer to the product as "
-    "Hoonr.\n\n"
+    "PAIR.\n\n"
     "When a user asks about a specific job (e.g. 'status of 26-12345', 'how many "
     "candidates on job 32129274', 'what's happening with the X-Ray role'), call "
     "the get_job_status tool. When they ask 'what jobs are active', 'recent "
@@ -45,7 +45,7 @@ _TOOLS: List[Dict[str, Any]] = [
         "function": {
             "name": "get_job_status",
             "description": (
-                "Look up a single job in Hoonr by JobDiva ref code (e.g. '26-12345') "
+                "Look up a single job in PAIR by JobDiva ref code (e.g. '26-12345') "
                 "or numeric job ID. Returns title, customer, status, archive flag, "
                 "openings, allowed submittals, and live candidate counts."
             ),
@@ -66,7 +66,7 @@ _TOOLS: List[Dict[str, Any]] = [
         "function": {
             "name": "list_recent_jobs",
             "description": (
-                "List the most recently updated jobs in Hoonr's portfolio with "
+                "List the most recently updated jobs in PAIR's portfolio with "
                 "their candidate counts. Use for 'my jobs', 'recent jobs', "
                 "'active jobs', 'portfolio overview'."
             ),
