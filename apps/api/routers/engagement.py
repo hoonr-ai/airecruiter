@@ -1631,7 +1631,9 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 candidate_email = interview_info.get("candidate_email", submitted_email)
 
                 if not interview_id:
-                    logger.warning(
+                    # Equal lengths + no match = keying broke for the whole batch, not a skip.
+                    _log = logger.error if len(data_list) == len(request.real_candidate_ids) else logger.warning
+                    _log(
                         "engagement_no_interview_match candidate_id=%s submitted_source_id=%s submitted_email=%s response_data_count=%d request_count=%d",
                         candidate_id,
                         submitted_source_id,
