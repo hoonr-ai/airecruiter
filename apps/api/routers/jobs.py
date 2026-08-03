@@ -291,6 +291,7 @@ def _backfill_monitored_jobs_counters_sync() -> None:
                             m.job_id,
                             m.jobdiva_id,
                             COUNT(DISTINCT sc.candidate_id) AS cs,
+                            -- Counts distinct interviews; ≤ candidates where two share an email (shared-email edge case).
                             COUNT(DISTINCT NULLIF(sc.data->>'engage_interview_id', '')) AS cl,
                             COUNT(DISTINCT CASE
                                 WHEN sc.data->>'engage_status' IN
@@ -2097,90 +2098,6 @@ async def remove_job_from_monitoring(job_id: str):
         return {"message": f"Job {job_id} removed from monitoring"}
     else:
         raise HTTPException(status_code=404, detail="Job not in monitoring list")
-
-_METRICS_ZERO = {
-    "candidates_sourced": 0,
-    "candidates_launched": 0,
-    "complete_submissions": 0,
-    "pass_submissions": 0,
-}
-
-
-def _aggregate_candidate_metrics(cursor, jobdiva_keys: List[str]) -> Dict[str, Dict[str, int]]:
-    """One bounded aggregation across the candidate-side metrics surfaced on
-    the dashboard. Replaces the pre-fix LEFT JOIN whose subquery
-    `GROUP BY sc.jobdiva_id` ran across the entire sourced_candidates table
-    on every load — and whose join predicate
-    `ON metrics.sc_jobdiva_id = mj.jobdiva_id OR metrics.sc_jobdiva_id = mj.job_id::text`
-    forced a seq scan because the `::text` cast made the second branch
-    non-sargable. With `WHERE jobdiva_id = ANY(%s)` keyed on the small set
-    of jobs we actually want, Postgres can use idx_sourced_candidates_jobdiva_id
-    and the per-row JSONB CASE WHENs only fire on the bounded slice.
-
-    Returns {key: counters} where key is whichever of `jobdiva_id`
-    (alphanumeric ref) or `job_id::text` (numeric PK) the candidate row
-    happened to be stored under. Caller sums both for each monitored job.
-    """
-    if not jobdiva_keys:
-        return {}
-    unique_keys = list({k for k in jobdiva_keys if k})
-    if not unique_keys:
-        return {}
-    cursor.execute(
-        """
-        SELECT
-            sc.jobdiva_id,
-            COUNT(DISTINCT sc.candidate_id)                                              AS candidates_sourced,
-            COUNT(DISTINCT NULLIF(sc.data->>'engage_interview_id', ''))               AS candidates_launched,
-            COUNT(DISTINCT CASE
-                WHEN sc.data->>'engage_status' IN ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
-                THEN sc.candidate_id
-            END)                                                                       AS complete_submissions,
-            COUNT(DISTINCT CASE
-                WHEN LOWER(sc.data->>'engage_hard_filter_status') IN ('pass', 'passed')
-                THEN sc.candidate_id
-            END)                                                                       AS pass_submissions
-        FROM sourced_candidates sc
-        WHERE sc.jobdiva_id = ANY(%s)
-        GROUP BY sc.jobdiva_id
-        """,
-        (unique_keys,),
-    )
-    out: Dict[str, Dict[str, int]] = {}
-    for row in cursor.fetchall() or []:
-        out[str(row[0])] = {
-            "candidates_sourced": int(row[1] or 0),
-            "candidates_launched": int(row[2] or 0),
-            "complete_submissions": int(row[3] or 0),
-            "pass_submissions": int(row[4] or 0),
-        }
-    return out
-
-
-def _sum_metrics_for_job(
-    metrics_by_key: Dict[str, Dict[str, int]],
-    jobdiva_id: Any,
-    job_id: Any,
-) -> Dict[str, int]:
-    """Sum counters from both possible storage keys for a single monitored job.
-    Mirrors `chat_service._sum_counts_for_job` semantics — some sourced_candidates
-    rows were written under `jobdiva_id` (alphanumeric ref), others under the
-    numeric `job_id::text`. Without summing both, dashboard counts under-count.
-    """
-    summed = dict(_METRICS_ZERO)
-    candidates = []
-    if jobdiva_id is not None and str(jobdiva_id) != "":
-        candidates.append(str(jobdiva_id))
-    if job_id is not None and str(job_id) != "":
-        candidates.append(str(job_id))
-    for key in candidates:
-        m = metrics_by_key.get(key)
-        if not m:
-            continue
-        for field in summed:
-            summed[field] += m[field]
-    return summed
-
 
 def _get_monitored_jobs_sync(include_archived: bool, view: str = "summary"):
     """

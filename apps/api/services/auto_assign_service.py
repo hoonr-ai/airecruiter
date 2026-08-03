@@ -1041,6 +1041,7 @@ class AutoAssignService:
                         """
                         SELECT
                             COUNT(DISTINCT sc.candidate_id)                                 AS candidates_sourced,
+                            -- Counts distinct interviews; ≤ candidates where two share an email (shared-email edge case).
                             COUNT(DISTINCT NULLIF(sc.data->>'engage_interview_id', '')) AS candidates_launched,
                             COUNT(DISTINCT CASE
                                 WHEN sc.data->>'engage_status' IN
