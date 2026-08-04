@@ -847,7 +847,9 @@ IMPORTANT:
         other_requirements = unique_other
 
         # Final Location logic with cleanup
-        if job_location:
+        _loc_norm = (location_type or "").strip().lower().replace("-", "").replace("_", "")
+        _is_remote = "remote" in _loc_norm or _loc_norm in ("fullyremote", "wfh") or (job_location or "").strip().upper() == "REMOTE"
+        if job_location and not _is_remote:
             other_requirements.append({"value": f"Location: {job_location}.", "required": "Required"})
 
         # Enforce maximum of 8 hard skills. Soft skills do not consume the hard-skill cap.
