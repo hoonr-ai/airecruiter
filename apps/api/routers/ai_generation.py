@@ -49,16 +49,7 @@ class JobDescriptionRequest(BaseModel):
     city: str = ""
 
 
-def _is_remote_job(work_arrangement: str, city: str) -> bool:
-    """True when the role should be presented as fully remote.
-
-    Matches "Remote", "Remote / W2", "Fully Remote", "WFH", etc., AND the
-    JobDiva-import case where location_type is empty but city is "REMOTE".
-    """
-    norm = (work_arrangement or "").strip().lower().replace("-", "").replace("_", "")
-    if "remote" in norm or norm in ("fullyremote", "wfh"):
-        return True
-    return (city or "").strip().upper() == "REMOTE"
+from core.utils import is_remote_job as _is_remote_job
 
 class JobDivaSyncRequest(BaseModel):
     jobId: str

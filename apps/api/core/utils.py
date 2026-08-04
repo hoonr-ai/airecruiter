@@ -1,5 +1,18 @@
 import re
 
+
+def is_remote_job(location_type: str, city: str = "") -> bool:
+    """True when the role should be presented as fully remote.
+
+    Canonical synonym list shared by all backend call sites. Matches the
+    frontend isRemoteJob() heuristic in apps/web/app/jobs/new/page.tsx.
+    """
+    norm = (location_type or "").strip().lower().replace("-", "").replace("_", "")
+    if "remote" in norm or "virtual" in norm or "telecommute" in norm or norm == "wfh":
+        return True
+    return (city or "").strip().upper() == "REMOTE"
+
+
 def normalize_skill(skill_name: str) -> str:
     """
     Converts a skill name to a canonical slug.
