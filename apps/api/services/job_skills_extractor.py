@@ -18,6 +18,7 @@ import logging
 from dataclasses import dataclass
 from core.graph import ontology
 from core import llm_cache
+from core.utils import is_remote_job as _is_remote_location
 from services.role_family import detect_role_family
 from services.taxonomy_service import extract_grounded_rubric
 from services import role_taxonomy
@@ -847,7 +848,7 @@ IMPORTANT:
         other_requirements = unique_other
 
         # Final Location logic with cleanup
-        if job_location:
+        if job_location and not _is_remote_location(location_type, job_location or ""):
             other_requirements.append({"value": f"Location: {job_location}.", "required": "Required"})
 
         # Enforce maximum of 8 hard skills. Soft skills do not consume the hard-skill cap.
