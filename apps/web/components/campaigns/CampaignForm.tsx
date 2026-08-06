@@ -94,9 +94,8 @@ export function CampaignForm({
   );
 
   // Outreach 2
-  const [outreach2Enabled, setOutreach2Enabled] = useState(
-    initial?.phase1_6hr_reminder_hours !== -1
-  );
+  const initialOutreach2Enabled = initial?.phase1_6hr_reminder_hours !== -1;
+  const [outreach2Enabled, setOutreach2Enabled] = useState(initialOutreach2Enabled);
   const [questions, setQuestions] = useState<TemplateQuestion[]>(
     initial?.template_screen_questions && initial.template_screen_questions.length > 0
       ? (initial.template_screen_questions as TemplateQuestion[])
@@ -116,10 +115,9 @@ export function CampaignForm({
       : "10"
   );
 
-  // Outreach 3
-  const [outreach3Enabled, setOutreach3Enabled] = useState(
-    initial?.phase1_to_phase2_hours !== -1
-  );
+  // Outreach 3 (Enforce sequential: require outreach 2 enabled)
+  const initialOutreach3Enabled = initialOutreach2Enabled && initial?.phase1_to_phase2_hours !== -1;
+  const [outreach3Enabled, setOutreach3Enabled] = useState(initialOutreach3Enabled);
   const [phase1To2Hours, setPhase1To2Hours] = useState<string>(
     initial?.phase1_to_phase2_hours !== null && initial?.phase1_to_phase2_hours !== undefined
       ? initial.phase1_to_phase2_hours === -1 ? "1.5" : initial.phase1_to_phase2_hours.toString()
@@ -134,10 +132,9 @@ export function CampaignForm({
       : "10"
   );
 
-  // Outreach 4
-  const [outreach4Enabled, setOutreach4Enabled] = useState(
-    initial?.phase2_to_phase3_hours !== -1
-  );
+  // Outreach 4 (Enforce sequential: require outreach 3 & 2 enabled)
+  const initialOutreach4Enabled = initialOutreach3Enabled && initial?.phase2_to_phase3_hours !== -1;
+  const [outreach4Enabled, setOutreach4Enabled] = useState(initialOutreach4Enabled);
   const [phase2To3Hours, setPhase2To3Hours] = useState<string>(
     initial?.phase2_to_phase3_hours !== null && initial?.phase2_to_phase3_hours !== undefined
       ? initial.phase2_to_phase3_hours === -1 ? "3.0" : initial.phase2_to_phase3_hours.toString()
@@ -185,6 +182,12 @@ export function CampaignForm({
       return;
     }
     setNameError(null);
+
+    // Reconcile sequential enforcement against any potential stale/inconsistent data at submit time
+    const effectiveOutreach2 = outreach2Enabled;
+    const effectiveOutreach3 = effectiveOutreach2 && outreach3Enabled;
+    const effectiveOutreach4 = effectiveOutreach3 && outreach4Enabled;
+
     onSubmit({
       name: name.trim(),
       customer_name: customerName.trim() || undefined,
@@ -194,12 +197,12 @@ export function CampaignForm({
       selected_job_boards: jobBoards,
       bot_introduction: botIntro.trim() || undefined,
       outreach_delay_mins: outreach1CallEnabled ? (parseNum(outreachDelayMins) ?? 0) : -1,
-      phase1_6hr_reminder_hours: outreach2Enabled ? (parseNum(phase1ReminderHours, true) ?? 0) : -1,
-      phase1_to_phase2_hours: outreach3Enabled ? (parseNum(phase1To2Hours, true) ?? 0) : -1,
-      phase2_to_phase3_hours: outreach4Enabled ? (parseNum(phase2To3Hours, true) ?? 0) : -1,
-      phase1_6hr_call_delay_mins: outreach2Enabled && outreach2CallEnabled ? (parseNum(phase1ReminderCallDelayMins) ?? 0) : -1,
-      phase2_call_delay_mins: outreach3Enabled && outreach3CallEnabled ? (parseNum(phase2CallDelayMins) ?? 0) : -1,
-      phase3_call_delay_mins: outreach4Enabled && outreach4CallEnabled ? (parseNum(phase3CallDelayMins) ?? 0) : -1,
+      phase1_6hr_reminder_hours: effectiveOutreach2 ? (parseNum(phase1ReminderHours, true) ?? 0) : -1,
+      phase1_to_phase2_hours: effectiveOutreach3 ? (parseNum(phase1To2Hours, true) ?? 0) : -1,
+      phase2_to_phase3_hours: effectiveOutreach4 ? (parseNum(phase2To3Hours, true) ?? 0) : -1,
+      phase1_6hr_call_delay_mins: effectiveOutreach2 && outreach2CallEnabled ? (parseNum(phase1ReminderCallDelayMins) ?? 0) : -1,
+      phase2_call_delay_mins: effectiveOutreach3 && outreach3CallEnabled ? (parseNum(phase2CallDelayMins) ?? 0) : -1,
+      phase3_call_delay_mins: effectiveOutreach4 && outreach4CallEnabled ? (parseNum(phase3CallDelayMins) ?? 0) : -1,
       recruiter_notes: recruiterNotes.trim() || undefined,
       template_screen_questions: questions,
     });
@@ -377,6 +380,10 @@ export function CampaignForm({
               const checked = !!v;
               setOutreach2Enabled(checked);
               if (!checked) {
+                // Note: Cascading reset intentionally only clears the *Enabled booleans, 
+                // not the associated delay/time input fields (e.g. phase1To2Hours, phase2To3Hours). 
+                // Disabled steps are serialized as -1 during submission regardless of their input values, 
+                // and retaining the user's input prevents data loss if they toggle off and back on.
                 setOutreach3Enabled(false);
                 setOutreach4Enabled(false);
               }
@@ -409,21 +416,34 @@ export function CampaignForm({
         </div>
 
         {/* Outreach 3 — Reminder 2 */}
-        <div className={cn("grid grid-cols-[20px_1fr_120px_120px] gap-2 items-center rounded-lg border p-2 transition-colors", outreach3Enabled ? "bg-white border-slate-200" : "bg-slate-100 border-slate-200 opacity-60")}>
+        <div className={cn("grid grid-cols-[20px_1fr_120px_120px] gap-2 items-center rounded-lg border p-2 transition-colors", (outreach3Enabled && outreach2Enabled) ? "bg-white border-slate-200" : "bg-slate-100 border-slate-200 opacity-60")}>
           <Checkbox
             id="o3-enabled"
             checked={outreach3Enabled}
             disabled={!outreach2Enabled}
+            title={!outreach2Enabled ? "Enable Outreach 2 first" : undefined}
             onCheckedChange={(v) => {
               const checked = !!v;
               setOutreach3Enabled(checked);
               if (!checked) {
+                // Note: Cascading reset intentionally only clears the *Enabled booleans, 
+                // not the associated delay/time input fields (e.g. phase2To3Hours). 
+                // Disabled steps are serialized as -1 during submission regardless of their input values.
                 setOutreach4Enabled(false);
               }
             }}
           />
-          <label htmlFor="o3-enabled" className="text-sm font-medium text-slate-700 cursor-pointer select-none">
-            Outreach 3 <span className="text-xs text-slate-400 font-normal">· Reminder 2</span>
+          <label 
+            htmlFor="o3-enabled" 
+            className="text-sm font-medium text-slate-700 cursor-pointer select-none flex items-center gap-2"
+            title={!outreach2Enabled ? "Enable Outreach 2 first" : undefined}
+          >
+            <span>Outreach 3 <span className="text-xs text-slate-400 font-normal">· Reminder 2</span></span>
+            {!outreach2Enabled && (
+              <span className="text-[10px] text-amber-600 font-normal bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                Requires Outreach 2
+              </span>
+            )}
           </label>
           <Input
             id="rem-p1-p2"
@@ -449,15 +469,25 @@ export function CampaignForm({
         </div>
 
         {/* Outreach 4 — Reminder 3 */}
-        <div className={cn("grid grid-cols-[20px_1fr_120px_120px] gap-2 items-center rounded-lg border p-2 transition-colors", outreach4Enabled ? "bg-white border-slate-200" : "bg-slate-100 border-slate-200 opacity-60")}>
+        <div className={cn("grid grid-cols-[20px_1fr_120px_120px] gap-2 items-center rounded-lg border p-2 transition-colors", (outreach4Enabled && outreach3Enabled && outreach2Enabled) ? "bg-white border-slate-200" : "bg-slate-100 border-slate-200 opacity-60")}>
           <Checkbox
             id="o4-enabled"
             checked={outreach4Enabled}
             disabled={!outreach3Enabled}
+            title={!outreach3Enabled ? "Enable Outreach 3 first" : undefined}
             onCheckedChange={(v) => setOutreach4Enabled(!!v)}
           />
-          <label htmlFor="o4-enabled" className="text-sm font-medium text-slate-700 cursor-pointer select-none">
-            Outreach 4 <span className="text-xs text-slate-400 font-normal">· Reminder 3</span>
+          <label 
+            htmlFor="o4-enabled" 
+            className="text-sm font-medium text-slate-700 cursor-pointer select-none flex items-center gap-2"
+            title={!outreach3Enabled ? "Enable Outreach 3 first" : undefined}
+          >
+            <span>Outreach 4 <span className="text-xs text-slate-400 font-normal">· Reminder 3</span></span>
+            {!outreach3Enabled && (
+              <span className="text-[10px] text-amber-600 font-normal bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
+                Requires Outreach 3
+              </span>
+            )}
           </label>
           <Input
             id="rem-p2-p3"
