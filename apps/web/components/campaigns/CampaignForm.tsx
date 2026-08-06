@@ -373,7 +373,14 @@ export function CampaignForm({
           <Checkbox
             id="o2-enabled"
             checked={outreach2Enabled}
-            onCheckedChange={(v) => setOutreach2Enabled(!!v)}
+            onCheckedChange={(v) => {
+              const checked = !!v;
+              setOutreach2Enabled(checked);
+              if (!checked) {
+                setOutreach3Enabled(false);
+                setOutreach4Enabled(false);
+              }
+            }}
           />
           <label htmlFor="o2-enabled" className="text-sm font-medium text-slate-700 cursor-pointer select-none">
             Outreach 2 <span className="text-xs text-slate-400 font-normal">· Reminder 1</span>
@@ -406,7 +413,14 @@ export function CampaignForm({
           <Checkbox
             id="o3-enabled"
             checked={outreach3Enabled}
-            onCheckedChange={(v) => setOutreach3Enabled(!!v)}
+            disabled={!outreach2Enabled}
+            onCheckedChange={(v) => {
+              const checked = !!v;
+              setOutreach3Enabled(checked);
+              if (!checked) {
+                setOutreach4Enabled(false);
+              }
+            }}
           />
           <label htmlFor="o3-enabled" className="text-sm font-medium text-slate-700 cursor-pointer select-none">
             Outreach 3 <span className="text-xs text-slate-400 font-normal">· Reminder 2</span>
@@ -439,6 +453,7 @@ export function CampaignForm({
           <Checkbox
             id="o4-enabled"
             checked={outreach4Enabled}
+            disabled={!outreach3Enabled}
             onCheckedChange={(v) => setOutreach4Enabled(!!v)}
           />
           <label htmlFor="o4-enabled" className="text-sm font-medium text-slate-700 cursor-pointer select-none">
