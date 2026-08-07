@@ -4,7 +4,7 @@
 // child job inherits). Used by both the "New Campaign" creation flow and the
 // "Edit" dialog on the detail page.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -30,6 +30,8 @@ import {
   getDefaultCampaignScreeningQuestions,
 } from "@/lib/campaigns";
 import { ScreeningQuestionsEditor } from "@/components/campaigns/ScreeningQuestionsEditor";
+
+const ROLE_RESPONSIBILITIES_QUESTION = "What is your current or most recent role and key responsibilities?";
 
 interface CampaignFormProps {
   initial?: Partial<Campaign>;
@@ -99,7 +101,7 @@ export function CampaignForm({
   const [questions, setQuestions] = useState<TemplateQuestion[]>(
     initial?.template_screen_questions && initial.template_screen_questions.length > 0
       ? (initial.template_screen_questions as TemplateQuestion[])
-      : getDefaultCampaignScreeningQuestions()
+      : getDefaultCampaignScreeningQuestions(initial?.screening_level ?? "L1.5")
   );
   const [phase1ReminderHours, setPhase1ReminderHours] = useState<string>(
     initial?.phase1_6hr_reminder_hours !== null && initial?.phase1_6hr_reminder_hours !== undefined
@@ -149,6 +151,18 @@ export function CampaignForm({
       : "10"
   );
   const [nameError, setNameError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if ((screeningLevel || "").trim().toLowerCase() !== "l0.5") return;
+
+    setQuestions((prev) => {
+      const filtered = prev.filter(
+        (q) => (q.question_text || "").trim().toLowerCase() !== ROLE_RESPONSIBILITIES_QUESTION.toLowerCase()
+      );
+      if (filtered.length === prev.length) return prev;
+      return filtered.map((q, index) => ({ ...q, order_index: index }));
+    });
+  }, [screeningLevel]);
 
   const addEmail = () => {
     const candidate = emailInput.trim();

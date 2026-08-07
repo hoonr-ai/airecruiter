@@ -383,13 +383,18 @@ def _enforce_boolean_pre_screen_questions(questions: List[Dict[str, Any]]) -> Li
     for q in questions or []:
         if not isinstance(q, dict):
             continue
+
+        q_text_raw = str(q.get("question_text") or "")
+        if "current or most recent role" in q_text_raw.strip().lower():
+            # L0.5 boolean interviews must not ask this open-ended prompt.
+            continue
             
         category = str(q.get("category") or "").strip().lower()
         if category in ("default", "logistics"):
             rewritten.append(q)
             continue
             
-        qt = _to_boolean_question_text(str(q.get("question_text") or ""))
+        qt = _to_boolean_question_text(q_text_raw)
         pc = str(q.get("pass_criteria") or "").strip()
         if not pc:
             pc = "Pass when candidate confirms relevant experience or eligibility."
