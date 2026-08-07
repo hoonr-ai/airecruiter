@@ -45,6 +45,9 @@ _LIST_TEXT_FIELDS = ("recruiter_emails", "selected_employment_types", "selected_
 # JSONB columns holding the shared template payload.
 _JSONB_FIELDS = ("template_rubric", "template_screen_questions", "template_sourcing_filters")
 
+_ROLE_RESPONSIBILITIES_QUESTION = "What is your current or most recent role and key responsibilities?"
+_ROLE_RESPONSIBILITIES_MATCH_FRAGMENT = "current or most recent role"
+
 _COLUMNS = (
     "campaign_id", "name", "customer_name",
     "recruiter_emails", "selected_employment_types", "screening_level",
@@ -202,7 +205,11 @@ async def create_campaign(campaign: CampaignData, user: UserIdentity = Depends(g
             )
 
         if not data.get("template_screen_questions"):
-            data["template_screen_questions"] = _get_default_campaign_questions()
+            data["template_screen_questions"] = _get_default_campaign_questions(data.get("screening_level"))
+        data["template_screen_questions"] = _normalize_questions_for_screening_level(
+            data.get("template_screen_questions"),
+            data.get("screening_level"),
+        )
 
         values = [_param_value(col, data.get(col)) for col in _COLUMNS]
         placeholders = ", ".join(["%s"] * len(_COLUMNS))
@@ -359,10 +366,39 @@ async def delete_campaign(campaign_id: str, user: UserIdentity = Depends(get_cur
         raise HTTPException(status_code=500, detail="Failed to delete campaign")
 
 
-def _get_default_campaign_questions() -> List[Dict[str, Any]]:
+def _is_l05_screening_level(level: Optional[str]) -> bool:
+    return (level or "").strip().lower() == "l0.5"
+
+
+def _is_role_responsibilities_question(text: Any) -> bool:
+    normalized = str(text or "").strip().lower()
+    return _ROLE_RESPONSIBILITIES_MATCH_FRAGMENT in normalized
+
+
+def _normalize_questions_for_screening_level(
+    questions: Optional[List[Dict[str, Any]]],
+    screening_level: Optional[str],
+) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = [dict(q or {}) for q in (questions or [])]
+    if not _is_l05_screening_level(screening_level):
+        return normalized
+
+    # L0.5 boolean flow should never ask the free-form role/responsibilities question.
+    filtered: List[Dict[str, Any]] = []
+    for q in normalized:
+        if _is_role_responsibilities_question(q.get("question_text")):
+            continue
+        filtered.append(q)
+
+    for idx, q in enumerate(filtered):
+        q["order_index"] = idx
+    return filtered
+
+
+def _get_default_campaign_questions(screening_level: Optional[str] = None) -> List[Dict[str, Any]]:
     """Return the standard 8-9 default non-role-specific screening questions exactly matching the Job Wizard,
     automatically seeded onto every campaign and inherited by all child jobs before role-specific questions are appended."""
-    return [
+    defaults = [
         {
             "question_text": "Are you open to exploring new job opportunities?",
             "pass_criteria": "Must be open to new job opportunities",
@@ -445,6 +481,7 @@ def _get_default_campaign_questions() -> List[Dict[str, Any]]:
             "order_index": 8,
         },
     ]
+    return _normalize_questions_for_screening_level(defaults, screening_level)
 
 
 async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction: Optional[str] = None) -> None:
@@ -664,6 +701,8 @@ async def _seed_job_rubric(campaign: Dict[str, Any], ref: str, bot_introduction:
                 logger.warning(f"Skills Rubric generation failed for child job {canonical_ref}: {rubric_err}")
 
         # --- Stage 3: Step 4 (Screening Questions) ---
+        template_questions = _normalize_questions_for_screening_level(template_questions, screening_lvl)
+
         from services.screening_question_generator import _is_remote_role
         is_remote = _is_remote_role(loc_type, city)
         arrangement_label = "a hybrid" if "hybrid" in (loc_type or "").lower() else "an onsite"
