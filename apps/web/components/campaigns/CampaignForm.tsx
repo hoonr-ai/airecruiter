@@ -84,17 +84,17 @@ export function CampaignForm({
   const [recruiterNotes, setRecruiterNotes] = useState(initial?.recruiter_notes ?? "");
 
   // Outreach 1
-  const [outreach1CallEnabled, setOutreach1CallEnabled] = useState(
-    initial?.outreach_delay_mins !== -1
+  const [outreach1Enabled, setOutreach1Enabled] = useState(
+    (initial?.outreach_delay_mins ?? 0) >= 0
   );
   const [outreachDelayMins, setOutreachDelayMins] = useState<string>(
     initial?.outreach_delay_mins !== null && initial?.outreach_delay_mins !== undefined
-      ? initial.outreach_delay_mins === -1 ? "10" : initial.outreach_delay_mins.toString()
+      ? initial.outreach_delay_mins < 0 ? "10" : initial.outreach_delay_mins.toString()
       : "10"
   );
 
   // Outreach 2
-  const initialOutreach2Enabled = initial?.phase1_6hr_reminder_hours !== -1;
+  const initialOutreach2Enabled = (initial?.phase1_6hr_reminder_hours ?? 0) >= 0;
   const [outreach2Enabled, setOutreach2Enabled] = useState(initialOutreach2Enabled);
   const [questions, setQuestions] = useState<TemplateQuestion[]>(
     initial?.template_screen_questions && initial.template_screen_questions.length > 0
@@ -103,15 +103,12 @@ export function CampaignForm({
   );
   const [phase1ReminderHours, setPhase1ReminderHours] = useState<string>(
     initial?.phase1_6hr_reminder_hours !== null && initial?.phase1_6hr_reminder_hours !== undefined
-      ? initial.phase1_6hr_reminder_hours === -1 ? "1.0" : initial.phase1_6hr_reminder_hours.toString()
+      ? initial.phase1_6hr_reminder_hours < 0 ? "1.0" : initial.phase1_6hr_reminder_hours.toString()
       : "1.0"
-  );
-  const [outreach2CallEnabled, setOutreach2CallEnabled] = useState(
-    initial?.phase1_6hr_call_delay_mins !== -1
   );
   const [phase1ReminderCallDelayMins, setPhase1ReminderCallDelayMins] = useState<string>(
     initial?.phase1_6hr_call_delay_mins !== null && initial?.phase1_6hr_call_delay_mins !== undefined
-      ? initial.phase1_6hr_call_delay_mins === -1 ? "10" : initial.phase1_6hr_call_delay_mins.toString()
+      ? initial.phase1_6hr_call_delay_mins < 0 ? "10" : initial.phase1_6hr_call_delay_mins.toString()
       : "10"
   );
 
@@ -120,15 +117,12 @@ export function CampaignForm({
   const [outreach3Enabled, setOutreach3Enabled] = useState(initialOutreach3Enabled);
   const [phase1To2Hours, setPhase1To2Hours] = useState<string>(
     initial?.phase1_to_phase2_hours !== null && initial?.phase1_to_phase2_hours !== undefined
-      ? initial.phase1_to_phase2_hours === -1 ? "1.5" : initial.phase1_to_phase2_hours.toString()
+      ? initial.phase1_to_phase2_hours < 0 ? "1.5" : initial.phase1_to_phase2_hours.toString()
       : "1.5"
-  );
-  const [outreach3CallEnabled, setOutreach3CallEnabled] = useState(
-    initial?.phase2_call_delay_mins !== -1
   );
   const [phase2CallDelayMins, setPhase2CallDelayMins] = useState<string>(
     initial?.phase2_call_delay_mins !== null && initial?.phase2_call_delay_mins !== undefined
-      ? initial.phase2_call_delay_mins === -1 ? "10" : initial.phase2_call_delay_mins.toString()
+      ? initial.phase2_call_delay_mins < 0 ? "10" : initial.phase2_call_delay_mins.toString()
       : "10"
   );
 
@@ -137,15 +131,12 @@ export function CampaignForm({
   const [outreach4Enabled, setOutreach4Enabled] = useState(initialOutreach4Enabled);
   const [phase2To3Hours, setPhase2To3Hours] = useState<string>(
     initial?.phase2_to_phase3_hours !== null && initial?.phase2_to_phase3_hours !== undefined
-      ? initial.phase2_to_phase3_hours === -1 ? "3.0" : initial.phase2_to_phase3_hours.toString()
+      ? initial.phase2_to_phase3_hours < 0 ? "3.0" : initial.phase2_to_phase3_hours.toString()
       : "3.0"
-  );
-  const [outreach4CallEnabled, setOutreach4CallEnabled] = useState(
-    initial?.phase3_call_delay_mins !== -1
   );
   const [phase3CallDelayMins, setPhase3CallDelayMins] = useState<string>(
     initial?.phase3_call_delay_mins !== null && initial?.phase3_call_delay_mins !== undefined
-      ? initial.phase3_call_delay_mins === -1 ? "10" : initial.phase3_call_delay_mins.toString()
+      ? initial.phase3_call_delay_mins < 0 ? "10" : initial.phase3_call_delay_mins.toString()
       : "10"
   );
   const [nameError, setNameError] = useState<string | null>(null);
@@ -176,6 +167,15 @@ export function CampaignForm({
     return !isNaN(num) ? num : undefined;
   };
 
+  const setIfNonNegative = (value: string, setValue: (v: string) => void) => {
+    if (value === "") {
+      setValue(value);
+      return;
+    }
+    const num = Number(value);
+    if (!isNaN(num) && num >= 0) setValue(value);
+  };
+
   const handleSubmit = () => {
     if (!name.trim() || !customerName.trim() || emails.length === 0 || empTypes.length === 0) {
       setNameError("Campaign Name, Customer, at least one Recruiter Email, and Employment Type are required");
@@ -196,13 +196,13 @@ export function CampaignForm({
       screening_level: screeningLevel,
       selected_job_boards: jobBoards,
       bot_introduction: botIntro.trim() || undefined,
-      outreach_delay_mins: outreach1CallEnabled ? (parseNum(outreachDelayMins) ?? 0) : -1,
+      outreach_delay_mins: outreach1Enabled ? (parseNum(outreachDelayMins) ?? 0) : -1,
       phase1_6hr_reminder_hours: effectiveOutreach2 ? (parseNum(phase1ReminderHours, true) ?? 0) : -1,
       phase1_to_phase2_hours: effectiveOutreach3 ? (parseNum(phase1To2Hours, true) ?? 0) : -1,
       phase2_to_phase3_hours: effectiveOutreach4 ? (parseNum(phase2To3Hours, true) ?? 0) : -1,
-      phase1_6hr_call_delay_mins: effectiveOutreach2 && outreach2CallEnabled ? (parseNum(phase1ReminderCallDelayMins) ?? 0) : -1,
-      phase2_call_delay_mins: effectiveOutreach3 && outreach3CallEnabled ? (parseNum(phase2CallDelayMins) ?? 0) : -1,
-      phase3_call_delay_mins: effectiveOutreach4 && outreach4CallEnabled ? (parseNum(phase3CallDelayMins) ?? 0) : -1,
+      phase1_6hr_call_delay_mins: effectiveOutreach2 ? (parseNum(phase1ReminderCallDelayMins) ?? 0) : -1,
+      phase2_call_delay_mins: effectiveOutreach3 ? (parseNum(phase2CallDelayMins) ?? 0) : -1,
+      phase3_call_delay_mins: effectiveOutreach4 ? (parseNum(phase3CallDelayMins) ?? 0) : -1,
       recruiter_notes: recruiterNotes.trim() || undefined,
       template_screen_questions: questions,
     });
@@ -349,11 +349,11 @@ export function CampaignForm({
         </div>
 
         {/* Outreach 1 — Initial */}
-        <div className={cn("grid grid-cols-[20px_1fr_120px_120px] gap-2 items-center rounded-lg border p-2 transition-colors", outreach1CallEnabled ? "bg-white border-slate-200" : "bg-slate-100 border-slate-200 opacity-60")}>
+        <div className={cn("grid grid-cols-[20px_1fr_120px_120px] gap-2 items-center rounded-lg border p-2 transition-colors", outreach1Enabled ? "bg-white border-slate-200" : "bg-slate-100 border-slate-200 opacity-60")}>
           <Checkbox
             id="o1-enabled"
-            checked={outreach1CallEnabled}
-            onCheckedChange={(v) => setOutreach1CallEnabled(!!v)}
+            checked={outreach1Enabled}
+            onCheckedChange={(v) => setOutreach1Enabled(!!v)}
           />
           <label htmlFor="o1-enabled" className="text-sm font-medium text-slate-700 cursor-pointer select-none">
             Outreach 1 <span className="text-xs text-slate-400 font-normal">· Initial (immediate)</span>
@@ -363,9 +363,9 @@ export function CampaignForm({
             id="call-p1"
             type="number"
             min={0}
-            disabled={!outreach1CallEnabled}
+            disabled={!outreach1Enabled}
             value={outreachDelayMins}
-            onChange={(e) => setOutreachDelayMins(e.target.value)}
+            onChange={(e) => setIfNonNegative(e.target.value, setOutreachDelayMins)}
             placeholder="10 min"
             className="text-xs h-8 text-center bg-white"
           />
@@ -399,7 +399,7 @@ export function CampaignForm({
             min={0}
             disabled={!outreach2Enabled}
             value={phase1ReminderHours}
-            onChange={(e) => setPhase1ReminderHours(e.target.value)}
+            onChange={(e) => setIfNonNegative(e.target.value, setPhase1ReminderHours)}
             placeholder="1.0 hr"
             className="text-xs h-8 text-center bg-white"
           />
@@ -407,9 +407,9 @@ export function CampaignForm({
             id="call-p1-6hr"
             type="number"
             min={0}
-            disabled={!outreach2Enabled || !outreach2CallEnabled}
+            disabled={!outreach2Enabled}
             value={phase1ReminderCallDelayMins}
-            onChange={(e) => setPhase1ReminderCallDelayMins(e.target.value)}
+            onChange={(e) => setIfNonNegative(e.target.value, setPhase1ReminderCallDelayMins)}
             placeholder="10 min"
             className="text-xs h-8 text-center bg-white"
           />
@@ -452,7 +452,7 @@ export function CampaignForm({
             min={0}
             disabled={!outreach3Enabled}
             value={phase1To2Hours}
-            onChange={(e) => setPhase1To2Hours(e.target.value)}
+            onChange={(e) => setIfNonNegative(e.target.value, setPhase1To2Hours)}
             placeholder="1.5 hr"
             className="text-xs h-8 text-center bg-white"
           />
@@ -460,9 +460,9 @@ export function CampaignForm({
             id="call-p2"
             type="number"
             min={0}
-            disabled={!outreach3Enabled || !outreach3CallEnabled}
+            disabled={!outreach3Enabled}
             value={phase2CallDelayMins}
-            onChange={(e) => setPhase2CallDelayMins(e.target.value)}
+            onChange={(e) => setIfNonNegative(e.target.value, setPhase2CallDelayMins)}
             placeholder="10 min"
             className="text-xs h-8 text-center bg-white"
           />
@@ -496,7 +496,7 @@ export function CampaignForm({
             min={0}
             disabled={!outreach4Enabled}
             value={phase2To3Hours}
-            onChange={(e) => setPhase2To3Hours(e.target.value)}
+            onChange={(e) => setIfNonNegative(e.target.value, setPhase2To3Hours)}
             placeholder="3.0 hr"
             className="text-xs h-8 text-center bg-white"
           />
@@ -504,9 +504,9 @@ export function CampaignForm({
             id="call-p3"
             type="number"
             min={0}
-            disabled={!outreach4Enabled || !outreach4CallEnabled}
+            disabled={!outreach4Enabled}
             value={phase3CallDelayMins}
-            onChange={(e) => setPhase3CallDelayMins(e.target.value)}
+            onChange={(e) => setIfNonNegative(e.target.value, setPhase3CallDelayMins)}
             placeholder="10 min"
             className="text-xs h-8 text-center bg-white"
           />
