@@ -30,9 +30,14 @@ export function formatScreeningLevel(level?: string | null): string {
 export const JOB_BOARDS = ["LinkedIn", "Indeed", "Dice", "Monster", "CareerBuilder"];
 
 const ROLE_RESPONSIBILITIES_QUESTION = "What is your current or most recent role and key responsibilities?";
+const ROLE_RESPONSIBILITIES_MATCH_FRAGMENT = "current or most recent role";
 
 function isBooleanScreeningLevel(level?: string): boolean {
   return (level ?? "").trim().toLowerCase() === "l0.5";
+}
+
+export function isRoleResponsibilitiesQuestion(text?: string): boolean {
+  return (text ?? "").trim().toLowerCase().includes(ROLE_RESPONSIBILITIES_MATCH_FRAGMENT);
 }
 
 export interface CampaignChildJob {
@@ -453,7 +458,7 @@ export function getDefaultCampaignScreeningQuestions(screeningLevel: string = "L
   ];
 
   const normalizedDefaults = isBooleanScreeningLevel(screeningLevel)
-    ? defaultQs.filter((q) => q.text !== ROLE_RESPONSIBILITIES_QUESTION)
+    ? defaultQs.filter((q) => !isRoleResponsibilitiesQuestion(q.text))
     : defaultQs;
 
   return normalizedDefaults.map((q, index) => ({

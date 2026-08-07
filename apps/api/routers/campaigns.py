@@ -46,7 +46,7 @@ _LIST_TEXT_FIELDS = ("recruiter_emails", "selected_employment_types", "selected_
 _JSONB_FIELDS = ("template_rubric", "template_screen_questions", "template_sourcing_filters")
 
 _ROLE_RESPONSIBILITIES_QUESTION = "What is your current or most recent role and key responsibilities?"
-_ROLE_RESPONSIBILITIES_PREFIX = _ROLE_RESPONSIBILITIES_QUESTION.lower()
+_ROLE_RESPONSIBILITIES_MATCH_FRAGMENT = "current or most recent role"
 
 _COLUMNS = (
     "campaign_id", "name", "customer_name",
@@ -370,6 +370,11 @@ def _is_l05_screening_level(level: Optional[str]) -> bool:
     return (level or "").strip().lower() == "l0.5"
 
 
+def _is_role_responsibilities_question(text: Any) -> bool:
+    normalized = str(text or "").strip().lower()
+    return _ROLE_RESPONSIBILITIES_MATCH_FRAGMENT in normalized
+
+
 def _normalize_questions_for_screening_level(
     questions: Optional[List[Dict[str, Any]]],
     screening_level: Optional[str],
@@ -381,8 +386,7 @@ def _normalize_questions_for_screening_level(
     # L0.5 boolean flow should never ask the free-form role/responsibilities question.
     filtered: List[Dict[str, Any]] = []
     for q in normalized:
-        q_text = str(q.get("question_text") or "").strip().lower()
-        if q_text.startswith(_ROLE_RESPONSIBILITIES_PREFIX):
+        if _is_role_responsibilities_question(q.get("question_text")):
             continue
         filtered.append(q)
 

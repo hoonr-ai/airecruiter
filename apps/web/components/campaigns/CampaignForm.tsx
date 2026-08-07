@@ -26,12 +26,11 @@ import {
   JOB_BOARDS,
   SCREENING_LEVELS,
   isValidRecruiterEmail,
+  isRoleResponsibilitiesQuestion,
   TemplateQuestion,
   getDefaultCampaignScreeningQuestions,
 } from "@/lib/campaigns";
 import { ScreeningQuestionsEditor } from "@/components/campaigns/ScreeningQuestionsEditor";
-
-const ROLE_RESPONSIBILITIES_QUESTION = "What is your current or most recent role and key responsibilities?";
 
 interface CampaignFormProps {
   initial?: Partial<Campaign>;
@@ -157,7 +156,7 @@ export function CampaignForm({
 
     setQuestions((prev) => {
       const filtered = prev.filter(
-        (q) => (q.question_text || "").trim().toLowerCase() !== ROLE_RESPONSIBILITIES_QUESTION.toLowerCase()
+        (q) => !isRoleResponsibilitiesQuestion(q.question_text)
       );
       if (filtered.length === prev.length) return prev;
       return filtered.map((q, index) => ({ ...q, order_index: index }));

@@ -342,6 +342,14 @@ def _is_yes_no_question(text: str) -> bool:
     return normalized.startswith(("are ", "do ", "does ", "did ", "have ", "has ", "is ", "can ", "will ", "would "))
 
 
+_ROLE_RESPONSIBILITIES_MATCH_FRAGMENT = "current or most recent role"
+
+
+def _is_role_responsibilities_question(text: str) -> bool:
+    normalized = str(text or "").strip().lower()
+    return _ROLE_RESPONSIBILITIES_MATCH_FRAGMENT in normalized
+
+
 def _to_boolean_question_text(text: str) -> str:
     raw = " ".join(str(text or "").split()).strip()
     if not raw:
@@ -353,8 +361,6 @@ def _to_boolean_question_text(text: str) -> str:
         return raw if raw.endswith("?") else f"{raw}?"
 
     # Deterministic rewrite for known front-matter regular prompts.
-    if "current or most recent role" in lower:
-        return "Do you have recent experience in a role similar to this position?"
     if "current location" in lower:
         return "Are you currently based in the required job region for this role?"
     if "earliest availability" in lower or "availability to start" in lower:
@@ -385,7 +391,7 @@ def _enforce_boolean_pre_screen_questions(questions: List[Dict[str, Any]]) -> Li
             continue
 
         q_text_raw = str(q.get("question_text") or "")
-        if "current or most recent role" in q_text_raw.strip().lower():
+        if _is_role_responsibilities_question(q_text_raw):
             # L0.5 boolean interviews must not ask this open-ended prompt.
             continue
             
