@@ -113,7 +113,7 @@ export function CampaignForm({
   );
 
   // Outreach 3 (Enforce sequential: require outreach 2 enabled)
-  const initialOutreach3Enabled = initialOutreach2Enabled && initial?.phase1_to_phase2_hours !== -1;
+  const initialOutreach3Enabled = initialOutreach2Enabled && (initial?.phase1_to_phase2_hours ?? 0) >= 0;
   const [outreach3Enabled, setOutreach3Enabled] = useState(initialOutreach3Enabled);
   const [phase1To2Hours, setPhase1To2Hours] = useState<string>(
     initial?.phase1_to_phase2_hours !== null && initial?.phase1_to_phase2_hours !== undefined
@@ -127,7 +127,7 @@ export function CampaignForm({
   );
 
   // Outreach 4 (Enforce sequential: require outreach 3 & 2 enabled)
-  const initialOutreach4Enabled = initialOutreach3Enabled && initial?.phase2_to_phase3_hours !== -1;
+  const initialOutreach4Enabled = initialOutreach3Enabled && (initial?.phase2_to_phase3_hours ?? 0) >= 0;
   const [outreach4Enabled, setOutreach4Enabled] = useState(initialOutreach4Enabled);
   const [phase2To3Hours, setPhase2To3Hours] = useState<string>(
     initial?.phase2_to_phase3_hours !== null && initial?.phase2_to_phase3_hours !== undefined
