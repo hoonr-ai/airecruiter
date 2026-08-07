@@ -4,7 +4,7 @@
 // child job inherits). Used by both the "New Campaign" creation flow and the
 // "Edit" dialog on the detail page.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -25,6 +25,7 @@ import {
   EMPLOYMENT_TYPES,
   JOB_BOARDS,
   SCREENING_LEVELS,
+  isBooleanScreeningLevel,
   isValidRecruiterEmail,
   isRoleResponsibilitiesQuestion,
   TemplateQuestion,
@@ -150,17 +151,34 @@ export function CampaignForm({
       : "10"
   );
   const [nameError, setNameError] = useState<string | null>(null);
+  const prevScreeningLevelRef = useRef(screeningLevel);
 
   useEffect(() => {
-    if ((screeningLevel || "").trim().toLowerCase() !== "l0.5") return;
+    const wasBoolean = isBooleanScreeningLevel(prevScreeningLevelRef.current);
+    const isBoolean = isBooleanScreeningLevel(screeningLevel);
 
     setQuestions((prev) => {
-      const filtered = prev.filter(
-        (q) => !isRoleResponsibilitiesQuestion(q.question_text)
+      const hasRoleQuestion = prev.some((q) => isRoleResponsibilitiesQuestion(q.question_text));
+
+      if (isBoolean) {
+        if (!hasRoleQuestion) return prev;
+        const filtered = prev.filter((q) => !isRoleResponsibilitiesQuestion(q.question_text));
+        return filtered.map((q, index) => ({ ...q, order_index: index }));
+      }
+
+      if (!wasBoolean || hasRoleQuestion) return prev;
+
+      const roleQuestionTemplate = getDefaultCampaignScreeningQuestions("L1.5").find((q) =>
+        isRoleResponsibilitiesQuestion(q.question_text)
       );
-      if (filtered.length === prev.length) return prev;
-      return filtered.map((q, index) => ({ ...q, order_index: index }));
+      if (!roleQuestionTemplate) return prev;
+
+      const next = [...prev];
+      next.splice(Math.min(1, next.length), 0, { ...roleQuestionTemplate });
+      return next.map((q, index) => ({ ...q, order_index: index }));
     });
+
+    prevScreeningLevelRef.current = screeningLevel;
   }, [screeningLevel]);
 
   const addEmail = () => {
