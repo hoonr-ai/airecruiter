@@ -32,7 +32,7 @@ export const JOB_BOARDS = ["LinkedIn", "Indeed", "Dice", "Monster", "CareerBuild
 const ROLE_RESPONSIBILITIES_QUESTION = "What is your current or most recent role and key responsibilities?";
 const ROLE_RESPONSIBILITIES_MATCH_FRAGMENT = "current or most recent role";
 
-function isBooleanScreeningLevel(level?: string): boolean {
+export function isBooleanScreeningLevel(level?: string): boolean {
   return (level ?? "").trim().toLowerCase() === "l0.5";
 }
 
