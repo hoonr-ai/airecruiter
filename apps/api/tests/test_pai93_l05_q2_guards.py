@@ -83,3 +83,17 @@ def test_enforce_boolean_questions_removes_role_question_and_rewrites_role_speci
     assert role_specific["question_text"].lower().startswith("do you ")
     assert role_specific["is_hard_filter"] is True
     assert any("current location" in (q.get("question_text") or "").lower() for q in rewritten)
+
+
+def test_enforce_boolean_questions_preserves_work_arrangement():
+    # PAI-96: work-arrangement is a yes/no hard filter — always passed through unchanged.
+    q = {
+        "question_text": "This role follows a hybrid work arrangement based in Minneapolis. Are you open to working in this setup?",
+        "category": "work-arrangement",
+        "order_index": 2,
+        "is_hard_filter": True,
+    }
+
+    rewritten = _enforce_boolean_pre_screen_questions([q])
+    assert len(rewritten) == 1
+    assert rewritten[0]["question_text"] == q["question_text"]
