@@ -5019,7 +5019,7 @@ function NewJobPageContent() {
     // 3. Locations
     if (!hasSeededSourceLocation) {
       setHasSeededSourceLocation(true);
-      if (jobData && sourceLocations.length === 0) {
+      if (jobData && sourceLocations.length === 0 && !isRemoteJob(jobData)) {
         // Format: "City, State Zip" (e.g. "Tempe, AZ 85281"). Including the
         // zip narrows sourcing-provider matches that mishandle short state
         // codes alone. Falls back to "City, State" when the zip is missing.
