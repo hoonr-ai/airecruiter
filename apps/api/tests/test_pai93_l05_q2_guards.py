@@ -93,8 +93,8 @@ def test_enforce_boolean_questions_preserves_work_arrangement_for_campaign():
         "is_hard_filter": True,
     }
 
-    assert len(_enforce_boolean_pre_screen_questions([q], is_campaign=True)) == 1
-    assert _enforce_boolean_pre_screen_questions([q], is_campaign=True)[0]["question_text"] == q["question_text"]
+    assert len(_enforce_boolean_pre_screen_questions([q])) == 1
+    assert _enforce_boolean_pre_screen_questions([q])[0]["question_text"] == q["question_text"]
 
 
 def test_enforce_boolean_questions_preserves_work_arrangement_regardless_of_campaign():
@@ -106,9 +106,6 @@ def test_enforce_boolean_questions_preserves_work_arrangement_regardless_of_camp
         "is_hard_filter": True,
     }
 
-    for flag in (True, False):
-        rewritten = _enforce_boolean_pre_screen_questions([q], is_campaign=flag)
-        assert len(rewritten) == 1, f"is_campaign={flag}: question dropped"
-        assert rewritten[0]["question_text"] == q["question_text"], (
-            f"is_campaign={flag}: text was rewritten to {rewritten[0]['question_text']!r}"
-        )
+    rewritten = _enforce_boolean_pre_screen_questions([q])
+    assert len(rewritten) == 1
+    assert rewritten[0]["question_text"] == q["question_text"]

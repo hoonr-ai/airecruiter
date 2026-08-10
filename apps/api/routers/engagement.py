@@ -384,10 +384,7 @@ def _to_boolean_question_text(text: str) -> str:
     return "Do you have hands-on experience relevant to this role?"
 
 
-def _enforce_boolean_pre_screen_questions(
-    questions: List[Dict[str, Any]],
-    is_campaign: bool = False,
-) -> List[Dict[str, Any]]:
+def _enforce_boolean_pre_screen_questions(questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     rewritten: List[Dict[str, Any]] = []
     for q in questions or []:
         if not isinstance(q, dict):
@@ -708,10 +705,7 @@ async def _generate_payload_for(request: GeneratePayloadRequest):
             ]
             is_l05 = str(job_row.get("screening_level") or "").strip().lower() == "l0.5"
             if is_l05:
-                is_campaign_job = bool(job_row.get("campaign_id"))
-                pre_screen_questions_raw = _enforce_boolean_pre_screen_questions(
-                    pre_screen_questions_raw, is_campaign=is_campaign_job
-                )
+                pre_screen_questions_raw = _enforce_boolean_pre_screen_questions(pre_screen_questions_raw)
             pre_screen_questions = _sanitize_pre_screen_questions_for_pair(
                 pre_screen_questions_raw,
                 fallback_job_title=(job_row.get("enhanced_title") or job_row.get("title") or request.job_id),
