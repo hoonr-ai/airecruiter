@@ -409,7 +409,8 @@ def _enforce_boolean_pre_screen_questions(questions: List[Dict[str, Any]]) -> Li
             continue
             
         category = str(q.get("category") or "").strip().lower()
-        if category in ("default", "logistics"):
+        # work-arrangement is already a yes/no hard filter — always preserve.
+        if category in ("default", "logistics", "work-arrangement"):
             rewritten.append(q)
             continue
             
