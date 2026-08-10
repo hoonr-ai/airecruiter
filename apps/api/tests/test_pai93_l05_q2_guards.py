@@ -83,3 +83,32 @@ def test_enforce_boolean_questions_removes_role_question_and_rewrites_role_speci
     assert role_specific["question_text"].lower().startswith("do you ")
     assert role_specific["is_hard_filter"] is True
     assert any("current location" in (q.get("question_text") or "").lower() for q in rewritten)
+
+
+def test_enforce_boolean_questions_preserves_work_arrangement_for_campaign():
+    q = {
+        "question_text": "This role follows a hybrid work arrangement based in Minneapolis. Are you open to working in this setup?",
+        "category": "work-arrangement",
+        "order_index": 2,
+        "is_hard_filter": True,
+    }
+
+    assert len(_enforce_boolean_pre_screen_questions([q], is_campaign=True)) == 1
+    assert _enforce_boolean_pre_screen_questions([q], is_campaign=True)[0]["question_text"] == q["question_text"]
+
+
+def test_enforce_boolean_questions_preserves_work_arrangement_regardless_of_campaign():
+    # PAI-96: work-arrangement is always preserved now — is_campaign no longer gates it.
+    q = {
+        "question_text": "This role follows a hybrid work arrangement based in Minneapolis. Are you open to working in this setup?",
+        "category": "work-arrangement",
+        "order_index": 2,
+        "is_hard_filter": True,
+    }
+
+    for flag in (True, False):
+        rewritten = _enforce_boolean_pre_screen_questions([q], is_campaign=flag)
+        assert len(rewritten) == 1, f"is_campaign={flag}: question dropped"
+        assert rewritten[0]["question_text"] == q["question_text"], (
+            f"is_campaign={flag}: text was rewritten to {rewritten[0]['question_text']!r}"
+        )
