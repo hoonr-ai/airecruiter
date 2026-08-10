@@ -361,7 +361,7 @@ export function CampaignForm({
         <div>
           <h3 className="text-sm font-semibold text-slate-900 font-outfit">Outreach Schedule</h3>
           <p className="text-xs text-slate-500 mt-0.5">
-            Configure the 4 outreach steps. Uncheck a step to skip it (<span className="font-semibold text-slate-700">-1</span> saved internally). Default values from environment are used when 0 or left as-is.
+            Configure the 4 outreach steps. Outreach 1 is always active. Uncheck steps 2–4 to skip them (<span className="font-semibold text-slate-700">-1</span> saved internally). Default values from environment are used when 0 or left as-is.
           </p>
         </div>
 
@@ -376,7 +376,7 @@ export function CampaignForm({
         {/* Outreach 1 — always active */}
         <div className="grid grid-cols-[20px_1fr_120px_120px] gap-2 items-center rounded-lg border p-2 bg-white border-slate-200">
           {/* locked indicator — outreach 1 cannot be disabled */}
-          <div className="flex items-center justify-center">
+          <div className="flex items-center justify-center" aria-hidden="true">
             <div className="w-4 h-4 rounded border-2 border-primary bg-primary flex items-center justify-center">
               <svg className="w-2.5 h-2.5 text-white" viewBox="0 0 10 8" fill="none">
                 <path d="M1 4l3 3 5-6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
@@ -384,7 +384,7 @@ export function CampaignForm({
             </div>
           </div>
           <span className="text-sm font-medium text-slate-700 select-none">
-            Outreach 1 <span className="text-xs text-slate-400 font-normal">· Initial (immediate)</span>
+            Outreach 1 <span className="text-xs text-slate-400 font-normal">· Initial (immediate) · always on</span>
           </span>
           <div className="text-center text-xs text-slate-400 italic">Immediate</div>
           <Input
