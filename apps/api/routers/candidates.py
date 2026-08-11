@@ -60,7 +60,9 @@ def _extract_rankings_hard_filter_details(
     if isinstance(resp, dict):
         transcriptions = resp.get("transcriptions") or []
 
-    if not transcriptions and isinstance(data_blob, dict):
+    _valid_hf = {"passed", "failed", "pass", "fail"}
+    _has_hf = any(str(t.get("hard_filter_status") or "").lower() in _valid_hf for t in transcriptions if isinstance(t, dict))
+    if (not transcriptions or not _has_hf) and isinstance(data_blob, dict):
         last_response = data_blob.get("engage_last_response")
         last_response = last_response if isinstance(last_response, dict) else _json_load_safe(last_response, {})
         if isinstance(last_response, dict):
