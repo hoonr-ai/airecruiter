@@ -50,6 +50,13 @@ interface Job {
 type SortField = keyof Job;
 type SortDirection = "asc" | "desc";
 
+const SCREENING_LEVEL_STYLES: Record<string, string> = {
+  "L0.5": "bg-gray-100 text-gray-600 border-gray-300",
+  "L1":   "bg-blue-50 text-blue-700 border-blue-200",
+  "L1.5": "bg-teal-50 text-teal-700 border-teal-200",
+  "L2":   "bg-purple-50 text-purple-700 border-purple-200",
+};
+
 export default function DashboardPage() {
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState("");
@@ -142,7 +149,7 @@ export default function DashboardPage() {
           jobdiva_id: details.jobdiva_id || "",
           title: details.enhanced_title || details.title || "—",
           customer_name: details.customer_name || "—",
-          screening_level: details.screening_level || undefined,
+          screening_level: details.screening_level || "—",
           recruiterEmails: Array.isArray(details.recruiter_emails) ? details.recruiter_emails : [],
           status: status || "—",
           location: [
@@ -255,6 +262,7 @@ export default function DashboardPage() {
       "Max Allowed Submittals",
       "Job Status",
       "PAIR Status",
+      "Screening Level",
       "First PAIR Launch",
       "Candidates Launched",
       "Complete Submissions",
@@ -280,6 +288,7 @@ export default function DashboardPage() {
       escapeCSV(job.maxAllowedSubmittals),
       escapeCSV(job.status),
       escapeCSV(job.pairStatus),
+      escapeCSV(job.screening_level === "—" ? "" : job.screening_level),
       escapeCSV(job.pairLaunchedAt ? new Date(job.pairLaunchedAt).toLocaleString("en-US", { timeZone: "America/New_York", timeZoneName: "short" }) : "—"),
       escapeCSV(job.candidatesLaunched),
       escapeCSV(job.completeSubmissions),
@@ -578,19 +587,11 @@ export default function DashboardPage() {
                     </div>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-center">
-                    {job.screening_level ? (() => {
-                      const styles: Record<string, string> = {
-                        'L0.5': 'bg-gray-100 text-gray-600 border-gray-300',
-                        'L1':   'bg-blue-50 text-blue-700 border-blue-200',
-                        'L1.5': 'bg-teal-50 text-teal-700 border-teal-200',
-                        'L2':   'bg-purple-50 text-purple-700 border-purple-200',
-                      };
-                      return (
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${styles[job.screening_level!] ?? 'bg-gray-100 text-gray-600 border-gray-300'}`}>
-                          {job.screening_level}
-                        </span>
-                      );
-                    })() : <span className="text-slate-400 text-xs">—</span>}
+                    {job.screening_level && job.screening_level !== "—" ? (
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${SCREENING_LEVEL_STYLES[job.screening_level] ?? "bg-gray-100 text-gray-600 border-gray-300"}`}>
+                        {highlight(job.screening_level)}
+                      </span>
+                    ) : <span className="text-slate-400 text-xs">—</span>}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700 text-center">
                     {job.pairLaunchedAt ? (
