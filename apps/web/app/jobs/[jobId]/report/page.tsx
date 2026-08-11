@@ -72,6 +72,7 @@ interface EvaluationReport {
     engage_status: string;
     hard_filter_status: string;
     total_fit_score: number;
+    is_boolean_interview?: boolean;
   };
   job: {
     job_id: string;
@@ -565,9 +566,6 @@ export default function CandidateEvaluationReportPage() {
                   if (hardFilterItems.length > 0) {
                     return hardFilterItems.map((item: any, i: number) => {
                       const q_text = item.question || item.question_text || "Question";
-                      const a_text = item.answer || item.answer_text || "—";
-                      const score = item.candidate_score;
-                      const total = item.total_score || 10.0;
                       const hf_status = item.hard_filter_status;
                       const reason = item.reason;
 
@@ -586,58 +584,12 @@ export default function CandidateEvaluationReportPage() {
                             </div>
                           </div>
                           
-                          <div className="bg-[#f8fafc] rounded-lg p-4 border border-[#f1f5f9] space-y-3">
-                            <div className="space-y-1">
-                              <span className="text-[11px] font-bold text-[#94a3b8] uppercase tracking-widest">Candidate Answer</span>
-                              <p className="text-[14px] text-[#334155] leading-relaxed italic">"{a_text}"</p>
+                          {reason && (
+                            <div className="bg-[#f8fafc] rounded-lg p-4 border border-[#f1f5f9] space-y-1">
+                              <span className="text-[11px] font-bold text-[#94a3b8] uppercase tracking-widest">AI Analysis</span>
+                              <p className="text-[13px] text-[#475569] leading-relaxed font-medium">{reason}</p>
                             </div>
-                            {reason && (
-                              <div className="space-y-1 pt-2 border-t border-slate-200/60">
-                                <span className="text-[11px] font-bold text-[#94a3b8] uppercase tracking-widest">AI Analysis</span>
-                                <p className="text-[13px] text-[#475569] leading-relaxed font-medium">{reason}</p>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    });
-                  }
-
-                  // 2. Legacy Logic Fallback (Keep for backward compatibility)
-                  const auditQuestions = pair.audit_payload?.questions || [];
-                  const auditResponses = pair.audit_response?.questions || [];
-                  const legacyHardFilters = auditQuestions.filter((q: any) => q.pass_criteria);
-                  
-                  if (legacyHardFilters.length > 0) {
-                    return legacyHardFilters.map((q: any, i: number) => {
-                      const response = auditResponses.find((r: any) => 
-                        r.question_text === q.question_text || r.id === q.id
-                      );
-                      const status = (response?.status || "PENDING").toUpperCase();
-                      
-                      return (
-                        <div key={i} className="flex items-center justify-between py-3 px-5 bg-white border border-[#e2e8f0] rounded-xl hover:border-slate-300 transition-all shadow-sm">
-                          <span className="text-[14px] text-[#475569] font-medium leading-relaxed pr-8">{q.question_text}</span>
-                          <StatusPill 
-                            status={status === 'PASS' ? 'Pass' : status === 'FAIL' ? 'Fail' : 'Pending'} 
-                            type={status === 'PASS' ? 'success' : status === 'FAIL' ? 'danger' : 'neutral'} 
-                          />
-                        </div>
-                      );
-                    });
-                  }
-
-                  const fallbackFilters = pair.evaluation?.hard_filters || pair.questions_answers || job.screen_questions || [];
-                  if (fallbackFilters.length > 0) {
-                    return fallbackFilters.map((q: any, i: number) => {
-                      const status = (q.pass_fail || q.status || "PENDING").toUpperCase();
-                      return (
-                        <div key={i} className="flex items-center justify-between py-3 px-5 bg-white border border-[#e2e8f0] rounded-xl hover:border-slate-300 transition-all shadow-sm">
-                          <span className="text-[14px] text-[#475569] font-medium leading-relaxed pr-8">{q.question_text || q.question || q.name}</span>
-                          <StatusPill 
-                            status={status === 'PASS' ? 'Pass' : status === 'FAIL' ? 'Fail' : 'Pending'} 
-                            type={status === 'PASS' ? 'success' : status === 'FAIL' ? 'danger' : 'neutral'} 
-                          />
+                          )}
                         </div>
                       );
                     });
