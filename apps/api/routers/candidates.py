@@ -1003,7 +1003,6 @@ async def get_job_candidates(
                 """, (job_id_or_ref, job_id_or_ref))
                 result = cur.fetchone()
                 resolved_jobdiva_id = job_id_or_ref
-                resolved_numeric_id = job_id_or_ref
                 job_screening_level = ""
                 if result:
                     resolved_jobdiva_id = result[0] or result[1]
@@ -3037,12 +3036,19 @@ async def get_candidate_evaluation_report(
                     live_list = transcription_data if isinstance(transcription_data, list) else []
                     webhook_list = pair_data.get("transcriptions") or []
                     if live_list and webhook_list:
+                        # Match by question text so order differences don't corrupt hard_filter_status assignment
+                        wh_hf = {}
+                        for wh in webhook_list:
+                            if isinstance(wh, dict) and wh.get("hard_filter_status"):
+                                k = (wh.get("question") or wh.get("question_text") or "").strip().lower()
+                                if k:
+                                    wh_hf[k] = wh["hard_filter_status"]
                         merged_trans = []
-                        for i, live_item in enumerate(live_list):
-                            if isinstance(live_item, dict) and not live_item.get("hard_filter_status") and i < len(webhook_list):
-                                wh = webhook_list[i]
-                                if isinstance(wh, dict) and wh.get("hard_filter_status"):
-                                    live_item = {**live_item, "hard_filter_status": wh["hard_filter_status"]}
+                        for live_item in live_list:
+                            if isinstance(live_item, dict) and not live_item.get("hard_filter_status"):
+                                k = (live_item.get("question") or live_item.get("question_text") or "").strip().lower()
+                                if k and k in wh_hf:
+                                    live_item = {**live_item, "hard_filter_status": wh_hf[k]}
                             merged_trans.append(live_item)
                         pair_data["transcriptions"] = merged_trans
                     else:
