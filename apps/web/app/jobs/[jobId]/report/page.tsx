@@ -690,16 +690,21 @@ export default function CandidateEvaluationReportPage() {
                         return (
                           <div key={i} className="space-y-4">
                             {q_text && (
-                              <div className="flex flex-col gap-2.5 relative items-start pr-12">
+                              <div className={`flex flex-col gap-2.5 relative items-start pr-12 ${msg.is_closing ? 'opacity-70' : ''}`}>
                                 <span className="text-[11px] font-black uppercase tracking-widest text-[#4f46e5]">
                                   ASSISTANT (ALEX)
                                 </span>
-                                <div className="p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border bg-[#eef2ff] border-[#e0e7ff] text-[#312e81] rounded-tl-none">
+                                <div className={`p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border rounded-tl-none ${
+                                  msg.is_closing
+                                    ? 'bg-[#e2e8f0] border-[#cbd5e1] text-[#475569] italic'
+                                    : 'bg-[#eef2ff] border-[#e0e7ff] text-[#312e81]'
+                                }`}>
                                   {q_text}
                                 </div>
                               </div>
                             )}
-                            {a_text && (
+                            {/* Candidate answer — show placeholder when question was sent but not answered */}
+                            {a_text ? (
                               <div className="flex flex-col gap-2.5 relative items-end pl-12">
                                 <span className="text-[11px] font-black uppercase tracking-widest text-[#94a3b8]">
                                   CANDIDATE
@@ -708,7 +713,17 @@ export default function CandidateEvaluationReportPage() {
                                   {a_text}
                                 </div>
                               </div>
-                            )}
+                            ) : msg.is_unanswered ? (
+                              /* PAI-107: candidate dropped off — show explicit placeholder */
+                              <div className="flex flex-col gap-2.5 relative items-end pl-12">
+                                <span className="text-[11px] font-black uppercase tracking-widest text-[#94a3b8]">
+                                  CANDIDATE
+                                </span>
+                                <div className="p-6 rounded-[20px] text-[13px] leading-relaxed shadow-sm border bg-[#fef9f0] border-[#fed7aa] text-[#92400e] rounded-tr-none italic">
+                                  No response recorded
+                                </div>
+                              </div>
+                            ) : null}
                           </div>
                         );
                       }

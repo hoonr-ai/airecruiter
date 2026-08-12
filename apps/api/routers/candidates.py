@@ -27,6 +27,29 @@ from routers._helpers import get_db_connection
 from core.auth import get_current_user, UserIdentity
 from routers.jobs import _verify_job_access_by_id
 
+def _merge_transcriptions(webhook_list: list, live_list: list) -> list:
+    """Helper to merge webhook transcriptions (with hard_filter_status) into live transcriptions."""
+    if not live_list or not webhook_list:
+        return live_list
+
+    wh_hf = {}
+    for wh in webhook_list:
+        if isinstance(wh, dict) and wh.get("hard_filter_status"):
+            k = (wh.get("question") or wh.get("question_text") or "").strip().lower()
+            if k:
+                wh_hf[k] = wh["hard_filter_status"]
+    
+    merged_trans = []
+    for live_item in live_list:
+        if isinstance(live_item, dict):
+            # Patch hard_filter_status from webhook when live item lacks it
+            if not live_item.get("hard_filter_status"):
+                k = (live_item.get("question") or live_item.get("question_text") or "").strip().lower()
+                if k and k in wh_hf:
+                    live_item = {**live_item, "hard_filter_status": wh_hf[k]}
+        merged_trans.append(live_item)
+    return merged_trans
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -3055,21 +3078,7 @@ async def get_candidate_evaluation_report(
                     live_list = transcription_data if isinstance(transcription_data, list) else []
                     webhook_list = pair_data.get("transcriptions") or []
                     if live_list and webhook_list:
-                        # Match by question text so order differences don't corrupt hard_filter_status assignment
-                        wh_hf = {}
-                        for wh in webhook_list:
-                            if isinstance(wh, dict) and wh.get("hard_filter_status"):
-                                k = (wh.get("question") or wh.get("question_text") or "").strip().lower()
-                                if k:
-                                    wh_hf[k] = wh["hard_filter_status"]
-                        merged_trans = []
-                        for live_item in live_list:
-                            if isinstance(live_item, dict) and not live_item.get("hard_filter_status"):
-                                k = (live_item.get("question") or live_item.get("question_text") or "").strip().lower()
-                                if k and k in wh_hf:
-                                    live_item = {**live_item, "hard_filter_status": wh_hf[k]}
-                            merged_trans.append(live_item)
-                        pair_data["transcriptions"] = merged_trans
+                        pair_data["transcriptions"] = _merge_transcriptions(webhook_list, live_list)
                     else:
                         pair_data["transcriptions"] = live_list
                 if outreach_data: pair_data["outreach"] = outreach_data
