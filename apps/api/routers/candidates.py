@@ -56,19 +56,38 @@ def _extract_rankings_hard_filter_details(
 
     details: List[Dict[str, Any]] = []
 
+    last_response = data_blob.get("engage_last_response")
+    last_response = last_response if isinstance(last_response, dict) else _json_load_safe(last_response, {})
+    wp_data = last_response.get("data", last_response) if isinstance(last_response, dict) else {}
+
+    # 1. Prefer explicit hard_filter_results from the updated webhook payload
+    hf_results = wp_data.get("hard_filter_results")
+    if isinstance(hf_results, list) and hf_results:
+        for item in hf_results:
+            hf_status = str(item.get("hard_filter_status") or item.get("pass_fail") or "").lower()
+            if hf_status not in {"passed", "failed", "pass", "fail"}:
+                continue
+            details.append({
+                "question": item.get("question") or "Question",
+                "answer": item.get("answer"),
+                "status": "Pass" if hf_status in {"passed", "pass"} else "Fail",
+                # Hardcoded because PairBot does not include numeric scores for these fields in the hard_filter_results array
+                "score": None,
+                "total_score": None,
+                "reason": item.get("reason") or "",
+            })
+        if details:
+            return details
+
+    # 2. Fallback to transcriptions
     transcriptions = []
     if isinstance(resp, dict):
         transcriptions = resp.get("transcriptions") or []
 
     _valid_hf = {"passed", "failed", "pass", "fail"}
     _has_hf = any(str(t.get("hard_filter_status") or "").lower() in _valid_hf for t in transcriptions if isinstance(t, dict))
-    if (not transcriptions or not _has_hf) and isinstance(data_blob, dict):
-        last_response = data_blob.get("engage_last_response")
-        last_response = last_response if isinstance(last_response, dict) else _json_load_safe(last_response, {})
-        if isinstance(last_response, dict):
-            wp_data = last_response.get("data", last_response)
-            if isinstance(wp_data, dict):
-                transcriptions = wp_data.get("transcriptions") or []
+    if (not transcriptions or not _has_hf):
+        transcriptions = wp_data.get("transcriptions") or []
 
     if isinstance(transcriptions, list):
         for item in transcriptions:
@@ -3199,6 +3218,12 @@ async def get_candidate_evaluation_report(
             "engage_completed_at":   str(engage_completed_at) if engage_completed_at else None,
             "engage_created_at":     str(engage_created_at) if engage_created_at else None,
             "is_boolean_interview":  is_l05,
+            # Same data source as the hover card — avoids a separate live-fetch failure
+            "engage_hard_filter_details": _extract_rankings_hard_filter_details(
+                data_blob if isinstance(data_blob, dict) else {},
+                pair_data.get("audit_response"),
+                pair_data.get("audit_payload"),
+            ),
             "matched_skills":        _jl(data_blob.get("matched_skills"), []),
             "missing_skills":        _jl(data_blob.get("missing_skills"), []),
             "explainability":        _jl(data_blob.get("explainability"), []),
