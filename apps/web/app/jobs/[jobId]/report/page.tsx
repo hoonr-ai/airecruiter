@@ -685,7 +685,7 @@ export default function CandidateEvaluationReportPage() {
                                 </span>
                                 <div className={`p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border rounded-tl-none ${
                                   msg.is_closing
-                                    ? 'bg-[#f8fafc] border-[#e2e8f0] text-[#64748b] italic'
+                                    ? 'bg-[#e2e8f0] border-[#cbd5e1] text-[#475569] italic'
                                     : 'bg-[#eef2ff] border-[#e0e7ff] text-[#312e81]'
                                 }`}>
                                   {q_text}
@@ -716,7 +716,6 @@ export default function CandidateEvaluationReportPage() {
                           </div>
                         );
                       }
-
 
                       // Handle single messages (raw transcripts)
                       if (single_text) {
