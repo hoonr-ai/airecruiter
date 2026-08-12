@@ -134,6 +134,7 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
       2. Offer Extended
       3. Offer Accepted
       4. Current Employee of the hiring client
+      5. Current or LAST employer on the no-contact company list
     """
     if not candidate or not isinstance(candidate, dict):
         return False, ""
@@ -196,6 +197,18 @@ def is_candidate_excluded_from_pair(candidate: Dict[str, Any], client_name: str 
         # must match "Meta Platforms" but NOT "Metadata Solutions".
         if is_same_company(comp, client_name):
             return True, "Employed by Hiring Client"
+
+    # No-contact companies (services/no_contact.py): current or LAST employer
+    # on the code-managed list. Step 5 greys these rows out and /candidates/
+    # save refuses to persist them, so reaching here means a stale session or
+    # legacy stored row — block outreach regardless.
+    try:
+        from services.no_contact import check_no_contact
+        nc_hit = check_no_contact(candidate)
+    except Exception:  # noqa: BLE001 — a matcher error must not block launches
+        nc_hit = None
+    if nc_hit:
+        return True, f"No-Contact Company ({nc_hit['keyword']})"
 
     return False, ""
 
