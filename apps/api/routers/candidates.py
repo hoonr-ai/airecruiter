@@ -3036,7 +3036,8 @@ async def get_candidate_evaluation_report(
                     live_list = transcription_data if isinstance(transcription_data, list) else []
                     webhook_list = pair_data.get("transcriptions") or []
                     if live_list and webhook_list:
-                        # Match by question text so order differences don't corrupt hard_filter_status assignment
+                        # Match by question text so order differences don't corrupt
+                        # hard_filter_status assignment.
                         wh_hf = {}
                         for wh in webhook_list:
                             if isinstance(wh, dict) and wh.get("hard_filter_status"):
@@ -3045,10 +3046,24 @@ async def get_candidate_evaluation_report(
                                     wh_hf[k] = wh["hard_filter_status"]
                         merged_trans = []
                         for live_item in live_list:
-                            if isinstance(live_item, dict) and not live_item.get("hard_filter_status"):
+                            if not isinstance(live_item, dict):
+                                continue
+                            # Patch hard_filter_status from webhook when live item lacks it
+                            if not live_item.get("hard_filter_status"):
                                 k = (live_item.get("question") or live_item.get("question_text") or "").strip().lower()
                                 if k and k in wh_hf:
                                     live_item = {**live_item, "hard_filter_status": wh_hf[k]}
+                            # PAI-107: always include bot-only rows (unanswered last
+                            # question / closing farewell).  These are flagged by Pairbot
+                            # with is_unanswered=True or is_closing=True.  Ensure they are
+                            # not silently dropped by normalising answer fields to None.
+                            speaker = (live_item.get("speaker_type") or "").lower()
+                            if speaker == "bot":
+                                live_item = {
+                                    **live_item,
+                                    "answer_text": live_item.get("answer_text"),
+                                    "answer": live_item.get("answer"),
+                                }
                             merged_trans.append(live_item)
                         pair_data["transcriptions"] = merged_trans
                     else:
