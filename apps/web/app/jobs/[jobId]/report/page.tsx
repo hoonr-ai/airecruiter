@@ -73,6 +73,7 @@ interface EvaluationReport {
     hard_filter_status: string;
     total_fit_score: number;
     is_boolean_interview?: boolean;
+    engage_hard_filter_details?: any[];
   };
   job: {
     job_id: string;
