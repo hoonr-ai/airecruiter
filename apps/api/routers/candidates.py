@@ -27,7 +27,7 @@ from routers._helpers import get_db_connection
 from core.auth import get_current_user, UserIdentity
 from routers.jobs import _verify_job_access_by_id
 
-def _merge_transcriptions_for_test(webhook_list: list, live_list: list) -> list:
+def _merge_transcriptions(webhook_list: list, live_list: list) -> list:
     """Helper to merge webhook transcriptions (with hard_filter_status) into live transcriptions."""
     if not live_list or not webhook_list:
         return live_list
@@ -3059,7 +3059,7 @@ async def get_candidate_evaluation_report(
                     live_list = transcription_data if isinstance(transcription_data, list) else []
                     webhook_list = pair_data.get("transcriptions") or []
                     if live_list and webhook_list:
-                        pair_data["transcriptions"] = _merge_transcriptions_for_test(webhook_list, live_list)
+                        pair_data["transcriptions"] = _merge_transcriptions(webhook_list, live_list)
                     else:
                         pair_data["transcriptions"] = live_list
                 if outreach_data: pair_data["outreach"] = outreach_data
