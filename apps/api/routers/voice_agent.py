@@ -114,8 +114,9 @@ class HardFilterResultItem(BaseModel):
     answer: str
     pass_fail: str
     hard_filter_status: str
-    reason: str
-    question_order: int
+    reason: Optional[str] = None
+    question_order: Optional[int] = None
+
 class VoiceAgentInterviewWebhook(BaseModel):
     interview_id: str
     status: str

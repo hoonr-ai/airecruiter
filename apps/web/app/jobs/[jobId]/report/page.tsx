@@ -549,6 +549,7 @@ export default function CandidateEvaluationReportPage() {
                   // 0. Use hover-card data (same source, most reliable)
                   let hardFilterItems: any[] = (scores.engage_hard_filter_details || []).map((d: any) => ({
                     question: d.question,
+                    answer: d.answer,
                     hard_filter_status: d.status === 'Pass' ? 'passed' : 'failed',
                     reason: d.reason,
                   }));

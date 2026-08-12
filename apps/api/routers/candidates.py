@@ -65,14 +65,19 @@ def _extract_rankings_hard_filter_details(
     if isinstance(hf_results, list) and hf_results:
         for item in hf_results:
             hf_status = str(item.get("hard_filter_status") or item.get("pass_fail") or "").lower()
+            if hf_status not in {"passed", "failed", "pass", "fail"}:
+                continue
             details.append({
                 "question": item.get("question") or "Question",
+                "answer": item.get("answer"),
                 "status": "Pass" if hf_status in {"passed", "pass"} else "Fail",
+                # Hardcoded because PairBot does not include numeric scores for these fields in the hard_filter_results array
                 "score": None,
                 "total_score": None,
                 "reason": item.get("reason") or "",
             })
-        return details
+        if details:
+            return details
 
     # 2. Fallback to transcriptions
     transcriptions = []
