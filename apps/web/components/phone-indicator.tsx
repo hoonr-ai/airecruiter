@@ -18,6 +18,9 @@ interface PhoneIndicatorProps {
   linkedinUrl?: string;
   /** Candidate source, forwarded to the enrichment endpoint for attribution. */
   source?: string;
+  /** Hard-disables the whole control (no popup, no lookup, no manual save).
+   *  Used for no-contact company rows, where every action is blocked. */
+  disabled?: boolean;
 }
 
 function countDigits(s: string) {
@@ -35,6 +38,7 @@ export function PhoneIndicator({
   title,
   linkedinUrl,
   source,
+  disabled = false,
 }: PhoneIndicatorProps) {
   const hasPhone = !!(phone && countDigits(phone) >= 7);
   const [open, setOpen] = useState(false);
@@ -188,13 +192,14 @@ export function PhoneIndicator({
     }
   }
 
-  const tooltip =
-    title ||
-    (hasPhone
-      ? phone || "Phone number on file"
-      : "Click to look up or add a phone number");
+  const tooltip = disabled
+    ? title || "No-contact company — phone actions disabled"
+    : title ||
+      (hasPhone
+        ? phone || "Phone number on file"
+        : "Click to look up or add a phone number");
 
-  const popup = open && popupCoords && typeof document !== "undefined"
+  const popup = !disabled && open && popupCoords && typeof document !== "undefined"
     ? createPortal(
         <div
           ref={popupRef}
@@ -288,17 +293,21 @@ export function PhoneIndicator({
     <div ref={wrapperRef} className="relative inline-flex items-center">
       <button
         type="button"
+        disabled={disabled}
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
+          if (disabled) return;
           setOpen((v) => !v);
         }}
         title={tooltip}
         aria-label={tooltip}
-        className={`h-7 w-7 flex items-center justify-center rounded-lg border shadow-sm transition-all ${
-          hasPhone
-            ? "border-emerald-200 bg-emerald-50 text-emerald-600 hover:bg-emerald-100"
-            : "border-slate-200 bg-white text-slate-400 hover:bg-slate-50 hover:text-slate-600"
+        className={`h-7 w-7 flex items-center justify-center rounded-lg border shadow-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed ${
+          disabled
+            ? "border-slate-200 bg-slate-100 text-slate-300"
+            : hasPhone
+              ? "border-emerald-200 bg-emerald-50 text-emerald-600 hover:bg-emerald-100"
+              : "border-slate-200 bg-white text-slate-400 hover:bg-slate-50 hover:text-slate-600"
         }`}
       >
         <Phone className={`w-3.5 h-3.5 ${hasPhone ? "fill-emerald-500" : ""}`} />

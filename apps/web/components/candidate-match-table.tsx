@@ -384,45 +384,65 @@ export function CandidateMatchTable({
               const launchedKey = `${candidate.source ?? ''}:${id}`;
               const isAlreadyLaunched = !!disabledLaunchedKeys?.has(launchedKey);
               const isDnc = !!dncKeys?.has(launchedKey);
+              // Backend-stamped flag: current/last employer is on the
+              // no-contact company list. Display-only row — greyed out,
+              // unselectable, every action disabled.
+              const isNoContact = candidate.no_contact === true;
+              const noContactTitle =
+                candidate.no_contact_reason ||
+                "Employer is on the no-contact company list — no actions can be taken";
 
               return (
                 <TableRow
                   key={id}
                   className={`cursor-default transition-colors ${
-                    isDnc
-                      ? "bg-rose-50 opacity-80"
-                      : isAlreadyLaunched
-                        ? "bg-slate-50 opacity-60"
-                        : "hover:bg-indigo-50/30"
+                    isNoContact
+                      ? "bg-slate-100/80 opacity-50"
+                      : isDnc
+                        ? "bg-rose-50 opacity-80"
+                        : isAlreadyLaunched
+                          ? "bg-slate-50 opacity-60"
+                          : "hover:bg-indigo-50/30"
                   }`}
                 >
                   <TableCell className="pl-4">
                     <Checkbox
                       className="w-4 h-4 rounded border-slate-300 data-[state=checked]:bg-purple-600 data-[state=checked]:border-purple-600"
-                      checked={checked && !isDnc}
-                      disabled={isAlreadyLaunched || isDnc}
+                      checked={checked && !isDnc && !isNoContact}
+                      disabled={isAlreadyLaunched || isDnc || isNoContact}
                       onCheckedChange={(v) => {
-                        if (isAlreadyLaunched || isDnc) return;
+                        if (isAlreadyLaunched || isDnc || isNoContact) return;
                         onToggleSelect(id, !!v);
                       }}
                       title={
-                        isDnc
-                          ? "Phone is on the Do Not Contact list"
-                          : isAlreadyLaunched
-                            ? "Already launched on this job"
-                            : undefined
+                        isNoContact
+                          ? noContactTitle
+                          : isDnc
+                            ? "Phone is on the Do Not Contact list"
+                            : isAlreadyLaunched
+                              ? "Already launched on this job"
+                              : undefined
                       }
                     />
                   </TableCell>
                   <TableCell className="max-w-[280px]">
-                    <button
-                      type="button"
-                      className="text-left text-[13.5px] font-semibold text-slate-900 hover:text-indigo-600 truncate block max-w-full"
-                      title={`${displayName} — view resume`}
-                      onClick={() => onOpenResume(candidate)}
-                    >
-                      {displayName}
-                    </button>
+                    {isNoContact ? (
+                      <span
+                        className="text-left text-[13.5px] font-semibold text-slate-500 truncate block max-w-full"
+                        title={noContactTitle}
+                      >
+                        {displayName}
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="text-left text-[13.5px] font-semibold text-slate-900 hover:text-indigo-600 truncate block max-w-full"
+                        title={`${displayName} — view resume`}
+                        onClick={() => onOpenResume(candidate)}
+                      >
+                        {displayName}
+                      </button>
+                    )}
                     {candidate.title || candidate.headline ? (
                       <div className="text-[11.5px] text-slate-500 truncate" title={candidate.title || candidate.headline}>
                         {candidate.title || candidate.headline}
@@ -441,6 +461,7 @@ export function CandidateMatchTable({
                         onSaved={(normalised) => onPhoneSaved(id, normalised)}
                         linkedinUrl={candidate.profile_url}
                         source={candidate.source}
+                        disabled={isNoContact}
                       />
                     ) : awaitingDetails(candidate) ? (
                       <Skeleton className="h-4 w-24" data-testid="shimmer-phone" />
@@ -453,6 +474,7 @@ export function CandidateMatchTable({
                         onSaved={(normalised) => onPhoneSaved(id, normalised)}
                         linkedinUrl={candidate.profile_url}
                         source={candidate.source}
+                        disabled={isNoContact}
                       />
                     )}
                   </TableCell>
@@ -472,7 +494,16 @@ export function CandidateMatchTable({
                       setHoveredId((prev) => (prev === id ? null : prev));
                     }}
                   >
-                    {matchScore != null && tone ? (
+                    {isNoContact ? (
+                      // No-contact rows are never scored (and the details
+                      // popup is an action, so it stays unreachable).
+                      <span
+                        className="inline-flex items-center justify-center w-12 h-12 rounded-full font-bold text-[12px] bg-slate-100 text-slate-400 border-2 border-slate-200"
+                        title={noContactTitle}
+                      >
+                        —
+                      </span>
+                    ) : matchScore != null && tone ? (
                       <button
                         type="button"
                         onClick={() => onOpenDetails(candidate)}
@@ -608,6 +639,14 @@ export function CandidateMatchTable({
                           title="Enriched via Exa Agent deep-search"
                         >
                           ✦ Deep
+                        </span>
+                      )}
+                      {isNoContact && (
+                        <span
+                          className="px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-wider inline-flex items-center border bg-slate-200 text-slate-600 border-slate-300"
+                          title={noContactTitle}
+                        >
+                          No Contact
                         </span>
                       )}
                       {isDnc && (

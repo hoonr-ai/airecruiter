@@ -561,6 +561,14 @@ const deduplicateCandidatesUI = (candidatesList: any[]) => {
       "jobdiva_candidate_id", "jobdiva_id"]) {
       if (!dst[f] && src[f]) dst[f] = src[f];
     }
+    // No-contact flag is sticky-true across merges: if EITHER row of the same
+    // person is flagged, the survivor stays flagged (dropping the flag here
+    // would silently re-enable actions on a blocked candidate).
+    if (src.no_contact === true && dst.no_contact !== true) {
+      dst.no_contact = true;
+      dst.no_contact_reason = src.no_contact_reason;
+      dst.no_contact_company = src.no_contact_company;
+    }
     const dEmail = String(dst.email || "");
     const sEmail = String(src.email || "");
     if (sEmail && sEmail !== dEmail && (!dEmail || (isPlaceholderEmailUI(dEmail) && !isPlaceholderEmailUI(sEmail)))) {
@@ -7057,6 +7065,13 @@ function NewJobPageContent() {
       // second MissingContactsModal pass). Low score / thin profile / location
       // are NOT skip reasons — everyone else stays launchable.
       .filter(c => !getCandidateExclusionReason(c))
+      // No-contact company rows are display-only: unselectable in the table,
+      // but re-filtered here so no code path (second MissingContactsModal
+      // pass included) can ever persist one. Backend re-checks at
+      // /candidates/save — defense in depth. NOTE: deliberately NOT part of
+      // getCandidateExclusionReason — that helper also drives row VISIBILITY,
+      // and no-contact rows must stay visible (greyed out).
+      .filter(c => c.no_contact !== true)
       .filter(c => {
         if (dncPhones.size === 0) return true;
         const np = normalizePhone(c.phone);
@@ -7579,7 +7594,7 @@ function NewJobPageContent() {
         c.sources.some((s: any) => String(s).toLowerCase().includes("jobdiva")));
 
     const launchable = pool.filter(
-      (c) => idOf(c) && !getCandidateExclusionReason(c)
+      (c) => idOf(c) && !getCandidateExclusionReason(c) && c.no_contact !== true
     );
     const byRank = [...launchable].sort(
       (a, b) => searchAndLaunchRank(b) - searchAndLaunchRank(a)
@@ -9232,7 +9247,7 @@ function NewJobPageContent() {
                         const firstN = sortedCandidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                            return !dncCandidateKeys.has(key);
+                            return !dncCandidateKeys.has(key) && c.no_contact !== true;
                           })
                           .slice(0, n);
 
@@ -9265,7 +9280,7 @@ function NewJobPageContent() {
                         const firstN = sortedCandidates
                           .filter(c => {
                             const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                            return !dncCandidateKeys.has(key);
+                            return !dncCandidateKeys.has(key) && c.no_contact !== true;
                           })
                           .slice(0, n);
                         const allFirstNSelected = firstN.length > 0 && firstN.every(c => selectedCandidates.has(c.candidate_id || c.jobdiva_candidate_id || c.id));
@@ -9306,7 +9321,7 @@ function NewJobPageContent() {
                         // rows hidden by the min-match/location filters.
                         const eligible = sortedCandidates.filter(c => {
                           const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                          return !dncCandidateKeys.has(key);
+                          return !dncCandidateKeys.has(key) && c.no_contact !== true;
                         });
                         const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));
@@ -9331,7 +9346,7 @@ function NewJobPageContent() {
                       {(() => {
                         const eligible = candidates.filter(c => {
                           const key = `${c.source ?? ''}:${c.candidate_id || c.jobdiva_candidate_id || c.id}`;
-                          return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key);
+                          return matchesSourceFilter(c) && !launchedCandidateKeys.has(key) && !launchedCandidateIds.has(String(c.candidate_id || c.jobdiva_candidate_id || c.id)) && !dncCandidateKeys.has(key) && c.no_contact !== true;
                         });
                         const allIds = eligible.map(c => c.candidate_id || c.jobdiva_candidate_id || c.id);
                         const allSelected = allIds.length > 0 && allIds.every(id => selectedCandidates.has(id));

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Briefcase, Users, Settings, Megaphone, UsersRound } from "lucide-react";
+import { LayoutDashboard, Briefcase, Users, Settings, Megaphone, UsersRound, ShieldOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AzureLoginButton } from "@/components/auth/AzureLoginButton";
 import { useUserRole } from "@/hooks/use-user-role";
@@ -21,6 +21,7 @@ export function Sidebar() {
             ? [
                   { label: "Admin Analytics", href: "/admin/analytics", icon: LayoutDashboard, disabled: false },
                   { label: "Teams", href: "/admin/teams", icon: UsersRound, disabled: false },
+                  { label: "No Contact List", href: "/admin/no-contact", icon: ShieldOff, disabled: false },
               ]
             : []),
         ...(!isAdmin && isTeamLead
