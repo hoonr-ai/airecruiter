@@ -233,6 +233,11 @@ export const api = {
       req<any>(`/api/v1/admin/analytics${teamId ? `?team_id=${encodeURIComponent(teamId)}` : ""}`),
     linkedinAccounts: () => req<any>(`/api/v1/admin/linkedin-accounts`),
   },
+  noContact: {
+    // Read-only: the list is code-managed (core/sourcing_config.py); admins
+    // can view it but edits happen through code for now.
+    companies: () => req<{ companies: string[]; editable: boolean }>(`/api/v1/no-contact/companies`),
+  },
   teams: {
     list: () => req<any>(`/api/v1/teams`),
     create: (body: { name: string; lead_emails: string; member_emails: string }) =>

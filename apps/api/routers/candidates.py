@@ -1576,6 +1576,40 @@ async def save_candidates(request: CandidatesSaveRequest):
                 )
             selected_candidates = allowed
 
+        # No-contact company enforcement (services/no_contact.py): flagged
+        # rows are display-only on Step 5 — the frontend never selects them,
+        # but a stale browser session or direct API call must not persist
+        # (or, downstream, launch) one. Recomputed server-side from the
+        # submitted payload; the frontend's flag is not trusted.
+        no_contact_skipped: List[Dict[str, Any]] = []
+        if selected_candidates:
+            from services.no_contact import check_no_contact
+            nc_allowed: List[Any] = []
+            for c in selected_candidates:
+                try:
+                    hit = check_no_contact(c.dict())
+                except Exception:  # noqa: BLE001 — a matcher error must not block saves
+                    hit = None
+                if hit:
+                    no_contact_skipped.append({
+                        "candidate_id": getattr(c, "candidate_id", None),
+                        "name": getattr(c, "name", None),
+                        "source": getattr(c, "source", None),
+                        "reason": (
+                            f"{hit['relation']} employer '{hit['company']}' matches "
+                            f"no-contact company '{hit['keyword']}'"
+                        ),
+                    })
+                else:
+                    nc_allowed.append(c)
+            if no_contact_skipped:
+                logger.info(
+                    "no_contact_skip count=%s ids=%s",
+                    len(no_contact_skipped),
+                    [s["candidate_id"] for s in no_contact_skipped],
+                )
+            selected_candidates = nc_allowed
+
         for idx, c in enumerate(selected_candidates):
             print(f"   Selected Candidate {idx+1}: {c.name} (ID: {c.candidate_id}, Source: {c.source})")
 
@@ -1845,6 +1879,8 @@ async def save_candidates(request: CandidatesSaveRequest):
             "enhanced_count": enhanced_count,
             "dnc_skipped_count": len(dnc_skipped),
             "dnc_skipped": dnc_skipped,
+            "no_contact_skipped_count": len(no_contact_skipped),
+            "no_contact_skipped": no_contact_skipped,
         }
 
     except HTTPException:

@@ -19,6 +19,7 @@ from services.location import (
     within_radius,
 )
 from services.jobdiva_boolean_translator import strip_jobdiva_dialect
+from services.no_contact import apply_no_contact_flag
 from core.config import (
     SCORING_REQUIRED_WEIGHT,
     SCORING_PREFERRED_WEIGHT,
@@ -551,6 +552,23 @@ class UnifiedCandidateSearch:
                 ))
             cand["location"] = loc
 
+            # No-contact companies (services/no_contact.py): flag at the emit
+            # choke-point so every source is covered — external rows carry
+            # employer fields pre-LLM, JobDiva rows only after enhancement.
+            # Flagged rows are display-only: never scored (match_score None
+            # renders as the grey "N/A" pill, and the None-safe score gates
+            # keep the row visible), greyed out client-side, and blocked
+            # server-side at /candidates/save and the launch gate.
+            if apply_no_contact_flag(cand):
+                cand["match_score"] = None
+                cand["missing_skills"] = []
+                cand["matched_skills"] = []
+                cand["explainability"] = [
+                    cand.get("no_contact_reason") or "No-contact company"
+                ]
+                cand["match_score_details"] = {}
+                return cand
+
             if criteria.bypass_screening:
                 cand["match_score"] = 0
                 cand["missing_skills"] = []
@@ -856,6 +874,7 @@ class UnifiedCandidateSearch:
                 "location_match_reason",
                 "qualifications", "employee_status", "available",
                 "availability_status", "current_company", "scoring_mode",
+                "no_contact", "no_contact_reason", "no_contact_company",
             ):
                 v = cand.get(key)
                 if v not in (None, "", [], {}):
@@ -1020,6 +1039,10 @@ class UnifiedCandidateSearch:
                 # "high_level" for JobDiva-JobAgent rows (LLM skills-match
                 # skipped) → popup labels the score "JobDiva agent search".
                 "scoring_mode",
+                # No-contact company flag → UI greys the row out and disables
+                # every action. False rides along too (v is not None) so a
+                # stale flag clears client-side.
+                "no_contact", "no_contact_reason", "no_contact_company",
             ):
                 v = cand.get(key)
                 if v is not None:
@@ -1368,6 +1391,17 @@ class UnifiedCandidateSearch:
                         if not assessment["passes"]:
                             return {"status": "failed_filter"}
 
+                        # No-contact company (checked after the Unipile profile
+                        # fetch fills company_experience): emit the row so Step 5
+                        # renders it greyed out, but spend nothing more on it —
+                        # no LLM extraction (which is also the enhanced-info
+                        # persistence path), no deep analysis, no paid contact
+                        # enrichment.
+                        if apply_no_contact_flag(cand):
+                            cand["enhanced_info"] = cand.get("enhanced_info") or {}
+                            cand["enhanced_info_status"] = "no_contact"
+                            return {"status": "no_contact_shown", "candidate": cand}
+
                         from services.sourced_candidates_storage import process_linkedin_candidate, process_dice_candidate
                         if is_linkedin:
                             enhanced = await process_linkedin_candidate(cand)
@@ -1482,7 +1516,7 @@ class UnifiedCandidateSearch:
                 for task in asyncio.as_completed(process_tasks):
                     result = await task
                     _status_counts[result["status"]] = _status_counts.get(result["status"], 0) + 1
-                    if result["status"] == "success":
+                    if result["status"] in ("success", "no_contact_shown"):
                         cand = result["candidate"]
                         assessment = self._filter_assessment(cand, criteria, enforce_years=False)
                         await emit_candidate(cand, assessment)
@@ -1618,6 +1652,13 @@ class UnifiedCandidateSearch:
                             patch_fields["phone"] = agent_phone
                         existing["sources"] = merged
                         existing.update({k: v for k, v in patch_fields.items() if v is not None})
+                        # Deep-search may reveal the employer (recent_companies)
+                        # only now, after the row was emitted unflagged —
+                        # re-check and ride the flag on this same patch.
+                        if apply_no_contact_flag(existing):
+                            for _nc_key in ("no_contact", "no_contact_reason", "no_contact_company"):
+                                if existing.get(_nc_key) is not None:
+                                    patch_fields[_nc_key] = existing[_nc_key]
                         await queue.put({
                             "type": "candidate_detail",
                             "candidate_id": cid,
@@ -5413,6 +5454,7 @@ class UnifiedCandidateSearch:
             "pre_llm_skipped_low_score": 0,
             "pre_llm_skipped_no_required_hit": 0,
             "pre_llm_skipped_min_years": 0,
+            "no_contact": 0,
         }
 
         async def _process(candidate: Dict[str, Any]):
@@ -5476,6 +5518,15 @@ class UnifiedCandidateSearch:
                         await _keep("kept_no_resume", detail_failed=True)
                         return
 
+                    # No-contact check now that resume/profile fields (and any
+                    # cached enhanced_info with company history, attached by
+                    # _attach_cached_enhanced_info) are on the row, so the
+                    # details patch below streams the flag with this paint.
+                    # Fresh JobDiva rows usually carry no employer signal yet;
+                    # those get caught post-LLM at the finalize_candidate
+                    # choke-point instead.
+                    apply_no_contact_flag(candidate)
+
                     # Emit the jobdiva_details patch as soon as resume + profile
                     # fields are in hand. UI clears the shimmer on these cells.
                     details_patch: Dict[str, Any] = {"_stage": "details_loaded"}
@@ -5485,6 +5536,7 @@ class UnifiedCandidateSearch:
                         "experience_years", "headline",
                         "qualifications", "employee_status", "available",
                         "availability_status", "current_company",
+                        "no_contact", "no_contact_reason", "no_contact_company",
                     ):
                         v = candidate.get(k)
                         if v not in (None, "", [], {}):
@@ -5495,6 +5547,22 @@ class UnifiedCandidateSearch:
                         "stage": "jobdiva_details",
                         "patch": details_patch,
                     })
+
+                    # No-contact company: everything the row needs for its
+                    # greyed-out display is in hand — stop here. No LLM
+                    # extraction (which is also the enhanced-info persistence
+                    # path), no pre-LLM scoring spend; finalize_candidate
+                    # leaves the row unscored.
+                    if candidate.get("no_contact"):
+                        counters["no_contact"] += 1
+                        self._log_stage(
+                            "NoContact",
+                            f"candidate_id={cid} kept display-only: "
+                            f"{candidate.get('no_contact_reason')} — "
+                            "skipping LLM + persistence",
+                        )
+                        await _keep("no_contact")
+                        return
 
                     # High-level scoring (JobDiva-JobAgent): résumé + profile
                     # fields are in hand — stop here. No pre-LLM gates, no LLM

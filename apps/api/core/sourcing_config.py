@@ -195,6 +195,21 @@ JOBDIVA_TALENT_TITLE_PULL_MAX_TITLES = 3
 # unscoreable rows (detail_failed → "Limited data") are always kept.
 JOBDIVA_TALENTSEARCH_MIN_SCORE = 60
 
+# Company keywords for the NO-CONTACT list (services/no_contact.py).
+# Candidates whose CURRENT or LAST employer loosely matches any of these
+# are still shown on Step 5 but greyed out: never LLM-scored, never
+# persisted, unselectable, and blocked server-side at /candidates/save and
+# the PAIR launch gate. Matching is deliberately loose ("Kaiser" catches
+# "Kaiser Permanente", "Citi Bank", one-typo variants) — see
+# matches_no_contact_company for the exact rules. Admins get a read-only
+# view of this list in the app; adding/removing companies is done by
+# editing THIS tuple (code-managed by design for now).
+NO_CONTACT_COMPANIES = (
+    "Kaiser",
+    "Citibank",
+    "Intuit",
+)
+
 # Minimum match_score for EXTERNAL-source rows (LinkedIn-Exa,
 # LinkedIn-Unipile, LinkedIn-DeepSearch, Dice, VettedDB) to be shown /
 # launchable. Same rationale as JOBDIVA_TALENTSEARCH_MIN_SCORE — these
