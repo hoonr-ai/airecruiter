@@ -546,16 +546,26 @@ export default function CandidateEvaluationReportPage() {
                   const transcriptions = auditResponse.transcriptions || pair.transcriptions || [];
                   const evaluationQuestions = pair.evaluation?.questions || [];
                   
-                  // 1. Filter for items that are EXPLICITLY hard filters
-                  let hardFilterItems = evaluationQuestions.filter((q: any) => 
-                    q.is_hard_filter === true || (q.pass_fail && ['PASS', 'FAIL'].includes(q.pass_fail.toUpperCase()))
-                  ).map((q: any) => ({
-                    question: q.question_text || q.question,
-                    answer: q.answer_text || q.answer,
-                    candidate_score: q.score,
-                    hard_filter_status: q.pass_fail ? (q.pass_fail.toUpperCase() === 'PASS' ? 'passed' : 'failed') : 'pending',
-                    reason: q.evaluation_reason || q.reason
+                  // 0. Use hover-card data (same source, most reliable)
+                  let hardFilterItems: any[] = (scores.engage_hard_filter_details || []).map((d: any) => ({
+                    question: d.question,
+                    answer: d.answer,
+                    hard_filter_status: d.status === 'Pass' ? 'passed' : 'failed',
+                    reason: d.reason,
                   }));
+
+                  // 1. Filter for items that are EXPLICITLY hard filters
+                  if (hardFilterItems.length === 0) {
+                    hardFilterItems = evaluationQuestions.filter((q: any) => 
+                      q.is_hard_filter === true || (q.pass_fail && ['PASS', 'FAIL'].includes(q.pass_fail.toUpperCase()))
+                    ).map((q: any) => ({
+                      question: q.question_text || q.question,
+                      answer: q.answer_text || q.answer,
+                      candidate_score: q.score,
+                      hard_filter_status: q.pass_fail ? (q.pass_fail.toUpperCase() === 'PASS' ? 'passed' : 'failed') : 'pending',
+                      reason: q.evaluation_reason || q.reason
+                    }));
+                  }
 
                   if (hardFilterItems.length === 0) {
                     hardFilterItems = transcriptions.filter((t: any) => 
