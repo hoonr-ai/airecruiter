@@ -1074,8 +1074,28 @@ async def get_job_candidates(
                     FROM sourced_candidates sc
                     WHERE (sc.jobdiva_id = %s OR sc.jobdiva_id = %s)
                       AND (sc.email IS NULL OR sc.email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!')
+                      AND NOT (
+                          -- Hide jobdiva.local candidates with no verified phone in the DB.
+                          -- The number embedded in pair-XXXX@no-email.jobdiva.local is unverified
+                          -- and should never be the sole basis for showing a candidate as reachable.
+                          sc.email ILIKE '%%jobdiva.local%%'
+                          AND REGEXP_REPLACE(COALESCE(sc.phone, ''), '\\D', '', 'g') = ''
+                      )
+                      AND NOT (
+                          -- Exclude jobdiva.local applicants that are phone-duplicates of a real candidate
+                          sc.email ILIKE '%%jobdiva.local%%'
+                          AND EXISTS (
+                              SELECT 1 FROM sourced_candidates sc2
+                              WHERE (sc2.jobdiva_id = %s OR sc2.jobdiva_id = %s)
+                                AND sc2.candidate_id != sc.candidate_id
+                                AND sc2.email NOT ILIKE '%%jobdiva.local%%'
+                                AND REGEXP_REPLACE(COALESCE(sc2.phone, ''), '\\D', '', 'g')
+                                    = REGEXP_REPLACE(SPLIT_PART(COALESCE(sc.email, ''), '@', 1), '\\D', '', 'g')
+                          )
+                      )
                     """,
                     (resolved_jobdiva_id, str(resolved_numeric_job_id),
+                     resolved_jobdiva_id, str(resolved_numeric_job_id),
                      resolved_jobdiva_id, str(resolved_numeric_job_id)),
                 )
                 counts_row = cur.fetchone() or {}
@@ -1086,6 +1106,9 @@ async def get_job_candidates(
                 params: List[Any] = [
                     str(resolved_jobdiva_id),
                     str(resolved_numeric_job_id),
+                    resolved_jobdiva_id,
+                    str(resolved_numeric_job_id),
+                    # Extra params for the duplicate-detection EXISTS sub-query
                     resolved_jobdiva_id,
                     str(resolved_numeric_job_id),
                 ]
@@ -1113,6 +1136,23 @@ async def get_job_candidates(
                         FROM sourced_candidates
                         WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                           AND (email IS NULL OR email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!')
+                          AND NOT (
+                              -- Hide jobdiva.local candidates with no verified phone in the DB.
+                              email ILIKE '%%jobdiva.local%%'
+                              AND REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g') = ''
+                          )
+                          AND NOT (
+                              -- Exclude jobdiva.local applicants that are phone-duplicates of a real candidate
+                              email ILIKE '%%jobdiva.local%%'
+                              AND EXISTS (
+                                  SELECT 1 FROM sourced_candidates sc2
+                                  WHERE (sc2.jobdiva_id = %s OR sc2.jobdiva_id = %s)
+                                    AND sc2.candidate_id != sourced_candidates.candidate_id
+                                    AND sc2.email NOT ILIKE '%%jobdiva.local%%'
+                                    AND REGEXP_REPLACE(COALESCE(sc2.phone, ''), '\\D', '', 'g')
+                                        = REGEXP_REPLACE(SPLIT_PART(COALESCE(sourced_candidates.email, ''), '@', 1), '\\D', '', 'g')
+                              )
+                          )
                         ORDER BY candidate_id, created_at DESC, id DESC
                     )
                     SELECT

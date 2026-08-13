@@ -241,6 +241,9 @@ def _is_placeholder_email(email: str) -> bool:
     local_part, domain = normalized.rsplit("@", 1)
     if domain in _PLACEHOLDER_DOMAINS:
         return True
+    # Catch subdomains of .local (e.g. no-email.jobdiva.local, jobdiva.local)
+    if domain.endswith(".local") or domain == "local":
+        return True
     if local_part in {"your-email", "your_email", "email", "test", "example", "candidate"}:
         return True
     # JobDiva auto-generates "Auto_<candidateId>@jobdiva.com" when a candidate
@@ -2164,6 +2167,11 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
                   AND (jobdiva_id = %s OR jobdiva_id = %s)
                   AND dnc_stopped_at IS NULL
                   AND COALESCE(data->>'engage_status', '') = ''
+                  AND NOT (
+                      -- Skip jobdiva.local candidates with no verified phone in the DB.
+                      email ILIKE '%%jobdiva.local%%'
+                      AND REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g') = ''
+                  )
                 """,
                 (list(candidate_ids), str(job_id), str(job_id)),
             )

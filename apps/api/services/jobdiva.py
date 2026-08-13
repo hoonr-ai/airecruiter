@@ -351,6 +351,9 @@ def _is_placeholder_email(email: str) -> bool:
     local_part, domain = normalized.rsplit("@", 1)
     if domain in _PLACEHOLDER_DOMAINS:
         return True
+    # Catch subdomains of .local (e.g. no-email.jobdiva.local, jobdiva.local)
+    if domain.endswith(".local") or domain == "local":
+        return True
     if local_part in _PLACEHOLDER_LOCALPARTS:
         return True
     # JobDiva auto-generates "Auto_<candidateId>@jobdiva.com" when a candidate
