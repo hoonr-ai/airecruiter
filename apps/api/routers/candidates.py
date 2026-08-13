@@ -1084,11 +1084,13 @@ async def get_job_candidates(
                       AND NOT (
                           -- Exclude jobdiva.local applicants that are phone-duplicates of a real candidate
                           sc.email ILIKE '%%jobdiva.local%%'
+                          AND REGEXP_REPLACE(SPLIT_PART(COALESCE(sc.email, ''), '@', 1), '\\D', '', 'g') <> ''
                           AND EXISTS (
                               SELECT 1 FROM sourced_candidates sc2
                               WHERE (sc2.jobdiva_id = %s OR sc2.jobdiva_id = %s)
                                 AND sc2.candidate_id != sc.candidate_id
                                 AND sc2.email NOT ILIKE '%%jobdiva.local%%'
+                                AND REGEXP_REPLACE(COALESCE(sc2.phone, ''), '\\D', '', 'g') <> ''
                                 AND REGEXP_REPLACE(COALESCE(sc2.phone, ''), '\\D', '', 'g')
                                     = REGEXP_REPLACE(SPLIT_PART(COALESCE(sc.email, ''), '@', 1), '\\D', '', 'g')
                           )
@@ -1144,11 +1146,13 @@ async def get_job_candidates(
                           AND NOT (
                               -- Exclude jobdiva.local applicants that are phone-duplicates of a real candidate
                               email ILIKE '%%jobdiva.local%%'
+                              AND REGEXP_REPLACE(SPLIT_PART(COALESCE(email, ''), '@', 1), '\\D', '', 'g') <> ''
                               AND EXISTS (
                                   SELECT 1 FROM sourced_candidates sc2
                                   WHERE (sc2.jobdiva_id = %s OR sc2.jobdiva_id = %s)
                                     AND sc2.candidate_id != sourced_candidates.candidate_id
                                     AND sc2.email NOT ILIKE '%%jobdiva.local%%'
+                                    AND REGEXP_REPLACE(COALESCE(sc2.phone, ''), '\\D', '', 'g') <> ''
                                     AND REGEXP_REPLACE(COALESCE(sc2.phone, ''), '\\D', '', 'g')
                                         = REGEXP_REPLACE(SPLIT_PART(COALESCE(sourced_candidates.email, ''), '@', 1), '\\D', '', 'g')
                               )
@@ -2189,8 +2193,8 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     # Synthetic JobDiva placeholders (Auto_*@jobdiva.com etc.) are not real
     # contact info — treating one as a seed short-circuits the chain before
     # Apollo/Exa ever look for a genuine address, and it can't be messaged.
-    from services.jobdiva import _is_placeholder_email
-    if seed_email and _is_placeholder_email(seed_email):
+    from utils.email_utils import is_placeholder_email
+    if seed_email and is_placeholder_email(seed_email):
         logger.info(
             "enrich_contact: ignoring synthetic seed email %s for %s",
             seed_email, candidate_id,

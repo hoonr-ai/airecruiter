@@ -14,14 +14,15 @@ logger = logging.getLogger(__name__)
 def _pick_valid_email(emails: List[Any]) -> Optional[str]:
     """From a list of emails prefer the first well-formed, non-placeholder one,
     falling back to the first value so we never drop a present contact entirely."""
-    from services.jobdiva import _EMAIL_RE, _is_placeholder_email
+    from services.jobdiva import _EMAIL_RE
+    from utils.email_utils import is_placeholder_email
 
     cleaned = [str(e).strip() for e in emails if e and str(e).strip()]
     if not cleaned:
         return None
     well_formed = [e for e in cleaned if _EMAIL_RE.match(e.lower())]
     for e in well_formed:
-        if not _is_placeholder_email(e):
+        if not is_placeholder_email(e):
             return e
     return well_formed[0] if well_formed else cleaned[0]
 

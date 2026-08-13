@@ -315,53 +315,7 @@ def _clean_location_field(value: Any) -> str:
     return val_str
 
 
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_PLACEHOLDER_EMAILS = {
-    "your-email@example.com",
-    "email@example.com",
-    "example@example.com",
-    "test@example.com",
-    "candidate@example.com",
-    "noreply@example.com",
-}
-_PLACEHOLDER_DOMAINS = {
-    "example.com",
-    "example.org",
-    "example.net",
-    "test.com",
-    "invalid",
-    "localhost",
-    "local",
-}
-_PLACEHOLDER_LOCALPARTS = {"your-email", "your_email", "email", "test", "example", "candidate"}
-
-
-def _is_placeholder_email(email: str) -> bool:
-    """Mirror of routers.engagement._is_placeholder_email so JobDiva extraction
-    skips synthetic/placeholder emails before they propagate downstream."""
-    normalized = (email or "").strip().lower()
-    if not normalized:
-        return True
-    if normalized in _PLACEHOLDER_EMAILS:
-        return True
-    if normalized.endswith("@noemail.pair.ai"):
-        return True
-    if "@" not in normalized:
-        return True
-    local_part, domain = normalized.rsplit("@", 1)
-    if domain in _PLACEHOLDER_DOMAINS:
-        return True
-    # Catch subdomains of .local (e.g. no-email.jobdiva.local, jobdiva.local)
-    if domain.endswith(".local") or domain == "local":
-        return True
-    if local_part in _PLACEHOLDER_LOCALPARTS:
-        return True
-    # JobDiva auto-generates "Auto_<candidateId>@jobdiva.com" when a candidate
-    # has no real email on file. Treat any @jobdiva.com address as synthetic so
-    # a real ALTERNATEEMAIL is preferred and PAIR never emails a dead address.
-    if domain == "jobdiva.com":
-        return True
-    return False
+from utils.email_utils import is_placeholder_email, _EMAIL_RE, _PLACEHOLDER_EMAILS, _PLACEHOLDER_DOMAINS
 
 
 def _collect_field_values(data: Dict[str, Any], keys: List[str]) -> List[str]:
@@ -416,7 +370,7 @@ def _get_candidate_email(data: Dict[str, Any]) -> str:
 
     well_formed = [v for v in values if _EMAIL_RE.match(v.strip().lower())]
     for v in well_formed:
-        if not _is_placeholder_email(v):
+        if not is_placeholder_email(v):
             return v.strip()
     if well_formed:
         return well_formed[0].strip()

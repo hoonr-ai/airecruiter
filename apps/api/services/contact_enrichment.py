@@ -910,7 +910,7 @@ async def enrich_contact_for_sourcing(
     # below that an unreachable candidate is reachable, silently denying them the
     # Exa fallback they actually need.
     try:
-        from services.jobdiva import _is_placeholder_email as _is_placeholder
+        from utils.email_utils import is_placeholder_email as _is_placeholder
     except Exception:  # pragma: no cover - defensive
         def _is_placeholder(_email: str) -> bool:
             return False
