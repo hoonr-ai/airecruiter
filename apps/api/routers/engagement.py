@@ -40,27 +40,9 @@ from core import (
     JOBDIVA_PASS_ACTION_NAME,
     JOBDIVA_PASS_QUALIFICATION_VALUE
 )
+from utils.email_utils import is_placeholder_email, _EMAIL_RE
 
 logger = logging.getLogger(__name__)
-
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_PLACEHOLDER_EMAILS = {
-    "your-email@example.com",
-    "email@example.com",
-    "example@example.com",
-    "test@example.com",
-    "candidate@example.com",
-    "noreply@example.com",
-}
-_PLACEHOLDER_DOMAINS = {
-    "example.com",
-    "example.org",
-    "example.net",
-    "test.com",
-    "invalid",
-    "localhost",
-    "local",
-}
 
 router = APIRouter(tags=["Engagement"])
 
@@ -228,26 +210,7 @@ def _format_normalized_score_100(score: Any, total: Any) -> Optional[str]:
     return f"{round(normalized_score, 1):.1f}/100"
 
 
-def _is_placeholder_email(email: str) -> bool:
-    normalized = (email or "").strip().lower()
-    if not normalized:
-        return True
-    if normalized in _PLACEHOLDER_EMAILS:
-        return True
-    if normalized.endswith("@noemail.pair.ai"):
-        return True
-    if "@" not in normalized:
-        return True
-    local_part, domain = normalized.rsplit("@", 1)
-    if domain in _PLACEHOLDER_DOMAINS:
-        return True
-    if local_part in {"your-email", "your_email", "email", "test", "example", "candidate"}:
-        return True
-    # JobDiva auto-generates "Auto_<candidateId>@jobdiva.com" when a candidate
-    # has no real email on file — these are dead addresses, not contactable.
-    if domain == "jobdiva.com":
-        return True
-    return False
+
 
 
 def _sanitize_pair_candidate_email(raw: str) -> str:
@@ -259,7 +222,7 @@ def _sanitize_pair_candidate_email(raw: str) -> str:
     kept so email outreach can still go out when available.
     """
     cleaned = (raw or "").strip().lower()
-    if not cleaned or not _EMAIL_RE.match(cleaned) or _is_placeholder_email(cleaned):
+    if not cleaned or not _EMAIL_RE.match(cleaned) or is_placeholder_email(cleaned):
         return ""
     return cleaned
 
@@ -2164,8 +2127,27 @@ async def auto_launch_for_candidates(candidate_ids: List[str], job_id: str) -> N
                   AND (jobdiva_id = %s OR jobdiva_id = %s)
                   AND dnc_stopped_at IS NULL
                   AND COALESCE(data->>'engage_status', '') = ''
+                  AND NOT (
+                      -- Skip jobdiva.local candidates with no verified phone in the DB.
+                      email ILIKE '%%jobdiva.local%%'
+                      AND REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g') = ''
+                  )
+                  AND NOT (
+                      -- Exclude jobdiva.local applicants that are phone-duplicates of a real candidate
+                      email ILIKE '%%jobdiva.local%%'
+                      AND REGEXP_REPLACE(SPLIT_PART(COALESCE(email, ''), '@', 1), '\\D', '', 'g') <> ''
+                      AND EXISTS (
+                          SELECT 1 FROM sourced_candidates sc2
+                          WHERE (sc2.jobdiva_id = %s OR sc2.jobdiva_id = %s)
+                            AND sc2.candidate_id != sourced_candidates.candidate_id
+                            AND sc2.email NOT ILIKE '%%jobdiva.local%%'
+                            AND REGEXP_REPLACE(COALESCE(sc2.phone, ''), '\\D', '', 'g') <> ''
+                            AND REGEXP_REPLACE(COALESCE(sc2.phone, ''), '\\D', '', 'g')
+                                = REGEXP_REPLACE(SPLIT_PART(COALESCE(sourced_candidates.email, ''), '@', 1), '\\D', '', 'g')
+                      )
+                  )
                 """,
-                (list(candidate_ids), str(job_id), str(job_id)),
+                (list(candidate_ids), str(job_id), str(job_id), str(job_id), str(job_id)),
             )
             eligible_ids = []
             for r in cur.fetchall():

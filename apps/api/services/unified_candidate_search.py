@@ -8,7 +8,8 @@ import time
 from typing import List, Dict, Any, Optional, Sequence, Tuple
 from pydantic import BaseModel
 
-from services.jobdiva import JobDivaService, _is_placeholder_email
+from services.jobdiva import JobDivaService
+from utils.email_utils import is_placeholder_email
 from services.unipile import unipile_service
 from services.vetted import vetted_service
 from services.exa_service import exa_service, _extract_city_from_highlights
@@ -6315,7 +6316,7 @@ class UnifiedCandidateSearch:
         d_email = str(dst.get("email") or "").strip()
         s_email = str(src.get("email") or "").strip()
         if s_email and s_email != d_email and (
-            not d_email or (_is_placeholder_email(d_email) and not _is_placeholder_email(s_email))
+            not d_email or (is_placeholder_email(d_email) and not is_placeholder_email(s_email))
         ):
             dst["email"] = s_email
             changed["email"] = s_email
@@ -6369,7 +6370,7 @@ class UnifiedCandidateSearch:
         email = str(candidate.get("email") or "").strip().lower()
         if (
             email and "@" in email
-            and not _is_placeholder_email(email)
+            and not is_placeholder_email(email)
             and email.split("@", 1)[0] not in self._GENERIC_INBOX_LOCALPARTS
         ):
             keys.append(f"email:{email}")
