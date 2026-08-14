@@ -72,6 +72,8 @@ interface EvaluationReport {
     engage_status: string;
     hard_filter_status: string;
     total_fit_score: number;
+    is_boolean_interview?: boolean;
+    engage_hard_filter_details?: any[];
   };
   job: {
     job_id: string;
@@ -545,16 +547,26 @@ export default function CandidateEvaluationReportPage() {
                   const transcriptions = auditResponse.transcriptions || pair.transcriptions || [];
                   const evaluationQuestions = pair.evaluation?.questions || [];
                   
-                  // 1. Filter for items that are EXPLICITLY hard filters
-                  let hardFilterItems = evaluationQuestions.filter((q: any) => 
-                    q.is_hard_filter === true || (q.pass_fail && ['PASS', 'FAIL'].includes(q.pass_fail.toUpperCase()))
-                  ).map((q: any) => ({
-                    question: q.question_text || q.question,
-                    answer: q.answer_text || q.answer,
-                    candidate_score: q.score,
-                    hard_filter_status: q.pass_fail ? (q.pass_fail.toUpperCase() === 'PASS' ? 'passed' : 'failed') : 'pending',
-                    reason: q.evaluation_reason || q.reason
+                  // 0. Use hover-card data (same source, most reliable)
+                  let hardFilterItems: any[] = (scores.engage_hard_filter_details || []).map((d: any) => ({
+                    question: d.question,
+                    answer: d.answer,
+                    hard_filter_status: d.status === 'Pass' ? 'passed' : 'failed',
+                    reason: d.reason,
                   }));
+
+                  // 1. Filter for items that are EXPLICITLY hard filters
+                  if (hardFilterItems.length === 0) {
+                    hardFilterItems = evaluationQuestions.filter((q: any) => 
+                      q.is_hard_filter === true || (q.pass_fail && ['PASS', 'FAIL'].includes(q.pass_fail.toUpperCase()))
+                    ).map((q: any) => ({
+                      question: q.question_text || q.question,
+                      answer: q.answer_text || q.answer,
+                      candidate_score: q.score,
+                      hard_filter_status: q.pass_fail ? (q.pass_fail.toUpperCase() === 'PASS' ? 'passed' : 'failed') : 'pending',
+                      reason: q.evaluation_reason || q.reason
+                    }));
+                  }
 
                   if (hardFilterItems.length === 0) {
                     hardFilterItems = transcriptions.filter((t: any) => 
@@ -565,9 +577,7 @@ export default function CandidateEvaluationReportPage() {
                   if (hardFilterItems.length > 0) {
                     return hardFilterItems.map((item: any, i: number) => {
                       const q_text = item.question || item.question_text || "Question";
-                      const a_text = item.answer || item.answer_text || "—";
-                      const score = item.candidate_score;
-                      const total = item.total_score || 10.0;
+                      const a_text = item.answer || item.answer_text;
                       const hf_status = item.hard_filter_status;
                       const reason = item.reason;
 
@@ -585,14 +595,16 @@ export default function CandidateEvaluationReportPage() {
                               />
                             </div>
                           </div>
-                          
+
                           <div className="bg-[#f8fafc] rounded-lg p-4 border border-[#f1f5f9] space-y-3">
-                            <div className="space-y-1">
-                              <span className="text-[11px] font-bold text-[#94a3b8] uppercase tracking-widest">Candidate Answer</span>
-                              <p className="text-[14px] text-[#334155] leading-relaxed italic">"{a_text}"</p>
-                            </div>
+                            {!scores.is_boolean_interview && a_text && (
+                              <div className="space-y-1">
+                                <span className="text-[11px] font-bold text-[#94a3b8] uppercase tracking-widest">Candidate Answer</span>
+                                <p className="text-[14px] text-[#334155] leading-relaxed italic">"{a_text}"</p>
+                              </div>
+                            )}
                             {reason && (
-                              <div className="space-y-1 pt-2 border-t border-slate-200/60">
+                              <div className="space-y-1">
                                 <span className="text-[11px] font-bold text-[#94a3b8] uppercase tracking-widest">AI Analysis</span>
                                 <p className="text-[13px] text-[#475569] leading-relaxed font-medium">{reason}</p>
                               </div>
@@ -603,40 +615,39 @@ export default function CandidateEvaluationReportPage() {
                     });
                   }
 
-                  // 2. Legacy Logic Fallback (Keep for backward compatibility)
+                  // Legacy fallback: audit_payload questions + audit_response answers (older PAIR format)
                   const auditQuestions = pair.audit_payload?.questions || [];
                   const auditResponses = pair.audit_response?.questions || [];
                   const legacyHardFilters = auditQuestions.filter((q: any) => q.pass_criteria);
-                  
                   if (legacyHardFilters.length > 0) {
                     return legacyHardFilters.map((q: any, i: number) => {
-                      const response = auditResponses.find((r: any) => 
+                      const response = auditResponses.find((r: any) =>
                         r.question_text === q.question_text || r.id === q.id
                       );
-                      const status = (response?.status || "PENDING").toUpperCase();
-                      
+                      const status = (response?.status || 'PENDING').toUpperCase();
                       return (
                         <div key={i} className="flex items-center justify-between py-3 px-5 bg-white border border-[#e2e8f0] rounded-xl hover:border-slate-300 transition-all shadow-sm">
                           <span className="text-[14px] text-[#475569] font-medium leading-relaxed pr-8">{q.question_text}</span>
-                          <StatusPill 
-                            status={status === 'PASS' ? 'Pass' : status === 'FAIL' ? 'Fail' : 'Pending'} 
-                            type={status === 'PASS' ? 'success' : status === 'FAIL' ? 'danger' : 'neutral'} 
+                          <StatusPill
+                            status={status === 'PASS' ? 'Pass' : status === 'FAIL' ? 'Fail' : 'Pending'}
+                            type={status === 'PASS' ? 'success' : status === 'FAIL' ? 'danger' : 'neutral'}
                           />
                         </div>
                       );
                     });
                   }
 
-                  const fallbackFilters = pair.evaluation?.hard_filters || pair.questions_answers || job.screen_questions || [];
-                  if (fallbackFilters.length > 0) {
-                    return fallbackFilters.map((q: any, i: number) => {
-                      const status = (q.pass_fail || q.status || "PENDING").toUpperCase();
+                  // Fallback: PAIR evaluation hard_filters or questions_answers (excludes Curate job.screen_questions)
+                  const pairFallbackFilters = pair.evaluation?.hard_filters || pair.questions_answers || [];
+                  if (pairFallbackFilters.length > 0) {
+                    return pairFallbackFilters.map((q: any, i: number) => {
+                      const status = (q.pass_fail || q.status || 'PENDING').toUpperCase();
                       return (
                         <div key={i} className="flex items-center justify-between py-3 px-5 bg-white border border-[#e2e8f0] rounded-xl hover:border-slate-300 transition-all shadow-sm">
                           <span className="text-[14px] text-[#475569] font-medium leading-relaxed pr-8">{q.question_text || q.question || q.name}</span>
-                          <StatusPill 
-                            status={status === 'PASS' ? 'Pass' : status === 'FAIL' ? 'Fail' : 'Pending'} 
-                            type={status === 'PASS' ? 'success' : status === 'FAIL' ? 'danger' : 'neutral'} 
+                          <StatusPill
+                            status={status === 'PASS' ? 'Pass' : status === 'FAIL' ? 'Fail' : 'Pending'}
+                            type={status === 'PASS' ? 'success' : status === 'FAIL' ? 'danger' : 'neutral'}
                           />
                         </div>
                       );
@@ -679,16 +690,21 @@ export default function CandidateEvaluationReportPage() {
                         return (
                           <div key={i} className="space-y-4">
                             {q_text && (
-                              <div className="flex flex-col gap-2.5 relative items-start pr-12">
+                              <div className={`flex flex-col gap-2.5 relative items-start pr-12 ${msg.is_closing ? 'opacity-70' : ''}`}>
                                 <span className="text-[11px] font-black uppercase tracking-widest text-[#4f46e5]">
                                   ASSISTANT (ALEX)
                                 </span>
-                                <div className="p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border bg-[#eef2ff] border-[#e0e7ff] text-[#312e81] rounded-tl-none">
+                                <div className={`p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border rounded-tl-none ${
+                                  msg.is_closing
+                                    ? 'bg-[#e2e8f0] border-[#cbd5e1] text-[#475569] italic'
+                                    : 'bg-[#eef2ff] border-[#e0e7ff] text-[#312e81]'
+                                }`}>
                                   {q_text}
                                 </div>
                               </div>
                             )}
-                            {a_text && (
+                            {/* Candidate answer — show placeholder when question was sent but not answered */}
+                            {a_text ? (
                               <div className="flex flex-col gap-2.5 relative items-end pl-12">
                                 <span className="text-[11px] font-black uppercase tracking-widest text-[#94a3b8]">
                                   CANDIDATE
@@ -697,7 +713,17 @@ export default function CandidateEvaluationReportPage() {
                                   {a_text}
                                 </div>
                               </div>
-                            )}
+                            ) : msg.is_unanswered ? (
+                              /* PAI-107: candidate dropped off — show explicit placeholder */
+                              <div className="flex flex-col gap-2.5 relative items-end pl-12">
+                                <span className="text-[11px] font-black uppercase tracking-widest text-[#94a3b8]">
+                                  CANDIDATE
+                                </span>
+                                <div className="p-6 rounded-[20px] text-[13px] leading-relaxed shadow-sm border bg-[#fef9f0] border-[#fed7aa] text-[#92400e] rounded-tr-none italic">
+                                  No response recorded
+                                </div>
+                              </div>
+                            ) : null}
                           </div>
                         );
                       }

@@ -29,6 +29,17 @@ export function formatScreeningLevel(level?: string | null): string {
 
 export const JOB_BOARDS = ["LinkedIn", "Indeed", "Dice", "Monster", "CareerBuilder"];
 
+const ROLE_RESPONSIBILITIES_QUESTION = "What is your current or most recent role and key responsibilities?";
+const ROLE_RESPONSIBILITIES_MATCH_FRAGMENT = "current or most recent role";
+
+export function isBooleanScreeningLevel(level?: string): boolean {
+  return (level ?? "").trim().toLowerCase() === "l0.5";
+}
+
+export function isRoleResponsibilitiesQuestion(text?: string): boolean {
+  return (text ?? "").trim().toLowerCase().includes(ROLE_RESPONSIBILITIES_MATCH_FRAGMENT);
+}
+
 export interface CampaignChildJob {
   job_id: string;
   jobdiva_id?: string;
@@ -352,17 +363,20 @@ export async function generateScreeningQuestions(input: {
     ? "a hybrid"
     : "an onsite";
 
+  const isBoolean = isBooleanScreeningLevel(input.screeningLevel);
   const defaultQs: Array<{ text: string; criteria: string; is_hard_filter?: boolean }> = [
     {
       text: "Are you open to exploring new job opportunities?",
       criteria: "Must be open to new job opportunities",
     },
-    {
-      text: "What is your current or most recent role and key responsibilities?",
-      criteria: "",
-    },
     { text: "What is your current location?", criteria: "" },
   ];
+  if (!isBoolean) {
+    defaultQs.splice(1, 0, {
+      text: ROLE_RESPONSIBILITIES_QUESTION,
+      criteria: "",
+    });
+  }
   if (!isRemote) {
     defaultQs.push({
       text: `This role follows ${arrangementLabel} work arrangement${input.city ? ` based in ${input.city}` : ""
@@ -400,7 +414,7 @@ export async function generateScreeningQuestions(input: {
   return defaults;
 }
 
-export function getDefaultCampaignScreeningQuestions(): TemplateQuestion[] {
+export function getDefaultCampaignScreeningQuestions(screeningLevel: string = "L1.5"): TemplateQuestion[] {
   const defaultQs = [
     {
       text: "Are you open to exploring new job opportunities?",
@@ -443,7 +457,11 @@ export function getDefaultCampaignScreeningQuestions(): TemplateQuestion[] {
     },
   ];
 
-  return defaultQs.map((q, index) => ({
+  const normalizedDefaults = isBooleanScreeningLevel(screeningLevel)
+    ? defaultQs.filter((q) => !isRoleResponsibilitiesQuestion(q.text))
+    : defaultQs;
+
+  return normalizedDefaults.map((q, index) => ({
     id: index + 1,
     question_text: q.text,
     pass_criteria: q.criteria,

@@ -27,6 +27,29 @@ from routers._helpers import get_db_connection
 from core.auth import get_current_user, UserIdentity
 from routers.jobs import _verify_job_access_by_id
 
+def _merge_transcriptions(webhook_list: list, live_list: list) -> list:
+    """Helper to merge webhook transcriptions (with hard_filter_status) into live transcriptions."""
+    if not live_list or not webhook_list:
+        return live_list
+
+    wh_hf = {}
+    for wh in webhook_list:
+        if isinstance(wh, dict) and wh.get("hard_filter_status"):
+            k = (wh.get("question") or wh.get("question_text") or "").strip().lower()
+            if k:
+                wh_hf[k] = wh["hard_filter_status"]
+    
+    merged_trans = []
+    for live_item in live_list:
+        if isinstance(live_item, dict):
+            # Patch hard_filter_status from webhook when live item lacks it
+            if not live_item.get("hard_filter_status"):
+                k = (live_item.get("question") or live_item.get("question_text") or "").strip().lower()
+                if k and k in wh_hf:
+                    live_item = {**live_item, "hard_filter_status": wh_hf[k]}
+        merged_trans.append(live_item)
+    return merged_trans
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -56,21 +79,47 @@ def _extract_rankings_hard_filter_details(
 
     details: List[Dict[str, Any]] = []
 
+    last_response = data_blob.get("engage_last_response")
+    last_response = last_response if isinstance(last_response, dict) else _json_load_safe(last_response, {})
+    wp_data = last_response.get("data", last_response) if isinstance(last_response, dict) else {}
+    # Failed-launch rows store the raw PAIR envelope, whose "data" can be null/list/str.
+    wp_data = wp_data if isinstance(wp_data, dict) else {}
+
+    # 1. Prefer explicit hard_filter_results from the updated webhook payload
+    hf_results = wp_data.get("hard_filter_results")
+    if isinstance(hf_results, list) and hf_results:
+        for item in hf_results:
+            if not isinstance(item, dict):
+                continue
+            hf_status = str(item.get("hard_filter_status") or item.get("pass_fail") or "").lower()
+            if hf_status not in {"passed", "failed", "pass", "fail"}:
+                continue
+            details.append({
+                "question": item.get("question") or "Question",
+                "answer": item.get("answer"),
+                "status": "Pass" if hf_status in {"passed", "pass"} else "Fail",
+                # Hardcoded because PairBot does not include numeric scores for these fields in the hard_filter_results array
+                "score": None,
+                "total_score": None,
+                "reason": item.get("reason") or "",
+            })
+        if details:
+            return details
+
+    # 2. Fallback to transcriptions
     transcriptions = []
     if isinstance(resp, dict):
         transcriptions = resp.get("transcriptions") or []
 
-    if not transcriptions and isinstance(data_blob, dict):
-        last_response = data_blob.get("engage_last_response")
-        last_response = last_response if isinstance(last_response, dict) else _json_load_safe(last_response, {})
-        if isinstance(last_response, dict):
-            wp_data = last_response.get("data", last_response)
-            if isinstance(wp_data, dict):
-                transcriptions = wp_data.get("transcriptions") or []
+    _valid_hf = {"passed", "failed", "pass", "fail"}
+    _has_hf = any(str(t.get("hard_filter_status") or "").lower() in _valid_hf for t in transcriptions if isinstance(t, dict))
+    if (not transcriptions or not _has_hf):
+        transcriptions = wp_data.get("transcriptions") or []
 
     if isinstance(transcriptions, list):
         for item in transcriptions:
             hf_status = str(item.get("hard_filter_status") or "").lower()
+            # Only show questions PAIR bot explicitly marked as qualifying hard filters
             if hf_status not in {"passed", "failed", "pass", "fail"}:
                 continue
             details.append({
@@ -108,7 +157,6 @@ def _extract_rankings_hard_filter_details(
             return details
 
     return details
-
 
 def _build_resume_matching_criteria(job_ref: str) -> Optional[SearchCriteria]:
     """Build SearchCriteria from monitored_jobs for detailed resume re-scoring."""
@@ -995,16 +1043,17 @@ async def get_job_candidates(
         try:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT jobdiva_id, job_id FROM monitored_jobs
+                    SELECT jobdiva_id, job_id, screening_level FROM monitored_jobs
                     WHERE job_id = %s OR jobdiva_id = %s
                     LIMIT 1
                 """, (job_id_or_ref, job_id_or_ref))
                 result = cur.fetchone()
                 resolved_jobdiva_id = job_id_or_ref
-                resolved_numeric_id = job_id_or_ref
+                job_screening_level = ""
                 if result:
                     resolved_jobdiva_id = result[0] or result[1]
                     resolved_numeric_job_id = result[1] or result[0]
+                    job_screening_level = str(result[2] or "").strip().lower() if len(result) > 2 else ""
         finally:
             conn.close()
 
@@ -1153,11 +1202,7 @@ async def get_job_candidates(
             if not cand.get("engage_created_at") and cand.get("audit_created_at"):
                 cand["engage_created_at"] = cand.get("audit_created_at")
 
-            cand["engage_hard_filter_details"] = _extract_rankings_hard_filter_details(
-                data_blob if isinstance(data_blob, dict) else {},
-                cand.get("audit_response"),
-                cand.get("audit_payload"),
-            )
+            is_boolean_job = job_screening_level == "l0.5"
 
             # read-side normalization for consistency across views
             norm_engage_score = None
@@ -1193,6 +1238,20 @@ async def get_job_candidates(
             # Calculate total_fit_score — average only completed stages (matches Report page logic)
             r_score = cand.get("match_score") or 0
             is_engage_done = s in ["passed", "completed", "hired", "pass", "failed", "rejected", "fail"]
+
+            # Boolean (L0.5) interviews have no scored questions — score is 100 for pass, 0 for fail.
+            if is_boolean_job and is_engage_done:
+                if status_display == "Pass":
+                    cand["engage_score"] = 100.0
+                elif status_display == "Fail":
+                    cand["engage_score"] = 0.0
+                cand["engage_total_score"] = 100
+
+            cand["engage_hard_filter_details"] = _extract_rankings_hard_filter_details(
+                data_blob if isinstance(data_blob, dict) else {},
+                cand.get("audit_response"),
+                cand.get("audit_payload"),
+            )
 
             scores_to_avg = [float(r_score)]
             if is_engage_done and cand.get("engage_score") is not None:
@@ -3050,11 +3109,18 @@ async def get_candidate_evaluation_report(
                 transcription_data= _safe(transcription_res)
                 outreach_data     = _safe(outreach_res)
 
-                # Merge live data into pair_data (live data takes precedence)
+                # Merge live data into pair_data (live data takes precedence).
+                # For transcriptions, preserve hard_filter_status from webhook when
+                # the live PAIR API omits it (avoids regression on boolean interviews).
                 if interview_data: pair_data["interview"] = interview_data
                 if evaluation_data: pair_data["evaluation"] = evaluation_data
-                if transcription_data: 
-                    pair_data["transcriptions"] = transcription_data if isinstance(transcription_data, list) else (transcription_data or [])
+                if transcription_data:
+                    live_list = transcription_data if isinstance(transcription_data, list) else []
+                    webhook_list = pair_data.get("transcriptions") or []
+                    if live_list and webhook_list:
+                        pair_data["transcriptions"] = _merge_transcriptions(webhook_list, live_list)
+                    else:
+                        pair_data["transcriptions"] = live_list
                 if outreach_data: pair_data["outreach"] = outreach_data
 
                 # Dynamic mapping of questions to evaluation fields
@@ -3175,17 +3241,38 @@ async def get_candidate_evaluation_report(
                 hf_passed = hf_display in ["", "pass", "passed", "not_hard_filter"]
                 status_display = "Pass" if hf_passed else "Fail"
 
+        # Boolean (L0.5) interviews have no scored questions — score is 100 for pass, 0 for fail.
+        is_l05 = str((job_row or {}).get("screening_level") or "").strip().lower() == "l0.5"
+        if is_l05 and is_engage_done:
+            if status_display == "Pass":
+                display_engage_score = 100.0
+            elif status_display == "Fail":
+                display_engage_score = 0.0
+            # Re-compute total_fit_score with corrected engage score
+            scores_to_average_corrected = [resume_match_score] if resume_match_score is not None else []
+            if display_engage_score is not None:
+                scores_to_average_corrected.append(display_engage_score)
+            if scores_to_average_corrected:
+                total_fit_score = sum(scores_to_average_corrected) / len(scores_to_average_corrected)
+
         scores = {
             "resume_match_score":    resume_match_score,
             "resume_match_status":   str(data_blob.get("resume_matching_status") or ("done" if resume_match_score > 0 else "pending")),
             "engage_score":          display_engage_score,
-            "engage_total_score":    100 if engage_total_score else None,
+            "engage_total_score":    100 if (engage_total_score or is_l05) else None,
             "engage_status":         status_display,
             "hard_filter_status":    None if status_display == "In Progress" else hard_filter_status,
             "total_fit_score":       round(total_fit_score, 1),
             "engage_interview_id":   engage_interview_id,
             "engage_completed_at":   str(engage_completed_at) if engage_completed_at else None,
             "engage_created_at":     str(engage_created_at) if engage_created_at else None,
+            "is_boolean_interview":  is_l05,
+            # Same data source as the hover card — avoids a separate live-fetch failure
+            "engage_hard_filter_details": _extract_rankings_hard_filter_details(
+                data_blob if isinstance(data_blob, dict) else {},
+                pair_data.get("audit_response"),
+                pair_data.get("audit_payload"),
+            ),
             "matched_skills":        _jl(data_blob.get("matched_skills"), []),
             "missing_skills":        _jl(data_blob.get("missing_skills"), []),
             "explainability":        _jl(data_blob.get("explainability"), []),

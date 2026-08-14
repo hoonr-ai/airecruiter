@@ -108,6 +108,18 @@ class TranscriptionItem(BaseModel):
     hard_filter_status: str  # "passed", "failed", or "not_hard_filter"
     reason: Optional[str] = None
     question_order: Optional[int] = None
+
+class HardFilterResultItem(BaseModel):
+    # All fields tolerant: PairBot may send pass_fail OR hard_filter_status (the
+    # reader treats them as alternatives), and answer is null for unanswered
+    # drop-offs. A strict model would 422 the whole webhook and lose the interview.
+    question: Optional[str] = None
+    answer: Optional[str] = None
+    pass_fail: Optional[str] = None
+    hard_filter_status: Optional[str] = None
+    reason: Optional[str] = None
+    question_order: Optional[int] = None
+
 class VoiceAgentInterviewWebhook(BaseModel):
     interview_id: str
     status: str
@@ -118,6 +130,7 @@ class VoiceAgentInterviewWebhook(BaseModel):
     candidate_score: Optional[float] = None
     completed_at: Optional[str] = None
     transcriptions: Optional[List[TranscriptionItem]] = None
+    hard_filter_results: Optional[List[HardFilterResultItem]] = None
 
 @router.post("/interviews/webhook")
 async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
@@ -135,7 +148,8 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 "hard_filter_status": payload.hard_filter_status,
                 "completed_at": payload.completed_at
             },
-            "transcriptions": [t.dict() for t in payload.transcriptions] if payload.transcriptions else []
+            "transcriptions": [t.dict() for t in payload.transcriptions] if payload.transcriptions else [],
+            "hard_filter_results": [h.dict() for h in payload.hard_filter_results] if payload.hard_filter_results else []
         }
 
         target_job_id = payload.jobdiva_id
