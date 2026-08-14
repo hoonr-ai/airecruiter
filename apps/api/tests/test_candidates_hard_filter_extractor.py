@@ -77,3 +77,25 @@ def test_extract_rankings_hard_filter_details_from_transcriptions():
     assert result[1]["status"] == "Fail"
     assert result[1]["score"] == 0
     assert result[1]["total_score"] == 10
+
+def test_extract_rankings_hard_filter_details_tolerates_non_dict_data():
+    # Failed-launch rows persist the raw PAIR envelope, whose "data" can be
+    # null / list / str — the extractor must degrade to [] instead of raising.
+    for bad in (None, [], "error", 0):
+        data_blob = {"engage_last_response": {"data": bad}}
+        assert _extract_rankings_hard_filter_details(data_blob, {}, {}) == []
+
+    # Non-dict items inside hard_filter_results are skipped, not fatal.
+    data_blob = {
+        "engage_last_response": {
+            "data": {
+                "hard_filter_results": [
+                    "garbage",
+                    {"question": "Q", "answer": "A", "hard_filter_status": "passed"},
+                ]
+            }
+        }
+    }
+    result = _extract_rankings_hard_filter_details(data_blob, {}, {})
+    assert len(result) == 1
+    assert result[0]["status"] == "Pass"

@@ -82,11 +82,15 @@ def _extract_rankings_hard_filter_details(
     last_response = data_blob.get("engage_last_response")
     last_response = last_response if isinstance(last_response, dict) else _json_load_safe(last_response, {})
     wp_data = last_response.get("data", last_response) if isinstance(last_response, dict) else {}
+    # Failed-launch rows store the raw PAIR envelope, whose "data" can be null/list/str.
+    wp_data = wp_data if isinstance(wp_data, dict) else {}
 
     # 1. Prefer explicit hard_filter_results from the updated webhook payload
     hf_results = wp_data.get("hard_filter_results")
     if isinstance(hf_results, list) and hf_results:
         for item in hf_results:
+            if not isinstance(item, dict):
+                continue
             hf_status = str(item.get("hard_filter_status") or item.get("pass_fail") or "").lower()
             if hf_status not in {"passed", "failed", "pass", "fail"}:
                 continue
