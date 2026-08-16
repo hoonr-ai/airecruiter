@@ -68,6 +68,32 @@ def _json_load_safe(value: Any, default: Any):
     return default
 
 
+def _format_engage_status(engage_status: Optional[str], engage_score: Optional[float], hf_display: str) -> str:
+    if not engage_status:
+        return "Pending"
+    s = engage_status.lower()
+    if s in ["passed", "hired", "pass"]:
+        return "Pass"
+    elif s in ["failed", "rejected", "fail"]:
+        if engage_score is None:
+            return "Pending"
+        else:
+            return "Fail"
+    elif s in ["in_progress", "in progress"]:
+        return "In Progress"
+    elif s == "completed":
+        hf_passed = hf_display in ["", "pass", "passed", "not_hard_filter"]
+        return "Pass" if hf_passed else "Fail"
+    return "Pending"
+
+
+def _is_engage_done(engage_status: Optional[str], engage_score: Optional[float], is_boolean_job: bool) -> bool:
+    if not engage_status:
+        return False
+    s = engage_status.lower()
+    return s in ["passed", "completed", "hired", "pass", "failed", "rejected", "fail"] and (is_boolean_job or engage_score is not None)
+
+
 def _extract_rankings_hard_filter_details(
     data_blob: Dict[str, Any],
     audit_response: Any,
@@ -1260,27 +1286,12 @@ async def get_job_candidates(
             score_display = cand.get("engage_score")
 
             # Format engage_status
-            cur_status = cand.get("engage_status") or "pending"
-            status_display = "Pending"
-            s = cur_status.lower()
-            if s in ["passed", "hired", "pass"]:
-                status_display = "Pass"
-            elif s in ["failed", "rejected", "fail"]:
-                if cand.get("engage_score") is None:
-                    status_display = "Pending"
-                else:
-                    status_display = "Fail"
-            elif s in ["in_progress", "in progress"]:
-                status_display = "In Progress"
-            elif s == "completed":
-                hf_passed = hf_display in ["", "pass", "passed", "not_hard_filter"]
-                status_display = "Pass" if hf_passed else "Fail"
-            
+            status_display = _format_engage_status(cand.get("engage_status"), cand.get("engage_score"), hf_display)
             cand["engage_status"] = status_display
 
             # Calculate total_fit_score — average only completed stages (matches Report page logic)
             r_score = cand.get("match_score") or 0
-            is_engage_done = s in ["passed", "completed", "hired", "pass", "failed", "rejected", "fail"] and cand.get("engage_score") is not None
+            is_engage_done = _is_engage_done(cand.get("engage_status"), cand.get("engage_score"), is_boolean_job)
 
             # Boolean (L0.5) interviews have no scored questions — score is 100 for pass, 0 for fail.
             if is_boolean_job and is_engage_done:
@@ -3253,9 +3264,11 @@ async def get_candidate_evaluation_report(
             # Calculate percentage: (score / total) * 100
             display_engage_score = round((float(engage_score) / float(engage_total_score)) * 100, 1)
 
+        is_l05 = str((job_row or {}).get("screening_level") or "").strip().lower() == "l0.5"
+
         # Calculate Total Fit Score: Average of only COMPLETED stages
         # Exclude Engage score if it's still in progress or initiated
-        is_engage_done = (engage_status or "").lower() in ["completed", "failed", "passed", "rejected", "pass", "fail"] and engage_score is not None
+        is_engage_done = _is_engage_done(engage_status, engage_score, is_l05)
         
         scores_to_average = []
         if resume_match_score is not None:
@@ -3270,22 +3283,8 @@ async def get_candidate_evaluation_report(
             total_fit_score = None
 
         # Status label formatting
-        status_display = "Pending"
-        if engage_status:
-            s = engage_status.lower()
-            if s in ["passed", "hired", "pass"]:
-                status_display = "Pass"
-            elif s in ["failed", "rejected", "fail"]:
-                if engage_score is None:
-                    status_display = "Pending"
-                else:
-                    status_display = "Fail"
-            elif s in ["in_progress", "in progress"]:
-                status_display = "In Progress"
-            elif s == "completed":
-                hf_display = (hard_filter_status or "").lower()
-                hf_passed = hf_display in ["", "pass", "passed", "not_hard_filter"]
-                status_display = "Pass" if hf_passed else "Fail"
+        hf_display = (hard_filter_status or "").lower()
+        status_display = _format_engage_status(engage_status, engage_score, hf_display)
 
         # Boolean (L0.5) interviews have no scored questions — score is 100 for pass, 0 for fail.
         is_l05 = str((job_row or {}).get("screening_level") or "").strip().lower() == "l0.5"
