@@ -85,11 +85,23 @@ const FINAL_ENGAGE_STATUSES = new Set([
 const normalizeStatusValue = (value: unknown): string =>
   String(value || "").trim().toLowerCase();
 
+const getEngageScore = (candidate: {
+  engage_score?: number | null;
+  data?: any;
+}): number | null | undefined => {
+  return candidate.engage_score !== undefined ? candidate.engage_score : candidate.data?.engage_score;
+};
+
 const hasFinalEngageOutcome = (candidate: {
   engage_status?: string;
   engage_hard_filter_status?: string;
+  engage_score?: number | null;
   data?: any;
 }): boolean => {
+  const score = getEngageScore(candidate);
+  if (score === null || score === undefined) {
+    return false;
+  }
   const statusCandidates = [
     candidate.engage_hard_filter_status,
     candidate.data?.engage_hard_filter_status,
@@ -639,6 +651,10 @@ export default function CandidateRankingsPage() {
     }
 
     if (raw === "failed" || raw === "fail" || raw === "rejected") {
+      const score = getEngageScore(c);
+      if (score === null || score === undefined) {
+        return { label: "Pending", color: "#64748b" };
+      }
       return { label: "Fail", color: "#e11d48" };
     }
 
