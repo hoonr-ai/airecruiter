@@ -1266,7 +1266,10 @@ async def get_job_candidates(
             if s in ["passed", "hired", "pass"]:
                 status_display = "Pass"
             elif s in ["failed", "rejected", "fail"]:
-                status_display = "Fail"
+                if cand.get("engage_score") is None:
+                    status_display = "Pending"
+                else:
+                    status_display = "Fail"
             elif s in ["in_progress", "in progress"]:
                 status_display = "In Progress"
             elif s == "completed":
@@ -1277,7 +1280,7 @@ async def get_job_candidates(
 
             # Calculate total_fit_score — average only completed stages (matches Report page logic)
             r_score = cand.get("match_score") or 0
-            is_engage_done = s in ["passed", "completed", "hired", "pass", "failed", "rejected", "fail"]
+            is_engage_done = s in ["passed", "completed", "hired", "pass", "failed", "rejected", "fail"] and cand.get("engage_score") is not None
 
             # Boolean (L0.5) interviews have no scored questions — score is 100 for pass, 0 for fail.
             if is_boolean_job and is_engage_done:
@@ -3252,7 +3255,7 @@ async def get_candidate_evaluation_report(
 
         # Calculate Total Fit Score: Average of only COMPLETED stages
         # Exclude Engage score if it's still in progress or initiated
-        is_engage_done = (engage_status or "").lower() in ["completed", "failed", "passed", "rejected", "pass", "fail"]
+        is_engage_done = (engage_status or "").lower() in ["completed", "failed", "passed", "rejected", "pass", "fail"] and engage_score is not None
         
         scores_to_average = []
         if resume_match_score is not None:
@@ -3261,10 +3264,10 @@ async def get_candidate_evaluation_report(
         if is_engage_done and display_engage_score is not None:
             scores_to_average.append(display_engage_score)
             
-        if scores_to_average:
+        if scores_to_average and is_engage_done:
             total_fit_score = sum(scores_to_average) / len(scores_to_average)
         else:
-            total_fit_score = 0
+            total_fit_score = None
 
         # Status label formatting
         status_display = "Pending"
@@ -3273,7 +3276,10 @@ async def get_candidate_evaluation_report(
             if s in ["passed", "hired", "pass"]:
                 status_display = "Pass"
             elif s in ["failed", "rejected", "fail"]:
-                status_display = "Fail"
+                if engage_score is None:
+                    status_display = "Pending"
+                else:
+                    status_display = "Fail"
             elif s in ["in_progress", "in progress"]:
                 status_display = "In Progress"
             elif s == "completed":
@@ -3302,7 +3308,7 @@ async def get_candidate_evaluation_report(
             "engage_total_score":    100 if (engage_total_score or is_l05) else None,
             "engage_status":         status_display,
             "hard_filter_status":    None if status_display == "In Progress" else hard_filter_status,
-            "total_fit_score":       round(total_fit_score, 1),
+            "total_fit_score":       round(total_fit_score, 1) if total_fit_score is not None else None,
             "engage_interview_id":   engage_interview_id,
             "engage_completed_at":   str(engage_completed_at) if engage_completed_at else None,
             "engage_created_at":     str(engage_created_at) if engage_created_at else None,

@@ -88,8 +88,13 @@ const normalizeStatusValue = (value: unknown): string =>
 const hasFinalEngageOutcome = (candidate: {
   engage_status?: string;
   engage_hard_filter_status?: string;
+  engage_score?: number | null;
   data?: any;
 }): boolean => {
+  const score = candidate.engage_score !== undefined ? candidate.engage_score : candidate.data?.engage_score;
+  if (score === null || score === undefined) {
+    return false;
+  }
   const statusCandidates = [
     candidate.engage_hard_filter_status,
     candidate.data?.engage_hard_filter_status,
@@ -639,6 +644,10 @@ export default function CandidateRankingsPage() {
     }
 
     if (raw === "failed" || raw === "fail" || raw === "rejected") {
+      const score = c.engage_score !== undefined ? c.engage_score : c.data?.engage_score;
+      if (score === null || score === undefined) {
+        return { label: "Pending", color: "#64748b" };
+      }
       return { label: "Fail", color: "#e11d48" };
     }
 
