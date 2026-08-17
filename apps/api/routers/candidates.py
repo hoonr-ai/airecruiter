@@ -108,11 +108,15 @@ def _extract_rankings_hard_filter_details(
     last_response = data_blob.get("engage_last_response")
     last_response = last_response if isinstance(last_response, dict) else _json_load_safe(last_response, {})
     wp_data = last_response.get("data", last_response) if isinstance(last_response, dict) else {}
+    # Failed-launch rows store the raw PAIR envelope, whose "data" can be null/list/str.
+    wp_data = wp_data if isinstance(wp_data, dict) else {}
 
     # 1. Prefer explicit hard_filter_results from the updated webhook payload
     hf_results = wp_data.get("hard_filter_results")
     if isinstance(hf_results, list) and hf_results:
         for item in hf_results:
+            if not isinstance(item, dict):
+                continue
             hf_status = str(item.get("hard_filter_status") or item.get("pass_fail") or "").lower()
             if hf_status not in {"passed", "failed", "pass", "fail"}:
                 continue
@@ -1292,6 +1296,20 @@ async def get_job_candidates(
             # Calculate total_fit_score — average only completed stages (matches Report page logic)
             r_score = cand.get("match_score") or 0
             is_engage_done = _is_engage_done(cand.get("engage_status"), cand.get("engage_score"), is_boolean_job)
+
+            # Boolean (L0.5) interviews have no scored questions — score is 100 for pass, 0 for fail.
+            if is_boolean_job and is_engage_done:
+                if status_display == "Pass":
+                    cand["engage_score"] = 100.0
+                elif status_display == "Fail":
+                    cand["engage_score"] = 0.0
+                cand["engage_total_score"] = 100
+
+            cand["engage_hard_filter_details"] = _extract_rankings_hard_filter_details(
+                data_blob if isinstance(data_blob, dict) else {},
+                cand.get("audit_response"),
+                cand.get("audit_payload"),
+            )
 
             # Boolean (L0.5) interviews have no scored questions — score is 100 for pass, 0 for fail.
             if is_boolean_job and is_engage_done:
@@ -3285,6 +3303,20 @@ async def get_candidate_evaluation_report(
         # Status label formatting
         hf_display = (hard_filter_status or "").lower()
         status_display = _format_engage_status(engage_status, engage_score, hf_display)
+
+        # Boolean (L0.5) interviews have no scored questions — score is 100 for pass, 0 for fail.
+        is_l05 = str((job_row or {}).get("screening_level") or "").strip().lower() == "l0.5"
+        if is_l05 and is_engage_done:
+            if status_display == "Pass":
+                display_engage_score = 100.0
+            elif status_display == "Fail":
+                display_engage_score = 0.0
+            # Re-compute total_fit_score with corrected engage score
+            scores_to_average_corrected = [resume_match_score] if resume_match_score is not None else []
+            if display_engage_score is not None:
+                scores_to_average_corrected.append(display_engage_score)
+            if scores_to_average_corrected:
+                total_fit_score = sum(scores_to_average_corrected) / len(scores_to_average_corrected)
 
         # Boolean (L0.5) interviews have no scored questions — score is 100 for pass, 0 for fail.
         is_l05 = str((job_row or {}).get("screening_level") or "").strip().lower() == "l0.5"

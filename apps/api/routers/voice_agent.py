@@ -110,10 +110,13 @@ class TranscriptionItem(BaseModel):
     question_order: Optional[int] = None
 
 class HardFilterResultItem(BaseModel):
-    question: str
-    answer: str
-    pass_fail: str
-    hard_filter_status: str
+    # All fields tolerant: PairBot may send pass_fail OR hard_filter_status (the
+    # reader treats them as alternatives), and answer is null for unanswered
+    # drop-offs. A strict model would 422 the whole webhook and lose the interview.
+    question: Optional[str] = None
+    answer: Optional[str] = None
+    pass_fail: Optional[str] = None
+    hard_filter_status: Optional[str] = None
     reason: Optional[str] = None
     question_order: Optional[int] = None
 
