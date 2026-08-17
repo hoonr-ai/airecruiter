@@ -1311,20 +1311,6 @@ async def get_job_candidates(
                 cand.get("audit_payload"),
             )
 
-            # Boolean (L0.5) interviews have no scored questions — score is 100 for pass, 0 for fail.
-            if is_boolean_job and is_engage_done:
-                if status_display == "Pass":
-                    cand["engage_score"] = 100.0
-                elif status_display == "Fail":
-                    cand["engage_score"] = 0.0
-                cand["engage_total_score"] = 100
-
-            cand["engage_hard_filter_details"] = _extract_rankings_hard_filter_details(
-                data_blob if isinstance(data_blob, dict) else {},
-                cand.get("audit_response"),
-                cand.get("audit_payload"),
-            )
-
             scores_to_avg = [float(r_score)]
             if is_engage_done and cand.get("engage_score") is not None:
                 scores_to_avg.append(float(cand["engage_score"]))
@@ -3305,21 +3291,6 @@ async def get_candidate_evaluation_report(
         status_display = _format_engage_status(engage_status, engage_score, hf_display)
 
         # Boolean (L0.5) interviews have no scored questions — score is 100 for pass, 0 for fail.
-        is_l05 = str((job_row or {}).get("screening_level") or "").strip().lower() == "l0.5"
-        if is_l05 and is_engage_done:
-            if status_display == "Pass":
-                display_engage_score = 100.0
-            elif status_display == "Fail":
-                display_engage_score = 0.0
-            # Re-compute total_fit_score with corrected engage score
-            scores_to_average_corrected = [resume_match_score] if resume_match_score is not None else []
-            if display_engage_score is not None:
-                scores_to_average_corrected.append(display_engage_score)
-            if scores_to_average_corrected:
-                total_fit_score = sum(scores_to_average_corrected) / len(scores_to_average_corrected)
-
-        # Boolean (L0.5) interviews have no scored questions — score is 100 for pass, 0 for fail.
-        is_l05 = str((job_row or {}).get("screening_level") or "").strip().lower() == "l0.5"
         if is_l05 and is_engage_done:
             if status_display == "Pass":
                 display_engage_score = 100.0
