@@ -1041,18 +1041,8 @@ class AutoAssignService:
                         """
                         SELECT
                             COUNT(DISTINCT sc.candidate_id)                                 AS candidates_sourced,
-                            COUNT(DISTINCT CASE
-                                WHEN (
-                                    COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''
-                                    OR EXISTS (
-                                        SELECT 1 FROM engage_interview_audit ea
-                                        WHERE ea.candidate_id = sc.candidate_id
-                                          AND (ea.jobdiva_id = %s OR ea.jobdiva_id = %s)
-                                          AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
-                                    )
-                                )
-                                THEN sc.candidate_id
-                            END) AS candidates_launched,
+                            -- Counts distinct interviews; ≤ candidates where two share an email (shared-email edge case).
+                            COUNT(DISTINCT NULLIF(sc.data->>'engage_interview_id', '')) AS candidates_launched,
                             COUNT(DISTINCT CASE
                                 WHEN sc.data->>'engage_status' IN
                                     ('completed', 'failed', 'passed', 'rejected', 'pass', 'fail')
@@ -1065,7 +1055,7 @@ class AutoAssignService:
                         FROM sourced_candidates sc
                         WHERE (sc.jobdiva_id = %s OR sc.jobdiva_id = %s)
                         """,
-                        (ref_id, num_id, ref_id, num_id),
+                        (ref_id, num_id),
                     )
                     row = cur.fetchone()
                     if not row:

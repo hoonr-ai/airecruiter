@@ -109,7 +109,10 @@ const FINAL_ENGAGE_STATUSES = new Set([
 const normalizeStatusValue = (value: unknown): string =>
   String(value || "").trim().toLowerCase();
 
-const hasFinalEngageOutcome = (hardFilterStatus?: string, engageStatus?: string): boolean => {
+const hasFinalEngageOutcome = (hardFilterStatus?: string, engageStatus?: string, engageScore?: number | null): boolean => {
+  if (engageScore === null || engageScore === undefined) {
+    return false;
+  }
   const statuses = [hardFilterStatus, engageStatus];
   return statuses.some((status) => {
     const raw = normalizeStatusValue(status);
@@ -286,7 +289,7 @@ export default function CandidateEvaluationReportPage() {
   }
 
   const { candidate, scores, job, pair } = data;
-  const showEngageScore = hasFinalEngageOutcome(scores.hard_filter_status, scores.engage_status);
+  const showEngageScore = hasFinalEngageOutcome(scores.hard_filter_status, scores.engage_status, scores.engage_score);
   const displayedTotalFitScore = showEngageScore
     ? (scores.total_fit_score || 0)
     : null;

@@ -68,6 +68,32 @@ def _json_load_safe(value: Any, default: Any):
     return default
 
 
+def _format_engage_status(engage_status: Optional[str], engage_score: Optional[float], hf_display: str) -> str:
+    if not engage_status:
+        return "Pending"
+    s = engage_status.lower()
+    if s in ["passed", "hired", "pass"]:
+        return "Pass"
+    elif s in ["failed", "rejected", "fail"]:
+        if engage_score is None:
+            return "Pending"
+        else:
+            return "Fail"
+    elif s in ["in_progress", "in progress"]:
+        return "In Progress"
+    elif s == "completed":
+        hf_passed = hf_display in ["", "pass", "passed", "not_hard_filter"]
+        return "Pass" if hf_passed else "Fail"
+    return "Pending"
+
+
+def _is_engage_done(engage_status: Optional[str], engage_score: Optional[float], is_boolean_job: bool) -> bool:
+    if not engage_status:
+        return False
+    s = engage_status.lower()
+    return s in ["passed", "completed", "hired", "pass", "failed", "rejected", "fail"] and (is_boolean_job or engage_score is not None)
+
+
 def _extract_rankings_hard_filter_details(
     data_blob: Dict[str, Any],
     audit_response: Any,
@@ -1078,8 +1104,30 @@ async def get_job_candidates(
                     FROM sourced_candidates sc
                     WHERE (sc.jobdiva_id = %s OR sc.jobdiva_id = %s)
                       AND (sc.email IS NULL OR sc.email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!')
+                      AND NOT (
+                          -- Hide jobdiva.local candidates with no verified phone in the DB.
+                          -- The number embedded in pair-XXXX@no-email.jobdiva.local is unverified
+                          -- and should never be the sole basis for showing a candidate as reachable.
+                          sc.email ILIKE '%%jobdiva.local%%'
+                          AND REGEXP_REPLACE(COALESCE(sc.phone, ''), '\\D', '', 'g') = ''
+                      )
+                      AND NOT (
+                          -- Exclude jobdiva.local applicants that are phone-duplicates of a real candidate
+                          sc.email ILIKE '%%jobdiva.local%%'
+                          AND REGEXP_REPLACE(SPLIT_PART(COALESCE(sc.email, ''), '@', 1), '\\D', '', 'g') <> ''
+                          AND EXISTS (
+                              SELECT 1 FROM sourced_candidates sc2
+                              WHERE (sc2.jobdiva_id = %s OR sc2.jobdiva_id = %s)
+                                AND sc2.candidate_id != sc.candidate_id
+                                AND sc2.email NOT ILIKE '%%jobdiva.local%%'
+                                AND REGEXP_REPLACE(COALESCE(sc2.phone, ''), '\\D', '', 'g') <> ''
+                                AND REGEXP_REPLACE(COALESCE(sc2.phone, ''), '\\D', '', 'g')
+                                    = REGEXP_REPLACE(SPLIT_PART(COALESCE(sc.email, ''), '@', 1), '\\D', '', 'g')
+                          )
+                      )
                     """,
                     (resolved_jobdiva_id, str(resolved_numeric_job_id),
+                     resolved_jobdiva_id, str(resolved_numeric_job_id),
                      resolved_jobdiva_id, str(resolved_numeric_job_id)),
                 )
                 counts_row = cur.fetchone() or {}
@@ -1090,6 +1138,9 @@ async def get_job_candidates(
                 params: List[Any] = [
                     str(resolved_jobdiva_id),
                     str(resolved_numeric_job_id),
+                    resolved_jobdiva_id,
+                    str(resolved_numeric_job_id),
+                    # Extra params for the duplicate-detection EXISTS sub-query
                     resolved_jobdiva_id,
                     str(resolved_numeric_job_id),
                 ]
@@ -1117,6 +1168,25 @@ async def get_job_candidates(
                         FROM sourced_candidates
                         WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                           AND (email IS NULL OR email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!')
+                          AND NOT (
+                              -- Hide jobdiva.local candidates with no verified phone in the DB.
+                              email ILIKE '%%jobdiva.local%%'
+                              AND REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g') = ''
+                          )
+                          AND NOT (
+                              -- Exclude jobdiva.local applicants that are phone-duplicates of a real candidate
+                              email ILIKE '%%jobdiva.local%%'
+                              AND REGEXP_REPLACE(SPLIT_PART(COALESCE(email, ''), '@', 1), '\\D', '', 'g') <> ''
+                              AND EXISTS (
+                                  SELECT 1 FROM sourced_candidates sc2
+                                  WHERE (sc2.jobdiva_id = %s OR sc2.jobdiva_id = %s)
+                                    AND sc2.candidate_id != sourced_candidates.candidate_id
+                                    AND sc2.email NOT ILIKE '%%jobdiva.local%%'
+                                    AND REGEXP_REPLACE(COALESCE(sc2.phone, ''), '\\D', '', 'g') <> ''
+                                    AND REGEXP_REPLACE(COALESCE(sc2.phone, ''), '\\D', '', 'g')
+                                        = REGEXP_REPLACE(SPLIT_PART(COALESCE(sourced_candidates.email, ''), '@', 1), '\\D', '', 'g')
+                              )
+                          )
                         ORDER BY candidate_id, created_at DESC, id DESC
                     )
                     SELECT
@@ -1220,24 +1290,12 @@ async def get_job_candidates(
             score_display = cand.get("engage_score")
 
             # Format engage_status
-            cur_status = cand.get("engage_status") or "pending"
-            status_display = "Pending"
-            s = cur_status.lower()
-            if s in ["passed", "hired", "pass"]:
-                status_display = "Pass"
-            elif s in ["failed", "rejected", "fail"]:
-                status_display = "Fail"
-            elif s in ["in_progress", "in progress"]:
-                status_display = "In Progress"
-            elif s == "completed":
-                hf_passed = hf_display in ["", "pass", "passed", "not_hard_filter"]
-                status_display = "Pass" if hf_passed else "Fail"
-            
+            status_display = _format_engage_status(cand.get("engage_status"), cand.get("engage_score"), hf_display)
             cand["engage_status"] = status_display
 
             # Calculate total_fit_score — average only completed stages (matches Report page logic)
             r_score = cand.get("match_score") or 0
-            is_engage_done = s in ["passed", "completed", "hired", "pass", "failed", "rejected", "fail"]
+            is_engage_done = _is_engage_done(cand.get("engage_status"), cand.get("engage_score"), is_boolean_job)
 
             # Boolean (L0.5) interviews have no scored questions — score is 100 for pass, 0 for fail.
             if is_boolean_job and is_engage_done:
@@ -2153,8 +2211,8 @@ async def _enrich_candidate_contact_impl(candidate_id: str, request: EnrichCandi
     # Synthetic JobDiva placeholders (Auto_*@jobdiva.com etc.) are not real
     # contact info — treating one as a seed short-circuits the chain before
     # Apollo/Exa ever look for a genuine address, and it can't be messaged.
-    from services.jobdiva import _is_placeholder_email
-    if seed_email and _is_placeholder_email(seed_email):
+    from utils.email_utils import is_placeholder_email
+    if seed_email and is_placeholder_email(seed_email):
         logger.info(
             "enrich_contact: ignoring synthetic seed email %s for %s",
             seed_email, candidate_id,
@@ -3210,9 +3268,11 @@ async def get_candidate_evaluation_report(
             # Calculate percentage: (score / total) * 100
             display_engage_score = round((float(engage_score) / float(engage_total_score)) * 100, 1)
 
+        is_l05 = str((job_row or {}).get("screening_level") or "").strip().lower() == "l0.5"
+
         # Calculate Total Fit Score: Average of only COMPLETED stages
         # Exclude Engage score if it's still in progress or initiated
-        is_engage_done = (engage_status or "").lower() in ["completed", "failed", "passed", "rejected", "pass", "fail"]
+        is_engage_done = _is_engage_done(engage_status, engage_score, is_l05)
         
         scores_to_average = []
         if resume_match_score is not None:
@@ -3221,28 +3281,16 @@ async def get_candidate_evaluation_report(
         if is_engage_done and display_engage_score is not None:
             scores_to_average.append(display_engage_score)
             
-        if scores_to_average:
+        if scores_to_average and is_engage_done:
             total_fit_score = sum(scores_to_average) / len(scores_to_average)
         else:
-            total_fit_score = 0
+            total_fit_score = None
 
         # Status label formatting
-        status_display = "Pending"
-        if engage_status:
-            s = engage_status.lower()
-            if s in ["passed", "hired", "pass"]:
-                status_display = "Pass"
-            elif s in ["failed", "rejected", "fail"]:
-                status_display = "Fail"
-            elif s in ["in_progress", "in progress"]:
-                status_display = "In Progress"
-            elif s == "completed":
-                hf_display = (hard_filter_status or "").lower()
-                hf_passed = hf_display in ["", "pass", "passed", "not_hard_filter"]
-                status_display = "Pass" if hf_passed else "Fail"
+        hf_display = (hard_filter_status or "").lower()
+        status_display = _format_engage_status(engage_status, engage_score, hf_display)
 
         # Boolean (L0.5) interviews have no scored questions — score is 100 for pass, 0 for fail.
-        is_l05 = str((job_row or {}).get("screening_level") or "").strip().lower() == "l0.5"
         if is_l05 and is_engage_done:
             if status_display == "Pass":
                 display_engage_score = 100.0
@@ -3262,7 +3310,7 @@ async def get_candidate_evaluation_report(
             "engage_total_score":    100 if (engage_total_score or is_l05) else None,
             "engage_status":         status_display,
             "hard_filter_status":    None if status_display == "In Progress" else hard_filter_status,
-            "total_fit_score":       round(total_fit_score, 1),
+            "total_fit_score":       round(total_fit_score, 1) if total_fit_score is not None else None,
             "engage_interview_id":   engage_interview_id,
             "engage_completed_at":   str(engage_completed_at) if engage_completed_at else None,
             "engage_created_at":     str(engage_created_at) if engage_created_at else None,

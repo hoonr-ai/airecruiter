@@ -314,10 +314,9 @@ def _compute_weekly_trends(conn, scope: Optional[Dict[str, Any]] = None, weeks: 
             GROUP BY 1
         """, sc_params),
         "candidates_launched": series(f"""
-            SELECT date_trunc('week', created_at)::date, COUNT(*)
+            SELECT date_trunc('week', created_at)::date, COUNT(DISTINCT NULLIF(interview_id, ''))
             FROM engage_interview_audit
             WHERE created_at >= date_trunc('week', NOW()) - make_interval(weeks => %s)
-              AND COALESCE(NULLIF(interview_id, ''), '') <> ''
               AND {sc_cond}
             GROUP BY 1
         """, sc_params),
