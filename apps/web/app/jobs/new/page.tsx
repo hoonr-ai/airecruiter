@@ -1037,12 +1037,12 @@ function NewJobPageContent() {
   const [isEnrichingContacts, setIsEnrichingContacts] = useState(false);
   const [missingContactsOpen, setMissingContactsOpen] = useState(false);
   // Realtime progress for the batched Launch PAIR flow (enrichment + per-batch
-  // save/engage). Batches of 75 keep individual /candidates/save payloads
-  // manageable (each candidate carries full resume_text, gated by nginx
-  // client_max_body_size — see nginx.conf) while cutting the number of
-  // save+engage round-trips; the modal surfaces per-batch status so the
-  // recruiter can see what's happening on long runs.
+  // save/engage). PAI-155: keep Pairbot engage batches at 75, but save in
+  // smaller chunks so /candidates/save is less likely to hit browser
+  // "Failed to fetch" on large resume payloads.
+  const SAVE_BATCH_SIZE = 25;
   const LAUNCH_BATCH_SIZE = 75;
+  const SAVE_MAX_RETRIES = 3;
 
   // Pace between batches so save+engage calls don't fire faster than nginx's
   // pair_batch_limit zone can sustain on large launches (seen: 26-30 batches
@@ -7023,11 +7023,9 @@ function NewJobPageContent() {
   // Launch PAIR consumes selected candidates (with optional contact overrides
   // from enrichment) and persists them to sourced_candidates.
   //
-  // The full selection is split into batches of LAUNCH_BATCH_SIZE before
-  // hitting /candidates/save + the engagement endpoints — large bulk
-  // payloads (hundreds of resumes + full enhanced_info blobs) were
-  // timing out / OOMing the backend. Each batch's save/engage status is
-  // streamed into launchProgress so the modal can show realtime state.
+  // PAI-155: save in SAVE_BATCH_SIZE chunks (with retries); Pairbot engage
+  // still uses LAUNCH_BATCH_SIZE via the engagement stream. Each batch's
+  // status is streamed into launchProgress for the launch modal.
   const runLaunchPair = async (
     contactOverrides?: Record<string, { phone?: string; email?: string }>,
     launchIdsOverride?: Set<string>,
@@ -7137,10 +7135,10 @@ function NewJobPageContent() {
     const jobdivaIdForSave = jobdivaId || jobData?.jobdiva_id || numericJobId;
     const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
 
-    // Slice into fixed-size batches; the modal already shows per-batch progress.
+    // Slice into fixed-size SAVE batches (smaller than Pairbot engage batches).
     const batches: typeof candidatesPayload[] = [];
-    for (let i = 0; i < candidatesPayload.length; i += LAUNCH_BATCH_SIZE) {
-      batches.push(candidatesPayload.slice(i, i + LAUNCH_BATCH_SIZE));
+    for (let i = 0; i < candidatesPayload.length; i += SAVE_BATCH_SIZE) {
+      batches.push(candidatesPayload.slice(i, i + SAVE_BATCH_SIZE));
     }
 
     const initialBatchInfo: LaunchBatchInfo[] = batches.map((batch, idx) => ({
@@ -7158,7 +7156,7 @@ function NewJobPageContent() {
       open: true,
       phase: "launching",
       totalCandidates: candidatesPayload.length,
-      batchSize: LAUNCH_BATCH_SIZE,
+      batchSize: SAVE_BATCH_SIZE,
       batches: initialBatchInfo,
       currentBatchIndex: 0,
       totalSaved: 0,
@@ -7216,7 +7214,7 @@ function NewJobPageContent() {
       }
     };
 
-    console.log(`🚀 Launching PAIR with ${candidatesPayload.length} candidates in ${batches.length} batch(es) of ${LAUNCH_BATCH_SIZE}`);
+    console.log(`🚀 Launching PAIR with ${candidatesPayload.length} candidates in ${batches.length} save batch(es) of ${SAVE_BATCH_SIZE}`);
 
     let totalSaved = 0;
     let totalEngaged = 0;
@@ -7248,42 +7246,62 @@ function NewJobPageContent() {
       setLaunchProgress(prev => ({ ...prev, currentBatchIndex: i }));
       updateBatch(i, { status: "saving" });
 
-      // ── Save batch ────────────────────────────────────────────────────
+      // ── Save batch (PAI-155: retry transient "Failed to fetch") ────────
       let saveOk = false;
       let batchSavedCount = 0;
       let batchDncSkipped = 0;
-      try {
-        const response = await authFetch(`${API_BASE}/candidates/save`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            jobdiva_id: jobdivaIdForSave,
-            candidates: batch,
-          }),
-        });
-        const result = await response.json();
-        if (response.ok && result.status === 'success') {
-          saveOk = true;
-          batchSavedCount = Number(result.saved_count) || batch.length;
-          batchDncSkipped = Number(result?.dnc_skipped_count || 0);
-        } else {
-          console.error(`Batch ${i + 1} save failed:`, JSON.stringify(result, null, 2));
-          const errorMsg = result.detail
+      let lastSaveError = "";
+      for (let attempt = 1; attempt <= SAVE_MAX_RETRIES; attempt++) {
+        try {
+          const response = await authFetch(`${API_BASE}/candidates/save`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              jobdiva_id: jobdivaIdForSave,
+              candidates: batch,
+            }),
+          });
+          const result = await response.json();
+          if (response.ok && result.status === 'success') {
+            saveOk = true;
+            batchSavedCount = Number(result.saved_count) || batch.length;
+            batchDncSkipped = Number(result?.dnc_skipped_count || 0);
+            break;
+          }
+          console.error(`Batch ${i + 1} save failed (attempt ${attempt}):`, JSON.stringify(result, null, 2));
+          lastSaveError = result.detail
             ? (Array.isArray(result.detail) ? JSON.stringify(result.detail) : result.detail)
             : (result.message || 'Unknown error');
-          updateBatch(i, { status: "failed", errorMessage: `Save failed: ${errorMsg}` });
-          totalFailedBatches += 1;
-          recordFailedBatch(batch, "save", String(errorMsg), i);
+          // 4xx: do not retry
+          if (response.status >= 400 && response.status < 500) break;
+        } catch (e) {
+          console.error(`Batch ${i + 1} save threw (attempt ${attempt}):`, e);
+          lastSaveError = e instanceof Error ? e.message : "Unknown error";
+          const isNetwork =
+            lastSaveError === "Failed to fetch"
+            || lastSaveError.toLowerCase().includes("network")
+            || lastSaveError.toLowerCase().includes("fetch");
+          if (!isNetwork || attempt === SAVE_MAX_RETRIES) break;
+          updateBatch(i, {
+            status: "saving",
+            errorMessage: `Network dropped — retrying save (${attempt}/${SAVE_MAX_RETRIES})…`,
+          });
+          await new Promise(resolve => setTimeout(resolve, 800 * attempt));
+          continue;
         }
-      } catch (e) {
-        console.error(`Batch ${i + 1} save threw:`, e);
-        const errMsg = e instanceof Error ? e.message : "Unknown error";
-        updateBatch(i, {
-          status: "failed",
-          errorMessage: `Save failed: ${errMsg}`,
-        });
+        if (attempt < SAVE_MAX_RETRIES) {
+          await new Promise(resolve => setTimeout(resolve, 800 * attempt));
+        }
+      }
+      if (!saveOk) {
+        const errMsg = lastSaveError || "Unknown error";
+        const friendly =
+          errMsg === "Failed to fetch"
+            ? "Network dropped while saving. Check your connection and retry."
+            : errMsg;
+        updateBatch(i, { status: "failed", errorMessage: `Save failed: ${friendly}` });
         totalFailedBatches += 1;
-        recordFailedBatch(batch, "save", errMsg, i);
+        recordFailedBatch(batch, "save", String(friendly), i);
       }
 
       if (!saveOk) {

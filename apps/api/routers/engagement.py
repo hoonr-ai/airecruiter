@@ -936,11 +936,11 @@ async def _post_to_pairbot(
     base_backoff_seconds: float = 2.0,
     timeout_seconds: float = 60.0,
 ) -> httpx.Response:
-    """POST to pairbot with retries on timeout / network error / 5xx.
+    """POST to pairbot with retries on network error / 5xx.
 
-    Pairbot occasionally returns 5xx or times out under load; a single 60s
-    attempt was enough to make manual Engage clicks feel flaky. 4xx responses
-    are returned immediately (client error — retry won't help).
+    PAI-155: Pairbot bulk-create now returns 202 quickly; do NOT retry on
+    TimeoutException (a timed-out create may still be running server-side,
+    and retrying would duplicate work / orphan bulk_jds).
     """
     last_exc: Optional[BaseException] = None
     last_response: Optional[httpx.Response] = None
@@ -963,7 +963,14 @@ async def _post_to_pairbot(
                 "pairbot_5xx attempt=%d/%d status=%d",
                 attempt + 1, max_attempts, response.status_code,
             )
-        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+        except httpx.TimeoutException as exc:
+            # Do not retry timeouts — Pairbot may still be creating.
+            logger.warning(
+                "pairbot_timeout attempt=%d/%d msg=%s (no retry)",
+                attempt + 1, max_attempts, str(exc),
+            )
+            raise
+        except (httpx.NetworkError, httpx.RemoteProtocolError) as exc:
             last_exc = exc
             logger.warning(
                 "pairbot_transport_error attempt=%d/%d type=%s msg=%s",
@@ -975,6 +982,64 @@ async def _post_to_pairbot(
     if last_response is not None:
         return last_response
     raise last_exc if last_exc is not None else RuntimeError("pairbot call failed")
+
+
+async def _wait_for_pairbot_creation(
+    bulk_id: str,
+    *,
+    timeout_seconds: float = 600.0,
+) -> Dict[str, Any]:
+    """PAI-155: wait on Pairbot SSE until interviews are created.
+
+    Pairbot returns 202 + bulk_id immediately; interview rows arrive later via
+    status=creation_completed (with data[]). Outreach progress uses the same
+    stream but Curate only needs creation_completed here.
+    """
+    stream_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/bulk-interviews/{bulk_id}/stream"
+    headers: Dict[str, str] = {}
+    pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
+    if pair_api_key:
+        headers["Authorization"] = f"Bearer {pair_api_key}"
+
+    deadline = asyncio.get_event_loop().time() + timeout_seconds
+    async with httpx.AsyncClient(timeout=None) as client:
+        async with client.stream("GET", stream_url, headers=headers) as response:
+            if response.status_code >= 400:
+                body = (await response.aread())[:300]
+                raise RuntimeError(
+                    f"Pairbot stream failed status={response.status_code} body={body!r}"
+                )
+            buffer = ""
+            async for chunk in response.aiter_text():
+                if asyncio.get_event_loop().time() > deadline:
+                    raise TimeoutError(
+                        f"Timed out waiting for Pairbot creation_completed bulk_id={bulk_id}"
+                    )
+                buffer += chunk
+                while "\n\n" in buffer:
+                    raw_event, buffer = buffer.split("\n\n", 1)
+                    data_lines = [
+                        line[5:].strip()
+                        for line in raw_event.split("\n")
+                        if line.startswith("data:")
+                    ]
+                    if not data_lines:
+                        continue
+                    try:
+                        event = json.loads("".join(data_lines))
+                    except Exception:
+                        logger.warning("pairbot_stream_parse_error bulk_id=%s raw=%r", bulk_id, data_lines)
+                        continue
+                    status = str(event.get("status") or "")
+                    if status == "creation_completed":
+                        return event if isinstance(event, dict) else {"status": status}
+                    if status == "creation_failed":
+                        raise RuntimeError(
+                            event.get("message")
+                            or f"Pairbot creation_failed for bulk_id={bulk_id}"
+                        )
+                    # Ignore accepted/creating/processing/completed (outreach).
+    raise TimeoutError(f"Pairbot stream ended without creation_completed bulk_id={bulk_id}")
 
 
 def _persist_jobdiva_candidate_id(candidate_id_internal: str, cand_data: Dict[str, Any]) -> None:
@@ -1460,8 +1525,71 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
             except Exception:
                 response_data = {"message": f"Raw: {response.text[:100]}"}
 
-            is_success = response.status_code in [200, 201]
+            # PAI-155: 202 Accepted means interviews are creating in background.
+            # Wait on SSE for creation_completed before writing audit/engage_status.
+            is_success = response.status_code in [200, 201, 202]
             logger.info(f"📥 PAIR API response status: {response.status_code}")
+            if is_success and response.status_code == 202:
+                bulk_id = str(response_data.get("bulk_id") or "").strip()
+                if not bulk_id:
+                    raise RuntimeError("Pairbot returned 202 without bulk_id")
+                # Mark processing so rank-list shows work in progress if the
+                # stream is slow; overwritten to sent/failed after creation.
+                for cid in request.real_candidate_ids:
+                    try:
+                        _proc_conn = _get_db_connection()
+                        try:
+                            _proc_cur = _proc_conn.cursor()
+                            _proc_cur.execute(
+                                """
+                                UPDATE sourced_candidates
+                                SET data = jsonb_set(
+                                        COALESCE(data, '{}'::jsonb),
+                                        '{engage_status}',
+                                        '"processing"',
+                                        true
+                                    ),
+                                    updated_at = CURRENT_TIMESTAMP
+                                WHERE candidate_id = %s
+                                  AND (jobdiva_id = %s OR jobdiva_id = %s)
+                                """,
+                                (
+                                    cid,
+                                    str(job_id_from_payload or ""),
+                                    str(payload_obj.get("jd", {}).get("jobdiva_id") or ""),
+                                ),
+                            )
+                            _proc_conn.commit()
+                            _proc_cur.close()
+                        finally:
+                            _proc_conn.close()
+                    except Exception as _proc_err:
+                        logger.warning(
+                            "engage_processing_stamp_failed candidate=%s err=%s",
+                            cid,
+                            _proc_err,
+                        )
+                logger.info(
+                    "pairbot_async_accepted bulk_id=%s waiting_for_creation candidates=%d",
+                    bulk_id,
+                    len(request.real_candidate_ids),
+                )
+                creation_event = await _wait_for_pairbot_creation(bulk_id)
+                response_data = {
+                    **response_data,
+                    "bulk_id": bulk_id,
+                    "data": creation_event.get("data") or [],
+                    "total_created": creation_event.get("total_created"),
+                    "failed_interviews": creation_event.get("failed_interviews"),
+                    "message": creation_event.get("message")
+                    or response_data.get("message")
+                    or "Interviews created",
+                }
+                logger.info(
+                    "pairbot_creation_completed bulk_id=%s created=%s",
+                    bulk_id,
+                    response_data.get("total_created"),
+                )
 
         # Save audit log for each candidate
         conn = _get_db_connection()
@@ -1551,13 +1679,16 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
             if not isinstance(data_list, list):
                 data_list = [response_data] if response_data else []
 
-            # Pairbot does not echo source_candidate_id in data[]; match entries by email.
-            # First-write-wins: prevents a duplicate email in data[] from
-            # silently overwriting an earlier valid match.
+            # Prefer source_candidate_id (PAI-155 Pairbot echoes it). Fall back
+            # to email for older Pairbot responses / phone-only rows.
+            interview_by_source_id: Dict[str, Dict[str, Any]] = {}
             interview_by_email: Dict[str, Dict[str, Any]] = {}
             for item in data_list:
                 if not isinstance(item, dict):
                     continue
+                src = str(item.get("source_candidate_id") or "").strip()
+                if src and src not in interview_by_source_id:
+                    interview_by_source_id[src] = item
                 item_email = str(item.get("candidate_email") or "").lower().strip()
                 if item_email and item_email not in interview_by_email:
                     interview_by_email[item_email] = item
@@ -1602,8 +1733,11 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                     if idx < len(submitted_email_by_idx)
                     else ""
                 )
-                # Pop so a shared email cannot match two different candidates.
-                interview_info = interview_by_email.pop(submitted_email, {}) if submitted_email else {}
+                interview_info: Dict[str, Any] = {}
+                if submitted_source_id and submitted_source_id in interview_by_source_id:
+                    interview_info = interview_by_source_id.pop(submitted_source_id, {}) or {}
+                elif submitted_email:
+                    interview_info = interview_by_email.pop(submitted_email, {}) or {}
                 # NOTE: The legacy positional fallback (data_list[idx]) has been
                 # intentionally removed. When the Bot API skips a candidate (e.g.
                 # missing email and phone) its response data[] is shorter than the
