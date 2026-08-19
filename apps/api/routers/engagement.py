@@ -1057,7 +1057,7 @@ async def _wait_for_pairbot_creation(
                     f"Pairbot stream failed status={response.status_code} body={body!r}"
                 )
             chunks: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
-            pump_error: List[BaseException] = []
+            pump_error: List[Exception] = []
 
             async def _pump_chunks() -> None:
                 try:
@@ -1065,7 +1065,7 @@ async def _wait_for_pairbot_creation(
                         await chunks.put(chunk)
                 except asyncio.CancelledError:
                     raise
-                except BaseException as exc:
+                except Exception as exc:
                     pump_error.append(exc)
                 finally:
                     await chunks.put(None)
