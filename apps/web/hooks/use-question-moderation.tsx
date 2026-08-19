@@ -9,9 +9,19 @@
 // recruiter — the backend applies the same policy server-side at generation
 // time only, so this is a guardrail, not a gate.
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle } from "lucide-react";
 import { API_BASE, authFetch } from "@/lib/api";
+
+// Question categories produced by our own generator/front-matter — trusted,
+// never moderated. Everything else (job wizard "other", campaigns "custom",
+// unknown imports) counts as recruiter-added. Single source of truth for both
+// editors — a category added to one list but not the other would make the two
+// surfaces silently disagree on what gets checked.
+const TRUSTED_QUESTION_CATEGORIES = ["default", "logistics", "work-arrangement", "role-specific", "intro"];
+
+export const isRecruiterAddedQuestion = (category: string | null | undefined): boolean =>
+    !TRUSTED_QUESTION_CATEGORIES.includes(String(category || "").toLowerCase());
 
 export interface QuestionPolicyVerdict {
     ok: boolean;
@@ -47,7 +57,11 @@ export function useQuestionModeration(jobTitle?: string) {
         const norm = normalizeQuestionText(text);
         if (norm.length < MIN_CHECK_LENGTH) return;
         const existing = verdictsRef.current[norm];
-        if (existing) return; // already checking or checked for this exact text
+        // Skip only when a check is in flight or a REAL verdict exists. A
+        // fail-open entry (checked: false — transient API/LLM outage) must be
+        // retried on the next edit/blur, not suppressed for the whole session.
+        if (existing === "checking") return;
+        if (existing && existing.checked) return;
         setEntry(norm, "checking");
         try {
             const res = await authFetch(`${API_BASE}/api/v1/ai-generation/screening-questions/moderate`, {
@@ -94,6 +108,14 @@ export function useQuestionModeration(jobTitle?: string) {
         (text: string): QuestionModerationState | undefined => verdicts[normalizeQuestionText(text)],
         [verdicts],
     );
+
+    // Pending debounce timers must not fire after the editor unmounts.
+    useEffect(() => {
+        const pending = timers.current;
+        return () => {
+            Object.values(pending).forEach(clearTimeout);
+        };
+    }, []);
 
     return { verdictFor, scheduleCheck, flushCheck };
 }

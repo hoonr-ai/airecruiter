@@ -185,6 +185,7 @@ export function LaunchPairProgressModal({
 
   const isDone = phase === "completed" || phase === "failed";
   const hasFailedCandidates = failedCandidates.length > 0;
+  const showRetry = isDone && hasFailedCandidates && !!onRetry;
 
   // Export the candidates whose batch failed so a support engineer can
   // re-launch PAIR for them manually via the API. One row per candidate,
@@ -450,7 +451,7 @@ export function LaunchPairProgressModal({
             <span />
           )}
           <div className="flex gap-2">
-            {isDone && hasFailedCandidates && onRetry && (
+            {showRetry && (
               <Button
                 type="button"
                 onClick={onRetry}
@@ -463,12 +464,8 @@ export function LaunchPairProgressModal({
             <Button
               disabled={!isDone}
               onClick={onClose}
-              variant={isDone && hasFailedCandidates && onRetry ? "outline" : "default"}
-              className={
-                isDone && hasFailedCandidates && onRetry
-                  ? ""
-                  : "bg-[#6366f1] hover:bg-[#4f46e5] text-white"
-              }
+              variant={showRetry ? "outline" : "default"}
+              className={showRetry ? "" : "bg-[#6366f1] hover:bg-[#4f46e5] text-white"}
             >
               {isDone ? "Close" : "Working…"}
             </Button>

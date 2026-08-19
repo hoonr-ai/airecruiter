@@ -2132,6 +2132,12 @@ async def launch_bulk_interviews(request: LaunchRequest):
             for idx, batch in enumerate(batches):
                 if idx > 0:
                     await asyncio.sleep(_LAUNCH_BATCH_DELAY_SECONDS)
+                # Ids actually sent to Pairbot for this batch: batch minus
+                # DNC-blocked minus contact-gate exclusions. Failure paths must
+                # report THESE ids — reporting the original batch would re-record
+                # rows already surfaced as exclusions, putting permanently
+                # uncontactable candidates into the retry set forever.
+                sendable_ids: List[str] = batch
                 try:
                     gp = await _generate_payload_for(
                         GeneratePayloadRequest(candidate_ids=batch, job_id=request.job_id)
@@ -2148,6 +2154,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
                         set(gp.get("dnc_blocked_ids") or []) if isinstance(gp, dict) else set()
                     )
                     real_ids = [c for c in batch if c not in dnc_blocked] if dnc_blocked else batch
+                    sendable_ids = real_ids
 
                     # Per-candidate contact gate. _send_bulk_interview_core's
                     # payload validation 400s the ENTIRE batch when any single
@@ -2198,6 +2205,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
                             all_excluded.extend(batch_dropped)
                             totals["excluded"] += len(batch_dropped)
                             real_ids = [cid for cid, _ in launchable]
+                            sendable_ids = real_ids
                             payload_obj["resumes"] = [r for _, r in launchable]
                             payload_str = json.dumps(payload_obj)
                         if not real_ids:
@@ -2253,13 +2261,13 @@ async def launch_bulk_interviews(request: LaunchRequest):
                         })
                     else:
                         totals["failed_batches"] += 1
-                        failed_candidate_ids.extend(batch)
+                        failed_candidate_ids.extend(sendable_ids)
                         yield _sse({
                             "type": "batch",
                             "index": idx,
                             "status": "failed",
                             "error": res.get("message") or "send failed",
-                            "candidate_ids": batch,
+                            "candidate_ids": sendable_ids,
                         })
                 except HTTPException as he:
                     # 409 = outreach stopped for this job -> abort the whole
@@ -2268,7 +2276,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
                     # complete, and surface those ids on the error event.
                     if getattr(he, "status_code", None) == 409:
                         aborted = True
-                        remaining = [c for b in batches[idx:] for c in b]
+                        remaining = sendable_ids + [c for b in batches[idx + 1:] for c in b]
                         totals["failed_batches"] += 1
                         failed_candidate_ids.extend(remaining)
                         yield _sse({
@@ -2280,18 +2288,18 @@ async def launch_bulk_interviews(request: LaunchRequest):
                         })
                         break
                     totals["failed_batches"] += 1
-                    failed_candidate_ids.extend(batch)
+                    failed_candidate_ids.extend(sendable_ids)
                     yield _sse({
                         "type": "batch", "index": idx, "status": "failed",
-                        "error": str(he.detail), "candidate_ids": batch,
+                        "error": str(he.detail), "candidate_ids": sendable_ids,
                     })
                 except Exception as e:
                     logger.error("launch batch %d failed: %s", idx, e, exc_info=True)
                     totals["failed_batches"] += 1
-                    failed_candidate_ids.extend(batch)
+                    failed_candidate_ids.extend(sendable_ids)
                     yield _sse({
                         "type": "batch", "index": idx, "status": "failed",
-                        "error": str(e), "candidate_ids": batch,
+                        "error": str(e), "candidate_ids": sendable_ids,
                     })
         finally:
             # Fire once even if the client disconnected mid-stream (generator

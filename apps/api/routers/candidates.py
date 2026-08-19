@@ -1690,6 +1690,12 @@ async def save_candidates(request: CandidatesSaveRequest):
             with conn.cursor() as cur:
                 for c in selected_candidates:
                     try:
+                        # Per-row savepoint: without it, one failed INSERT
+                        # aborts the shared transaction — every later row
+                        # raises InFailedSqlTransaction (swallowed below) and
+                        # the final commit() rolls back rows already counted
+                        # in saved_ids/saved_count.
+                        cur.execute("SAVEPOINT save_candidate_row")
                         incoming_match_score: Optional[float] = None
                         try:
                             raw_incoming_score = getattr(c, 'match_score', None)
@@ -1849,6 +1855,10 @@ async def save_candidates(request: CandidatesSaveRequest):
 
                     except Exception as e:
                         print(f"❌ Error saving candidate {c.candidate_id}: {e}")
+                        try:
+                            cur.execute("ROLLBACK TO SAVEPOINT save_candidate_row")
+                        except Exception as rollback_err:
+                            print(f"❌ Savepoint rollback failed: {rollback_err}")
                         continue
 
             conn.commit()

@@ -23,7 +23,7 @@ import {
 import { useAI } from "@/context/ai-context";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { API_BASE, authFetch } from "@/lib/api";
+import { API_BASE, authFetch, isNetworkFetchError } from "@/lib/api";
 
 type TiraMode = "chat" | "boolean" | "match" | "aicheck" | "bug";
 
@@ -592,6 +592,10 @@ function MatchResultCard({ result }: { result: MatchResult }) {
 
 const AI_CHECK_MAX_FILES = 25;
 const AI_CHECK_MAX_FILE_MB = 8;
+// nginx's client_max_body_size is 25m server-wide — cap the whole batch below
+// it (multipart overhead included) so oversized uploads fail here with a clear
+// message instead of an HTML 413 from the proxy.
+const AI_CHECK_MAX_TOTAL_MB = 20;
 
 function AICheckMode() {
     const apiBase = API_BASE;
@@ -606,13 +610,20 @@ function AICheckMode() {
         setError(null);
         setFiles(prev => {
             const merged = [...prev];
+            let totalBytes = merged.reduce((sum, f) => sum + f.size, 0);
             for (const f of Array.from(picked)) {
                 if (f.size > AI_CHECK_MAX_FILE_MB * 1024 * 1024) {
                     setError(`${f.name} is larger than ${AI_CHECK_MAX_FILE_MB}MB and was skipped.`);
                     continue;
                 }
                 const dup = merged.some(m => m.name === f.name && m.size === f.size && m.lastModified === f.lastModified);
-                if (!dup) merged.push(f);
+                if (dup) continue;
+                if (totalBytes + f.size > AI_CHECK_MAX_TOTAL_MB * 1024 * 1024) {
+                    setError(`Batch is limited to ${AI_CHECK_MAX_TOTAL_MB}MB total — ${f.name} was skipped.`);
+                    continue;
+                }
+                merged.push(f);
+                totalBytes += f.size;
             }
             if (merged.length > AI_CHECK_MAX_FILES) {
                 setError(`You can check up to ${AI_CHECK_MAX_FILES} resumes at a time — extra files were skipped.`);
@@ -643,16 +654,29 @@ function AICheckMode() {
             const fd = new FormData();
             files.forEach(f => fd.append("files", f));
             const res = await authFetch(`${apiBase}/tira/ai-check`, { method: "POST", body: fd });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data?.detail || `Failed (${res.status})`);
+            // A proxy error (e.g. 413 for an oversized batch) returns an HTML
+            // body — don't let the JSON parse failure mask the real cause.
+            let data: any = null;
+            try {
+                data = await res.json();
+            } catch {
+                /* non-JSON body */
+            }
+            if (!res.ok || !data) {
+                throw new Error(
+                    data?.detail
+                        || (res.status === 413
+                            ? "Upload too large — remove some files and try again."
+                            : `Failed (${res.status})`),
+                );
+            }
             setReport(data as AICheckReport);
         } catch (e) {
-            const msg =
-                e instanceof TypeError
-                    ? "Network failure — check your connection and try again."
-                    : e instanceof Error
-                        ? e.message
-                        : "Couldn't run the AI check.";
+            const msg = isNetworkFetchError(e)
+                ? "Network failure — check your connection and try again."
+                : e instanceof Error
+                    ? e.message
+                    : "Couldn't run the AI check.";
             setError(msg);
         } finally {
             setSubmitting(false);

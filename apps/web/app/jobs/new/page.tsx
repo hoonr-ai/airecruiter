@@ -90,7 +90,7 @@ import {
 import { normalizePhone } from "@/lib/phone";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { API_BASE, authFetch, isNetworkFetchError } from "@/lib/api";
-import { useQuestionModeration, QuestionPolicyWarning } from "@/hooks/use-question-moderation";
+import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion } from "@/hooks/use-question-moderation";
 import { trackEvent } from "@/lib/analytics";
 import { logger } from "@/lib/logger";
 
@@ -6615,14 +6615,6 @@ function NewJobPageContent() {
     }
   };
 
-  // Recruiter-added rows (category "other"; "custom" for campaign imports) —
-  // the only ones the AI policy check runs on. Front-matter and AI-generated
-  // questions are trusted output of our own generator.
-  const isRecruiterAddedQuestion = (q: ScreenQuestion) =>
-    !["default", "logistics", "work-arrangement", "role-specific", "intro"].includes(
-      String(q.category || "").toLowerCase(),
-    );
-
   const addScreenQuestion = () => {
     const newQuestion: ScreenQuestion = {
       id: questionIdCounter,
@@ -6647,7 +6639,7 @@ function NewJobPageContent() {
     userHasEditedQuestionsRef.current = true;
     if (field === 'question_text') {
       const target = screenQuestions.find(q => q.id === id);
-      if (target && isRecruiterAddedQuestion(target)) {
+      if (target && isRecruiterAddedQuestion(target.category)) {
         questionModeration.scheduleCheck(String(id), String(value ?? ""));
       }
     }
@@ -6950,14 +6942,14 @@ function NewJobPageContent() {
                   value={q.question_text}
                   onChange={(e) => updateScreenQuestion(q.id, 'question_text', e.target.value)}
                   onBlur={() => {
-                    if (isRecruiterAddedQuestion(q)) {
+                    if (isRecruiterAddedQuestion(q.category)) {
                       questionModeration.flushCheck(String(q.id), q.question_text);
                     }
                   }}
                   className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium resize-none whitespace-pre-wrap break-words"
                   rows={3}
                 />
-                {isRecruiterAddedQuestion(q) && (
+                {isRecruiterAddedQuestion(q.category) && (
                   <QuestionPolicyWarning verdict={questionModeration.verdictFor(q.question_text)} />
                 )}
               </div>
@@ -7056,7 +7048,7 @@ function NewJobPageContent() {
   const runLaunchPair = async (
     contactOverrides?: Record<string, { phone?: string; email?: string }>,
     launchIdsOverride?: Set<string>,
-    options?: { skipRedirect?: boolean },
+    options?: { skipRedirect?: boolean; isRetry?: boolean },
   ): Promise<{ success: boolean; savedCount: number }> => {
     const launchIds = launchIdsOverride ?? selectedCandidates;
     if (launchIds.size === 0) return { success: false, savedCount: 0 };
@@ -7084,7 +7076,12 @@ function NewJobPageContent() {
     // the auto-deselect from handleLaunchPairClick. The backend repeats
     // this check at /candidates/save — defense in depth.
     const candidatesPayload = effective
-      .filter(c => launchIds.has(c.candidate_id || c.jobdiva_candidate_id || c.id))
+      // Tolerate raw vs String() ids: normal launches pass raw selection ids,
+      // the Retry path passes the String()-normalized ids from failedCandidates.
+      .filter(c => {
+        const cid = c.candidate_id || c.jobdiva_candidate_id || c.id;
+        return launchIds.has(cid) || launchIds.has(String(cid));
+      })
       // Launch-PAIR skip safety net: only candidates who currently work at the
       // hiring client company are withheld from /candidates/save (even via the
       // second MissingContactsModal pass). Low score / thin profile / location
@@ -7278,8 +7275,8 @@ function NewJobPageContent() {
       let batchSavedCount = 0;
       let batchDncSkipped = 0;
       let lastSaveError = "";
-      let lastSaveWasNetwork = false;
       let batchSavedIds: string[] | null = null;
+      let batchSkippedIds: string[] = [];
       for (let attempt = 1; attempt <= SAVE_MAX_RETRIES; attempt++) {
         try {
           const response = await authFetch(`${API_BASE}/candidates/save`, {
@@ -7298,7 +7295,6 @@ function NewJobPageContent() {
             // the request already reached the server (save is upsert, but
             // retrying a completed write can still duplicate audit side effects).
             lastSaveError = parseErr instanceof Error ? parseErr.message : "Invalid JSON response";
-            lastSaveWasNetwork = false;
             console.error(`Batch ${i + 1} save non-JSON body (attempt ${attempt}):`, lastSaveError);
             if (response.ok || attempt === SAVE_MAX_RETRIES) break;
             updateBatch(i, {
@@ -7320,10 +7316,14 @@ function NewJobPageContent() {
             batchSavedIds = Array.isArray(payload.saved_ids)
               ? payload.saved_ids.map((id: unknown) => String(id))
               : null;
+            // Intentional server-side skips (DNC / no-contact) — NOT failures.
+            batchSkippedIds = [
+              ...(Array.isArray(payload.dnc_skipped) ? payload.dnc_skipped : []),
+              ...(Array.isArray(payload.no_contact_skipped) ? payload.no_contact_skipped : []),
+            ].map((s: any) => String(s?.candidate_id ?? "")).filter(Boolean);
             break;
           }
           console.error(`Batch ${i + 1} save failed (attempt ${attempt}):`, JSON.stringify(result, null, 2));
-          lastSaveWasNetwork = false;
           lastSaveError = payload?.detail
             ? (Array.isArray(payload.detail) ? JSON.stringify(payload.detail) : payload.detail)
             : (payload?.message || `HTTP ${response.status}`);
@@ -7352,12 +7352,14 @@ function NewJobPageContent() {
           continue;
         } catch (e) {
           console.error(`Batch ${i + 1} save threw (attempt ${attempt}):`, e);
-          lastSaveError = e instanceof Error ? e.message : "Unknown error";
           // fetch() network failures are TypeError in all major browsers
           // (Chrome "Failed to fetch", Safari "Load failed", Firefox
-          // "NetworkError when attempting to fetch resource").
+          // "NetworkError when attempting to fetch resource"). Name them as
+          // connectivity problems — the raw strings read like server bugs.
           const isRetryable = isNetworkFetchError(e);
-          lastSaveWasNetwork = isRetryable;
+          lastSaveError = isRetryable
+            ? "Network failure — check your internet connection and retry."
+            : e instanceof Error ? e.message : "Unknown error";
           if (!isRetryable || attempt === SAVE_MAX_RETRIES) break;
           updateBatch(i, {
             status: "saving",
@@ -7369,15 +7371,9 @@ function NewJobPageContent() {
       }
       if (!saveOk) {
         const errMsg = lastSaveError || "Unknown error";
-        // Name a connectivity problem as such — the raw browser strings
-        // ("Failed to fetch", "Load failed", "NetworkError…") read like a
-        // server bug and vary by browser.
-        const friendly = lastSaveWasNetwork
-          ? "Network failure — check your internet connection and retry."
-          : errMsg;
-        updateBatch(i, { status: "failed", errorMessage: `Save failed: ${friendly}` });
+        updateBatch(i, { status: "failed", errorMessage: `Save failed: ${errMsg}` });
         totalFailedBatches += 1;
-        recordFailedBatch(batch, "save", String(friendly), i);
+        recordFailedBatch(batch, "save", String(errMsg), i);
       }
 
       if (!saveOk) {
@@ -7392,6 +7388,20 @@ function NewJobPageContent() {
         const batchIdSet = new Set(batch.map(c => c.candidate_id));
         for (const id of batchSavedIds) {
           if (batchIdSet.has(id)) savedCandidateIds.push(id);
+        }
+        // Rows the server neither saved nor intentionally skipped (DNC /
+        // no-contact) hit a per-row save error. Surface them as failures —
+        // otherwise they'd silently vanish: never engaged, never in the
+        // failed CSV, invisible to Retry.
+        const savedSet = new Set(batchSavedIds);
+        const skippedSet = new Set(batchSkippedIds);
+        const unsavedRows = batch.filter(
+          c => !savedSet.has(c.candidate_id) && !skippedSet.has(c.candidate_id),
+        );
+        if (unsavedRows.length > 0) {
+          console.error(`Batch ${i + 1}: ${unsavedRows.length} row(s) not saved server-side`, unsavedRows.map(c => c.candidate_id));
+          totalFailedBatches += 1;
+          recordFailedBatch(unsavedRows, "save", "Not saved (server-side save error)", i);
         }
       } else {
         for (const c of batch) savedCandidateIds.push(c.candidate_id);
@@ -7464,9 +7474,14 @@ function NewJobPageContent() {
           {
             jobId: jobIdForEngage,
             candidateIds: savedCandidateIds,
-            isInitialLaunch: wizardMode !== 'source',
-            notifyRecruiters: true,
-            sendJobPostingEmail: selectedJobBoards.length > 0,
+            // A Retry is a continuation of the original launch, not a new one:
+            // the fire-once side effects (applicant sync, recruiter launch
+            // email, job-board posting email) already fired — or deliberately
+            // didn't — on the first pass. Re-sending these flags would fire
+            // them again for the retried subset.
+            isInitialLaunch: wizardMode !== 'source' && !options?.isRetry,
+            notifyRecruiters: !options?.isRetry,
+            sendJobPostingEmail: selectedJobBoards.length > 0 && !options?.isRetry,
             appBaseUrl: typeof window !== "undefined" ? window.location.origin : "",
             batchSize: LAUNCH_BATCH_SIZE,
           },
@@ -7516,7 +7531,14 @@ function NewJobPageContent() {
                 const msg = evt.error || "Launch failed";
                 engageFailureMessage = msg;
                 totalFailedBatches += 1;
-                recordLaunchFailures(ids, msg);
+                // Prefer the backend's id list: it excludes rows the contact
+                // gate already dropped as uncontactable (those are exclusions,
+                // not failures — recording them here would make Retry re-launch
+                // them forever). The slice is the fallback for older backends.
+                const failedIds = Array.isArray(evt.candidate_ids) && evt.candidate_ids.length > 0
+                  ? evt.candidate_ids.map((id) => String(id))
+                  : ids;
+                recordLaunchFailures(failedIds, msg);
                 updateBatch(launchIndexOffset + evt.index, {
                   status: "failed",
                   errorMessage: `Engage failed: ${msg}`,
@@ -7677,11 +7699,27 @@ function NewJobPageContent() {
   // runLaunchPair resets failedCandidates as it starts.
   const handleRetryFailedLaunch = () => {
     const retryIds = new Set(
-      launchProgress.failedCandidates.map(c => c.candidate_id).filter(Boolean),
+      launchProgress.failedCandidates.map(c => String(c.candidate_id)).filter(Boolean),
     );
     if (retryIds.size === 0) return;
+    // Fresh per-run accumulators: skip counts, enrich stats and the final
+    // message are per-run, and runLaunchPair itself only resets the
+    // batch/failure fields — carrying these over double-counts the skip panel.
+    setLaunchProgress(prev => ({
+      ...prev,
+      enrichTotal: 0,
+      enrichDone: 0,
+      enrichSucceeded: 0,
+      enrichAlreadyReachable: 0,
+      enrichMissingLinkedIn: 0,
+      enrichNoContact: 0,
+      enrichFailed: 0,
+      hardFilterSkipped: 0,
+      hardFilterSkippedNames: [],
+      finalMessage: undefined,
+    }));
     const overrides = Object.keys(pendingLaunchOverrides).length > 0 ? pendingLaunchOverrides : undefined;
-    void runLaunchPair(overrides, retryIds, { skipRedirect: false });
+    void runLaunchPair(overrides, retryIds, { skipRedirect: false, isRetry: true });
   };
 
   // Entry point wired to Launch PAIR. Before save, auto-enrich selected

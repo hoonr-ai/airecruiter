@@ -22,7 +22,7 @@ from core import (
     JOBDIVA_AI_JD_UDF_ID, JOBDIVA_JOB_NOTES_UDF_ID,
     OPENAI_MODEL
 )
-from core.llm_client import get_openai_client, model_for
+from core.llm_client import get_openai_client, log_usage, model_for
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -721,6 +721,8 @@ async def moderate_screening_questions(
     model = model_for("question_moderation", "gpt-4o-mini")
     semaphore = asyncio.Semaphore(4)
 
+    job_title = (req.job_title or "").strip()
+
     async def _check(item: ModerateQuestionItem) -> Dict[str, Any]:
         text = item.question_text.strip()[:1000]
         base = {"key": item.key, "question_text": text}
@@ -728,7 +730,10 @@ async def moderate_screening_questions(
         if oai is None:
             return unchecked
 
-        cache_key = _llm_cache.make_key("q_moderation", 1, model, text)
+        # job_title is part of the prompt (it decides off_topic/nonsensical),
+        # so it must be part of the key — a verdict for one job's context must
+        # not serve another job for 7 days.
+        cache_key = _llm_cache.make_key("q_moderation", 1, model, job_title, text)
         cached = await _llm_cache.get_json(cache_key)
         if cached is not None:
             try:
@@ -738,8 +743,9 @@ async def moderate_screening_questions(
                 pass  # schema drift — re-run
 
         async with semaphore:
+            started = time.monotonic()
             try:
-                job_context = f"Job title: {req.job_title.strip()}\n\n" if req.job_title.strip() else ""
+                job_context = f"Job title: {job_title}\n\n" if job_title else ""
                 completion = await oai.beta.chat.completions.parse(
                     model=model,
                     messages=[
@@ -753,6 +759,7 @@ async def moderate_screening_questions(
             except Exception as exc:
                 logger.warning(f"question moderation failed (fail-open): {exc}")
                 return unchecked
+        log_usage("question_moderation", completion, duration_ms=(time.monotonic() - started) * 1000)
 
         verdict = completion.choices[0].message.parsed
         if verdict is None:
