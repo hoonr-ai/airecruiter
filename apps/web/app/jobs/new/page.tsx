@@ -7279,16 +7279,17 @@ function NewJobPageContent() {
             await new Promise(resolve => setTimeout(resolve, SAVE_RETRY_BASE_DELAY_MS * attempt));
             continue;
           }
-          if (response.ok && result.status === 'success') {
+          const payload = result && typeof result === "object" ? result : null;
+          if (response.ok && payload?.status === 'success') {
             saveOk = true;
-            batchSavedCount = Number(result.saved_count) || batch.length;
-            batchDncSkipped = Number(result?.dnc_skipped_count || 0);
+            batchSavedCount = Number(payload.saved_count) || batch.length;
+            batchDncSkipped = Number(payload.dnc_skipped_count || 0);
             break;
           }
           console.error(`Batch ${i + 1} save failed (attempt ${attempt}):`, JSON.stringify(result, null, 2));
-          lastSaveError = result.detail
-            ? (Array.isArray(result.detail) ? JSON.stringify(result.detail) : result.detail)
-            : (result.message || `HTTP ${response.status}`);
+          lastSaveError = payload?.detail
+            ? (Array.isArray(payload.detail) ? JSON.stringify(payload.detail) : payload.detail)
+            : (payload?.message || `HTTP ${response.status}`);
           // 2xx that is not our success shape already hit the server — do not resend.
           // Permanent client errors: do not retry. 429 is expected under
           // nginx pair_batch_limit and must be retried (honor Retry-After).
