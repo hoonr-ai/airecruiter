@@ -7283,7 +7283,7 @@ function NewJobPageContent() {
           if (response.ok && payload?.status === 'success') {
             saveOk = true;
             batchSavedCount = Number(payload.saved_count) || batch.length;
-            batchDncSkipped = Number(payload?.dnc_skipped_count || 0);
+            batchDncSkipped = Number(payload.dnc_skipped_count || 0);
             break;
           }
           console.error(`Batch ${i + 1} save failed (attempt ${attempt}):`, JSON.stringify(result, null, 2));
