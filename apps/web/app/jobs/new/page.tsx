@@ -89,7 +89,8 @@ import {
 } from "@/components/launch-pair-progress-modal";
 import { normalizePhone } from "@/lib/phone";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
-import { API_BASE, authFetch } from "@/lib/api";
+import { API_BASE, authFetch, isNetworkFetchError } from "@/lib/api";
+import { useQuestionModeration, QuestionPolicyWarning } from "@/hooks/use-question-moderation";
 import { trackEvent } from "@/lib/analytics";
 import { logger } from "@/lib/logger";
 
@@ -945,6 +946,9 @@ function NewJobPageContent() {
   const [botIntroduction, setBotIntroduction] = useState("");
   const [screenQuestions, setScreenQuestions] = useState<ScreenQuestion[]>([]);
   const [questionIdCounter, setQuestionIdCounter] = useState(1);
+  // AI policy check (NSFW / rude / discriminatory / nonsensical) for
+  // recruiter-added questions — shows a warning under the row, never blocks.
+  const questionModeration = useQuestionModeration(jobTitle);
   const lastAutoIntroTitleRef = useRef("");
   const lastSyncedTitleForJDRef = useRef("");
   const botIntroductionEditedRef = useRef(false);
@@ -6611,6 +6615,14 @@ function NewJobPageContent() {
     }
   };
 
+  // Recruiter-added rows (category "other"; "custom" for campaign imports) —
+  // the only ones the AI policy check runs on. Front-matter and AI-generated
+  // questions are trusted output of our own generator.
+  const isRecruiterAddedQuestion = (q: ScreenQuestion) =>
+    !["default", "logistics", "work-arrangement", "role-specific", "intro"].includes(
+      String(q.category || "").toLowerCase(),
+    );
+
   const addScreenQuestion = () => {
     const newQuestion: ScreenQuestion = {
       id: questionIdCounter,
@@ -6633,6 +6645,12 @@ function NewJobPageContent() {
 
   const updateScreenQuestion = (id: number, field: keyof ScreenQuestion, value: any) => {
     userHasEditedQuestionsRef.current = true;
+    if (field === 'question_text') {
+      const target = screenQuestions.find(q => q.id === id);
+      if (target && isRecruiterAddedQuestion(target)) {
+        questionModeration.scheduleCheck(String(id), String(value ?? ""));
+      }
+    }
     setScreenQuestions(prev => prev.map(q => {
       if (q.id === id) {
         return { ...q, [field]: value };
@@ -6931,9 +6949,17 @@ function NewJobPageContent() {
                 <textarea
                   value={q.question_text}
                   onChange={(e) => updateScreenQuestion(q.id, 'question_text', e.target.value)}
+                  onBlur={() => {
+                    if (isRecruiterAddedQuestion(q)) {
+                      questionModeration.flushCheck(String(q.id), q.question_text);
+                    }
+                  }}
                   className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium resize-none whitespace-pre-wrap break-words"
                   rows={3}
                 />
+                {isRecruiterAddedQuestion(q) && (
+                  <QuestionPolicyWarning verdict={questionModeration.verdictFor(q.question_text)} />
+                )}
               </div>
 
               <div className="flex-1 min-w-0 border-l border-slate-100 pl-3">
@@ -7252,6 +7278,8 @@ function NewJobPageContent() {
       let batchSavedCount = 0;
       let batchDncSkipped = 0;
       let lastSaveError = "";
+      let lastSaveWasNetwork = false;
+      let batchSavedIds: string[] | null = null;
       for (let attempt = 1; attempt <= SAVE_MAX_RETRIES; attempt++) {
         try {
           const response = await authFetch(`${API_BASE}/candidates/save`, {
@@ -7270,6 +7298,7 @@ function NewJobPageContent() {
             // the request already reached the server (save is upsert, but
             // retrying a completed write can still duplicate audit side effects).
             lastSaveError = parseErr instanceof Error ? parseErr.message : "Invalid JSON response";
+            lastSaveWasNetwork = false;
             console.error(`Batch ${i + 1} save non-JSON body (attempt ${attempt}):`, lastSaveError);
             if (response.ok || attempt === SAVE_MAX_RETRIES) break;
             updateBatch(i, {
@@ -7284,9 +7313,17 @@ function NewJobPageContent() {
             saveOk = true;
             batchSavedCount = Number(payload.saved_count) || batch.length;
             batchDncSkipped = Number(payload.dnc_skipped_count || 0);
+            // Backend reports which ids actually got a sourced_candidates row.
+            // Only those may be engaged: an id sent to /engage/launch without a
+            // row resolves to a contactless "Unknown Candidate" stub that 400s
+            // its ENTIRE 75-candidate Pairbot batch.
+            batchSavedIds = Array.isArray(payload.saved_ids)
+              ? payload.saved_ids.map((id: unknown) => String(id))
+              : null;
             break;
           }
           console.error(`Batch ${i + 1} save failed (attempt ${attempt}):`, JSON.stringify(result, null, 2));
+          lastSaveWasNetwork = false;
           lastSaveError = payload?.detail
             ? (Array.isArray(payload.detail) ? JSON.stringify(payload.detail) : payload.detail)
             : (payload?.message || `HTTP ${response.status}`);
@@ -7319,7 +7356,8 @@ function NewJobPageContent() {
           // fetch() network failures are TypeError in all major browsers
           // (Chrome "Failed to fetch", Safari "Load failed", Firefox
           // "NetworkError when attempting to fetch resource").
-          const isRetryable = e instanceof TypeError;
+          const isRetryable = isNetworkFetchError(e);
+          lastSaveWasNetwork = isRetryable;
           if (!isRetryable || attempt === SAVE_MAX_RETRIES) break;
           updateBatch(i, {
             status: "saving",
@@ -7331,10 +7369,12 @@ function NewJobPageContent() {
       }
       if (!saveOk) {
         const errMsg = lastSaveError || "Unknown error";
-        const friendly =
-          errMsg === "Failed to fetch"
-            ? "Network dropped while saving. Check your connection and retry."
-            : errMsg;
+        // Name a connectivity problem as such — the raw browser strings
+        // ("Failed to fetch", "Load failed", "NetworkError…") read like a
+        // server bug and vary by browser.
+        const friendly = lastSaveWasNetwork
+          ? "Network failure — check your internet connection and retry."
+          : errMsg;
         updateBatch(i, { status: "failed", errorMessage: `Save failed: ${friendly}` });
         totalFailedBatches += 1;
         recordFailedBatch(batch, "save", String(friendly), i);
@@ -7346,7 +7386,16 @@ function NewJobPageContent() {
 
       totalSaved += batchSavedCount;
       totalDncSkipped += batchDncSkipped;
-      for (const c of batch) savedCandidateIds.push(c.candidate_id);
+      // Engage only ids the backend confirmed saved (older backends don't
+      // return saved_ids — fall back to the whole batch as before).
+      if (batchSavedIds) {
+        const batchIdSet = new Set(batch.map(c => c.candidate_id));
+        for (const id of batchSavedIds) {
+          if (batchIdSet.has(id)) savedCandidateIds.push(id);
+        }
+      } else {
+        for (const c of batch) savedCandidateIds.push(c.candidate_id);
+      }
       // "engaging" here = saved, awaiting the single launch stream below.
       updateBatch(i, {
         status: "engaging",
@@ -7503,7 +7552,9 @@ function NewJobPageContent() {
       } catch (launchErr) {
         // Hard failure (non-ok response or the stream dropped). The unengaged
         // remainder is recorded by the reconciliation below.
-        engageFailureMessage = launchErr instanceof Error ? launchErr.message : "Launch failed";
+        engageFailureMessage = isNetworkFetchError(launchErr)
+          ? "Network failure — the connection dropped during launch. Check your internet and retry."
+          : launchErr instanceof Error ? launchErr.message : "Launch failed";
       }
 
       // Reconcile: any saved candidate the backend never reported on (409 abort
@@ -7618,6 +7669,19 @@ function NewJobPageContent() {
     }
 
     return { success: totalSaved > 0, savedCount: totalSaved };
+  };
+
+  // Re-run Launch PAIR for exactly the candidates whose batch failed (save or
+  // engage). Safe to repeat: the backend skips already-sent candidates and
+  // treats engage_status='failed' as retryable. Snapshot the ids first —
+  // runLaunchPair resets failedCandidates as it starts.
+  const handleRetryFailedLaunch = () => {
+    const retryIds = new Set(
+      launchProgress.failedCandidates.map(c => c.candidate_id).filter(Boolean),
+    );
+    if (retryIds.size === 0) return;
+    const overrides = Object.keys(pendingLaunchOverrides).length > 0 ? pendingLaunchOverrides : undefined;
+    void runLaunchPair(overrides, retryIds, { skipRedirect: false });
   };
 
   // Entry point wired to Launch PAIR. Before save, auto-enrich selected
@@ -7897,18 +7961,35 @@ function NewJobPageContent() {
         }
 
         try {
-          const res = await authFetch(`${API_BASE}/candidates/enrich-contact`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              candidate_id: id,
-              jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId || undefined,
-              source: c.source || undefined,
-              linkedin_url: linkedinUrl,
-            }),
-          });
+          // One retry on rate-limit/gateway pushback (429/503) or a network
+          // blip — at 250 candidates these transients otherwise dump whole
+          // cohorts into "enrichment failed" and then the needs-info modal.
+          let res: Response | null = null;
+          for (let enrichAttempt = 1; enrichAttempt <= 2; enrichAttempt++) {
+            try {
+              res = await authFetch(`${API_BASE}/candidates/enrich-contact`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  candidate_id: id,
+                  jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId || undefined,
+                  source: c.source || undefined,
+                  linkedin_url: linkedinUrl,
+                }),
+              });
+            } catch (enrichErr) {
+              if (!isNetworkFetchError(enrichErr) || enrichAttempt === 2) throw enrichErr;
+              res = null;
+            }
+            if (res && res.status !== 429 && res.status !== 503) break;
+            if (enrichAttempt === 2) break;
+            const retryAfter = Number(res?.headers.get("Retry-After"));
+            await new Promise(resolve =>
+              setTimeout(resolve, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1500),
+            );
+          }
 
-          if (!res.ok) {
+          if (!res || !res.ok) {
             enrichFailedCount += 1;
             setLaunchProgress(prev => ({
               ...prev,
@@ -10150,7 +10231,7 @@ return (
     {/* Toast Notification */}
     {toast && (
       <div
-        className={`fixed bottom-8 right-8 flex items-center gap-2.5 px-5 py-3 rounded-lg text-[14px] font-medium text-white shadow-xl z-50 transition-all duration-300 transform translate-y-0 opacity-100 ${toast.type === "success" ? "bg-[#166534]" : "bg-primary"}`}
+        className={`fixed bottom-8 right-8 flex items-center gap-2.5 px-5 py-3 rounded-lg text-[14px] font-medium text-white shadow-xl z-50 transition-all duration-300 transform translate-y-0 opacity-100 ${toast.type === "success" ? "bg-[#166534]" : toast.type === "error" ? "bg-rose-600" : "bg-primary"}`}
       >
         {toast.type === "success" ? (
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
@@ -10291,6 +10372,7 @@ return (
     <LaunchPairProgressModal
       progress={launchProgress}
       onClose={() => setLaunchProgress(initialLaunchProgress)}
+      onRetry={handleRetryFailedLaunch}
     />
 
     {/* Paste Resume Modal (External requirement) */}

@@ -4,15 +4,18 @@ Endpoints:
 
 - POST /tira/match       Score a resume against an existing job's rubric.
 - POST /tira/boolean     Generate a boolean search string from a JD text/file.
+- POST /tira/ai-check    Bulk AI-plagiarism (AI-generated content) check on resumes.
 - POST /tira/bug-report  Email a bug report via SMTP.
 
 Thin wrappers around mechanisms that already exist elsewhere in the codebase:
 - Resume/JD text extraction: routers/manual_candidates._extract_resume_text_from_upload.
 - Scoring: services/unified_candidate_search._score_candidate.
+- AI-content detection: services/ai_detection.
 - Chat + tool-calling for status lookups: services/chat_service.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -21,10 +24,11 @@ from email.message import EmailMessage
 from typing import Any, Dict, List, Optional
 
 import psycopg2.extras
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
+from core.auth import UserIdentity, get_current_user
 from routers._helpers import get_db_connection
-from routers.manual_candidates import _extract_resume_text_from_upload
+from routers.manual_candidates import _extract_resume_text_from_upload, _guess_name_from_resume
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -281,6 +285,108 @@ async def tira_boolean_from_jd(
         "nice_to_have": _as_str_list(parsed.get("nice_to_have")),
         "exclusions": _as_str_list(parsed.get("exclusions")),
         "source": "pasted" if (jd_text or "").strip() else "file",
+    }
+
+
+# ---------------------------------------------------------------------------
+# /tira/ai-check — bulk AI-plagiarism check on uploaded resumes
+# ---------------------------------------------------------------------------
+
+_AI_CHECK_MAX_FILES = 25
+_AI_CHECK_MAX_FILE_BYTES = 8 * 1024 * 1024  # mirrors the bug-report screenshot cap
+_AI_CHECK_CONCURRENCY = 5
+
+
+@router.post("/tira/ai-check")
+async def tira_ai_check_resumes(
+    files: List[UploadFile] = File(...),
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Bulk "AI plagiarism" check: estimate how AI-generated each uploaded
+    resume's prose is and return a per-resume report.
+
+    Unreadable / oversized / failed files land in `failed` with a reason
+    instead of failing the whole batch. Nothing is persisted.
+    """
+    from services.ai_detection import ai_detection_service
+
+    if not files:
+        raise HTTPException(status_code=400, detail="Upload at least one resume.")
+    if len(files) > _AI_CHECK_MAX_FILES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Upload at most {_AI_CHECK_MAX_FILES} resumes at a time.",
+        )
+    if ai_detection_service.client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenAI isn't configured on the server (missing OPENAI_API_KEY).",
+        )
+
+    failed: List[Dict[str, str]] = []
+    prepared: List[Dict[str, str]] = []
+    for f in files:
+        filename = f.filename or "resume"
+        try:
+            content = await f.read()
+        except Exception:
+            failed.append({"filename": filename, "reason": "Could not read the uploaded file."})
+            continue
+        if len(content) > _AI_CHECK_MAX_FILE_BYTES:
+            failed.append({"filename": filename, "reason": "File is larger than 8MB."})
+            continue
+        try:
+            text = _extract_resume_text_from_upload(filename, content)
+        except Exception as parse_err:
+            logger.warning(f"Tira ai-check: failed to parse {filename!r}: {parse_err}")
+            failed.append({"filename": filename, "reason": "Could not parse the file. Try PDF, DOCX, or TXT."})
+            continue
+        if not text or len(text.strip()) < 40:
+            failed.append({"filename": filename, "reason": "Could not extract readable text (scanned image?)."})
+            continue
+        prepared.append({"filename": filename, "text": text})
+
+    semaphore = asyncio.Semaphore(_AI_CHECK_CONCURRENCY)
+
+    async def _analyze(item: Dict[str, str]) -> Dict[str, Any]:
+        async with semaphore:
+            try:
+                verdict = await ai_detection_service.detect(item["text"], item["filename"])
+            except Exception as e:
+                return {"__failed__": True, "filename": item["filename"], "reason": str(e)}
+            return {
+                "filename": item["filename"],
+                "candidate_name": _guess_name_from_resume(item["text"], item["filename"]),
+                "word_count": len(item["text"].split()),
+                **verdict.model_dump(),
+            }
+
+    outcomes = await asyncio.gather(*(_analyze(item) for item in prepared))
+    results: List[Dict[str, Any]] = []
+    for outcome in outcomes:
+        if outcome.get("__failed__"):
+            failed.append({"filename": outcome["filename"], "reason": outcome["reason"]})
+        else:
+            results.append(outcome)
+
+    # Most suspicious first — that's what the recruiter is scanning for.
+    results.sort(key=lambda r: r.get("ai_likelihood", 0), reverse=True)
+
+    analyzed = len(results)
+    scores = [r["ai_likelihood"] for r in results]
+    return {
+        "status": "success",
+        "results": results,
+        "failed": failed,
+        "summary": {
+            "total": len(files),
+            "analyzed": analyzed,
+            "failed": len(failed),
+            "likely_ai": sum(1 for r in results if r["verdict"] == "likely_ai"),
+            "uncertain": sum(1 for r in results if r["verdict"] == "uncertain"),
+            "likely_human": sum(1 for r in results if r["verdict"] == "likely_human"),
+            "avg_ai_likelihood": round(sum(scores) / analyzed) if analyzed else 0,
+        },
     }
 
 

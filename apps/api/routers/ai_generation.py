@@ -3,9 +3,11 @@ import os
 import random
 import time
 import logging
-from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, HTTPException, Request, BackgroundTasks
+from typing import Any, Dict, List, Literal, Optional
+from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from pydantic import BaseModel, Field
+
+from core.auth import UserIdentity, get_current_user
 import hashlib
 from dataclasses import asdict
 from datetime import datetime
@@ -651,6 +653,123 @@ async def generate_screening_questions_endpoint(job_id: str, req: ScreeningQuest
         import logging
         logging.getLogger(__name__).error(f"screening-questions generate failed: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Screening-question policy moderation (Step 4 recruiter-added questions)
+# ---------------------------------------------------------------------------
+
+class ModerateQuestionItem(BaseModel):
+    key: str = ""
+    question_text: str = ""
+
+
+class ModerateQuestionsRequest(BaseModel):
+    questions: List[ModerateQuestionItem]
+    job_title: str = ""
+
+
+class QuestionPolicyVerdict(BaseModel):
+    """LLM verdict for one recruiter-written screening question."""
+    ok: bool
+    flags: List[Literal[
+        "nsfw", "rude", "discriminatory", "sensitive_personal_data",
+        "nonsensical", "off_topic",
+    ]] = Field(default_factory=list)
+    reason: str = Field(
+        description="One short recruiter-facing sentence explaining the problem; empty when ok."
+    )
+
+
+_QUESTION_MODERATION_PROMPT = """You review recruiter-written phone-screen questions for PAIR, a recruiting platform, against company policy. An automated interview bot will ask candidates these questions verbatim.
+
+Flag a question ONLY when it clearly violates policy:
+- nsfw: sexual, explicit, or otherwise inappropriate content.
+- rude: insulting, demeaning, hostile, or mocking toward the candidate.
+- discriminatory: probes protected characteristics (age, race, ethnicity, religion, gender, sexual orientation, marital/family status, pregnancy, disability, national origin, or citizenship beyond standard work-authorization) or otherwise invites illegal hiring bias.
+- sensitive_personal_data: asks for data a screening call must not collect (SSN/government ID numbers, bank or card details, passwords, medical history).
+- nonsensical: incoherent, self-contradictory, or not answerable as written — a candidate could not reasonably respond to it.
+- off_topic: no plausible relevance to screening a candidate for a job.
+
+Do NOT flag normal recruiting questions, even blunt ones: availability/notice period, compensation expectations, work authorization/visa status, willingness to relocate or work on-site/shifts/on-call, background-check or drug-test consent, references, years of experience, education, or tough technical/behavioral questions.
+
+Set ok=true with empty flags and empty reason when the question complies. When flagging, set ok=false and reason to ONE short recruiter-facing sentence (under 25 words) explaining the problem."""
+
+_QUESTION_MODERATION_MAX = 30
+_QUESTION_MODERATION_CACHE_TTL = 7 * 24 * 60 * 60
+
+
+@router.post("/screening-questions/moderate")
+async def moderate_screening_questions(
+    req: ModerateQuestionsRequest,
+    user: UserIdentity = Depends(get_current_user),
+):
+    """Policy-check recruiter-written screening questions (Step 4 / campaigns).
+
+    Returns a verdict per question. Fails OPEN (`checked: false`, no flags)
+    when the model is unavailable or errors — the check is a guardrail, and a
+    provider outage must never block recruiters from writing questions.
+    """
+    from core import llm_cache as _llm_cache
+
+    oai = get_openai_client()
+    items = [q for q in (req.questions or []) if (q.question_text or "").strip()]
+    items = items[:_QUESTION_MODERATION_MAX]
+    if not items:
+        return {"status": "success", "results": []}
+
+    model = model_for("question_moderation", "gpt-4o-mini")
+    semaphore = asyncio.Semaphore(4)
+
+    async def _check(item: ModerateQuestionItem) -> Dict[str, Any]:
+        text = item.question_text.strip()[:1000]
+        base = {"key": item.key, "question_text": text}
+        unchecked = {**base, "ok": True, "flags": [], "reason": "", "checked": False}
+        if oai is None:
+            return unchecked
+
+        cache_key = _llm_cache.make_key("q_moderation", 1, model, text)
+        cached = await _llm_cache.get_json(cache_key)
+        if cached is not None:
+            try:
+                verdict = QuestionPolicyVerdict.model_validate(cached)
+                return {**base, **verdict.model_dump(), "checked": True}
+            except Exception:
+                pass  # schema drift — re-run
+
+        async with semaphore:
+            try:
+                job_context = f"Job title: {req.job_title.strip()}\n\n" if req.job_title.strip() else ""
+                completion = await oai.beta.chat.completions.parse(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": _QUESTION_MODERATION_PROMPT},
+                        {"role": "user", "content": f"{job_context}Screening question to review:\n{text}"},
+                    ],
+                    response_format=QuestionPolicyVerdict,
+                    temperature=0.0,
+                    prompt_cache_key="q-moderation-v1",
+                )
+            except Exception as exc:
+                logger.warning(f"question moderation failed (fail-open): {exc}")
+                return unchecked
+
+        verdict = completion.choices[0].message.parsed
+        if verdict is None:
+            return unchecked
+        data = verdict.model_dump()
+        # Keep ok and flags consistent regardless of model drift.
+        data["ok"] = bool(data.get("ok")) and not data.get("flags")
+        if data["ok"]:
+            data["reason"] = ""
+        try:
+            await _llm_cache.set_json(cache_key, data, ttl_seconds=_QUESTION_MODERATION_CACHE_TTL)
+        except Exception:
+            pass
+        return {**base, **data, "checked": True}
+
+    results = await asyncio.gather(*(_check(item) for item in items))
+    return {"status": "success", "results": list(results)}
 
 
 @router.get("/jobs/{job_id}/rubric")

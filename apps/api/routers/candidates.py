@@ -1678,6 +1678,10 @@ async def save_candidates(request: CandidatesSaveRequest):
         import json
 
         saved_count = 0
+        # Ids that actually got a sourced_candidates row this request. The FE
+        # must engage ONLY these: an id sent to /engage/launch without a row
+        # resolves to a contactless stub that 400s its whole Pairbot batch.
+        saved_ids: List[str] = []
         processing_payloads = []
         scoring_criteria = _build_resume_matching_criteria(str(resolved_jobdiva_id))
 
@@ -1840,6 +1844,7 @@ async def save_candidates(request: CandidatesSaveRequest):
                         """, candidate_data)
 
                         saved_count += 1
+                        saved_ids.append(str(c.candidate_id))
                         processing_payloads.append(candidate_data)
 
                     except Exception as e:
@@ -1938,6 +1943,7 @@ async def save_candidates(request: CandidatesSaveRequest):
             "status": "success",
             "detail": f"Saved {saved_count} sourced candidates",
             "saved_count": saved_count,
+            "saved_ids": saved_ids,
             "enhanced_count": enhanced_count,
             "dnc_skipped_count": len(dnc_skipped),
             "dnc_skipped": dnc_skipped,
