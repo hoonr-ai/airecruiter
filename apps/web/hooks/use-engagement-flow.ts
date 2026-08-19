@@ -175,13 +175,14 @@ export function useEngagementFlow() {
       }),
     });
     if (!res.ok || !res.body) {
-      let msg = "Launch request failed";
+      let msg = "";
       try {
         const j = await res.json();
-        msg = j?.message || (typeof j?.detail === "string" ? j.detail : msg);
+        msg = j?.message || (typeof j?.detail === "string" ? j.detail : "");
       } catch {
         /* non-JSON error body */
       }
+      if (!msg) msg = res.ok ? "Launch request failed (empty response)" : `Launch request failed (HTTP ${res.status})`;
       logger.error("engagement.launch.failed", { status: res.status, message: msg });
       throw new Error(msg);
     }

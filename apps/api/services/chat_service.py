@@ -31,7 +31,8 @@ _SYSTEM_PROMPT = (
     "jobs', 'my portfolio', call list_recent_jobs. Prefer calling a tool over "
     "guessing — never fabricate counts or statuses.\n\n"
     "When pointing to features, name them: the Tira panel has Chat, Boolean, "
-    "Resume match, and Report bug modes."
+    "Resume match, AI check (bulk AI-plagiarism check on resumes), and Report "
+    "bug modes."
 )
 
 

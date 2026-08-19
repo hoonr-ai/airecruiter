@@ -89,7 +89,8 @@ import {
 } from "@/components/launch-pair-progress-modal";
 import { normalizePhone } from "@/lib/phone";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
-import { API_BASE, authFetch } from "@/lib/api";
+import { API_BASE, authFetch, isNetworkFetchError } from "@/lib/api";
+import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion } from "@/hooks/use-question-moderation";
 import { trackEvent } from "@/lib/analytics";
 import { logger } from "@/lib/logger";
 
@@ -945,6 +946,9 @@ function NewJobPageContent() {
   const [botIntroduction, setBotIntroduction] = useState("");
   const [screenQuestions, setScreenQuestions] = useState<ScreenQuestion[]>([]);
   const [questionIdCounter, setQuestionIdCounter] = useState(1);
+  // AI policy check (NSFW / rude / discriminatory / nonsensical) for
+  // recruiter-added questions — shows a warning under the row, never blocks.
+  const questionModeration = useQuestionModeration(jobTitle);
   const lastAutoIntroTitleRef = useRef("");
   const lastSyncedTitleForJDRef = useRef("");
   const botIntroductionEditedRef = useRef(false);
@@ -1037,12 +1041,13 @@ function NewJobPageContent() {
   const [isEnrichingContacts, setIsEnrichingContacts] = useState(false);
   const [missingContactsOpen, setMissingContactsOpen] = useState(false);
   // Realtime progress for the batched Launch PAIR flow (enrichment + per-batch
-  // save/engage). Batches of 75 keep individual /candidates/save payloads
-  // manageable (each candidate carries full resume_text, gated by nginx
-  // client_max_body_size — see nginx.conf) while cutting the number of
-  // save+engage round-trips; the modal surfaces per-batch status so the
-  // recruiter can see what's happening on long runs.
+  // save/engage). PAI-155: keep Pairbot engage batches at 75, but save in
+  // smaller chunks so /candidates/save is less likely to hit browser
+  // "Failed to fetch" on large resume payloads.
+  const SAVE_BATCH_SIZE = 25;
   const LAUNCH_BATCH_SIZE = 75;
+  const SAVE_MAX_RETRIES = 3;
+  const SAVE_RETRY_BASE_DELAY_MS = 800;
 
   // Pace between batches so save+engage calls don't fire faster than nginx's
   // pair_batch_limit zone can sustain on large launches (seen: 26-30 batches
@@ -6632,6 +6637,12 @@ function NewJobPageContent() {
 
   const updateScreenQuestion = (id: number, field: keyof ScreenQuestion, value: any) => {
     userHasEditedQuestionsRef.current = true;
+    if (field === 'question_text') {
+      const target = screenQuestions.find(q => q.id === id);
+      if (target && isRecruiterAddedQuestion(target.category)) {
+        questionModeration.scheduleCheck(String(id), String(value ?? ""));
+      }
+    }
     setScreenQuestions(prev => prev.map(q => {
       if (q.id === id) {
         return { ...q, [field]: value };
@@ -6930,9 +6941,17 @@ function NewJobPageContent() {
                 <textarea
                   value={q.question_text}
                   onChange={(e) => updateScreenQuestion(q.id, 'question_text', e.target.value)}
+                  onBlur={() => {
+                    if (isRecruiterAddedQuestion(q.category)) {
+                      questionModeration.flushCheck(String(q.id), q.question_text);
+                    }
+                  }}
                   className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium resize-none whitespace-pre-wrap break-words"
                   rows={3}
                 />
+                {isRecruiterAddedQuestion(q.category) && (
+                  <QuestionPolicyWarning verdict={questionModeration.verdictFor(q.question_text)} />
+                )}
               </div>
 
               <div className="flex-1 min-w-0 border-l border-slate-100 pl-3">
@@ -7023,15 +7042,13 @@ function NewJobPageContent() {
   // Launch PAIR consumes selected candidates (with optional contact overrides
   // from enrichment) and persists them to sourced_candidates.
   //
-  // The full selection is split into batches of LAUNCH_BATCH_SIZE before
-  // hitting /candidates/save + the engagement endpoints — large bulk
-  // payloads (hundreds of resumes + full enhanced_info blobs) were
-  // timing out / OOMing the backend. Each batch's save/engage status is
-  // streamed into launchProgress so the modal can show realtime state.
+  // PAI-155: save in SAVE_BATCH_SIZE chunks (with retries); Pairbot engage
+  // still uses LAUNCH_BATCH_SIZE via the engagement stream. Each batch's
+  // status is streamed into launchProgress for the launch modal.
   const runLaunchPair = async (
     contactOverrides?: Record<string, { phone?: string; email?: string }>,
     launchIdsOverride?: Set<string>,
-    options?: { skipRedirect?: boolean },
+    options?: { skipRedirect?: boolean; isRetry?: boolean },
   ): Promise<{ success: boolean; savedCount: number }> => {
     const launchIds = launchIdsOverride ?? selectedCandidates;
     if (launchIds.size === 0) return { success: false, savedCount: 0 };
@@ -7059,7 +7076,12 @@ function NewJobPageContent() {
     // the auto-deselect from handleLaunchPairClick. The backend repeats
     // this check at /candidates/save — defense in depth.
     const candidatesPayload = effective
-      .filter(c => launchIds.has(c.candidate_id || c.jobdiva_candidate_id || c.id))
+      // Tolerate raw vs String() ids: normal launches pass raw selection ids,
+      // the Retry path passes the String()-normalized ids from failedCandidates.
+      .filter(c => {
+        const cid = c.candidate_id || c.jobdiva_candidate_id || c.id;
+        return launchIds.has(cid) || launchIds.has(String(cid));
+      })
       // Launch-PAIR skip safety net: only candidates who currently work at the
       // hiring client company are withheld from /candidates/save (even via the
       // second MissingContactsModal pass). Low score / thin profile / location
@@ -7137,10 +7159,10 @@ function NewJobPageContent() {
     const jobdivaIdForSave = jobdivaId || jobData?.jobdiva_id || numericJobId;
     const jobIdForEngage = (jobdivaId || jobData?.jobdiva_id || numericJobId || "").toString().trim();
 
-    // Slice into fixed-size batches; the modal already shows per-batch progress.
+    // Slice into fixed-size SAVE batches (smaller than Pairbot engage batches).
     const batches: typeof candidatesPayload[] = [];
-    for (let i = 0; i < candidatesPayload.length; i += LAUNCH_BATCH_SIZE) {
-      batches.push(candidatesPayload.slice(i, i + LAUNCH_BATCH_SIZE));
+    for (let i = 0; i < candidatesPayload.length; i += SAVE_BATCH_SIZE) {
+      batches.push(candidatesPayload.slice(i, i + SAVE_BATCH_SIZE));
     }
 
     const initialBatchInfo: LaunchBatchInfo[] = batches.map((batch, idx) => ({
@@ -7158,7 +7180,7 @@ function NewJobPageContent() {
       open: true,
       phase: "launching",
       totalCandidates: candidatesPayload.length,
-      batchSize: LAUNCH_BATCH_SIZE,
+      batchSize: SAVE_BATCH_SIZE,
       batches: initialBatchInfo,
       currentBatchIndex: 0,
       totalSaved: 0,
@@ -7216,7 +7238,7 @@ function NewJobPageContent() {
       }
     };
 
-    console.log(`🚀 Launching PAIR with ${candidatesPayload.length} candidates in ${batches.length} batch(es) of ${LAUNCH_BATCH_SIZE}`);
+    console.log(`🚀 Launching PAIR with ${candidatesPayload.length} candidates in ${batches.length} save batch(es) of ${SAVE_BATCH_SIZE}`);
 
     let totalSaved = 0;
     let totalEngaged = 0;
@@ -7248,42 +7270,110 @@ function NewJobPageContent() {
       setLaunchProgress(prev => ({ ...prev, currentBatchIndex: i }));
       updateBatch(i, { status: "saving" });
 
-      // ── Save batch ────────────────────────────────────────────────────
+      // ── Save batch (PAI-155: retry transient network / 5xx / 429) ────
       let saveOk = false;
       let batchSavedCount = 0;
       let batchDncSkipped = 0;
-      try {
-        const response = await authFetch(`${API_BASE}/candidates/save`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            jobdiva_id: jobdivaIdForSave,
-            candidates: batch,
-          }),
-        });
-        const result = await response.json();
-        if (response.ok && result.status === 'success') {
-          saveOk = true;
-          batchSavedCount = Number(result.saved_count) || batch.length;
-          batchDncSkipped = Number(result?.dnc_skipped_count || 0);
-        } else {
-          console.error(`Batch ${i + 1} save failed:`, JSON.stringify(result, null, 2));
-          const errorMsg = result.detail
-            ? (Array.isArray(result.detail) ? JSON.stringify(result.detail) : result.detail)
-            : (result.message || 'Unknown error');
-          updateBatch(i, { status: "failed", errorMessage: `Save failed: ${errorMsg}` });
-          totalFailedBatches += 1;
-          recordFailedBatch(batch, "save", String(errorMsg), i);
+      let lastSaveError = "";
+      let batchSavedIds: string[] | null = null;
+      let batchSkippedIds: string[] = [];
+      for (let attempt = 1; attempt <= SAVE_MAX_RETRIES; attempt++) {
+        try {
+          const response = await authFetch(`${API_BASE}/candidates/save`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              jobdiva_id: jobdivaIdForSave,
+              candidates: batch,
+            }),
+          });
+          let result: any = null;
+          try {
+            result = await response.json();
+          } catch (parseErr) {
+            // Gateway HTML 502/504 bodies throw here. Do not retry 2xx:
+            // the request already reached the server (save is upsert, but
+            // retrying a completed write can still duplicate audit side effects).
+            lastSaveError = parseErr instanceof Error ? parseErr.message : "Invalid JSON response";
+            console.error(`Batch ${i + 1} save non-JSON body (attempt ${attempt}):`, lastSaveError);
+            if (response.ok || attempt === SAVE_MAX_RETRIES) break;
+            updateBatch(i, {
+              status: "saving",
+              errorMessage: `Save error — retrying (${attempt}/${SAVE_MAX_RETRIES})…`,
+            });
+            await new Promise(resolve => setTimeout(resolve, SAVE_RETRY_BASE_DELAY_MS * attempt));
+            continue;
+          }
+          const payload = result && typeof result === "object" ? result : null;
+          if (response.ok && payload?.status === 'success') {
+            saveOk = true;
+            batchSavedCount = Number(payload.saved_count) || batch.length;
+            batchDncSkipped = Number(payload.dnc_skipped_count || 0);
+            // Backend reports which ids actually got a sourced_candidates row.
+            // Only those may be engaged: an id sent to /engage/launch without a
+            // row resolves to a contactless "Unknown Candidate" stub that 400s
+            // its ENTIRE 75-candidate Pairbot batch.
+            batchSavedIds = Array.isArray(payload.saved_ids)
+              ? payload.saved_ids.map((id: unknown) => String(id))
+              : null;
+            // Intentional server-side skips (DNC / no-contact) — NOT failures.
+            batchSkippedIds = [
+              ...(Array.isArray(payload.dnc_skipped) ? payload.dnc_skipped : []),
+              ...(Array.isArray(payload.no_contact_skipped) ? payload.no_contact_skipped : []),
+            ].map((s: any) => String(s?.candidate_id ?? "")).filter(Boolean);
+            break;
+          }
+          console.error(`Batch ${i + 1} save failed (attempt ${attempt}):`, JSON.stringify(result, null, 2));
+          lastSaveError = payload?.detail
+            ? (Array.isArray(payload.detail) ? JSON.stringify(payload.detail) : payload.detail)
+            : (payload?.message || `HTTP ${response.status}`);
+          // 2xx that is not our success shape already hit the server — do not resend.
+          // Permanent client errors: do not retry. 429 is expected under
+          // nginx pair_batch_limit and must be retried (honor Retry-After).
+          const isRateLimited = response.status === 429;
+          const isClientError =
+            response.status >= 400 && response.status < 500 && !isRateLimited;
+          if (response.ok || isClientError || attempt === SAVE_MAX_RETRIES) break;
+          updateBatch(i, {
+            status: "saving",
+            errorMessage: isRateLimited
+              ? `Rate limited — retrying save (${attempt}/${SAVE_MAX_RETRIES})…`
+              : `Save error — retrying (${attempt}/${SAVE_MAX_RETRIES})…`,
+          });
+          let delayMs = SAVE_RETRY_BASE_DELAY_MS * attempt;
+          if (isRateLimited) {
+            const retryAfter = response.headers.get("Retry-After");
+            const parsed = retryAfter ? Number(retryAfter) : NaN;
+            if (Number.isFinite(parsed) && parsed >= 0) {
+              delayMs = Math.max(delayMs, parsed * 1000);
+            }
+          }
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          continue;
+        } catch (e) {
+          console.error(`Batch ${i + 1} save threw (attempt ${attempt}):`, e);
+          // fetch() network failures are TypeError in all major browsers
+          // (Chrome "Failed to fetch", Safari "Load failed", Firefox
+          // "NetworkError when attempting to fetch resource"). Name them as
+          // connectivity problems — the raw strings read like server bugs.
+          const isRetryable = isNetworkFetchError(e);
+          lastSaveError = isRetryable
+            ? "Network failure — check your internet connection and retry."
+            : e instanceof Error ? e.message : "Unknown error";
+          if (!isRetryable || attempt === SAVE_MAX_RETRIES) break;
+          updateBatch(i, {
+            status: "saving",
+            errorMessage: `Network dropped — retrying save (${attempt}/${SAVE_MAX_RETRIES})…`,
+          });
+          await new Promise(resolve => setTimeout(resolve, SAVE_RETRY_BASE_DELAY_MS * attempt));
+          continue;
         }
-      } catch (e) {
-        console.error(`Batch ${i + 1} save threw:`, e);
-        const errMsg = e instanceof Error ? e.message : "Unknown error";
-        updateBatch(i, {
-          status: "failed",
-          errorMessage: `Save failed: ${errMsg}`,
-        });
+      }
+      if (!saveOk) {
+        const errMsg = lastSaveError || "Unknown error";
+        updateBatch(i, { status: "failed", errorMessage: `Save failed: ${errMsg}` });
         totalFailedBatches += 1;
-        recordFailedBatch(batch, "save", errMsg, i);
+        recordFailedBatch(batch, "save", String(errMsg), i);
       }
 
       if (!saveOk) {
@@ -7292,7 +7382,30 @@ function NewJobPageContent() {
 
       totalSaved += batchSavedCount;
       totalDncSkipped += batchDncSkipped;
-      for (const c of batch) savedCandidateIds.push(c.candidate_id);
+      // Engage only ids the backend confirmed saved (older backends don't
+      // return saved_ids — fall back to the whole batch as before).
+      if (batchSavedIds) {
+        const batchIdSet = new Set(batch.map(c => c.candidate_id));
+        for (const id of batchSavedIds) {
+          if (batchIdSet.has(id)) savedCandidateIds.push(id);
+        }
+        // Rows the server neither saved nor intentionally skipped (DNC /
+        // no-contact) hit a per-row save error. Surface them as failures —
+        // otherwise they'd silently vanish: never engaged, never in the
+        // failed CSV, invisible to Retry.
+        const savedSet = new Set(batchSavedIds);
+        const skippedSet = new Set(batchSkippedIds);
+        const unsavedRows = batch.filter(
+          c => !savedSet.has(c.candidate_id) && !skippedSet.has(c.candidate_id),
+        );
+        if (unsavedRows.length > 0) {
+          console.error(`Batch ${i + 1}: ${unsavedRows.length} row(s) not saved server-side`, unsavedRows.map(c => c.candidate_id));
+          totalFailedBatches += 1;
+          recordFailedBatch(unsavedRows, "save", "Not saved (server-side save error)", i);
+        }
+      } else {
+        for (const c of batch) savedCandidateIds.push(c.candidate_id);
+      }
       // "engaging" here = saved, awaiting the single launch stream below.
       updateBatch(i, {
         status: "engaging",
@@ -7361,9 +7474,14 @@ function NewJobPageContent() {
           {
             jobId: jobIdForEngage,
             candidateIds: savedCandidateIds,
-            isInitialLaunch: wizardMode !== 'source',
-            notifyRecruiters: true,
-            sendJobPostingEmail: selectedJobBoards.length > 0,
+            // A Retry is a continuation of the original launch, not a new one:
+            // the fire-once side effects (applicant sync, recruiter launch
+            // email, job-board posting email) already fired — or deliberately
+            // didn't — on the first pass. Re-sending these flags would fire
+            // them again for the retried subset.
+            isInitialLaunch: wizardMode !== 'source' && !options?.isRetry,
+            notifyRecruiters: !options?.isRetry,
+            sendJobPostingEmail: selectedJobBoards.length > 0 && !options?.isRetry,
             appBaseUrl: typeof window !== "undefined" ? window.location.origin : "",
             batchSize: LAUNCH_BATCH_SIZE,
           },
@@ -7413,7 +7531,14 @@ function NewJobPageContent() {
                 const msg = evt.error || "Launch failed";
                 engageFailureMessage = msg;
                 totalFailedBatches += 1;
-                recordLaunchFailures(ids, msg);
+                // Prefer the backend's id list: it excludes rows the contact
+                // gate already dropped as uncontactable (those are exclusions,
+                // not failures — recording them here would make Retry re-launch
+                // them forever). The slice is the fallback for older backends.
+                const failedIds = Array.isArray(evt.candidate_ids) && evt.candidate_ids.length > 0
+                  ? evt.candidate_ids.map((id) => String(id))
+                  : ids;
+                recordLaunchFailures(failedIds, msg);
                 updateBatch(launchIndexOffset + evt.index, {
                   status: "failed",
                   errorMessage: `Engage failed: ${msg}`,
@@ -7449,7 +7574,9 @@ function NewJobPageContent() {
       } catch (launchErr) {
         // Hard failure (non-ok response or the stream dropped). The unengaged
         // remainder is recorded by the reconciliation below.
-        engageFailureMessage = launchErr instanceof Error ? launchErr.message : "Launch failed";
+        engageFailureMessage = isNetworkFetchError(launchErr)
+          ? "Network failure — the connection dropped during launch. Check your internet and retry."
+          : launchErr instanceof Error ? launchErr.message : "Launch failed";
       }
 
       // Reconcile: any saved candidate the backend never reported on (409 abort
@@ -7564,6 +7691,35 @@ function NewJobPageContent() {
     }
 
     return { success: totalSaved > 0, savedCount: totalSaved };
+  };
+
+  // Re-run Launch PAIR for exactly the candidates whose batch failed (save or
+  // engage). Safe to repeat: the backend skips already-sent candidates and
+  // treats engage_status='failed' as retryable. Snapshot the ids first —
+  // runLaunchPair resets failedCandidates as it starts.
+  const handleRetryFailedLaunch = () => {
+    const retryIds = new Set(
+      launchProgress.failedCandidates.map(c => String(c.candidate_id)).filter(Boolean),
+    );
+    if (retryIds.size === 0) return;
+    // Fresh per-run accumulators: skip counts, enrich stats and the final
+    // message are per-run, and runLaunchPair itself only resets the
+    // batch/failure fields — carrying these over double-counts the skip panel.
+    setLaunchProgress(prev => ({
+      ...prev,
+      enrichTotal: 0,
+      enrichDone: 0,
+      enrichSucceeded: 0,
+      enrichAlreadyReachable: 0,
+      enrichMissingLinkedIn: 0,
+      enrichNoContact: 0,
+      enrichFailed: 0,
+      hardFilterSkipped: 0,
+      hardFilterSkippedNames: [],
+      finalMessage: undefined,
+    }));
+    const overrides = Object.keys(pendingLaunchOverrides).length > 0 ? pendingLaunchOverrides : undefined;
+    void runLaunchPair(overrides, retryIds, { skipRedirect: false, isRetry: true });
   };
 
   // Entry point wired to Launch PAIR. Before save, auto-enrich selected
@@ -7843,18 +7999,35 @@ function NewJobPageContent() {
         }
 
         try {
-          const res = await authFetch(`${API_BASE}/candidates/enrich-contact`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              candidate_id: id,
-              jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId || undefined,
-              source: c.source || undefined,
-              linkedin_url: linkedinUrl,
-            }),
-          });
+          // One retry on rate-limit/gateway pushback (429/503) or a network
+          // blip — at 250 candidates these transients otherwise dump whole
+          // cohorts into "enrichment failed" and then the needs-info modal.
+          let res: Response | null = null;
+          for (let enrichAttempt = 1; enrichAttempt <= 2; enrichAttempt++) {
+            try {
+              res = await authFetch(`${API_BASE}/candidates/enrich-contact`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  candidate_id: id,
+                  jobdiva_id: jobdivaId || jobData?.jobdiva_id || numericJobId || undefined,
+                  source: c.source || undefined,
+                  linkedin_url: linkedinUrl,
+                }),
+              });
+            } catch (enrichErr) {
+              if (!isNetworkFetchError(enrichErr) || enrichAttempt === 2) throw enrichErr;
+              res = null;
+            }
+            if (res && res.status !== 429 && res.status !== 503) break;
+            if (enrichAttempt === 2) break;
+            const retryAfter = Number(res?.headers.get("Retry-After"));
+            await new Promise(resolve =>
+              setTimeout(resolve, Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 1500),
+            );
+          }
 
-          if (!res.ok) {
+          if (!res || !res.ok) {
             enrichFailedCount += 1;
             setLaunchProgress(prev => ({
               ...prev,
@@ -10096,7 +10269,7 @@ return (
     {/* Toast Notification */}
     {toast && (
       <div
-        className={`fixed bottom-8 right-8 flex items-center gap-2.5 px-5 py-3 rounded-lg text-[14px] font-medium text-white shadow-xl z-50 transition-all duration-300 transform translate-y-0 opacity-100 ${toast.type === "success" ? "bg-[#166534]" : "bg-primary"}`}
+        className={`fixed bottom-8 right-8 flex items-center gap-2.5 px-5 py-3 rounded-lg text-[14px] font-medium text-white shadow-xl z-50 transition-all duration-300 transform translate-y-0 opacity-100 ${toast.type === "success" ? "bg-[#166534]" : toast.type === "error" ? "bg-rose-600" : "bg-primary"}`}
       >
         {toast.type === "success" ? (
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 flex-shrink-0 font-bold"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg>
@@ -10237,6 +10410,7 @@ return (
     <LaunchPairProgressModal
       progress={launchProgress}
       onClose={() => setLaunchProgress(initialLaunchProgress)}
+      onRetry={handleRetryFailedLaunch}
     />
 
     {/* Paste Resume Modal (External requirement) */}

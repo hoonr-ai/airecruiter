@@ -936,11 +936,11 @@ async def _post_to_pairbot(
     base_backoff_seconds: float = 2.0,
     timeout_seconds: float = 60.0,
 ) -> httpx.Response:
-    """POST to pairbot with retries on timeout / network error / 5xx.
+    """POST to pairbot with retries on network error / 5xx.
 
-    Pairbot occasionally returns 5xx or times out under load; a single 60s
-    attempt was enough to make manual Engage clicks feel flaky. 4xx responses
-    are returned immediately (client error — retry won't help).
+    PAI-155: Pairbot bulk-create now returns 202 quickly; do NOT retry on
+    TimeoutException (a timed-out create may still be running server-side,
+    and retrying would duplicate work / orphan bulk_jds).
     """
     last_exc: Optional[BaseException] = None
     last_response: Optional[httpx.Response] = None
@@ -963,7 +963,14 @@ async def _post_to_pairbot(
                 "pairbot_5xx attempt=%d/%d status=%d",
                 attempt + 1, max_attempts, response.status_code,
             )
-        except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
+        except httpx.TimeoutException as exc:
+            # Do not retry timeouts — Pairbot may still be creating.
+            logger.warning(
+                "pairbot_timeout attempt=%d/%d msg=%s (no retry)",
+                attempt + 1, max_attempts, str(exc),
+            )
+            raise
+        except (httpx.NetworkError, httpx.RemoteProtocolError) as exc:
             last_exc = exc
             logger.warning(
                 "pairbot_transport_error attempt=%d/%d type=%s msg=%s",
@@ -975,6 +982,152 @@ async def _post_to_pairbot(
     if last_response is not None:
         return last_response
     raise last_exc if last_exc is not None else RuntimeError("pairbot call failed")
+
+
+def _stamp_engage_status_batch(
+    candidate_ids: List[str],
+    status_value: str,
+    *,
+    job_id_value: str = "",
+    job_id_alt: str = "",
+) -> None:
+    """Batch-write engage_status for many candidates in one connection."""
+    if not candidate_ids:
+        return
+    conn = _get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE sourced_candidates
+            SET data = jsonb_set(
+                    COALESCE(data, '{}'::jsonb),
+                    '{engage_status}',
+                    to_jsonb(%s::text),
+                    true
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE candidate_id = ANY(%s)
+              AND (jobdiva_id = %s OR jobdiva_id = %s)
+            """,
+            (
+                status_value,
+                list(candidate_ids),
+                str(job_id_value or ""),
+                str(job_id_alt or ""),
+            ),
+        )
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
+
+
+async def _wait_for_pairbot_creation(
+    bulk_id: str,
+    *,
+    timeout_seconds: float = 600.0,
+) -> Dict[str, Any]:
+    """PAI-155: wait on Pairbot SSE until interviews are created.
+
+    Pairbot returns 202 + bulk_id immediately; interview rows arrive later via
+    status=creation_completed (with data[]). Outreach progress uses the same
+    stream but Curate only needs creation_completed here.
+
+    Uses a connect timeout plus a background pump into a queue. Waiting on
+    the queue (not aiter.__anext__) keeps the SSE generator alive across idle
+    gaps so a quiet-but-alive stream is not closed before timeout_seconds.
+    """
+    stream_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/bulk-interviews/{bulk_id}/stream"
+    headers: Dict[str, str] = {}
+    pair_api_key = os.getenv("PAIR_API_KEY", "").strip()
+    if pair_api_key:
+        headers["Authorization"] = f"Bearer {pair_api_key}"
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    # read=None: Pairbot may emit nothing until creation_completed; the overall
+    # deadline is enforced by wait_for on the queue, not the httpx read timeout.
+    client_timeout = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
+    async with httpx.AsyncClient(timeout=client_timeout) as client:
+        async with client.stream("GET", stream_url, headers=headers) as response:
+            if response.status_code >= 400:
+                body = (await response.aread())[:300]
+                raise RuntimeError(
+                    f"Pairbot stream failed status={response.status_code} body={body!r}"
+                )
+            chunks: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
+            pump_error: List[Exception] = []
+
+            async def _pump_chunks() -> None:
+                try:
+                    async for chunk in response.aiter_text():
+                        await chunks.put(chunk)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    pump_error.append(exc)
+                finally:
+                    await chunks.put(None)
+
+            pump = asyncio.create_task(_pump_chunks())
+            buffer = ""
+            try:
+                while True:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            f"Timed out waiting for Pairbot creation_completed bulk_id={bulk_id}"
+                        )
+                    try:
+                        chunk = await asyncio.wait_for(
+                            chunks.get(),
+                            timeout=min(60.0, remaining),
+                        )
+                    except asyncio.TimeoutError:
+                        # No bytes yet; generator is still alive on the pump.
+                        continue
+                    if chunk is None:
+                        break
+                    # SSE allows LF or CRLF frame terminators.
+                    buffer += chunk.replace("\r\n", "\n").replace("\r", "\n")
+                    while "\n\n" in buffer:
+                        raw_event, buffer = buffer.split("\n\n", 1)
+                        data_lines = [
+                            line[5:].strip()
+                            for line in raw_event.split("\n")
+                            if line.startswith("data:")
+                        ]
+                        if not data_lines:
+                            continue
+                        try:
+                            event = json.loads("".join(data_lines))
+                        except Exception:
+                            logger.warning(
+                                "pairbot_stream_parse_error bulk_id=%s raw=%r",
+                                bulk_id,
+                                data_lines,
+                            )
+                            continue
+                        status = str(event.get("status") or "")
+                        if status == "creation_completed":
+                            return event if isinstance(event, dict) else {"status": status}
+                        if status == "creation_failed":
+                            raise RuntimeError(
+                                event.get("message")
+                                or f"Pairbot creation_failed for bulk_id={bulk_id}"
+                            )
+                        # Ignore accepted/creating/processing/completed (outreach).
+            finally:
+                if not pump.done():
+                    pump.cancel()
+                    try:
+                        await pump
+                    except (asyncio.CancelledError, Exception):
+                        pass
+            if pump_error:
+                raise pump_error[0]
+    raise TimeoutError(f"Pairbot stream ended without creation_completed bulk_id={bulk_id}")
 
 
 def _persist_jobdiva_candidate_id(candidate_id_internal: str, cand_data: Dict[str, Any]) -> None:
@@ -1460,8 +1613,68 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
             except Exception:
                 response_data = {"message": f"Raw: {response.text[:100]}"}
 
-            is_success = response.status_code in [200, 201]
+            # PAI-155: 202 Accepted means interviews are creating in background.
+            # Wait on SSE for creation_completed before writing audit/engage_status.
+            is_success = 200 <= response.status_code < 300
             logger.info(f"📥 PAIR API response status: {response.status_code}")
+            if is_success and response.status_code == 202:
+                bulk_id = str(response_data.get("bulk_id") or "").strip()
+                if not bulk_id:
+                    raise RuntimeError("Pairbot returned 202 without bulk_id")
+                job_id_alt = str(payload_obj.get("jd", {}).get("jobdiva_id") or "")
+                # Mark processing so rank-list shows work in progress if the
+                # stream is slow; overwritten to sent/failed after creation.
+                try:
+                    _stamp_engage_status_batch(
+                        list(request.real_candidate_ids),
+                        "processing",
+                        job_id_value=str(job_id_from_payload or ""),
+                        job_id_alt=job_id_alt,
+                    )
+                except Exception as _proc_err:
+                    logger.warning(
+                        "engage_processing_stamp_failed bulk_id=%s err=%s",
+                        bulk_id,
+                        _proc_err,
+                    )
+                logger.info(
+                    "pairbot_async_accepted bulk_id=%s waiting_for_creation candidates=%d",
+                    bulk_id,
+                    len(request.real_candidate_ids),
+                )
+                try:
+                    creation_event = await _wait_for_pairbot_creation(bulk_id)
+                except Exception as wait_err:
+                    # Do not leave candidates stuck at engage_status=processing.
+                    try:
+                        _stamp_engage_status_batch(
+                            list(request.real_candidate_ids),
+                            "failed",
+                            job_id_value=str(job_id_from_payload or ""),
+                            job_id_alt=job_id_alt,
+                        )
+                    except Exception as _fail_stamp_err:
+                        logger.warning(
+                            "engage_failed_stamp_after_wait_error bulk_id=%s err=%s",
+                            bulk_id,
+                            _fail_stamp_err,
+                        )
+                    raise wait_err
+                response_data = {
+                    **response_data,
+                    "bulk_id": bulk_id,
+                    "data": creation_event.get("data") or [],
+                    "total_created": creation_event.get("total_created"),
+                    "failed_interviews": creation_event.get("failed_interviews"),
+                    "message": creation_event.get("message")
+                    or response_data.get("message")
+                    or "Interviews created",
+                }
+                logger.info(
+                    "pairbot_creation_completed bulk_id=%s created=%s",
+                    bulk_id,
+                    response_data.get("total_created"),
+                )
 
         # Save audit log for each candidate
         conn = _get_db_connection()
@@ -1551,13 +1764,16 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
             if not isinstance(data_list, list):
                 data_list = [response_data] if response_data else []
 
-            # Pairbot does not echo source_candidate_id in data[]; match entries by email.
-            # First-write-wins: prevents a duplicate email in data[] from
-            # silently overwriting an earlier valid match.
+            # Prefer source_candidate_id (PAI-155 Pairbot echoes it). Fall back
+            # to email for older Pairbot responses / phone-only rows.
+            interview_by_source_id: Dict[str, Dict[str, Any]] = {}
             interview_by_email: Dict[str, Dict[str, Any]] = {}
             for item in data_list:
                 if not isinstance(item, dict):
                     continue
+                src = str(item.get("source_candidate_id") or "").strip()
+                if src and src not in interview_by_source_id:
+                    interview_by_source_id[src] = item
                 item_email = str(item.get("candidate_email") or "").lower().strip()
                 if item_email and item_email not in interview_by_email:
                     interview_by_email[item_email] = item
@@ -1602,8 +1818,11 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                     if idx < len(submitted_email_by_idx)
                     else ""
                 )
-                # Pop so a shared email cannot match two different candidates.
-                interview_info = interview_by_email.pop(submitted_email, {}) if submitted_email else {}
+                interview_info: Dict[str, Any] = {}
+                if submitted_source_id and submitted_source_id in interview_by_source_id:
+                    interview_info = interview_by_source_id.pop(submitted_source_id, {}) or {}
+                elif submitted_email:
+                    interview_info = interview_by_email.pop(submitted_email, {}) or {}
                 # NOTE: The legacy positional fallback (data_list[idx]) has been
                 # intentionally removed. When the Bot API skips a candidate (e.g.
                 # missing email and phone) its response data[] is shorter than the
@@ -1849,7 +2068,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
     def _sse(obj: Dict[str, Any]) -> str:
         return f"data: {json.dumps(obj)}\n\n"
 
-    async def _gen():
+    async def _work():
         ids = [str(c) for c in (request.candidate_ids or []) if str(c).strip()]
         batch_size = max(1, int(request.batch_size or _LAUNCH_PAIRBOT_BATCH_SIZE))
         batches = [ids[i:i + batch_size] for i in range(0, len(ids), batch_size)]
@@ -1913,6 +2132,12 @@ async def launch_bulk_interviews(request: LaunchRequest):
             for idx, batch in enumerate(batches):
                 if idx > 0:
                     await asyncio.sleep(_LAUNCH_BATCH_DELAY_SECONDS)
+                # Ids actually sent to Pairbot for this batch: batch minus
+                # DNC-blocked minus contact-gate exclusions. Failure paths must
+                # report THESE ids — reporting the original batch would re-record
+                # rows already surfaced as exclusions, putting permanently
+                # uncontactable candidates into the retry set forever.
+                sendable_ids: List[str] = batch
                 try:
                     gp = await _generate_payload_for(
                         GeneratePayloadRequest(candidate_ids=batch, job_id=request.job_id)
@@ -1929,6 +2154,68 @@ async def launch_bulk_interviews(request: LaunchRequest):
                         set(gp.get("dnc_blocked_ids") or []) if isinstance(gp, dict) else set()
                     )
                     real_ids = [c for c in batch if c not in dnc_blocked] if dnc_blocked else batch
+                    sendable_ids = real_ids
+
+                    # Per-candidate contact gate. _send_bulk_interview_core's
+                    # payload validation 400s the ENTIRE batch when any single
+                    # resume has no usable phone/email — including the
+                    # "Unknown Candidate" stub generate-payload emits for an id
+                    # with no sourced_candidates row. At batch size 75 that's a
+                    # 75-candidate blast radius for one bad row. Drop those rows
+                    # here and surface them as exclusions; everyone else launches.
+                    try:
+                        payload_obj = json.loads(payload_str)
+                    except Exception:
+                        payload_obj = None
+                    resumes = payload_obj.get("resumes") if isinstance(payload_obj, dict) else None
+                    if isinstance(resumes, list) and len(resumes) == len(real_ids):
+                        launchable: List[tuple] = []
+                        batch_dropped: List[Dict[str, str]] = []
+                        for cid, resume in zip(real_ids, resumes):
+                            if not isinstance(resume, dict):
+                                batch_dropped.append({
+                                    "candidate_id": cid, "name": "",
+                                    "reason": "invalid resume payload at launch",
+                                })
+                                continue
+                            clean_email = _sanitize_pair_candidate_email(str(resume.get("email") or ""))
+                            resume["email"] = clean_email
+                            has_contact = (
+                                len(_pair_phone_digits(resume.get("phone"))) >= 7 or bool(clean_email)
+                            )
+                            if has_contact:
+                                launchable.append((cid, resume))
+                                continue
+                            name = str(resume.get("name") or "")
+                            batch_dropped.append({
+                                "candidate_id": cid,
+                                "name": name,
+                                "reason": (
+                                    "no candidate record found at launch"
+                                    if name == "Unknown Candidate"
+                                    else "no usable phone or email at launch"
+                                ),
+                            })
+                        if batch_dropped:
+                            logger.warning(
+                                "launch batch %d: excluding %d contactless/missing rows pre-send: %s",
+                                idx, len(batch_dropped),
+                                [d["candidate_id"] for d in batch_dropped],
+                            )
+                            all_excluded.extend(batch_dropped)
+                            totals["excluded"] += len(batch_dropped)
+                            real_ids = [cid for cid, _ in launchable]
+                            sendable_ids = real_ids
+                            payload_obj["resumes"] = [r for _, r in launchable]
+                            payload_str = json.dumps(payload_obj)
+                        if not real_ids:
+                            # Whole batch was uncontactable — nothing to send.
+                            yield _sse({
+                                "type": "batch", "index": idx, "status": "completed",
+                                "sent": 0, "no_interview": 0, "already_sent": 0,
+                                "excluded": len(batch_dropped), "bulk_id": None,
+                            })
+                            continue
 
                     send_req = SendBulkInterviewRequest(
                         payload=payload_str,
@@ -1974,13 +2261,13 @@ async def launch_bulk_interviews(request: LaunchRequest):
                         })
                     else:
                         totals["failed_batches"] += 1
-                        failed_candidate_ids.extend(batch)
+                        failed_candidate_ids.extend(sendable_ids)
                         yield _sse({
                             "type": "batch",
                             "index": idx,
                             "status": "failed",
                             "error": res.get("message") or "send failed",
-                            "candidate_ids": batch,
+                            "candidate_ids": sendable_ids,
                         })
                 except HTTPException as he:
                     # 409 = outreach stopped for this job -> abort the whole
@@ -1989,7 +2276,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
                     # complete, and surface those ids on the error event.
                     if getattr(he, "status_code", None) == 409:
                         aborted = True
-                        remaining = [c for b in batches[idx:] for c in b]
+                        remaining = sendable_ids + [c for b in batches[idx + 1:] for c in b]
                         totals["failed_batches"] += 1
                         failed_candidate_ids.extend(remaining)
                         yield _sse({
@@ -2001,18 +2288,18 @@ async def launch_bulk_interviews(request: LaunchRequest):
                         })
                         break
                     totals["failed_batches"] += 1
-                    failed_candidate_ids.extend(batch)
+                    failed_candidate_ids.extend(sendable_ids)
                     yield _sse({
                         "type": "batch", "index": idx, "status": "failed",
-                        "error": str(he.detail), "candidate_ids": batch,
+                        "error": str(he.detail), "candidate_ids": sendable_ids,
                     })
                 except Exception as e:
                     logger.error("launch batch %d failed: %s", idx, e, exc_info=True)
                     totals["failed_batches"] += 1
-                    failed_candidate_ids.extend(batch)
+                    failed_candidate_ids.extend(sendable_ids)
                     yield _sse({
                         "type": "batch", "index": idx, "status": "failed",
-                        "error": str(e), "candidate_ids": batch,
+                        "error": str(e), "candidate_ids": sendable_ids,
                     })
         finally:
             # Fire once even if the client disconnected mid-stream (generator
@@ -2029,7 +2316,62 @@ async def launch_bulk_interviews(request: LaunchRequest):
             "failed_candidate_ids": failed_candidate_ids,
         })
 
-    return StreamingResponse(_gen(), media_type="text/event-stream")
+    async def _gen():
+        # Heartbeat pump. A single batch can hold the stream silent for many
+        # minutes (Pairbot creation wait alone is up to 600s) — long enough for
+        # proxies/browsers to idle the connection out and lose the rest of the
+        # launch. Run the work in a task and emit an SSE comment (ignored by
+        # the client parser) whenever no real event shows up for 15s.
+        queue: asyncio.Queue = asyncio.Queue()
+        _sentinel = object()
+
+        async def _pump():
+            error: Optional[Exception] = None
+            try:
+                async for chunk in _work():
+                    await queue.put(chunk)
+            except Exception as exc:
+                error = exc
+            finally:
+                # put_nowait: unbounded queue, and safe even mid-cancellation.
+                queue.put_nowait(error if error is not None else _sentinel)
+
+        pump_task = asyncio.create_task(_pump())
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                if item is _sentinel:
+                    break
+                if isinstance(item, Exception):
+                    # Preserve pre-pump semantics: a crash in the worker aborts
+                    # the stream instead of ending it silently.
+                    raise item
+                yield item
+        finally:
+            # Client disconnect cancels this generator — cancel the worker so
+            # its finally (fire-once side effects) runs, mirroring the old
+            # direct-generator cancellation semantics.
+            if not pump_task.done():
+                pump_task.cancel()
+                try:
+                    await pump_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            # Tell nginx not to buffer this stream (it has no SSE-specific
+            # config of its own) and caches to keep hands off.
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # Hard cap so a single sync run can never blast more than this many

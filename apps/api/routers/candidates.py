@@ -1678,6 +1678,10 @@ async def save_candidates(request: CandidatesSaveRequest):
         import json
 
         saved_count = 0
+        # Ids that actually got a sourced_candidates row this request. The FE
+        # must engage ONLY these: an id sent to /engage/launch without a row
+        # resolves to a contactless stub that 400s its whole Pairbot batch.
+        saved_ids: List[str] = []
         processing_payloads = []
         scoring_criteria = _build_resume_matching_criteria(str(resolved_jobdiva_id))
 
@@ -1686,6 +1690,12 @@ async def save_candidates(request: CandidatesSaveRequest):
             with conn.cursor() as cur:
                 for c in selected_candidates:
                     try:
+                        # Per-row savepoint: without it, one failed INSERT
+                        # aborts the shared transaction — every later row
+                        # raises InFailedSqlTransaction (swallowed below) and
+                        # the final commit() rolls back rows already counted
+                        # in saved_ids/saved_count.
+                        cur.execute("SAVEPOINT save_candidate_row")
                         incoming_match_score: Optional[float] = None
                         try:
                             raw_incoming_score = getattr(c, 'match_score', None)
@@ -1840,10 +1850,15 @@ async def save_candidates(request: CandidatesSaveRequest):
                         """, candidate_data)
 
                         saved_count += 1
+                        saved_ids.append(str(c.candidate_id))
                         processing_payloads.append(candidate_data)
 
                     except Exception as e:
                         print(f"❌ Error saving candidate {c.candidate_id}: {e}")
+                        try:
+                            cur.execute("ROLLBACK TO SAVEPOINT save_candidate_row")
+                        except Exception as rollback_err:
+                            print(f"❌ Savepoint rollback failed: {rollback_err}")
                         continue
 
             conn.commit()
@@ -1938,6 +1953,7 @@ async def save_candidates(request: CandidatesSaveRequest):
             "status": "success",
             "detail": f"Saved {saved_count} sourced candidates",
             "saved_count": saved_count,
+            "saved_ids": saved_ids,
             "enhanced_count": enhanced_count,
             "dnc_skipped_count": len(dnc_skipped),
             "dnc_skipped": dnc_skipped,

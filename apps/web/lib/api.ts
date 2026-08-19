@@ -89,6 +89,16 @@ export async function authFetch(url: string, init: RequestInit = {}): Promise<Re
   });
 }
 
+// fetch() network failures surface as a TypeError in all major browsers
+// (Chrome "Failed to fetch", Safari "Load failed", Firefox "NetworkError when
+// attempting to fetch resource"), and a dropped streaming-body read rejects
+// the same way. Errors we throw ourselves (non-OK statuses, JSON parse
+// failures) are regular Error instances, so this cleanly separates
+// "connectivity problem — retryable" from "server said no".
+export function isNetworkFetchError(e: unknown): boolean {
+  return e instanceof TypeError;
+}
+
 if (typeof window !== "undefined" && !(window as any).__apiFetchPatched) {
   (window as any).__apiFetchPatched = true;
   const originalFetch = window.fetch.bind(window);
