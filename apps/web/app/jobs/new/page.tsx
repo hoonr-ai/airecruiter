@@ -7246,7 +7246,7 @@ function NewJobPageContent() {
       setLaunchProgress(prev => ({ ...prev, currentBatchIndex: i }));
       updateBatch(i, { status: "saving" });
 
-      // ── Save batch (PAI-155: retry transient "Failed to fetch") ────────
+      // ── Save batch (PAI-155: retry transient network / 5xx / 429) ────
       let saveOk = false;
       let batchSavedCount = 0;
       let batchDncSkipped = 0;
@@ -7261,7 +7261,21 @@ function NewJobPageContent() {
               candidates: batch,
             }),
           });
-          const result = await response.json();
+          let result: any = null;
+          try {
+            result = await response.json();
+          } catch (parseErr) {
+            // Gateway HTML 502/504 bodies throw here; treat as retryable.
+            lastSaveError = parseErr instanceof Error ? parseErr.message : "Invalid JSON response";
+            console.error(`Batch ${i + 1} save non-JSON body (attempt ${attempt}):`, lastSaveError);
+            if (response.ok || attempt === SAVE_MAX_RETRIES) break;
+            updateBatch(i, {
+              status: "saving",
+              errorMessage: `Save error — retrying (${attempt}/${SAVE_MAX_RETRIES})…`,
+            });
+            await new Promise(resolve => setTimeout(resolve, 800 * attempt));
+            continue;
+          }
           if (response.ok && result.status === 'success') {
             saveOk = true;
             batchSavedCount = Number(result.saved_count) || batch.length;
@@ -7271,26 +7285,46 @@ function NewJobPageContent() {
           console.error(`Batch ${i + 1} save failed (attempt ${attempt}):`, JSON.stringify(result, null, 2));
           lastSaveError = result.detail
             ? (Array.isArray(result.detail) ? JSON.stringify(result.detail) : result.detail)
-            : (result.message || 'Unknown error');
-          // 4xx: do not retry
-          if (response.status >= 400 && response.status < 500) break;
+            : (result.message || `HTTP ${response.status}`);
+          // Permanent client errors: do not retry. 429 is expected under
+          // nginx pair_batch_limit and must be retried (honor Retry-After).
+          const isRateLimited = response.status === 429;
+          const isClientError =
+            response.status >= 400 && response.status < 500 && !isRateLimited;
+          if (isClientError || attempt === SAVE_MAX_RETRIES) break;
+          updateBatch(i, {
+            status: "saving",
+            errorMessage: isRateLimited
+              ? `Rate limited — retrying save (${attempt}/${SAVE_MAX_RETRIES})…`
+              : `Save error — retrying (${attempt}/${SAVE_MAX_RETRIES})…`,
+          });
+          let delayMs = 800 * attempt;
+          if (isRateLimited) {
+            const retryAfter = response.headers.get("Retry-After");
+            const parsed = retryAfter ? Number(retryAfter) : NaN;
+            if (Number.isFinite(parsed) && parsed >= 0) {
+              delayMs = Math.max(delayMs, parsed * 1000);
+            }
+          }
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          continue;
         } catch (e) {
           console.error(`Batch ${i + 1} save threw (attempt ${attempt}):`, e);
           lastSaveError = e instanceof Error ? e.message : "Unknown error";
-          const isNetwork =
+          const lower = lastSaveError.toLowerCase();
+          const isRetryable =
             lastSaveError === "Failed to fetch"
-            || lastSaveError.toLowerCase().includes("network")
-            || lastSaveError.toLowerCase().includes("fetch");
-          if (!isNetwork || attempt === SAVE_MAX_RETRIES) break;
+            || lower.includes("network")
+            || lower.includes("fetch")
+            || lower.includes("unexpected token")
+            || lower.includes("json");
+          if (!isRetryable || attempt === SAVE_MAX_RETRIES) break;
           updateBatch(i, {
             status: "saving",
             errorMessage: `Network dropped — retrying save (${attempt}/${SAVE_MAX_RETRIES})…`,
           });
           await new Promise(resolve => setTimeout(resolve, 800 * attempt));
           continue;
-        }
-        if (attempt < SAVE_MAX_RETRIES) {
-          await new Promise(resolve => setTimeout(resolve, 800 * attempt));
         }
       }
       if (!saveOk) {

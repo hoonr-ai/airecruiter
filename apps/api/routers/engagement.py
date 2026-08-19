@@ -984,6 +984,45 @@ async def _post_to_pairbot(
     raise last_exc if last_exc is not None else RuntimeError("pairbot call failed")
 
 
+def _stamp_engage_status_batch(
+    candidate_ids: List[str],
+    status_value: str,
+    *,
+    job_id_value: str = "",
+    job_id_alt: str = "",
+) -> None:
+    """Batch-write engage_status for many candidates in one connection."""
+    if not candidate_ids:
+        return
+    conn = _get_db_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            UPDATE sourced_candidates
+            SET data = jsonb_set(
+                    COALESCE(data, '{}'::jsonb),
+                    '{engage_status}',
+                    to_jsonb(%s::text),
+                    true
+                ),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE candidate_id = ANY(%s)
+              AND (jobdiva_id = %s OR jobdiva_id = %s)
+            """,
+            (
+                status_value,
+                list(candidate_ids),
+                str(job_id_value or ""),
+                str(job_id_alt or ""),
+            ),
+        )
+        conn.commit()
+        cur.close()
+    finally:
+        conn.close()
+
+
 async def _wait_for_pairbot_creation(
     bulk_id: str,
     *,
@@ -994,6 +1033,9 @@ async def _wait_for_pairbot_creation(
     Pairbot returns 202 + bulk_id immediately; interview rows arrive later via
     status=creation_completed (with data[]). Outreach progress uses the same
     stream but Curate only needs creation_completed here.
+
+    Uses a connect timeout plus per-chunk wait_for so a silently hung stream
+    cannot block past timeout_seconds (aiter alone never wakes without bytes).
     """
     stream_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/bulk-interviews/{bulk_id}/stream"
     headers: Dict[str, str] = {}
@@ -1001,8 +1043,12 @@ async def _wait_for_pairbot_creation(
     if pair_api_key:
         headers["Authorization"] = f"Bearer {pair_api_key}"
 
-    deadline = asyncio.get_event_loop().time() + timeout_seconds
-    async with httpx.AsyncClient(timeout=None) as client:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    # read=None: Pairbot may emit nothing until creation_completed; we enforce
+    # the overall deadline via wait_for on each chunk instead.
+    client_timeout = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
+    async with httpx.AsyncClient(timeout=client_timeout) as client:
         async with client.stream("GET", stream_url, headers=headers) as response:
             if response.status_code >= 400:
                 body = (await response.aread())[:300]
@@ -1010,11 +1056,23 @@ async def _wait_for_pairbot_creation(
                     f"Pairbot stream failed status={response.status_code} body={body!r}"
                 )
             buffer = ""
-            async for chunk in response.aiter_text():
-                if asyncio.get_event_loop().time() > deadline:
+            aiter = response.aiter_text().__aiter__()
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
                     raise TimeoutError(
                         f"Timed out waiting for Pairbot creation_completed bulk_id={bulk_id}"
                     )
+                try:
+                    chunk = await asyncio.wait_for(
+                        aiter.__anext__(),
+                        timeout=min(60.0, remaining),
+                    )
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    # No bytes yet; keep waiting until the overall deadline.
+                    continue
                 buffer += chunk
                 while "\n\n" in buffer:
                     raw_event, buffer = buffer.split("\n\n", 1)
@@ -1533,48 +1591,45 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 bulk_id = str(response_data.get("bulk_id") or "").strip()
                 if not bulk_id:
                     raise RuntimeError("Pairbot returned 202 without bulk_id")
+                job_id_alt = str(payload_obj.get("jd", {}).get("jobdiva_id") or "")
                 # Mark processing so rank-list shows work in progress if the
                 # stream is slow; overwritten to sent/failed after creation.
-                for cid in request.real_candidate_ids:
-                    try:
-                        _proc_conn = _get_db_connection()
-                        try:
-                            _proc_cur = _proc_conn.cursor()
-                            _proc_cur.execute(
-                                """
-                                UPDATE sourced_candidates
-                                SET data = jsonb_set(
-                                        COALESCE(data, '{}'::jsonb),
-                                        '{engage_status}',
-                                        '"processing"',
-                                        true
-                                    ),
-                                    updated_at = CURRENT_TIMESTAMP
-                                WHERE candidate_id = %s
-                                  AND (jobdiva_id = %s OR jobdiva_id = %s)
-                                """,
-                                (
-                                    cid,
-                                    str(job_id_from_payload or ""),
-                                    str(payload_obj.get("jd", {}).get("jobdiva_id") or ""),
-                                ),
-                            )
-                            _proc_conn.commit()
-                            _proc_cur.close()
-                        finally:
-                            _proc_conn.close()
-                    except Exception as _proc_err:
-                        logger.warning(
-                            "engage_processing_stamp_failed candidate=%s err=%s",
-                            cid,
-                            _proc_err,
-                        )
+                try:
+                    _stamp_engage_status_batch(
+                        list(request.real_candidate_ids),
+                        "processing",
+                        job_id_value=str(job_id_from_payload or ""),
+                        job_id_alt=job_id_alt,
+                    )
+                except Exception as _proc_err:
+                    logger.warning(
+                        "engage_processing_stamp_failed bulk_id=%s err=%s",
+                        bulk_id,
+                        _proc_err,
+                    )
                 logger.info(
                     "pairbot_async_accepted bulk_id=%s waiting_for_creation candidates=%d",
                     bulk_id,
                     len(request.real_candidate_ids),
                 )
-                creation_event = await _wait_for_pairbot_creation(bulk_id)
+                try:
+                    creation_event = await _wait_for_pairbot_creation(bulk_id)
+                except Exception as wait_err:
+                    # Do not leave candidates stuck at engage_status=processing.
+                    try:
+                        _stamp_engage_status_batch(
+                            list(request.real_candidate_ids),
+                            "failed",
+                            job_id_value=str(job_id_from_payload or ""),
+                            job_id_alt=job_id_alt,
+                        )
+                    except Exception as _fail_stamp_err:
+                        logger.warning(
+                            "engage_failed_stamp_after_wait_error bulk_id=%s err=%s",
+                            bulk_id,
+                            _fail_stamp_err,
+                        )
+                    raise wait_err
                 response_data = {
                     **response_data,
                     "bulk_id": bulk_id,
