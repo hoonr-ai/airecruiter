@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, AlertCircle, Loader2, Rocket, Download } from "lucide-react";
+import { CheckCircle2, AlertCircle, Loader2, Rocket, Download, RotateCcw } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -119,6 +119,10 @@ export const initialLaunchProgress: LaunchPairProgress = {
 interface LaunchPairProgressModalProps {
   progress: LaunchPairProgress;
   onClose: () => void;
+  // Re-runs the launch for exactly the failed candidates. Shown whenever a
+  // finished run left failures behind (covers both the all-failed and the
+  // partial case — phase alone can't, since a partial run ends "completed").
+  onRetry?: () => void;
 }
 
 function StageIcon({ status }: { status: BatchStatus }) {
@@ -154,6 +158,7 @@ function batchLabel(b: LaunchBatchInfo): string {
 export function LaunchPairProgressModal({
   progress,
   onClose,
+  onRetry,
 }: LaunchPairProgressModalProps) {
   const {
     open,
@@ -180,6 +185,7 @@ export function LaunchPairProgressModal({
 
   const isDone = phase === "completed" || phase === "failed";
   const hasFailedCandidates = failedCandidates.length > 0;
+  const showRetry = isDone && hasFailedCandidates && !!onRetry;
 
   // Export the candidates whose batch failed so a support engineer can
   // re-launch PAIR for them manually via the API. One row per candidate,
@@ -444,13 +450,26 @@ export function LaunchPairProgressModal({
           ) : (
             <span />
           )}
-          <Button
-            disabled={!isDone}
-            onClick={onClose}
-            className="bg-[#6366f1] hover:bg-[#4f46e5] text-white"
-          >
-            {isDone ? "Close" : "Working…"}
-          </Button>
+          <div className="flex gap-2">
+            {showRetry && (
+              <Button
+                type="button"
+                onClick={onRetry}
+                className="bg-[#6366f1] hover:bg-[#4f46e5] text-white"
+              >
+                <RotateCcw className="w-4 h-4 mr-2" />
+                Retry {failedCandidates.length} failed
+              </Button>
+            )}
+            <Button
+              disabled={!isDone}
+              onClick={onClose}
+              variant={showRetry ? "outline" : "default"}
+              className={showRetry ? "" : "bg-[#6366f1] hover:bg-[#4f46e5] text-white"}
+            >
+              {isDone ? "Close" : "Working…"}
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>

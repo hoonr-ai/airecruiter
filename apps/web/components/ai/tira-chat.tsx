@@ -17,13 +17,42 @@ import {
     AlertCircle,
     Search,
     Copy,
+    Bot,
+    X,
 } from "lucide-react";
 import { useAI } from "@/context/ai-context";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { API_BASE, authFetch } from "@/lib/api";
+import { API_BASE, authFetch, isNetworkFetchError } from "@/lib/api";
 
-type TiraMode = "chat" | "boolean" | "match" | "bug";
+type TiraMode = "chat" | "boolean" | "match" | "aicheck" | "bug";
+
+interface AICheckResult {
+    filename: string;
+    candidate_name: string;
+    word_count: number;
+    ai_likelihood: number;
+    verdict: "likely_human" | "uncertain" | "likely_ai";
+    confidence: "low" | "medium" | "high";
+    ai_signals: string[];
+    human_signals: string[];
+    summary: string;
+}
+
+interface AICheckReport {
+    status: string;
+    results: AICheckResult[];
+    failed: Array<{ filename: string; reason: string }>;
+    summary: {
+        total: number;
+        analyzed: number;
+        failed: number;
+        likely_ai: number;
+        uncertain: number;
+        likely_human: number;
+        avg_ai_likelihood: number;
+    };
+}
 
 interface BooleanResult {
     status: string;
@@ -89,6 +118,7 @@ export function TiraChat() {
                 )}
                 {mode === "boolean" && <BooleanMode />}
                 {mode === "match" && <MatchMode />}
+                {mode === "aicheck" && <AICheckMode />}
                 {mode === "bug" && <BugMode />}
             </SheetContent>
         </Sheet>
@@ -104,10 +134,11 @@ function ModeSwitcher({ mode, setMode }: { mode: TiraMode; setMode: (m: TiraMode
         { id: "chat", label: "Chat", icon: <MessageSquare className="w-3.5 h-3.5" /> },
         { id: "boolean", label: "Boolean", icon: <Search className="w-3.5 h-3.5" /> },
         { id: "match", label: "Resume match", icon: <FileSearch className="w-3.5 h-3.5" /> },
+        { id: "aicheck", label: "AI check", icon: <Bot className="w-3.5 h-3.5" /> },
         { id: "bug", label: "Report bug", icon: <Bug className="w-3.5 h-3.5" /> },
     ];
     return (
-        <div className="flex gap-1.5 px-4 py-2.5 border-b bg-background/60">
+        <div className="flex flex-wrap gap-1.5 px-4 py-2.5 border-b bg-background/60">
             {tabs.map(t => (
                 <button
                     key={t.id}
@@ -547,6 +578,284 @@ function MatchResultCard({ result }: { result: MatchResult }) {
                     <ul className="space-y-1 text-[12.5px] text-slate-600 list-disc pl-4">
                         {result.explainability.slice(0, 8).map((e, i) => (
                             <li key={`e-${i}`}>{typeof e === "string" ? e : JSON.stringify(e)}</li>
+                        ))}
+                    </ul>
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AI check mode — bulk AI-plagiarism check on resumes
+// ---------------------------------------------------------------------------
+
+const AI_CHECK_MAX_FILES = 25;
+const AI_CHECK_MAX_FILE_MB = 8;
+// nginx's client_max_body_size is 25m server-wide — cap the whole batch below
+// it (multipart overhead included) so oversized uploads fail here with a clear
+// message instead of an HTML 413 from the proxy.
+const AI_CHECK_MAX_TOTAL_MB = 20;
+
+function AICheckMode() {
+    const apiBase = API_BASE;
+
+    const [files, setFiles] = useState<File[]>([]);
+    const [submitting, setSubmitting] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [report, setReport] = useState<AICheckReport | null>(null);
+
+    const addFiles = (picked: FileList | null) => {
+        if (!picked || picked.length === 0) return;
+        setError(null);
+        setFiles(prev => {
+            const merged = [...prev];
+            let totalBytes = merged.reduce((sum, f) => sum + f.size, 0);
+            for (const f of Array.from(picked)) {
+                if (f.size > AI_CHECK_MAX_FILE_MB * 1024 * 1024) {
+                    setError(`${f.name} is larger than ${AI_CHECK_MAX_FILE_MB}MB and was skipped.`);
+                    continue;
+                }
+                const dup = merged.some(m => m.name === f.name && m.size === f.size && m.lastModified === f.lastModified);
+                if (dup) continue;
+                if (totalBytes + f.size > AI_CHECK_MAX_TOTAL_MB * 1024 * 1024) {
+                    setError(`Batch is limited to ${AI_CHECK_MAX_TOTAL_MB}MB total — ${f.name} was skipped.`);
+                    continue;
+                }
+                merged.push(f);
+                totalBytes += f.size;
+            }
+            if (merged.length > AI_CHECK_MAX_FILES) {
+                setError(`You can check up to ${AI_CHECK_MAX_FILES} resumes at a time — extra files were skipped.`);
+                return merged.slice(0, AI_CHECK_MAX_FILES);
+            }
+            return merged;
+        });
+    };
+
+    const removeFile = (idx: number) => setFiles(prev => prev.filter((_, i) => i !== idx));
+
+    const resetAll = () => {
+        setFiles([]);
+        setReport(null);
+        setError(null);
+    };
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setError(null);
+        if (files.length === 0) {
+            setError("Add at least one resume (PDF, DOCX, or TXT).");
+            return;
+        }
+        setSubmitting(true);
+        setReport(null);
+        try {
+            const fd = new FormData();
+            files.forEach(f => fd.append("files", f));
+            const res = await authFetch(`${apiBase}/tira/ai-check`, { method: "POST", body: fd });
+            // A proxy error (e.g. 413 for an oversized batch) returns an HTML
+            // body — don't let the JSON parse failure mask the real cause.
+            let data: any = null;
+            try {
+                data = await res.json();
+            } catch {
+                /* non-JSON body */
+            }
+            if (!res.ok || !data) {
+                throw new Error(
+                    data?.detail
+                        || (res.status === 413
+                            ? "Upload too large — remove some files and try again."
+                            : `Failed (${res.status})`),
+                );
+            }
+            setReport(data as AICheckReport);
+        } catch (e) {
+            const msg = isNetworkFetchError(e)
+                ? "Network failure — check your connection and try again."
+                : e instanceof Error
+                    ? e.message
+                    : "Couldn't run the AI check.";
+            setError(msg);
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    return (
+        <ScrollArea className="flex-1">
+            <form onSubmit={handleSubmit} className="p-4 space-y-4">
+                <div className="text-[12.5px] text-slate-500 leading-relaxed">
+                    Upload resumes in bulk and Tira estimates how likely each one was written by AI, with the signals behind each verdict.
+                </div>
+
+                <div>
+                    <label className="text-[12px] font-semibold text-slate-500 uppercase tracking-wide block mb-1.5">
+                        Resumes ({files.length}/{AI_CHECK_MAX_FILES})
+                    </label>
+                    <label className="flex items-center gap-2 h-10 px-3 border border-dashed border-slate-300 rounded-md bg-slate-50/60 text-[13px] text-slate-600 cursor-pointer hover:bg-slate-50">
+                        <Upload className="w-4 h-4 text-slate-400" />
+                        <span className="truncate">
+                            {files.length > 0 ? "Add more resumes" : "Click to upload (PDF, DOCX, TXT) — multiple allowed"}
+                        </span>
+                        <input
+                            type="file"
+                            multiple
+                            accept=".pdf,.docx,.txt,.md"
+                            onChange={e => {
+                                addFiles(e.target.files);
+                                e.target.value = "";
+                            }}
+                            className="hidden"
+                        />
+                    </label>
+                </div>
+
+                {files.length > 0 && (
+                    <ul className="space-y-1">
+                        {files.map((f, i) => (
+                            <li key={`${f.name}-${f.size}-${i}`} className="flex items-center gap-2 text-[12.5px] text-slate-700 bg-white border border-slate-200 rounded-md px-2.5 py-1.5">
+                                <FileSearch className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                                <span className="truncate flex-1">{f.name}</span>
+                                <span className="text-slate-400 text-[11px] shrink-0">{(f.size / 1024).toFixed(0)} KB</span>
+                                <button type="button" onClick={() => removeFile(i)} className="text-slate-400 hover:text-rose-600 shrink-0" aria-label={`Remove ${f.name}`}>
+                                    <X className="w-3.5 h-3.5" />
+                                </button>
+                            </li>
+                        ))}
+                    </ul>
+                )}
+
+                {error && (
+                    <div className="text-[13px] text-rose-600 flex items-start gap-1.5">
+                        <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" /> <span>{error}</span>
+                    </div>
+                )}
+
+                <Button type="submit" disabled={submitting || files.length === 0} className="w-full bg-hoonr-gradient text-white h-10">
+                    {submitting
+                        ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Analyzing {files.length} resume{files.length === 1 ? "" : "s"}… this can take a minute</>)
+                        : `Check ${files.length || ""} resume${files.length === 1 ? "" : "s"} for AI content`}
+                </Button>
+
+                {report && (
+                    <div className="space-y-3">
+                        <AICheckSummaryCard report={report} />
+                        {report.results.map((r, i) => (
+                            <AICheckResultCard key={`${r.filename}-${i}`} result={r} />
+                        ))}
+                        {report.failed.length > 0 && (
+                            <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-3 space-y-1">
+                                <div className="text-[11px] uppercase tracking-wider text-amber-700 font-semibold">Not analyzed</div>
+                                {report.failed.map((f, i) => (
+                                    <div key={`f-${i}`} className="text-[12.5px] text-amber-800">
+                                        <span className="font-medium">{f.filename}</span> — {f.reason}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        <div className="text-[11.5px] text-slate-400 leading-relaxed">
+                            Heuristic estimate — AI detection from text alone is probabilistic, not proof. Use it as a signal to probe in a screen, not to reject a candidate outright.
+                        </div>
+                        <Button type="button" variant="outline" onClick={resetAll} className="w-full h-9">
+                            Check another batch
+                        </Button>
+                    </div>
+                )}
+            </form>
+        </ScrollArea>
+    );
+}
+
+function AICheckSummaryCard({ report }: { report: AICheckReport }) {
+    const s = report.summary;
+    return (
+        <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm space-y-2">
+            <div className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold">Batch report</div>
+            <div className="flex flex-wrap gap-1.5">
+                <span className="px-2 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200 text-[11.5px] font-medium">
+                    {s.likely_ai} likely AI
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-amber-50 text-amber-700 border border-amber-200 text-[11.5px] font-medium">
+                    {s.uncertain} uncertain
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11.5px] font-medium">
+                    {s.likely_human} likely human
+                </span>
+                {s.failed > 0 && (
+                    <span className="px-2 py-0.5 rounded-full bg-slate-50 text-slate-600 border border-slate-200 text-[11.5px] font-medium">
+                        {s.failed} not analyzed
+                    </span>
+                )}
+            </div>
+            <div className="text-[12.5px] text-slate-500">
+                {s.analyzed} of {s.total} analyzed · average AI likelihood {s.avg_ai_likelihood}/100
+            </div>
+        </div>
+    );
+}
+
+const AI_CHECK_VERDICT_LABEL: Record<AICheckResult["verdict"], string> = {
+    likely_ai: "Likely AI-generated",
+    uncertain: "Uncertain",
+    likely_human: "Likely human-written",
+};
+
+function AICheckResultCard({ result }: { result: AICheckResult }) {
+    const score = Math.round(result.ai_likelihood || 0);
+    // Inverse of the match-score ramp — here a HIGH score is the bad outcome.
+    const scoreColor = score >= 65 ? "text-rose-600" : score >= 30 ? "text-amber-500" : "text-emerald-600";
+    const verdictTone =
+        result.verdict === "likely_ai"
+            ? "bg-rose-50 text-rose-700 border-rose-200"
+            : result.verdict === "uncertain"
+                ? "bg-amber-50 text-amber-700 border-amber-200"
+                : "bg-emerald-50 text-emerald-700 border-emerald-200";
+    return (
+        <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3 shadow-sm">
+            <div className="flex items-end justify-between gap-3">
+                <div>
+                    <div className="text-[11px] uppercase tracking-wider text-slate-500 font-semibold">AI likelihood</div>
+                    <div className={cn("text-4xl font-bold leading-none mt-1", scoreColor)}>
+                        {score}<span className="text-lg text-slate-400 font-semibold ml-0.5">/100</span>
+                    </div>
+                </div>
+                <div className="text-right text-[12px] text-slate-500 min-w-0">
+                    <div className="font-semibold text-slate-700 truncate">{result.candidate_name || result.filename}</div>
+                    <div className="text-[11.5px] truncate">{result.filename}</div>
+                    <div className="text-[11.5px]">{result.word_count} words</div>
+                </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5">
+                <span className={cn("px-2 py-0.5 rounded-full border text-[11.5px] font-medium", verdictTone)}>
+                    {AI_CHECK_VERDICT_LABEL[result.verdict] ?? result.verdict}
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-slate-50 text-slate-600 border border-slate-200 text-[11.5px] font-medium">
+                    {result.confidence} confidence
+                </span>
+            </div>
+
+            {result.summary && <div className="text-[12.5px] text-slate-600 leading-relaxed">{result.summary}</div>}
+
+            {result.ai_signals?.length > 0 && (
+                <div>
+                    <div className="text-[11px] uppercase tracking-wider text-rose-700 font-semibold mb-1.5">AI signals</div>
+                    <ul className="space-y-1 text-[12.5px] text-slate-600 list-disc pl-4">
+                        {result.ai_signals.slice(0, 6).map((sig, i) => (
+                            <li key={`ai-${i}`}>{sig}</li>
+                        ))}
+                    </ul>
+                </div>
+            )}
+
+            {result.human_signals?.length > 0 && (
+                <div>
+                    <div className="text-[11px] uppercase tracking-wider text-emerald-700 font-semibold mb-1.5">Human signals</div>
+                    <ul className="space-y-1 text-[12.5px] text-slate-600 list-disc pl-4">
+                        {result.human_signals.slice(0, 6).map((sig, i) => (
+                            <li key={`h-${i}`}>{sig}</li>
                         ))}
                     </ul>
                 </div>

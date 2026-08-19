@@ -2068,7 +2068,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
     def _sse(obj: Dict[str, Any]) -> str:
         return f"data: {json.dumps(obj)}\n\n"
 
-    async def _gen():
+    async def _work():
         ids = [str(c) for c in (request.candidate_ids or []) if str(c).strip()]
         batch_size = max(1, int(request.batch_size or _LAUNCH_PAIRBOT_BATCH_SIZE))
         batches = [ids[i:i + batch_size] for i in range(0, len(ids), batch_size)]
@@ -2132,6 +2132,12 @@ async def launch_bulk_interviews(request: LaunchRequest):
             for idx, batch in enumerate(batches):
                 if idx > 0:
                     await asyncio.sleep(_LAUNCH_BATCH_DELAY_SECONDS)
+                # Ids actually sent to Pairbot for this batch: batch minus
+                # DNC-blocked minus contact-gate exclusions. Failure paths must
+                # report THESE ids — reporting the original batch would re-record
+                # rows already surfaced as exclusions, putting permanently
+                # uncontactable candidates into the retry set forever.
+                sendable_ids: List[str] = batch
                 try:
                     gp = await _generate_payload_for(
                         GeneratePayloadRequest(candidate_ids=batch, job_id=request.job_id)
@@ -2148,6 +2154,68 @@ async def launch_bulk_interviews(request: LaunchRequest):
                         set(gp.get("dnc_blocked_ids") or []) if isinstance(gp, dict) else set()
                     )
                     real_ids = [c for c in batch if c not in dnc_blocked] if dnc_blocked else batch
+                    sendable_ids = real_ids
+
+                    # Per-candidate contact gate. _send_bulk_interview_core's
+                    # payload validation 400s the ENTIRE batch when any single
+                    # resume has no usable phone/email — including the
+                    # "Unknown Candidate" stub generate-payload emits for an id
+                    # with no sourced_candidates row. At batch size 75 that's a
+                    # 75-candidate blast radius for one bad row. Drop those rows
+                    # here and surface them as exclusions; everyone else launches.
+                    try:
+                        payload_obj = json.loads(payload_str)
+                    except Exception:
+                        payload_obj = None
+                    resumes = payload_obj.get("resumes") if isinstance(payload_obj, dict) else None
+                    if isinstance(resumes, list) and len(resumes) == len(real_ids):
+                        launchable: List[tuple] = []
+                        batch_dropped: List[Dict[str, str]] = []
+                        for cid, resume in zip(real_ids, resumes):
+                            if not isinstance(resume, dict):
+                                batch_dropped.append({
+                                    "candidate_id": cid, "name": "",
+                                    "reason": "invalid resume payload at launch",
+                                })
+                                continue
+                            clean_email = _sanitize_pair_candidate_email(str(resume.get("email") or ""))
+                            resume["email"] = clean_email
+                            has_contact = (
+                                len(_pair_phone_digits(resume.get("phone"))) >= 7 or bool(clean_email)
+                            )
+                            if has_contact:
+                                launchable.append((cid, resume))
+                                continue
+                            name = str(resume.get("name") or "")
+                            batch_dropped.append({
+                                "candidate_id": cid,
+                                "name": name,
+                                "reason": (
+                                    "no candidate record found at launch"
+                                    if name == "Unknown Candidate"
+                                    else "no usable phone or email at launch"
+                                ),
+                            })
+                        if batch_dropped:
+                            logger.warning(
+                                "launch batch %d: excluding %d contactless/missing rows pre-send: %s",
+                                idx, len(batch_dropped),
+                                [d["candidate_id"] for d in batch_dropped],
+                            )
+                            all_excluded.extend(batch_dropped)
+                            totals["excluded"] += len(batch_dropped)
+                            real_ids = [cid for cid, _ in launchable]
+                            sendable_ids = real_ids
+                            payload_obj["resumes"] = [r for _, r in launchable]
+                            payload_str = json.dumps(payload_obj)
+                        if not real_ids:
+                            # Whole batch was uncontactable — nothing to send.
+                            yield _sse({
+                                "type": "batch", "index": idx, "status": "completed",
+                                "sent": 0, "no_interview": 0, "already_sent": 0,
+                                "excluded": len(batch_dropped), "bulk_id": None,
+                            })
+                            continue
 
                     send_req = SendBulkInterviewRequest(
                         payload=payload_str,
@@ -2193,13 +2261,13 @@ async def launch_bulk_interviews(request: LaunchRequest):
                         })
                     else:
                         totals["failed_batches"] += 1
-                        failed_candidate_ids.extend(batch)
+                        failed_candidate_ids.extend(sendable_ids)
                         yield _sse({
                             "type": "batch",
                             "index": idx,
                             "status": "failed",
                             "error": res.get("message") or "send failed",
-                            "candidate_ids": batch,
+                            "candidate_ids": sendable_ids,
                         })
                 except HTTPException as he:
                     # 409 = outreach stopped for this job -> abort the whole
@@ -2208,7 +2276,7 @@ async def launch_bulk_interviews(request: LaunchRequest):
                     # complete, and surface those ids on the error event.
                     if getattr(he, "status_code", None) == 409:
                         aborted = True
-                        remaining = [c for b in batches[idx:] for c in b]
+                        remaining = sendable_ids + [c for b in batches[idx + 1:] for c in b]
                         totals["failed_batches"] += 1
                         failed_candidate_ids.extend(remaining)
                         yield _sse({
@@ -2220,18 +2288,18 @@ async def launch_bulk_interviews(request: LaunchRequest):
                         })
                         break
                     totals["failed_batches"] += 1
-                    failed_candidate_ids.extend(batch)
+                    failed_candidate_ids.extend(sendable_ids)
                     yield _sse({
                         "type": "batch", "index": idx, "status": "failed",
-                        "error": str(he.detail), "candidate_ids": batch,
+                        "error": str(he.detail), "candidate_ids": sendable_ids,
                     })
                 except Exception as e:
                     logger.error("launch batch %d failed: %s", idx, e, exc_info=True)
                     totals["failed_batches"] += 1
-                    failed_candidate_ids.extend(batch)
+                    failed_candidate_ids.extend(sendable_ids)
                     yield _sse({
                         "type": "batch", "index": idx, "status": "failed",
-                        "error": str(e), "candidate_ids": batch,
+                        "error": str(e), "candidate_ids": sendable_ids,
                     })
         finally:
             # Fire once even if the client disconnected mid-stream (generator
@@ -2248,7 +2316,62 @@ async def launch_bulk_interviews(request: LaunchRequest):
             "failed_candidate_ids": failed_candidate_ids,
         })
 
-    return StreamingResponse(_gen(), media_type="text/event-stream")
+    async def _gen():
+        # Heartbeat pump. A single batch can hold the stream silent for many
+        # minutes (Pairbot creation wait alone is up to 600s) — long enough for
+        # proxies/browsers to idle the connection out and lose the rest of the
+        # launch. Run the work in a task and emit an SSE comment (ignored by
+        # the client parser) whenever no real event shows up for 15s.
+        queue: asyncio.Queue = asyncio.Queue()
+        _sentinel = object()
+
+        async def _pump():
+            error: Optional[Exception] = None
+            try:
+                async for chunk in _work():
+                    await queue.put(chunk)
+            except Exception as exc:
+                error = exc
+            finally:
+                # put_nowait: unbounded queue, and safe even mid-cancellation.
+                queue.put_nowait(error if error is not None else _sentinel)
+
+        pump_task = asyncio.create_task(_pump())
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                if item is _sentinel:
+                    break
+                if isinstance(item, Exception):
+                    # Preserve pre-pump semantics: a crash in the worker aborts
+                    # the stream instead of ending it silently.
+                    raise item
+                yield item
+        finally:
+            # Client disconnect cancels this generator — cancel the worker so
+            # its finally (fire-once side effects) runs, mirroring the old
+            # direct-generator cancellation semantics.
+            if not pump_task.done():
+                pump_task.cancel()
+                try:
+                    await pump_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            # Tell nginx not to buffer this stream (it has no SSE-specific
+            # config of its own) and caches to keep hands off.
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # Hard cap so a single sync run can never blast more than this many

@@ -13,6 +13,7 @@ import { useRef, useState } from "react";
 import { GripVertical, Plus, RotateCw, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TemplateQuestion } from "@/lib/campaigns";
+import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion } from "@/hooks/use-question-moderation";
 
 // ── Inline drag-reorder hook (same implementation as job wizard) ──────────────
 function useDragReorder(onMove: (from: number, to: number) => void) {
@@ -49,6 +50,10 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
     questions,
     onChange,
   }: ScreeningQuestionsEditorProps) {
+
+  // AI policy check (NSFW / rude / discriminatory / nonsensical) on
+  // recruiter-added questions — warning only, never blocks.
+  const questionModeration = useQuestionModeration();
 
   // ── Drag reorder ────────────────────────────────────────────────────────────
   const move = (from: number, to: number) => {
@@ -135,10 +140,23 @@ function useDragReorder(onMove: (from: number, to: number) => void) {
           <div className="flex-1 min-w-0">
             <textarea
               value={q.question_text ?? ""}
-              onChange={(e) => update(index, { question_text: e.target.value })}
+              onChange={(e) => {
+                update(index, { question_text: e.target.value });
+                if (isRecruiterAddedQuestion(q.category)) {
+                  questionModeration.scheduleCheck(String(index), e.target.value);
+                }
+              }}
+              onBlur={() => {
+                if (isRecruiterAddedQuestion(q.category)) {
+                  questionModeration.flushCheck(String(index), q.question_text ?? "");
+                }
+              }}
               rows={3}
               className="w-full text-[13px] bg-transparent border-none outline-none text-slate-900 font-medium resize-none whitespace-pre-wrap break-words"
             />
+            {isRecruiterAddedQuestion(q.category) && (
+              <QuestionPolicyWarning verdict={questionModeration.verdictFor(q.question_text ?? "")} />
+            )}
           </div>
 
           {/* Pass criteria */}
