@@ -1043,6 +1043,7 @@ function NewJobPageContent() {
   const SAVE_BATCH_SIZE = 25;
   const LAUNCH_BATCH_SIZE = 75;
   const SAVE_MAX_RETRIES = 3;
+  const SAVE_RETRY_BASE_DELAY_MS = 800;
 
   // Pace between batches so save+engage calls don't fire faster than nginx's
   // pair_batch_limit zone can sustain on large launches (seen: 26-30 batches
@@ -7265,7 +7266,9 @@ function NewJobPageContent() {
           try {
             result = await response.json();
           } catch (parseErr) {
-            // Gateway HTML 502/504 bodies throw here; treat as retryable.
+            // Gateway HTML 502/504 bodies throw here. Do not retry 2xx:
+            // the request already reached the server (save is upsert, but
+            // retrying a completed write can still duplicate audit side effects).
             lastSaveError = parseErr instanceof Error ? parseErr.message : "Invalid JSON response";
             console.error(`Batch ${i + 1} save non-JSON body (attempt ${attempt}):`, lastSaveError);
             if (response.ok || attempt === SAVE_MAX_RETRIES) break;
@@ -7273,7 +7276,7 @@ function NewJobPageContent() {
               status: "saving",
               errorMessage: `Save error — retrying (${attempt}/${SAVE_MAX_RETRIES})…`,
             });
-            await new Promise(resolve => setTimeout(resolve, 800 * attempt));
+            await new Promise(resolve => setTimeout(resolve, SAVE_RETRY_BASE_DELAY_MS * attempt));
             continue;
           }
           if (response.ok && result.status === 'success') {
@@ -7286,19 +7289,20 @@ function NewJobPageContent() {
           lastSaveError = result.detail
             ? (Array.isArray(result.detail) ? JSON.stringify(result.detail) : result.detail)
             : (result.message || `HTTP ${response.status}`);
+          // 2xx that is not our success shape already hit the server — do not resend.
           // Permanent client errors: do not retry. 429 is expected under
           // nginx pair_batch_limit and must be retried (honor Retry-After).
           const isRateLimited = response.status === 429;
           const isClientError =
             response.status >= 400 && response.status < 500 && !isRateLimited;
-          if (isClientError || attempt === SAVE_MAX_RETRIES) break;
+          if (response.ok || isClientError || attempt === SAVE_MAX_RETRIES) break;
           updateBatch(i, {
             status: "saving",
             errorMessage: isRateLimited
               ? `Rate limited — retrying save (${attempt}/${SAVE_MAX_RETRIES})…`
               : `Save error — retrying (${attempt}/${SAVE_MAX_RETRIES})…`,
           });
-          let delayMs = 800 * attempt;
+          let delayMs = SAVE_RETRY_BASE_DELAY_MS * attempt;
           if (isRateLimited) {
             const retryAfter = response.headers.get("Retry-After");
             const parsed = retryAfter ? Number(retryAfter) : NaN;
@@ -7311,19 +7315,16 @@ function NewJobPageContent() {
         } catch (e) {
           console.error(`Batch ${i + 1} save threw (attempt ${attempt}):`, e);
           lastSaveError = e instanceof Error ? e.message : "Unknown error";
-          const lower = lastSaveError.toLowerCase();
-          const isRetryable =
-            lastSaveError === "Failed to fetch"
-            || lower.includes("network")
-            || lower.includes("fetch")
-            || lower.includes("unexpected token")
-            || lower.includes("json");
+          // fetch() network failures are TypeError in all major browsers
+          // (Chrome "Failed to fetch", Safari "Load failed", Firefox
+          // "NetworkError when attempting to fetch resource").
+          const isRetryable = e instanceof TypeError;
           if (!isRetryable || attempt === SAVE_MAX_RETRIES) break;
           updateBatch(i, {
             status: "saving",
             errorMessage: `Network dropped — retrying save (${attempt}/${SAVE_MAX_RETRIES})…`,
           });
-          await new Promise(resolve => setTimeout(resolve, 800 * attempt));
+          await new Promise(resolve => setTimeout(resolve, SAVE_RETRY_BASE_DELAY_MS * attempt));
           continue;
         }
       }
