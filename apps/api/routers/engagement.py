@@ -1034,8 +1034,9 @@ async def _wait_for_pairbot_creation(
     status=creation_completed (with data[]). Outreach progress uses the same
     stream but Curate only needs creation_completed here.
 
-    Uses a connect timeout plus per-chunk wait_for so a silently hung stream
-    cannot block past timeout_seconds (aiter alone never wakes without bytes).
+    Uses a connect timeout plus a background pump into a queue. Waiting on
+    the queue (not aiter.__anext__) keeps the SSE generator alive across idle
+    gaps so a quiet-but-alive stream is not closed before timeout_seconds.
     """
     stream_url = f"{EXTERNAL_INTERVIEW_API_URL}/api/bulk-interviews/{bulk_id}/stream"
     headers: Dict[str, str] = {}
@@ -1045,8 +1046,8 @@ async def _wait_for_pairbot_creation(
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
-    # read=None: Pairbot may emit nothing until creation_completed; we enforce
-    # the overall deadline via wait_for on each chunk instead.
+    # read=None: Pairbot may emit nothing until creation_completed; the overall
+    # deadline is enforced by wait_for on the queue, not the httpx read timeout.
     client_timeout = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
     async with httpx.AsyncClient(timeout=client_timeout) as client:
         async with client.stream("GET", stream_url, headers=headers) as response:
@@ -1055,48 +1056,77 @@ async def _wait_for_pairbot_creation(
                 raise RuntimeError(
                     f"Pairbot stream failed status={response.status_code} body={body!r}"
                 )
-            buffer = ""
-            aiter = response.aiter_text().__aiter__()
-            while True:
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    raise TimeoutError(
-                        f"Timed out waiting for Pairbot creation_completed bulk_id={bulk_id}"
-                    )
+            chunks: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
+            pump_error: List[BaseException] = []
+
+            async def _pump_chunks() -> None:
                 try:
-                    chunk = await asyncio.wait_for(
-                        aiter.__anext__(),
-                        timeout=min(60.0, remaining),
-                    )
-                except StopAsyncIteration:
-                    break
-                except asyncio.TimeoutError:
-                    # No bytes yet; keep waiting until the overall deadline.
-                    continue
-                buffer += chunk
-                while "\n\n" in buffer:
-                    raw_event, buffer = buffer.split("\n\n", 1)
-                    data_lines = [
-                        line[5:].strip()
-                        for line in raw_event.split("\n")
-                        if line.startswith("data:")
-                    ]
-                    if not data_lines:
-                        continue
-                    try:
-                        event = json.loads("".join(data_lines))
-                    except Exception:
-                        logger.warning("pairbot_stream_parse_error bulk_id=%s raw=%r", bulk_id, data_lines)
-                        continue
-                    status = str(event.get("status") or "")
-                    if status == "creation_completed":
-                        return event if isinstance(event, dict) else {"status": status}
-                    if status == "creation_failed":
-                        raise RuntimeError(
-                            event.get("message")
-                            or f"Pairbot creation_failed for bulk_id={bulk_id}"
+                    async for chunk in response.aiter_text():
+                        await chunks.put(chunk)
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as exc:
+                    pump_error.append(exc)
+                finally:
+                    await chunks.put(None)
+
+            pump = asyncio.create_task(_pump_chunks())
+            buffer = ""
+            try:
+                while True:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            f"Timed out waiting for Pairbot creation_completed bulk_id={bulk_id}"
                         )
-                    # Ignore accepted/creating/processing/completed (outreach).
+                    try:
+                        chunk = await asyncio.wait_for(
+                            chunks.get(),
+                            timeout=min(60.0, remaining),
+                        )
+                    except asyncio.TimeoutError:
+                        # No bytes yet; generator is still alive on the pump.
+                        continue
+                    if chunk is None:
+                        break
+                    # SSE allows LF or CRLF frame terminators.
+                    buffer += chunk.replace("\r\n", "\n").replace("\r", "\n")
+                    while "\n\n" in buffer:
+                        raw_event, buffer = buffer.split("\n\n", 1)
+                        data_lines = [
+                            line[5:].strip()
+                            for line in raw_event.split("\n")
+                            if line.startswith("data:")
+                        ]
+                        if not data_lines:
+                            continue
+                        try:
+                            event = json.loads("".join(data_lines))
+                        except Exception:
+                            logger.warning(
+                                "pairbot_stream_parse_error bulk_id=%s raw=%r",
+                                bulk_id,
+                                data_lines,
+                            )
+                            continue
+                        status = str(event.get("status") or "")
+                        if status == "creation_completed":
+                            return event if isinstance(event, dict) else {"status": status}
+                        if status == "creation_failed":
+                            raise RuntimeError(
+                                event.get("message")
+                                or f"Pairbot creation_failed for bulk_id={bulk_id}"
+                            )
+                        # Ignore accepted/creating/processing/completed (outreach).
+            finally:
+                if not pump.done():
+                    pump.cancel()
+                    try:
+                        await pump
+                    except (asyncio.CancelledError, Exception):
+                        pass
+            if pump_error:
+                raise pump_error[0]
     raise TimeoutError(f"Pairbot stream ended without creation_completed bulk_id={bulk_id}")
 
 
@@ -1585,7 +1615,7 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
 
             # PAI-155: 202 Accepted means interviews are creating in background.
             # Wait on SSE for creation_completed before writing audit/engage_status.
-            is_success = response.status_code in [200, 201, 202]
+            is_success = 200 <= response.status_code < 300
             logger.info(f"📥 PAIR API response status: {response.status_code}")
             if is_success and response.status_code == 202:
                 bulk_id = str(response_data.get("bulk_id") or "").strip()
