@@ -99,3 +99,21 @@ def test_extract_rankings_hard_filter_details_tolerates_non_dict_data():
     result = _extract_rankings_hard_filter_details(data_blob, {}, {})
     assert len(result) == 1
     assert result[0]["status"] == "Pass"
+
+def test_extract_rankings_hard_filter_details_pending_status():
+    data_blob = {
+        "engage_last_response": {
+            "data": {
+                "hard_filter_results": [
+                    {
+                        "question": "Are you authorized?",
+                        "answer": "Yes",
+                        "hard_filter_status": "pending",
+                    }
+                ]
+            }
+        }
+    }
+    result = _extract_rankings_hard_filter_details(data_blob, {}, {})
+    assert len(result) == 1
+    assert result[0]["status"] == "Pending"

@@ -8,6 +8,26 @@ on:
 
 jobs:
 
+  test-api:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r apps/api/requirements.txt pytest
+
+      - name: Run API tests (PAI-154 webhook + hard-filter readers)
+        run: |
+          cd apps/api
+          PYTHONPATH=. pytest tests/test_voice_agent_webhook.py tests/test_candidates_hard_filter_extractor.py -q
+
   # ----------------------
   # QA DEPLOYMENT
   # ----------------------
