@@ -68,6 +68,18 @@ def _json_load_safe(value: Any, default: Any):
     return default
 
 
+def _hard_filter_row_display(raw: Optional[str]) -> Optional[str]:
+    """Map webhook HF token to Pass/Fail/Pending, or None if not a hard-filter row."""
+    token = str(raw or "").lower().strip()
+    if token in {"not_hard_filter"}:
+        return None
+    if token in {"passed", "pass"}:
+        return "Pass"
+    if token in {"failed", "fail"}:
+        return "Fail"
+    return "Pending"
+
+
 def _format_engage_status(engage_status: Optional[str], engage_score: Optional[float], hf_display: str) -> str:
     if not engage_status:
         return "Pending"
@@ -117,13 +129,15 @@ def _extract_rankings_hard_filter_details(
         for item in hf_results:
             if not isinstance(item, dict):
                 continue
-            hf_status = str(item.get("hard_filter_status") or item.get("pass_fail") or "").lower()
-            if hf_status not in {"passed", "failed", "pass", "fail"}:
+            display = _hard_filter_row_display(
+                item.get("hard_filter_status") or item.get("pass_fail")
+            )
+            if display is None:
                 continue
             details.append({
                 "question": item.get("question") or "Question",
                 "answer": item.get("answer"),
-                "status": "Pass" if hf_status in {"passed", "pass"} else "Fail",
+                "status": display,
                 # Hardcoded because PairBot does not include numeric scores for these fields in the hard_filter_results array
                 "score": None,
                 "total_score": None,
@@ -137,20 +151,22 @@ def _extract_rankings_hard_filter_details(
     if isinstance(resp, dict):
         transcriptions = resp.get("transcriptions") or []
 
-    _valid_hf = {"passed", "failed", "pass", "fail"}
-    _has_hf = any(str(t.get("hard_filter_status") or "").lower() in _valid_hf for t in transcriptions if isinstance(t, dict))
+    _has_hf = any(
+        _hard_filter_row_display(t.get("hard_filter_status")) is not None
+        for t in transcriptions
+        if isinstance(t, dict)
+    )
     if (not transcriptions or not _has_hf):
         transcriptions = wp_data.get("transcriptions") or []
 
     if isinstance(transcriptions, list):
         for item in transcriptions:
-            hf_status = str(item.get("hard_filter_status") or "").lower()
-            # Only show questions PAIR bot explicitly marked as qualifying hard filters
-            if hf_status not in {"passed", "failed", "pass", "fail"}:
+            display = _hard_filter_row_display(item.get("hard_filter_status"))
+            if display is None:
                 continue
             details.append({
                 "question": item.get("question") or item.get("question_text") or "Question",
-                "status": "Pass" if hf_status in {"passed", "pass"} else "Fail",
+                "status": display,
                 "score": item.get("candidate_score"),
                 "total_score": item.get("total_score"),
                 "reason": item.get("reason") or "",
