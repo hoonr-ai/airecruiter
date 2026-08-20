@@ -23,10 +23,22 @@ jobs:
         run: |
           pip install -r apps/api/requirements.txt pytest
 
-      - name: Run API tests (PAI-154 webhook + hard-filter readers)
+      - name: Run API tests (webhook + hard-filter readers, quick-first sourcing)
+        # Stub env: config fails closed on missing vars at import, so an
+        # env-less pytest aborts at collection (this is what broke this job
+        # on develop). Values are fakes — these tests never call out.
+        env:
+          OPENAI_API_KEY: test
+          JOBDIVA_CLIENT_ID: test
+          JOBDIVA_USERNAME: test
+          JOBDIVA_PASSWORD: test
+          UNIPILE_API_KEY: test
+          UNIPILE_ACCOUNT_ID: test
+          ENCRYPTION_KEY: test
+          DATABASE_URL: "sqlite://"
         run: |
           cd apps/api
-          PYTHONPATH=. pytest tests/test_voice_agent_webhook.py tests/test_candidates_hard_filter_extractor.py -q
+          PYTHONPATH=. pytest tests/test_voice_agent_webhook.py tests/test_candidates_hard_filter_extractor.py tests/test_jobagent_quick_first.py tests/test_search_stream_gender_patch.py -q
 
   # ----------------------
   # QA DEPLOYMENT
