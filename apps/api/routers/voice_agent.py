@@ -106,9 +106,8 @@ class TranscriptionItem(BaseModel):
     question: Optional[str] = None
     answer: Optional[str] = None
     candidate_score: Optional[float] = None
-    total_score: Optional[float] = 10.0
-    # PairBot sends "pending" when a hard-filter has an answer but no PASS/FAIL
-    # yet. Stored as-is; display code treats unrecognized values as non-pass.
+    total_score: Optional[float] = None
+    # PairBot may send "pending" or null before PASS/FAIL is finalized.
     hard_filter_status: Optional[str] = None
     reason: Optional[str] = None
     question_order: Optional[int] = None
@@ -124,29 +123,6 @@ class HardFilterResultItem(BaseModel):
     reason: Optional[str] = None
     question_order: Optional[int] = None
 
-def _dump_model(model: Any) -> Dict[str, Any]:
-    """Pydantic v1/v2 compatible dump for webhook persistence."""
-    if hasattr(model, "model_dump"):
-        try:
-            return model.model_dump(mode="json")
-        except TypeError:
-            return model.model_dump()
-    return model.dict()
-
-
-def effective_status_for_webhook(status: Optional[str], hard_filter_status: Optional[str] = None) -> str:
-    """Map PairBot webhook status to the PAIR engage_status we persist."""
-    if status != "completed":
-        return status or ""
-    hf_raw = (hard_filter_status or "").lower().strip()
-    hf_passed = hf_raw in ("passed", "pass", "", "not_hard_filter") or hard_filter_status is None
-    return "passed" if hf_passed else "failed"
-
-
-def should_persist_engage_scores(payload_status: Optional[str]) -> bool:
-    """Scores are written only for completed interviews, never for failed/in_progress."""
-    return (payload_status or "").lower() == "completed"
-
 
 class VoiceAgentInterviewWebhook(BaseModel):
     interview_id: str
@@ -159,6 +135,44 @@ class VoiceAgentInterviewWebhook(BaseModel):
     completed_at: Optional[str] = None
     transcriptions: Optional[List[TranscriptionItem]] = None
     hard_filter_results: Optional[List[HardFilterResultItem]] = None
+
+
+def _normalized_webhook_status(status: Optional[str]) -> str:
+    return (status or "").strip().lower()
+
+
+def effective_status_for_webhook(status: str, hard_filter_status: Optional[str] = None) -> str:
+    """Map PairBot webhook status to the PAIR engage_status we persist."""
+    norm = _normalized_webhook_status(status)
+    if norm != "completed":
+        return norm
+    hf_raw = (hard_filter_status or "").lower().strip()
+    hf_passed = hf_raw in ("passed", "pass", "", "not_hard_filter")
+    return "passed" if hf_passed else "failed"
+
+
+def should_persist_engage_scores(payload_status: str) -> bool:
+    """Scores are written only for completed interviews, never for failed/in_progress."""
+    return _normalized_webhook_status(payload_status) == "completed"
+
+
+def _pending_hard_filter_count(payload: VoiceAgentInterviewWebhook) -> int:
+    """Rows with HF context but no definitive PASS/FAIL yet."""
+    pending = 0
+    for item in payload.hard_filter_results or []:
+        token = str(item.hard_filter_status or item.pass_fail or "").lower().strip()
+        if token == "not_hard_filter":
+            continue
+        if token not in ("passed", "pass", "failed", "fail"):
+            pending += 1
+    for row in payload.transcriptions or []:
+        token = str(row.hard_filter_status or "").lower().strip()
+        if token == "not_hard_filter":
+            continue
+        if token not in ("passed", "pass", "failed", "fail"):
+            pending += 1
+    return pending
+
 
 @router.post("/interviews/webhook")
 async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
@@ -176,10 +190,11 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 "hard_filter_status": payload.hard_filter_status,
                 "completed_at": payload.completed_at
             },
-            "transcriptions": [_dump_model(t) for t in payload.transcriptions] if payload.transcriptions else [],
-            "hard_filter_results": [_dump_model(h) for h in payload.hard_filter_results] if payload.hard_filter_results else []
+            "transcriptions": [t.model_dump(mode="json") for t in payload.transcriptions] if payload.transcriptions else [],
+            "hard_filter_results": [h.model_dump(mode="json") for h in payload.hard_filter_results] if payload.hard_filter_results else []
         }
 
+        status_norm = _normalized_webhook_status(payload.status)
         target_job_id = payload.jobdiva_id
         target_candidate_id = payload.candidate_id
         
@@ -208,7 +223,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 effective_status = effective_status_for_webhook(
                     payload.status, payload.hard_filter_status
                 )
-                if payload.status == 'completed':
+                if status_norm == "completed":
                     logger.info(
                         f"Webhook: interview {payload.interview_id} → {effective_status.upper()} "
                         f"(hf={payload.hard_filter_status or 'none'}, score={payload.candidate_score})"
@@ -223,7 +238,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                         updated_at = CURRENT_TIMESTAMP
                     WHERE interview_id = %s
                     """,
-                    (effective_status, json.dumps(_dump_model(payload)), str(payload.interview_id))
+                    (effective_status, json.dumps(payload.model_dump(mode="json")), str(payload.interview_id))
                 )
 
                 # 2. Update sourced_candidates.data
@@ -234,8 +249,9 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     "engage_interview_id": str(payload.interview_id),
                     "engage_last_response": detail_payload,
                 }
-                # Only write scores for completed interviews. Direct status=failed
-                # (if PairBot ever sends it) stays a status-only update.
+                pending_hf = _pending_hard_filter_count(payload)
+                if pending_hf:
+                    candidate_blob["engage_hard_filter_pending_count"] = pending_hf
                 if should_persist_engage_scores(payload.status):
                     if payload.total_score is not None:
                         candidate_blob["engage_total_score"] = payload.total_score
@@ -281,7 +297,10 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
         try:
             from routers.engagement import ENGAGE_PASSED_STATUSES
         except ImportError:
-            ENGAGE_PASSED_STATUSES = ["passed", "hired"]
+            logger.warning(
+                "ENGAGE_PASSED_STATUSES import failed; skipping passed-notification email"
+            )
+            ENGAGE_PASSED_STATUSES = []
             
         if check_status in [s.lower() for s in ENGAGE_PASSED_STATUSES] and payload.total_score is not None:
             if target_job_id and target_candidate_id:
