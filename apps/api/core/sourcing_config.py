@@ -145,6 +145,16 @@ FAST_PATH_DETAIL_BACKGROUND_PAGE_DELAY_S = 1.0
 JOBAGENT_RESUME_COUNT = 150
 JOBAGENT_MAX_RESUME_COUNT = 300
 
+# Quick-first tranche for the initial Step-5 search (offset 0 only).
+# Because latency scales with resumeCount, a small extra JobAgentSearch
+# call returns in seconds and paints the top-N rows (the agent response
+# carries their resume text inline) while the full-batch call is still in
+# flight. The full call re-returns those N ranks (JobAgent has no offset);
+# the shared seen_ids dedup keeps them from re-emitting or re-enriching.
+# 0 disables the quick phase. Skipped for headless runs (bypass_screening)
+# and "Search more" tranches (offset>0), where first paint doesn't matter.
+JOBAGENT_QUICK_FIRST_COUNT = 20
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # TalentSearch pagination

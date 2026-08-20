@@ -11,15 +11,6 @@ saved Step-5 drafts and non-wizard callers still send bare "JobDiva", and
 that must keep meaning "run both pools" — the alternative (treating it as
 neither) would silently stop sourcing for every existing job.
 """
-import os
-
-for _k in (
-    "OPENAI_API_KEY", "JOBDIVA_CLIENT_ID", "JOBDIVA_USERNAME", "JOBDIVA_PASSWORD",
-    "UNIPILE_API_KEY", "UNIPILE_ACCOUNT_ID", "ENCRYPTION_KEY",
-):
-    os.environ.setdefault(_k, "test")
-os.environ.setdefault("DATABASE_URL", "sqlite://")
-
 from services.unified_candidate_search import resolve_jobdiva_sources  # noqa: E402
 
 

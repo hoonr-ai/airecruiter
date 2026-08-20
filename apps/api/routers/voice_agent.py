@@ -15,6 +15,12 @@ from datetime import datetime, timezone
 import logging
 logger = logging.getLogger(__name__)
 
+from routers.engagement import (
+    ENGAGE_PASSED_STATUSES,
+    _check_and_fire_candidate_passed_notification,
+)
+from routers.hard_filter_utils import count_pending_hard_filters
+
 router = APIRouter(tags=["Voice Agent Integration"])
 
 # Questions stored verbatim often begin with "You ..." (declarative). When
@@ -101,11 +107,14 @@ async def get_voice_job_context(job_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 class TranscriptionItem(BaseModel):
-    question: str
-    answer: str
-    candidate_score: float
-    total_score: float = 10.0
-    hard_filter_status: str  # "passed", "failed", or "not_hard_filter"
+    # All per-row fields are optional so a malformed/partial transcription
+    # cannot 422 the whole interview webhook (PAI-154).
+    question: Optional[str] = None
+    answer: Optional[str] = None
+    candidate_score: Optional[float] = None
+    total_score: Optional[float] = None
+    # PairBot sends "pending" on in-flight HF rows; null/empty is not an HF marker.
+    hard_filter_status: Optional[str] = None
     reason: Optional[str] = None
     question_order: Optional[int] = None
 
@@ -120,6 +129,7 @@ class HardFilterResultItem(BaseModel):
     reason: Optional[str] = None
     question_order: Optional[int] = None
 
+
 class VoiceAgentInterviewWebhook(BaseModel):
     interview_id: str
     status: str
@@ -131,6 +141,38 @@ class VoiceAgentInterviewWebhook(BaseModel):
     completed_at: Optional[str] = None
     transcriptions: Optional[List[TranscriptionItem]] = None
     hard_filter_results: Optional[List[HardFilterResultItem]] = None
+
+
+def _normalized_webhook_status(status: Optional[str]) -> str:
+    return (status or "").strip().lower()
+
+
+def effective_status_for_webhook(
+    status: str,
+    hard_filter_status: Optional[str] = None,
+    *,
+    has_pending_hf: bool = False,
+) -> str:
+    """Map PairBot webhook status to the PAIR engage_status we persist."""
+    norm = _normalized_webhook_status(status)
+    if norm != "completed":
+        return norm
+    hf_raw = (hard_filter_status or "").lower().strip()
+    if hf_raw in ("pending", "in_progress", "awaiting") or has_pending_hf:
+        return "in_progress"
+    if hf_raw in ("passed", "pass", "", "not_hard_filter"):
+        return "passed"
+    if hf_raw in ("failed", "fail"):
+        return "failed"
+    return "failed"
+
+
+def should_persist_engage_scores(payload_status: str, effective_status: str) -> bool:
+    """Scores are written only for terminal completed outcomes (passed/failed)."""
+    if _normalized_webhook_status(payload_status) != "completed":
+        return False
+    return effective_status.lower() in ("passed", "failed")
+
 
 @router.post("/interviews/webhook")
 async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
@@ -148,10 +190,11 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 "hard_filter_status": payload.hard_filter_status,
                 "completed_at": payload.completed_at
             },
-            "transcriptions": [t.dict() for t in payload.transcriptions] if payload.transcriptions else [],
-            "hard_filter_results": [h.dict() for h in payload.hard_filter_results] if payload.hard_filter_results else []
+            "transcriptions": [t.model_dump(mode="json") for t in payload.transcriptions] if payload.transcriptions else [],
+            "hard_filter_results": [h.model_dump(mode="json") for h in payload.hard_filter_results] if payload.hard_filter_results else []
         }
 
+        status_norm = _normalized_webhook_status(payload.status)
         target_job_id = payload.jobdiva_id
         target_candidate_id = payload.candidate_id
         
@@ -177,25 +220,19 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                 # Pair Bot sends 'completed' when all questions are answered.
                 # Curate decides the final pass/fail from that completed result.
                 # For in_progress: no evaluation yet — just track the status.
-                effective_status = payload.status
-                if payload.status == 'completed':
-                    hf_raw = (payload.hard_filter_status or '').lower().strip()
-                    # No hard filter (None / empty / 'not_hard_filter') = automatically passed
-                    hf_passed = hf_raw in ('passed', 'pass', '', 'not_hard_filter') or payload.hard_filter_status is None
-
-                    if hf_passed:
-                        effective_status = 'passed'
-                        logger.info(
-                            f"Webhook: interview {payload.interview_id} → PASSED "
-                            f"(hf={hf_raw or 'none'}, score={payload.candidate_score})"
-                        )
-                    else:
-                        effective_status = 'failed'
-                        logger.info(
-                            f"Webhook: interview {payload.interview_id} → FAILED "
-                            f"(hf={hf_raw or 'none'}, hf_passed={hf_passed}, "
-                            f"score={payload.candidate_score})"
-                        )
+                pending_hf = count_pending_hard_filters(
+                    payload.hard_filter_results, payload.transcriptions
+                )
+                effective_status = effective_status_for_webhook(
+                    payload.status,
+                    payload.hard_filter_status,
+                    has_pending_hf=pending_hf > 0,
+                )
+                if status_norm == "completed":
+                    logger.info(
+                        f"Webhook: interview {payload.interview_id} → {effective_status.upper()} "
+                        f"(hf={payload.hard_filter_status or 'none'}, score={payload.candidate_score})"
+                    )
 
                 # 1. Update engage_interview_audit (matching interview_id)
                 cur.execute(
@@ -206,7 +243,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                         updated_at = CURRENT_TIMESTAMP
                     WHERE interview_id = %s
                     """,
-                    (effective_status, json.dumps(payload.dict()), str(payload.interview_id))
+                    (effective_status, json.dumps(payload.model_dump(mode="json")), str(payload.interview_id))
                 )
 
                 # 2. Update sourced_candidates.data
@@ -217,10 +254,9 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
                     "engage_interview_id": str(payload.interview_id),
                     "engage_last_response": detail_payload,
                 }
-                # Only write scores + outcome fields for completed interviews.
-                # For in_progress, we just track the status — scores arrive with
-                # the final completed webhook once all questions are answered.
-                if payload.status == 'completed':
+                if pending_hf:
+                    candidate_blob["engage_hard_filter_pending_count"] = pending_hf
+                if should_persist_engage_scores(payload.status, effective_status):
                     if payload.total_score is not None:
                         candidate_blob["engage_total_score"] = payload.total_score
                     if payload.candidate_score is not None:
@@ -258,32 +294,21 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
             conn.commit()
 
         # Check for pass condition and fire email if needed.
-        # Use the effective_status already resolved above (passed/failed/in_progress).
         check_status = effective_status.lower()
-        
-        # Safe import of ENGAGE_PASSED_STATUSES
-        try:
-            from routers.engagement import ENGAGE_PASSED_STATUSES
-        except ImportError:
-            ENGAGE_PASSED_STATUSES = ["passed", "hired"]
-            
-        if check_status in [s.lower() for s in ENGAGE_PASSED_STATUSES] and payload.total_score is not None:
+        if (
+            check_status in [s.lower() for s in ENGAGE_PASSED_STATUSES]
+            and payload.total_score is not None
+        ):
             if target_job_id and target_candidate_id:
-                try:
-                    from routers.engagement import _check_and_fire_candidate_passed_notification
-                    # interview_id should be parsed to int if it's digit
-                    int_id = int(payload.interview_id) if str(payload.interview_id).isdigit() else payload.interview_id
-                    asyncio.create_task(
-                        _check_and_fire_candidate_passed_notification(
-                            interview_id=int_id,
-                            detail_payload=detail_payload,
-                            job_id=target_job_id,
-                            candidate_id=target_candidate_id,
-                        )
+                int_id = int(payload.interview_id) if str(payload.interview_id).isdigit() else payload.interview_id
+                asyncio.create_task(
+                    _check_and_fire_candidate_passed_notification(
+                        interview_id=int_id,
+                        detail_payload=detail_payload,
+                        job_id=target_job_id,
+                        candidate_id=target_candidate_id,
                     )
-                except (ImportError, AttributeError):
-                    import logging
-                    logging.getLogger(__name__).warning("Candidate passed but _check_and_fire_candidate_passed_notification is not available in engagement.py. Skipping email.")
+                )
             
         return {"success": True, "message": "Interview results processed successfully"}
 

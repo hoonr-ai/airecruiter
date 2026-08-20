@@ -1257,26 +1257,76 @@ class UnifiedCandidateSearch:
 
                 async def _run_jobagent_pool():
                     from core import sourcing_config as _sc_pool
-                    self._log_stage("JobDiva", "Running JobDiva JobAgent search...")
-                    jobagent_res = await self._search_jobdiva_talent(criteria)
-                    if jobagent_res.get("jobdiva_criteria_unconfigured"):
-                        summary["jobdiva_criteria_unconfigured"] = True
-                    for _c in jobagent_res.get("candidates") or []:
-                        _jc = str(_c.get("candidate_id") or _c.get("id") or "")
-                        if _jc:
-                            jobagent_matched_ids.add(_jc)
-                    await _process_talent_pool(
-                        jobagent_res,
-                        stage_name="JobDiva",
-                        source_label="JobDiva-JobAgent",
-                        cap_label="JobAgent rank",
-                        # Recruiter-authored criteria in JobDiva + its own
-                        # ranking → trust the results: high-level score only
-                        # (no per-candidate LLM skills-match), never dropped.
-                        high_level_scoring=bool(
-                            getattr(_sc_pool, "JOBAGENT_HIGH_LEVEL_SCORING", True)
-                        ),
+
+                    async def _consume_jobagent(jobagent_res: Dict[str, Any]) -> None:
+                        if jobagent_res.get("jobdiva_criteria_unconfigured"):
+                            summary["jobdiva_criteria_unconfigured"] = True
+                        for _c in jobagent_res.get("candidates") or []:
+                            _jc = str(_c.get("candidate_id") or _c.get("id") or "")
+                            if _jc:
+                                jobagent_matched_ids.add(_jc)
+                        await _process_talent_pool(
+                            jobagent_res,
+                            stage_name="JobDiva",
+                            source_label="JobDiva-JobAgent",
+                            cap_label="JobAgent rank",
+                            # Recruiter-authored criteria in JobDiva + its own
+                            # ranking → trust the results: high-level score only
+                            # (no per-candidate LLM skills-match), never dropped.
+                            high_level_scoring=bool(
+                                getattr(_sc_pool, "JOBAGENT_HIGH_LEVEL_SCORING", True)
+                            ),
+                        )
+
+                    # Two-phase fetch: JobAgentSearch latency scales with
+                    # resumeCount, so a small quick call paints the top-N rows
+                    # (resume text rides in the agent response) in seconds
+                    # while the full tranche is still in flight. The full call
+                    # re-returns those ranks; seen_ids dedup in
+                    # emit_jobdiva_agent_result keeps the overlap from
+                    # re-emitting or re-enriching. Initial search only —
+                    # "Search more" tranches (offset>0) and headless runs
+                    # (bypass_screening) go straight to the full call.
+                    _quick_n = max(
+                        0, int(getattr(_sc_pool, "JOBAGENT_QUICK_FIRST_COUNT", 0) or 0)
                     )
+                    _offset = max(0, int(getattr(criteria, "jobdiva_offset", 0) or 0))
+                    _batch = max(1, int(getattr(criteria, "jobdiva_batch_size", 150) or 150))
+                    two_phase = (
+                        _quick_n > 0
+                        and _offset == 0
+                        and _batch > _quick_n
+                        and not getattr(criteria, "bypass_screening", False)
+                    )
+                    if not two_phase:
+                        self._log_stage("JobDiva", "Running JobDiva JobAgent search...")
+                        await _consume_jobagent(await self._search_jobdiva_talent(criteria))
+                        return
+
+                    self._log_stage(
+                        "JobDiva",
+                        f"Running JobDiva JobAgent search (two-phase: quick {_quick_n} "
+                        f"+ full {_batch})...",
+                    )
+
+                    async def _quick_phase():
+                        try:
+                            res = await self._search_jobdiva_talent(
+                                criteria, resume_count_override=_quick_n
+                            )
+                            await _consume_jobagent(res)
+                        except Exception as e:
+                            # Quick phase is purely a first-paint accelerator —
+                            # the full phase covers its ranks, so never let it
+                            # fail the pool.
+                            logger.warning(
+                                f"JobAgent quick-first phase failed (full phase still covers it): {e}"
+                            )
+
+                    async def _full_phase():
+                        await _consume_jobagent(await self._search_jobdiva_talent(criteria))
+
+                    await asyncio.gather(_quick_phase(), _full_phase())
 
                 async def _run_talent_search_pool():
                     from core import sourcing_config as _sc_pool
@@ -2096,13 +2146,22 @@ class UnifiedCandidateSearch:
                 pass
 
 
-    async def _search_jobdiva_talent(self, criteria: SearchCriteria) -> Dict[str, Any]:
+    async def _search_jobdiva_talent(
+        self,
+        criteria: SearchCriteria,
+        resume_count_override: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """JobDiva talent-pool sourcing via JobAgentSearch.
 
         JobAgentSearch (JobDiva's AI matcher) is anchored to the job's JobDiva
         ID and returns a per-job ranked candidate set. We then apply a
         client-side state filter to backstop the geo precision JobDiva does
         not give us.
+
+        ``resume_count_override``: request exactly this many resumes instead
+        of the offset+batch tranche math — the quick-first phase uses a small
+        value here so JobAgentSearch returns in seconds (latency scales with
+        resumeCount).
 
         Surfaces `criteria_unconfigured: True` in the return when JobAgent
         responded with "Criteria Not Assigned" — frontend uses this to nudge
@@ -2124,7 +2183,10 @@ class UnifiedCandidateSearch:
                     batch_size,
                     int(getattr(_sc_rc, "JOBAGENT_MAX_RESUME_COUNT", _sc_rc.JOBAGENT_RESUME_COUNT) or batch_size),
                 )
-                resume_count = min(max_resume_count, offset + batch_size)
+                if resume_count_override:
+                    resume_count = min(max_resume_count, max(1, int(resume_count_override)))
+                else:
+                    resume_count = min(max_resume_count, offset + batch_size)
                 # Wall-clock as the orchestrator sees it. Comparing this to the
                 # service's "JobAgent TIMING total_ms" reveals event-loop
                 # contention: if this is much larger, the coroutine was starved
@@ -2152,13 +2214,16 @@ class UnifiedCandidateSearch:
                     f"raw={len(candidates)} offset={offset} batch={batch_size} "
                     f"criteria_unconfigured={criteria_unconfigured}"
                 )
-                if offset:
+                if resume_count_override:
+                    candidates = candidates[: max(1, int(resume_count_override))]
+                elif offset:
                     candidates = candidates[offset : offset + batch_size]
                 else:
                     candidates = candidates[:batch_size]
                 self._log_stage(
                     "TalentSearch",
-                    f"JobAgent tranche offset={offset} batch={batch_size} kept={len(candidates)}"
+                    f"JobAgent tranche offset={offset} batch={batch_size} "
+                    f"override={resume_count_override or 0} kept={len(candidates)}"
                 )
 
             if not candidates:

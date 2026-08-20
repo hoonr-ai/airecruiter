@@ -554,7 +554,8 @@ export default function CandidateEvaluationReportPage() {
                   let hardFilterItems: any[] = (scores.engage_hard_filter_details || []).map((d: any) => ({
                     question: d.question,
                     answer: d.answer,
-                    hard_filter_status: d.status === 'Pass' ? 'passed' : 'failed',
+                    hard_filter_status:
+                      d.status === 'Pass' ? 'passed' : d.status === 'Fail' ? 'failed' : 'pending',
                     reason: d.reason,
                   }));
 
@@ -572,16 +573,25 @@ export default function CandidateEvaluationReportPage() {
                   }
 
                   if (hardFilterItems.length === 0) {
-                    hardFilterItems = transcriptions.filter((t: any) => 
-                      t.hard_filter_status === 'passed' || t.hard_filter_status === 'failed'
-                    );
+                    const hfTokens = new Set(['passed', 'pass', 'failed', 'fail', 'pending', 'in_progress', 'awaiting']);
+                    hardFilterItems = transcriptions.filter((t: any) => {
+                      const s = String(t.hard_filter_status ?? '').toLowerCase().trim();
+                      if (s === 'not_hard_filter') return false;
+                      return hfTokens.has(s);
+                    });
                   }
 
                   if (hardFilterItems.length > 0) {
                     return hardFilterItems.map((item: any, i: number) => {
                       const q_text = item.question || item.question_text || "Question";
                       const a_text = item.answer || item.answer_text;
-                      const hf_status = item.hard_filter_status;
+                      const hf_raw = String(item.hard_filter_status ?? '').toLowerCase().trim();
+                      const hf_label =
+                        hf_raw === 'passed' || hf_raw === 'pass'
+                          ? 'Pass'
+                          : hf_raw === 'failed' || hf_raw === 'fail'
+                            ? 'Fail'
+                            : 'Pending';
                       const reason = item.reason;
 
                       return (
@@ -593,8 +603,8 @@ export default function CandidateEvaluationReportPage() {
                             </div>
                             <div className="flex flex-col items-end gap-2 shrink-0">
                               <StatusPill 
-                                status={hf_status === 'passed' ? 'Pass' : 'Fail'} 
-                                type={hf_status === 'passed' ? 'success' : 'danger'} 
+                                status={hf_label} 
+                                type={hf_label === 'Pass' ? 'success' : hf_label === 'Fail' ? 'danger' : 'neutral'} 
                               />
                             </div>
                           </div>
