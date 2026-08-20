@@ -1,6 +1,10 @@
 name: Deploy Pair Application
 
 on:
+  pull_request:
+    branches:
+      - develop
+      - main
   push:
     branches:
       - develop
@@ -10,6 +14,9 @@ jobs:
 
   test-api:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -18,32 +25,28 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements.txt
+            apps/api/requirements-dev.txt
 
       - name: Install dependencies
         run: |
-          pip install -r apps/api/requirements.txt pytest
+          pip install -r apps/api/requirements.txt -r apps/api/requirements-dev.txt
 
-      - name: Run API tests (webhook + hard-filter readers, quick-first sourcing)
-        # Stub env: config fails closed on missing vars at import, so an
-        # env-less pytest aborts at collection (this is what broke this job
-        # on develop). Values are fakes — these tests never call out.
-        env:
-          OPENAI_API_KEY: test
-          JOBDIVA_CLIENT_ID: test
-          JOBDIVA_USERNAME: test
-          JOBDIVA_PASSWORD: test
-          UNIPILE_API_KEY: test
-          UNIPILE_ACCOUNT_ID: test
-          ENCRYPTION_KEY: test
-          DATABASE_URL: "sqlite://"
+      - name: Run API tests
+        # Env stubs live in apps/api/tests/conftest.py (single source of truth).
+        # test_jobdiva_talent_payload.py has 9 pre-existing failures on develop
+        # (mock signature drift) — tracked separately from this PR.
         run: |
           cd apps/api
-          PYTHONPATH=. pytest tests/test_voice_agent_webhook.py tests/test_candidates_hard_filter_extractor.py tests/test_jobagent_quick_first.py tests/test_search_stream_gender_patch.py -q
+          pytest -q --ignore=tests/test_jobdiva_talent_payload.py
 
   # ----------------------
   # QA DEPLOYMENT
   # ----------------------
   deploy-qa:
+    needs: test-api
     if: github.ref_name == 'develop'
     runs-on: ubuntu-latest
 
@@ -90,6 +93,7 @@ jobs:
   # PRODUCTION DEPLOYMENT
   # ----------------------
   deploy-prod:
+    needs: test-api
     if: github.ref_name == 'main'
     #if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest

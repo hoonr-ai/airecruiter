@@ -14,14 +14,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-os.environ.setdefault("OPENAI_API_KEY", "sk-test")
-os.environ.setdefault("JOBDIVA_CLIENT_ID", "x")
-os.environ.setdefault("JOBDIVA_USERNAME", "x")
-os.environ.setdefault("JOBDIVA_PASSWORD", "x")
-os.environ.setdefault("UNIPILE_API_KEY", "x")
-os.environ.setdefault("UNIPILE_ACCOUNT_ID", "x")
-os.environ.setdefault("DATABASE_URL", "postgresql://stub")
-os.environ.setdefault("ENCRYPTION_KEY", "x")
+from tests.env_stubs import stub_required_env
+
+stub_required_env()
 os.environ.setdefault("REDIS_URL", "")
 
 

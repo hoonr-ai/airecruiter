@@ -554,7 +554,8 @@ export default function CandidateEvaluationReportPage() {
                   let hardFilterItems: any[] = (scores.engage_hard_filter_details || []).map((d: any) => ({
                     question: d.question,
                     answer: d.answer,
-                    hard_filter_status: d.status === 'Pass' ? 'passed' : 'failed',
+                    hard_filter_status:
+                      d.status === 'Pass' ? 'passed' : d.status === 'Fail' ? 'failed' : 'pending',
                     reason: d.reason,
                   }));
 
@@ -572,10 +573,11 @@ export default function CandidateEvaluationReportPage() {
                   }
 
                   if (hardFilterItems.length === 0) {
+                    const hfTokens = new Set(['passed', 'pass', 'failed', 'fail', 'pending', 'in_progress', 'awaiting']);
                     hardFilterItems = transcriptions.filter((t: any) => {
                       const s = String(t.hard_filter_status ?? '').toLowerCase().trim();
                       if (s === 'not_hard_filter') return false;
-                      return ['passed', 'failed', 'pass', 'fail', 'pending'].includes(s) || !t.hard_filter_status;
+                      return hfTokens.has(s);
                     });
                   }
 

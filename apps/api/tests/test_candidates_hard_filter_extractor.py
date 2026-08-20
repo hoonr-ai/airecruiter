@@ -117,3 +117,27 @@ def test_extract_rankings_hard_filter_details_pending_status():
     result = _extract_rankings_hard_filter_details(data_blob, {}, {})
     assert len(result) == 1
     assert result[0]["status"] == "Pending"
+
+
+def test_fallback_to_webhook_transcriptions_when_audit_lacks_hf():
+    """Real HF rows in webhook blob must win when audit only has ordinary questions."""
+    audit_response = {
+        "transcriptions": [
+            {"question": "Describe leadership", "candidate_score": 8.0},
+            {"question": "Why this role?", "candidate_score": 7.0},
+        ]
+    }
+    data_blob = {
+        "engage_last_response": {
+            "data": {
+                "transcriptions": [
+                    {"question": "Are you authorized to work?", "hard_filter_status": "passed"},
+                    {"question": "Need sponsorship?", "hard_filter_status": "failed"},
+                ]
+            }
+        }
+    }
+    rows = _extract_rankings_hard_filter_details(data_blob, audit_response, {})
+    assert len(rows) == 2
+    assert rows[0]["status"] == "Pass"
+    assert rows[1]["status"] == "Fail"

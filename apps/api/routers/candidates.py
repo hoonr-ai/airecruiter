@@ -68,16 +68,7 @@ def _json_load_safe(value: Any, default: Any):
     return default
 
 
-def _hard_filter_row_display(raw: Optional[str]) -> Optional[str]:
-    """Map webhook HF token to Pass/Fail/Pending, or None if not a hard-filter row."""
-    token = str(raw or "").lower().strip()
-    if token in {"not_hard_filter"}:
-        return None
-    if token in {"passed", "pass"}:
-        return "Pass"
-    if token in {"failed", "fail"}:
-        return "Fail"
-    return "Pending"
+from routers.hard_filter_utils import hard_filter_row_display as _hard_filter_row_display
 
 
 def _format_engage_status(engage_status: Optional[str], engage_score: Optional[float], hf_display: str) -> str:

@@ -18,14 +18,6 @@ the AI inference stubbed, and pin:
 """
 import asyncio
 import json
-import os
-
-for _k in (
-    "OPENAI_API_KEY", "JOBDIVA_CLIENT_ID", "JOBDIVA_USERNAME", "JOBDIVA_PASSWORD",
-    "UNIPILE_API_KEY", "UNIPILE_ACCOUNT_ID", "ENCRYPTION_KEY",
-):
-    os.environ.setdefault(_k, "test")
-os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 import routers.candidates as rc  # noqa: E402
 from core.auth import UserIdentity  # noqa: E402
