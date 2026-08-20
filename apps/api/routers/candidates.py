@@ -139,6 +139,23 @@ def _bucket_candidate_status(
     }.get(label, "pending")
 
 
+def _match_submitted_id(submitted_ids: Dict[str, Any], *candidate_ids: Any) -> Optional[str]:
+    """Return the jobdiva_submittals key matching any of the given ids.
+
+    Rank-list rows are matched to JobDiva submittal records by JobDiva
+    candidate id: JobDiva-sourced rows carry it as their own candidate_id,
+    external rows (LinkedIn etc.) get data.jobdiva_candidate_id stamped at
+    launch provisioning. Empty/blank ids never match.
+    """
+    if not submitted_ids:
+        return None
+    for raw in candidate_ids:
+        key = str(raw or "").strip()
+        if key and key in submitted_ids:
+            return key
+    return None
+
+
 def _extract_rankings_hard_filter_details(
     data_blob: Dict[str, Any],
     audit_response: Any,
@@ -1265,6 +1282,32 @@ async def get_job_candidates(
 
                 candidates = cur.fetchall()
 
+                # JobDiva submittal records for this job, mirrored from BI
+                # JobSubmittalsDetail into jobdiva_submittals by the 15-min
+                # auto-sync. Map of JobDiva candidate id → latest submit date;
+                # used to flag rows and to count the submitted /
+                # completed-but-not-submitted header chips.
+                submitted_ids: Dict[str, Any] = {}
+                try:
+                    cur.execute(
+                        """
+                        SELECT candidate_id, MAX(submit_date) AS last_submit_date
+                        FROM jobdiva_submittals
+                        WHERE (job_id = %s OR jobdiva_ref = %s)
+                          AND COALESCE(candidate_id, '') <> ''
+                        GROUP BY candidate_id
+                        """,
+                        (str(resolved_numeric_job_id), str(resolved_jobdiva_id)),
+                    )
+                    for js_row in cur.fetchall():
+                        submitted_ids[str(js_row["candidate_id"]).strip()] = js_row.get("last_submit_date")
+                except Exception as sub_err:
+                    # Fail-open: rows just render as not-submitted. This aborts
+                    # the transaction, so the status_counts query below will
+                    # also degrade to None via its own except.
+                    logger.warning(f"jobdiva_submittals lookup failed for job {job_id_or_ref}: {sub_err}")
+                    submitted_ids = {}
+
                 # Interview-progress counts across ALL of the job's candidates.
                 # The rank list is infinite-scrolled, so the client can't derive
                 # these until every page is loaded — compute them here, on the
@@ -1292,7 +1335,8 @@ async def get_job_candidates(
                                     data->>'engage_interview_id' AS data_interview_id,
                                     data->>'engage_score' AS raw_engage_score,
                                     data->>'engage_candidate_score' AS raw_engage_candidate_score,
-                                    data->>'engage_hard_filter_status' AS raw_hard_filter_status
+                                    data->>'engage_hard_filter_status' AS raw_hard_filter_status,
+                                    data->>'jobdiva_candidate_id' AS jobdiva_candidate_id
                                 FROM sourced_candidates
                                 WHERE (jobdiva_id = %s OR jobdiva_id = %s)
                                   AND (email IS NULL OR email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!')
@@ -1316,6 +1360,8 @@ async def get_job_candidates(
                                 ORDER BY candidate_id, created_at DESC, id DESC
                             )
                             SELECT
+                                sc.candidate_id,
+                                sc.jobdiva_candidate_id,
                                 sc.raw_engage_status,
                                 sc.data_interview_id,
                                 sc.raw_engage_score,
@@ -1345,6 +1391,8 @@ async def get_job_candidates(
                             "in_progress": 0,
                             "pending": 0,
                             "not_launched": 0,
+                            "submitted": 0,
+                            "completed_not_submitted": 0,
                         }
                         for row in cur.fetchall():
                             bucket = _bucket_candidate_status(
@@ -1360,6 +1408,15 @@ async def get_job_candidates(
                             status_counts["total"] += 1
                             if bucket != "not_launched":
                                 status_counts["launched"] += 1
+                            is_submitted = _match_submitted_id(
+                                submitted_ids,
+                                row.get("candidate_id"),
+                                row.get("jobdiva_candidate_id"),
+                            ) is not None
+                            if is_submitted:
+                                status_counts["submitted"] += 1
+                            if bucket in ("pass", "fail") and not is_submitted:
+                                status_counts["completed_not_submitted"] += 1
                         status_counts["completed"] = status_counts["pass"] + status_counts["fail"]
                     except Exception as count_err:
                         # Counts are decoration on the rank list — never fail the
@@ -1420,6 +1477,20 @@ async def get_job_candidates(
 
             if not cand.get("engage_created_at") and cand.get("audit_created_at"):
                 cand["engage_created_at"] = cand.get("audit_created_at")
+
+            # JobDiva submittal flag — matched by JobDiva candidate id: the
+            # row's own id (JobDiva-sourced rows) or the id stamped at launch
+            # provisioning (external rows). Freshness = last auto-sync (≤15m).
+            matched_submit_key = _match_submitted_id(
+                submitted_ids,
+                cand.get("candidate_id"),
+                cand.get("jobdiva_candidate_id")
+                or (data_blob.get("jobdiva_candidate_id") if isinstance(data_blob, dict) else None),
+            )
+            cand["jobdiva_submitted"] = matched_submit_key is not None
+            cand["jobdiva_submit_date"] = (
+                submitted_ids.get(matched_submit_key) if matched_submit_key else None
+            )
 
             is_boolean_job = job_screening_level == "l0.5"
 

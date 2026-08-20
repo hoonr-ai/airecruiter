@@ -1,4 +1,4 @@
-from routers.candidates import _bucket_candidate_status
+from routers.candidates import _bucket_candidate_status, _match_submitted_id
 
 
 def _bucket(
@@ -72,3 +72,22 @@ def test_failed_needs_a_score_to_count_as_fail():
     )
     # Garbage score text must not crash — treated as missing.
     assert _bucket(data_interview_id="1", raw_engage_status="failed", raw_engage_score="n/a") == "pending"
+
+
+def test_match_submitted_id_by_own_or_provisioned_id():
+    submitted = {"111": None, "222": None}
+    # JobDiva-sourced row: its own candidate_id is the JobDiva id.
+    assert _match_submitted_id(submitted, "111", None) == "111"
+    # External row: matched via the provisioned jobdiva_candidate_id.
+    assert _match_submitted_id(submitted, "linkedin-abc", "222") == "222"
+    # Whitespace / int-typed ids still match.
+    assert _match_submitted_id(submitted, " 111 ", None) == "111"
+    assert _match_submitted_id(submitted, 111, None) == "111"
+    assert _match_submitted_id(submitted, "999", "888") is None
+
+
+def test_match_submitted_id_never_matches_blank():
+    # Blank ids must not match anything, and an empty map matches nothing.
+    assert _match_submitted_id({"111": None}, "", None) is None
+    assert _match_submitted_id({"111": None}, None, "   ") is None
+    assert _match_submitted_id({}, "111", "111") is None
