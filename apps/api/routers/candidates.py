@@ -94,6 +94,51 @@ def _is_engage_done(engage_status: Optional[str], engage_score: Optional[float],
     return s in ["passed", "completed", "hired", "pass", "failed", "rejected", "fail"] and (is_boolean_job or engage_score is not None)
 
 
+def _coerce_score(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bucket_candidate_status(
+    raw_engage_status: Optional[str],
+    audit_status: Optional[str],
+    data_interview_id: Optional[str],
+    audit_interview_id: Optional[str],
+    raw_engage_score: Any,
+    raw_engage_candidate_score: Any,
+    raw_hard_filter_status: Optional[str],
+) -> str:
+    """Bucket one deduped candidate row for the rank-list header counters.
+
+    Must stay in lockstep with the per-row payload logic in get_job_candidates
+    (data blob wins over audit fallback, _format_engage_status display rules)
+    and the frontend's N/A rule (no interview id anywhere = never launched),
+    or the header chips will disagree with the table labels.
+
+    Returns one of: not_launched | pending | in_progress | pass | fail.
+    """
+    interview_id = str(data_interview_id or "").strip() or str(audit_interview_id or "").strip()
+    if not interview_id:
+        return "not_launched"
+
+    score = _coerce_score(raw_engage_score)
+    if score is None:
+        score = _coerce_score(raw_engage_candidate_score)
+
+    status = raw_engage_status or audit_status
+    hf_display = str(raw_hard_filter_status or "").lower()
+    label = _format_engage_status(status, score, hf_display)
+    return {
+        "Pass": "pass",
+        "Fail": "fail",
+        "In Progress": "in_progress",
+    }.get(label, "pending")
+
+
 def _extract_rankings_hard_filter_details(
     data_blob: Dict[str, Any],
     audit_response: Any,
@@ -1219,6 +1264,110 @@ async def get_job_candidates(
                 )
 
                 candidates = cur.fetchall()
+
+                # Interview-progress counts across ALL of the job's candidates.
+                # The rank list is infinite-scrolled, so the client can't derive
+                # these until every page is loaded — compute them here, on the
+                # first page only (they don't change while scrolling). Uses the
+                # same dedup + latest-audit fallback as the row payload so the
+                # header chips always agree with the table's status labels.
+                status_counts = None
+                if offset == 0 or limit is None:
+                    try:
+                        cur.execute(
+                            """
+                            WITH latest_audit AS (
+                                SELECT DISTINCT ON (candidate_id)
+                                    candidate_id,
+                                    status,
+                                    interview_id
+                                FROM engage_interview_audit
+                                WHERE (jobdiva_id = %s OR jobdiva_id = %s)
+                                ORDER BY candidate_id, id DESC
+                            ),
+                            deduped_candidates AS (
+                                SELECT DISTINCT ON (candidate_id)
+                                    candidate_id,
+                                    data->>'engage_status' AS raw_engage_status,
+                                    data->>'engage_interview_id' AS data_interview_id,
+                                    data->>'engage_score' AS raw_engage_score,
+                                    data->>'engage_candidate_score' AS raw_engage_candidate_score,
+                                    data->>'engage_hard_filter_status' AS raw_hard_filter_status
+                                FROM sourced_candidates
+                                WHERE (jobdiva_id = %s OR jobdiva_id = %s)
+                                  AND (email IS NULL OR email NOT ILIKE 'Auto!_%%@jobdiva.com' ESCAPE '!')
+                                  AND NOT (
+                                      email ILIKE '%%jobdiva.local%%'
+                                      AND REGEXP_REPLACE(COALESCE(phone, ''), '\\D', '', 'g') = ''
+                                  )
+                                  AND NOT (
+                                      email ILIKE '%%jobdiva.local%%'
+                                      AND REGEXP_REPLACE(SPLIT_PART(COALESCE(email, ''), '@', 1), '\\D', '', 'g') <> ''
+                                      AND EXISTS (
+                                          SELECT 1 FROM sourced_candidates sc2
+                                          WHERE (sc2.jobdiva_id = %s OR sc2.jobdiva_id = %s)
+                                            AND sc2.candidate_id != sourced_candidates.candidate_id
+                                            AND sc2.email NOT ILIKE '%%jobdiva.local%%'
+                                            AND REGEXP_REPLACE(COALESCE(sc2.phone, ''), '\\D', '', 'g') <> ''
+                                            AND REGEXP_REPLACE(COALESCE(sc2.phone, ''), '\\D', '', 'g')
+                                                = REGEXP_REPLACE(SPLIT_PART(COALESCE(sourced_candidates.email, ''), '@', 1), '\\D', '', 'g')
+                                      )
+                                  )
+                                ORDER BY candidate_id, created_at DESC, id DESC
+                            )
+                            SELECT
+                                sc.raw_engage_status,
+                                sc.data_interview_id,
+                                sc.raw_engage_score,
+                                sc.raw_engage_candidate_score,
+                                sc.raw_hard_filter_status,
+                                la.status AS audit_status,
+                                la.interview_id AS audit_interview_id
+                            FROM deduped_candidates sc
+                            LEFT JOIN latest_audit la
+                                ON la.candidate_id = sc.candidate_id
+                            """,
+                            (
+                                str(resolved_jobdiva_id),
+                                str(resolved_numeric_job_id),
+                                str(resolved_jobdiva_id),
+                                str(resolved_numeric_job_id),
+                                str(resolved_jobdiva_id),
+                                str(resolved_numeric_job_id),
+                            ),
+                        )
+                        status_counts = {
+                            "total": 0,
+                            "launched": 0,
+                            "completed": 0,
+                            "pass": 0,
+                            "fail": 0,
+                            "in_progress": 0,
+                            "pending": 0,
+                            "not_launched": 0,
+                        }
+                        for row in cur.fetchall():
+                            bucket = _bucket_candidate_status(
+                                row.get("raw_engage_status"),
+                                row.get("audit_status"),
+                                row.get("data_interview_id"),
+                                row.get("audit_interview_id"),
+                                row.get("raw_engage_score"),
+                                row.get("raw_engage_candidate_score"),
+                                row.get("raw_hard_filter_status"),
+                            )
+                            status_counts[bucket] += 1
+                            status_counts["total"] += 1
+                            if bucket != "not_launched":
+                                status_counts["launched"] += 1
+                        status_counts["completed"] = status_counts["pass"] + status_counts["fail"]
+                    except Exception as count_err:
+                        # Counts are decoration on the rank list — never fail the
+                        # list itself over them. This is the last query on this
+                        # connection, so an aborted transaction can't hurt later
+                        # statements.
+                        logger.warning(f"status_counts query failed for job {job_id_or_ref}: {count_err}")
+                        status_counts = None
         finally:
             conn.close()
 
@@ -1342,6 +1491,8 @@ async def get_job_candidates(
             "status": "success",
             "candidates": candidates,
             "launched_count": launched_count,
+            # Present on the first page (offset 0) only; None on scroll pages.
+            "status_counts": status_counts,
             "pagination": {
                 "limit": effective_limit,
                 "offset": effective_offset,
