@@ -19,14 +19,6 @@ These tests pin:
     (headless auto-sync), and JOBAGENT_QUICK_FIRST_COUNT=0
 """
 import asyncio
-import os
-
-for _k in (
-    "OPENAI_API_KEY", "JOBDIVA_CLIENT_ID", "JOBDIVA_USERNAME", "JOBDIVA_PASSWORD",
-    "UNIPILE_API_KEY", "UNIPILE_ACCOUNT_ID", "ENCRYPTION_KEY",
-):
-    os.environ.setdefault(_k, "test")
-os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 from core import sourcing_config  # noqa: E402
 from services.unified_candidate_search import (  # noqa: E402

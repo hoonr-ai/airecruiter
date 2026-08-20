@@ -7,16 +7,6 @@ and the currently-employed-by-client veto.
 The service's __init__ touches external clients, so we build a bare instance
 via object.__new__ and exercise the pure scoring methods directly.
 """
-import os
-
-# Config requires these at import time; set dummies before importing anything.
-for _k in (
-    "OPENAI_API_KEY", "JOBDIVA_CLIENT_ID", "JOBDIVA_USERNAME", "JOBDIVA_PASSWORD",
-    "UNIPILE_API_KEY", "UNIPILE_ACCOUNT_ID", "ENCRYPTION_KEY",
-):
-    os.environ.setdefault(_k, "test")
-os.environ.setdefault("DATABASE_URL", "sqlite://")
-
 import pytest  # noqa: E402
 
 from core.config import (  # noqa: E402

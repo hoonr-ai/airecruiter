@@ -15,16 +15,10 @@ from datetime import datetime, timezone
 import logging
 logger = logging.getLogger(__name__)
 
-try:
-    from routers.engagement import (
-        ENGAGE_PASSED_STATUSES,
-        _check_and_fire_candidate_passed_notification,
-    )
-except ImportError:
-    logger.exception("Failed to import engagement notification helpers")
-    ENGAGE_PASSED_STATUSES = []
-    _check_and_fire_candidate_passed_notification = None
-
+from routers.engagement import (
+    ENGAGE_PASSED_STATUSES,
+    _check_and_fire_candidate_passed_notification,
+)
 from routers.hard_filter_utils import count_pending_hard_filters
 
 router = APIRouter(tags=["Voice Agent Integration"])
@@ -119,7 +113,7 @@ class TranscriptionItem(BaseModel):
     answer: Optional[str] = None
     candidate_score: Optional[float] = None
     total_score: Optional[float] = None
-    # PairBot may send "pending" or null before PASS/FAIL is finalized.
+    # PairBot sends "pending" on in-flight HF rows; null/empty is not an HF marker.
     hard_filter_status: Optional[str] = None
     reason: Optional[str] = None
     question_order: Optional[int] = None
@@ -302,8 +296,7 @@ async def receive_interview_results(payload: VoiceAgentInterviewWebhook):
         # Check for pass condition and fire email if needed.
         check_status = effective_status.lower()
         if (
-            _check_and_fire_candidate_passed_notification
-            and check_status in [s.lower() for s in ENGAGE_PASSED_STATUSES]
+            check_status in [s.lower() for s in ENGAGE_PASSED_STATUSES]
             and payload.total_score is not None
         ):
             if target_job_id and target_candidate_id:

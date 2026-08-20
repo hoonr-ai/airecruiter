@@ -20,24 +20,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Stub the env config.py requires at import time (no real creds in CI/dev).
-try:  # a valid Fernet key in case config.py constructs Fernet(ENCRYPTION_KEY)
-    from cryptography.fernet import Fernet  # noqa: E402
+from tests.env_stubs import stub_required_env
 
-    os.environ.setdefault("ENCRYPTION_KEY", Fernet.generate_key().decode())
-except Exception:  # pragma: no cover - fallback if cryptography is absent
-    os.environ.setdefault("ENCRYPTION_KEY", "x" * 44)
-
-for _k, _v in {
-    "OPENAI_API_KEY": "sk-test",
-    "JOBDIVA_CLIENT_ID": "1",
-    "JOBDIVA_USERNAME": "u",
-    "JOBDIVA_PASSWORD": "p",
-    "UNIPILE_API_KEY": "k",
-    "UNIPILE_ACCOUNT_ID": "a",
-    "DATABASE_URL": "postgresql://u:p@localhost:5432/db",
-}.items():
-    os.environ.setdefault(_k, _v)
+stub_required_env()
 
 from unittest.mock import patch  # noqa: E402
 

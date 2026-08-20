@@ -1,23 +1,23 @@
 """Shared pytest bootstrap for apps/api.
 
-Router imports pull in core.config, which requires JobDiva/OpenAI env vars at
-import time. CI test-api does not have production secrets, so stub them here
-before any test module imports application code.
+Router imports pull in core.config, which requires env vars at import time via
+get_env_or_fail (see core/config.py). This module is the single source of truth
+for test env stubs — per-module duplicate blocks were removed in #483.
 """
-import os
+import pytest
 
-for _key in (
-    "OPENAI_API_KEY",
-    "JOBDIVA_CLIENT_ID",
-    "JOBDIVA_USERNAME",
-    "JOBDIVA_PASSWORD",
-    "UNIPILE_API_KEY",
-    "UNIPILE_ACCOUNT_ID",
-):
-    os.environ.setdefault(_key, "test")
+from tests.env_stubs import stub_required_env
 
-os.environ.setdefault("DATABASE_URL", "sqlite://")
-os.environ.setdefault(
-    "ENCRYPTION_KEY",
-    "47bTz8Kx5vQ2mN9pR3sW6yA1cE4gH7jL0oU3xZ5dF8k=",
-)
+stub_required_env()
+
+
+@pytest.fixture(autouse=True)
+def _block_real_db_connections(monkeypatch):
+    """Fail fast if a test accidentally opens a real Postgres connection."""
+
+    def _fail(*_args, **_kwargs):
+        raise RuntimeError(
+            "Tests must not open real database connections; mock get_db_connection."
+        )
+
+    monkeypatch.setattr("core.db.get_db_connection", _fail, raising=False)

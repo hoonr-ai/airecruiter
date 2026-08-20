@@ -7,20 +7,16 @@ mentioned" override could never fire and negated-remote jobs stayed Remote —
 which then disabled the location gate in unified search (remote jobs search
 US-wide and skip the radius verdict).
 """
-import os
 import sys
 from pathlib import Path
-
-# Config requires these at import time; set dummies before importing anything.
-for _k in (
-    "OPENAI_API_KEY", "JOBDIVA_CLIENT_ID", "JOBDIVA_USERNAME", "JOBDIVA_PASSWORD",
-    "UNIPILE_API_KEY", "UNIPILE_ACCOUNT_ID", "ENCRYPTION_KEY",
-):
-    os.environ.setdefault(_k, "test")
 
 APPS_API_DIR = Path(__file__).resolve().parent.parent
 if str(APPS_API_DIR) not in sys.path:
     sys.path.insert(0, str(APPS_API_DIR))
+
+from tests.env_stubs import stub_required_env
+
+stub_required_env()
 
 from services.location_type import (  # noqa: E402
     detect_remote_signals,
