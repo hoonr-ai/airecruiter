@@ -621,38 +621,89 @@ async def search_jobdiva_candidates(request: CandidateSearchRequest, user: UserI
         # garbage-collected mid-flight.
         async def stream_candidates():
             persist_tasks: List[asyncio.Task] = []
+            # AI name→gender inference must not gate row delivery: awaiting it
+            # inline serialized every fresh-name burst behind one LLM call per
+            # row (up to 8s each), delaying first paint by minutes. Rows now
+            # stream immediately with the heuristic gender fields; a confident
+            # AI result follows as a targeted candidate_detail patch carrying
+            # only the resolved gender fields.
+            gender_tasks: set = set()
+            gender_patches: asyncio.Queue = asyncio.Queue()
+            # The old inline await was concurrency-1 by construction; keep the
+            # OpenAI fan-out bounded now that lookups run in parallel. Later
+            # tasks for repeated names also get to hit the per-name cache
+            # instead of duplicating in-flight calls.
+            gender_semaphore = asyncio.Semaphore(8)
+
+            async def _infer_gender_background(cid: str, cand_snapshot: Dict[str, Any]) -> None:
+                try:
+                    async with gender_semaphore:
+                        fields = await asyncio.wait_for(
+                            _extract_candidate_gender_fields_with_ai(cand_snapshot),
+                            timeout=8.0,
+                        )
+                except Exception:
+                    return
+                # Only male/female ever patches the row — a "default" result
+                # must never overwrite the already-streamed heuristic fields.
+                if fields.get("gender_label") in ("male", "female"):
+                    await gender_patches.put({
+                        "type": "candidate_detail",
+                        "candidate_id": cid,
+                        "stage": "gender",
+                        "patch": fields,
+                    })
+
+            def _drain_gender_patches() -> List[str]:
+                lines: List[str] = []
+                while not gender_patches.empty():
+                    lines.append(json.dumps(gender_patches.get_nowait()) + "\n")
+                return lines
+
             try:
                 async for event in unified_search_service.search_candidates(criteria):
                     if event.get("type") == "candidate":
                         cand = event.get("data") or {}
                         if isinstance(cand, dict):
-                            # Bound the name→gender inference so one slow
-                            # OpenAI call can't stall the whole candidate
-                            # stream; fall back to the non-AI gender fields.
-                            try:
-                                cand.update(
-                                    await asyncio.wait_for(
-                                        _extract_candidate_gender_fields_with_ai(cand),
-                                        timeout=8.0,
-                                    )
+                            cand.update(_extract_candidate_gender_fields(cand))
+                            cid = str(cand.get("candidate_id") or cand.get("id") or "")
+                            if cid and cand.get("gender_label") not in ("male", "female"):
+                                task = asyncio.create_task(
+                                    _infer_gender_background(cid, dict(cand))
                                 )
-                            except asyncio.TimeoutError:
-                                cand.update(_extract_candidate_gender_fields(cand))
-                    # Do not inject gender into candidate_detail patches.
+                                gender_tasks.add(task)
+                                task.add_done_callback(gender_tasks.discard)
+                    # Do not inject gender into other candidate_detail patches.
                     # These patches often omit identity fields and would
                     # normalize to "default", unintentionally overwriting a
                     # previously inferred male/female label on the UI row.
                     yield json.dumps(event) + "\n"
+                    for line in _drain_gender_patches():
+                        yield line
                     if event.get("type") == "candidate":
                         cand = event.get("data") or {}
-                        # Auto-persistence of applicants has been disabled to ensure 
-                        # only explicitly selected candidates (via Launch PAIR) are 
+                        # Auto-persistence of applicants has been disabled to ensure
+                        # only explicitly selected candidates (via Launch PAIR) are
                         # saved to the database/Master Pool.
                         pass
+                # Flush stragglers: give still-pending inferences a bounded
+                # window, then emit whatever resolved. Unresolved tails stay
+                # "default" — same outcome as the old per-row timeout fallback.
+                if gender_tasks:
+                    await asyncio.wait(list(gender_tasks), timeout=20.0)
+                for line in _drain_gender_patches():
+                    yield line
             except Exception as e:
                 logger.error(f"Error in search stream: {e}", exc_info=True)
                 yield json.dumps({"type": "error", "message": str(e)}) + "\n"
             finally:
+                # Client disconnect / stream close: stop any in-flight gender
+                # inferences — nobody is left to consume their patches.
+                for task in list(gender_tasks):
+                    if not task.done():
+                        task.cancel()
+                if gender_tasks:
+                    await asyncio.gather(*gender_tasks, return_exceptions=True)
                 # Drain persist tasks so failures surface in logs instead of
                 # vanishing when the generator closes.
                 if persist_tasks:
