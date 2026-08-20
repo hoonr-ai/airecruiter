@@ -44,6 +44,7 @@ jobs:
   # QA DEPLOYMENT
   # ----------------------
   deploy-qa:
+    needs: test-api
     if: github.ref_name == 'develop'
     runs-on: ubuntu-latest
 
@@ -90,6 +91,7 @@ jobs:
   # PRODUCTION DEPLOYMENT
   # ----------------------
   deploy-prod:
+    needs: test-api
     if: github.ref_name == 'main'
     #if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
