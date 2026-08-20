@@ -13,8 +13,11 @@ for _key in (
     "JOBDIVA_PASSWORD",
     "UNIPILE_API_KEY",
     "UNIPILE_ACCOUNT_ID",
-    "ENCRYPTION_KEY",
 ):
     os.environ.setdefault(_key, "test")
 
 os.environ.setdefault("DATABASE_URL", "sqlite://")
+os.environ.setdefault(
+    "ENCRYPTION_KEY",
+    "47bTz8Kx5vQ2mN9pR3sW6yA1cE4gH7jL0oU3xZ5dF8k=",
+)

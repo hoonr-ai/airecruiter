@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 from routers.candidates import _extract_rankings_hard_filter_details
+from routers.hard_filter_utils import count_pending_hard_filters
 from routers.voice_agent import (
     TranscriptionItem,
     VoiceAgentInterviewWebhook,
@@ -85,7 +86,7 @@ def test_webhook_accepts_null_question_and_total_score():
 
 
 def test_pending_hard_filter_rows_surface_in_extractor():
-    """Pending/null HF rows must render as Pending, not be dropped."""
+    """Explicit pending tokens render as Pending; unmarked rows are not hard filters."""
     data_blob = {
         "engage_last_response": {
             "data": {
@@ -96,31 +97,37 @@ def test_pending_hard_filter_rows_surface_in_extractor():
                         "hard_filter_status": "pending",
                     },
                     {
-                        "question": "Sponsorship?",
-                        "answer": "No",
-                        "hard_filter_status": None,
+                        "question": "Describe a leadership example",
+                        "answer": "Led a team of five",
+                        "hard_filter_status": "not_hard_filter",
+                    },
+                    {
+                        "question": "Why this role?",
+                        "answer": "Growth",
                     },
                 ]
             }
         }
     }
     rows = _extract_rankings_hard_filter_details(data_blob, {}, {})
-    assert len(rows) == 2
+    assert len(rows) == 1
     assert rows[0]["status"] == "Pending"
-    assert rows[1]["status"] == "Pending"
 
 
 def test_effective_status_mapping_and_score_persist_gate():
     assert effective_status_for_webhook("completed", "passed") == "passed"
     assert effective_status_for_webhook("completed", "failed") == "failed"
+    assert effective_status_for_webhook("completed", "pending") == "in_progress"
+    assert effective_status_for_webhook("completed", "passed", has_pending_hf=True) == "in_progress"
     assert effective_status_for_webhook("in_progress", "passed") == "in_progress"
     assert effective_status_for_webhook("failed", None) == "failed"
     assert effective_status_for_webhook("Completed", "passed") == "passed"
     assert effective_status_for_webhook("COMPLETED", "failed") == "failed"
-    assert should_persist_engage_scores("completed") is True
-    assert should_persist_engage_scores("Completed") is True
-    assert should_persist_engage_scores("failed") is False
-    assert should_persist_engage_scores("in_progress") is False
+    assert should_persist_engage_scores("completed", "passed") is True
+    assert should_persist_engage_scores("Completed", "passed") is True
+    assert should_persist_engage_scores("completed", "in_progress") is False
+    assert should_persist_engage_scores("failed", "failed") is False
+    assert should_persist_engage_scores("in_progress", "in_progress") is False
 
 
 @contextmanager
@@ -188,3 +195,42 @@ def test_receive_interview_results_titlecase_completed_maps_and_writes_scores():
 
     assert blobs[0]["engage_status"] == "passed"
     assert blobs[0]["engage_score"] == 90.0
+
+
+def test_pending_hf_webhook_persists_in_progress_without_scores():
+    with _mock_webhook_db() as blobs:
+        payload = VoiceAgentInterviewWebhook(
+            interview_id="42",
+            status="completed",
+            candidate_score=80.0,
+            total_score=100.0,
+            hard_filter_status="passed",
+            transcriptions=[
+                TranscriptionItem(
+                    question="Are you authorized?",
+                    answer="Yes",
+                    hard_filter_status="pending",
+                )
+            ],
+        )
+        asyncio.run(receive_interview_results(payload))
+
+    assert blobs[0]["engage_status"] == "in_progress"
+    assert "engage_score" not in blobs[0]
+    assert blobs[0]["engage_hard_filter_pending_count"] == 1
+
+
+def test_count_pending_hard_filters_dedupes_and_skips_ordinary_rows():
+    payload = VoiceAgentInterviewWebhook(
+        interview_id="1",
+        status="completed",
+        hard_filter_results=[
+            {"question": "Authorized?", "hard_filter_status": "pending"},
+        ],
+        transcriptions=[
+            {"question": "Authorized?", "hard_filter_status": "pending"},
+            {"question": "Leadership example", "candidate_score": 8.0},
+            {"question": "Normal q", "hard_filter_status": "not_hard_filter"},
+        ],
+    )
+    assert count_pending_hard_filters(payload.hard_filter_results, payload.transcriptions) == 1

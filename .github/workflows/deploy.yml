@@ -34,7 +34,7 @@ jobs:
           JOBDIVA_PASSWORD: test
           UNIPILE_API_KEY: test
           UNIPILE_ACCOUNT_ID: test
-          ENCRYPTION_KEY: test
+          ENCRYPTION_KEY: 47bTz8Kx5vQ2mN9pR3sW6yA1cE4gH7jL0oU3xZ5dF8k=
           DATABASE_URL: "sqlite://"
         run: |
           cd apps/api
