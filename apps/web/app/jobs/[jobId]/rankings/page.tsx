@@ -286,6 +286,10 @@ interface Candidate {
   engage_created_at?: string;
   availability?: string;
   created_at: string;
+  // Matched against the job's JobDiva submittal records (jobdiva_submittals
+  // mirror, refreshed by the 15-min auto-sync).
+  jobdiva_submitted?: boolean;
+  jobdiva_submit_date?: string | null;
   data?: any;
 }
 
@@ -481,6 +485,21 @@ export default function CandidateRankingsPage() {
   const [hasMoreCandidates, setHasMoreCandidates] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [launchedRowCount, setLaunchedRowCount] = useState(0);
+  // Server-computed interview-progress counts across ALL candidates of the
+  // job (the list is paginated, so loaded rows alone would under-count).
+  // Null until the first page responds, or when the API omits them.
+  const [statusCounts, setStatusCounts] = useState<{
+    total: number;
+    launched: number;
+    completed: number;
+    pass: number;
+    fail: number;
+    in_progress: number;
+    pending: number;
+    not_launched: number;
+    submitted: number;
+    completed_not_submitted: number;
+  } | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [appliedFilters, setAppliedFilters] = useState<AppliedFilters | null>(null);
@@ -552,7 +571,8 @@ export default function CandidateRankingsPage() {
 
   // Filter + sort state. `filteredCandidates` is now derived via useMemo so every
   // filter updates the table synchronously (no stale state via setFilteredCandidates).
-  type StatusFilter = "all" | "pass" | "fail" | "in_progress" | "pending" | "n/a";
+  // "completed" is a composite bucket: Pass + Fail (interview finished either way).
+  type StatusFilter = "all" | "completed" | "pass" | "fail" | "in_progress" | "pending" | "n/a";
   type SortField = "index" | "name" | "screening_score" | "engage_score" | "total_score" | "source" | "engage_status";
   type SortDir = "asc" | "desc";
   type ColumnFilterCondition = "contains" | "not_contains" | "equals" | "starts_with";
@@ -562,6 +582,10 @@ export default function CandidateRankingsPage() {
   }
 
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  // Orthogonal to interview status: whether the candidate has a submittal
+  // record in JobDiva for this job. Composes with statusFilter, so
+  // "completed" + "not_submitted" = the actionable submit-next list.
+  const [submittedFilter, setSubmittedFilter] = useState<"all" | "submitted" | "not_submitted">("all");
   const [activityFilter, setActivityFilter] = useState<"all" | "has_activity">("all");
   const [sourceFilter, setSourceFilter] = useState<string>("all");
   const [minScore, setMinScore] = useState<number>(0);
@@ -722,6 +746,34 @@ export default function CandidateRankingsPage() {
     return Array.from(set).sort();
   }, [candidates]);
 
+  // Counts for the header chips. Prefer the server's whole-job counts; fall
+  // back to counting the loaded rows (may under-count while pages remain).
+  const interviewProgressCounts = useMemo(() => {
+    if (statusCounts) {
+      return {
+        completed: statusCounts.completed,
+        pass: statusCounts.pass,
+        fail: statusCounts.fail,
+        inProgress: statusCounts.in_progress,
+        submitted: statusCounts.submitted,
+        completedNotSubmitted: statusCounts.completed_not_submitted,
+      };
+    }
+    let pass = 0, fail = 0, inProgress = 0, submitted = 0, completedNotSubmitted = 0;
+    candidates.forEach(c => {
+      const label = normalizeInterviewStatus(c).label;
+      const isSubmitted = Boolean(c.jobdiva_submitted);
+      if (isSubmitted) submitted++;
+      if (label === "Pass" || label === "Fail") {
+        if (label === "Pass") pass++; else fail++;
+        if (!isSubmitted) completedNotSubmitted++;
+      } else if (label === "In Progress") {
+        inProgress++;
+      }
+    });
+    return { completed: pass + fail, pass, fail, inProgress, submitted, completedNotSubmitted };
+  }, [statusCounts, candidates]);
+
   const filteredCandidates = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     let rows = candidates.filter(c => {
@@ -733,8 +785,18 @@ export default function CandidateRankingsPage() {
       // Status
       if (statusFilter !== "all") {
         const engageLabel = normalizeInterviewStatus(c).label.toLowerCase();
-        const sf = statusFilter === "in_progress" ? "in progress" : statusFilter;
-        if (engageLabel !== sf) return false;
+        if (statusFilter === "completed") {
+          if (engageLabel !== "pass" && engageLabel !== "fail") return false;
+        } else {
+          const sf = statusFilter === "in_progress" ? "in progress" : statusFilter;
+          if (engageLabel !== sf) return false;
+        }
+      }
+      // Submitted in JobDiva
+      if (submittedFilter !== "all") {
+        const isSubmitted = Boolean(c.jobdiva_submitted);
+        if (submittedFilter === "submitted" && !isSubmitted) return false;
+        if (submittedFilter === "not_submitted" && isSubmitted) return false;
       }
       // Activity History
       if (activityFilter === "has_activity" && !deriveInterviewId(c)) return false;
@@ -835,7 +897,7 @@ export default function CandidateRankingsPage() {
       });
     }
     return rows;
-  }, [candidates, searchQuery, statusFilter, activityFilter, sourceFilter, minScore, sortField, sortDir, columnFilters]);
+  }, [candidates, searchQuery, statusFilter, submittedFilter, activityFilter, sourceFilter, minScore, sortField, sortDir, columnFilters]);
 
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
@@ -849,6 +911,7 @@ export default function CandidateRankingsPage() {
   const clearFilters = () => {
     setSearchQuery("");
     setStatusFilter("all");
+    setSubmittedFilter("all");
     setActivityFilter("all");
     setSourceFilter("all");
     setMinScore(0);
@@ -1368,6 +1431,11 @@ export default function CandidateRankingsPage() {
       if (sEmail && sEmail !== dEmail && (!dEmail || (isPlaceholderEmail(dEmail) && !isPlaceholderEmail(sEmail)))) {
         dst.email = sEmail;
       }
+      // A JobDiva submittal on either duplicate belongs to the merged person.
+      if (src.jobdiva_submitted && !dst.jobdiva_submitted) {
+        dst.jobdiva_submitted = true;
+        if (src.jobdiva_submit_date) dst.jobdiva_submit_date = src.jobdiva_submit_date;
+      }
       return dst;
     };
 
@@ -1461,6 +1529,23 @@ export default function CandidateRankingsPage() {
       setLaunchedRowCount(launchedCount);
     }
 
+    // Only the first page (offset 0) carries status_counts; scroll pages send null.
+    const sc = candData?.status_counts;
+    if (sc && typeof sc === "object") {
+      setStatusCounts({
+        total: Number(sc.total) || 0,
+        launched: Number(sc.launched) || 0,
+        completed: Number(sc.completed) || 0,
+        pass: Number(sc.pass) || 0,
+        fail: Number(sc.fail) || 0,
+        in_progress: Number(sc.in_progress) || 0,
+        pending: Number(sc.pending) || 0,
+        not_launched: Number(sc.not_launched) || 0,
+        submitted: Number(sc.submitted) || 0,
+        completed_not_submitted: Number(sc.completed_not_submitted) || 0,
+      });
+    }
+
     const total = Number(candData?.pagination?.total);
     if (Number.isFinite(total)) {
       setCandidateTotalCount(total);
@@ -1508,6 +1593,7 @@ export default function CandidateRankingsPage() {
     setFeedbacks({});
     setCandidateTotalCount(0);
     setLaunchedRowCount(0);
+    setStatusCounts(null);
     setCandidateOffset(0);
     setHasMoreCandidates(false);
     try {
@@ -1615,6 +1701,7 @@ export default function CandidateRankingsPage() {
   const hasActiveFilters = Boolean(
     searchQuery.trim() ||
     statusFilter !== "all" ||
+    submittedFilter !== "all" ||
     activityFilter !== "all" ||
     sourceFilter !== "all" ||
     minScore > 0
@@ -1672,7 +1759,7 @@ export default function CandidateRankingsPage() {
         </div>
 
         <div className="flex items-center gap-8">
-          <div className="flex gap-8 border-r border-slate-200 pr-8">
+          <div className="flex flex-wrap gap-x-8 gap-y-3 border-r border-slate-200 pr-8">
             <div className="flex flex-col gap-3 text-sm text-slate-600">
               {isInitialLoading ? (
                 <>
@@ -1701,6 +1788,82 @@ export default function CandidateRankingsPage() {
                   <div className="flex items-center gap-2">
                     <div className="w-2 h-2 rounded-full bg-slate-300"></div> Max. Allowed Submittals: <strong className="text-slate-900 ml-1">{!job?.max_allowed_submittals ? "—" : job.max_allowed_submittals}</strong>
                   </div>
+                </>
+              )}
+            </div>
+            {/* Interview-progress chips. Clicking toggles the status filter on
+                the table below; counts are whole-job (server-computed), not
+                just the loaded page. */}
+            <div className="flex flex-col gap-2 text-sm text-slate-600">
+              {isInitialLoading ? (
+                <>
+                  <Skeleton className="h-5 w-44 bg-slate-100" />
+                  <Skeleton className="h-5 w-44 bg-slate-100" />
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setStatusFilter(prev => (prev === "completed" ? "all" : "completed"))}
+                    title={`Interview finished — ${interviewProgressCounts.pass} pass · ${interviewProgressCounts.fail} fail. Click to show only these candidates.`}
+                    className={`flex items-center gap-2 rounded-lg px-2 py-0.5 transition-colors text-left cursor-pointer ${statusFilter === "completed"
+                      ? "bg-emerald-50 ring-1 ring-emerald-300 text-emerald-800"
+                      : "hover:bg-slate-100"}`}
+                  >
+                    <div className="w-2 h-2 rounded-full bg-emerald-500"></div>
+                    Completed: <strong className={`ml-1 ${statusFilter === "completed" ? "text-emerald-900" : "text-slate-900"}`}>{interviewProgressCounts.completed}</strong>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setStatusFilter(prev => (prev === "in_progress" ? "all" : "in_progress"))}
+                    title="Interview started but not finished (In Progress). Click to show only these candidates."
+                    className={`flex items-center gap-2 rounded-lg px-2 py-0.5 transition-colors text-left cursor-pointer ${statusFilter === "in_progress"
+                      ? "bg-amber-50 ring-1 ring-amber-300 text-amber-800"
+                      : "hover:bg-slate-100"}`}
+                  >
+                    <div className="w-2 h-2 rounded-full bg-amber-500"></div>
+                    Partially Completed: <strong className={`ml-1 ${statusFilter === "in_progress" ? "text-amber-900" : "text-slate-900"}`}>{interviewProgressCounts.inProgress}</strong>
+                  </button>
+                </>
+              )}
+            </div>
+            {/* JobDiva submittal chips — mirrored from JobDiva every ~15 min.
+                "Completed, Not Submitted" is the actionable delta: interview
+                finished but no submittal record in JobDiva yet. */}
+            <div className="flex flex-col gap-2 text-sm text-slate-600">
+              {isInitialLoading ? (
+                <>
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                  <Skeleton className="h-5 w-48 bg-slate-100" />
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setSubmittedFilter(prev => (prev === "submitted" ? "all" : "submitted"))}
+                    title="Has a submittal record in JobDiva for this job (synced every ~15 min). Click to show only these candidates."
+                    className={`flex items-center gap-2 rounded-lg px-2 py-0.5 transition-colors text-left cursor-pointer ${submittedFilter === "submitted"
+                      ? "bg-indigo-50 ring-1 ring-indigo-300 text-indigo-800"
+                      : "hover:bg-slate-100"}`}
+                  >
+                    <div className="w-2 h-2 rounded-full bg-indigo-500"></div>
+                    Submitted in JobDiva: <strong className={`ml-1 ${submittedFilter === "submitted" ? "text-indigo-900" : "text-slate-900"}`}>{interviewProgressCounts.submitted}</strong>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const isActive = statusFilter === "completed" && submittedFilter === "not_submitted";
+                      setStatusFilter(isActive ? "all" : "completed");
+                      setSubmittedFilter(isActive ? "all" : "not_submitted");
+                    }}
+                    title="Interview finished but no JobDiva submittal record yet — the submit-next list. Click to show only these candidates."
+                    className={`flex items-center gap-2 rounded-lg px-2 py-0.5 transition-colors text-left cursor-pointer ${statusFilter === "completed" && submittedFilter === "not_submitted"
+                      ? "bg-rose-50 ring-1 ring-rose-300 text-rose-800"
+                      : "hover:bg-slate-100"}`}
+                  >
+                    <div className="w-2 h-2 rounded-full bg-rose-500"></div>
+                    Completed, Not Submitted: <strong className={`ml-1 ${statusFilter === "completed" && submittedFilter === "not_submitted" ? "text-rose-900" : "text-slate-900"}`}>{interviewProgressCounts.completedNotSubmitted}</strong>
+                  </button>
                 </>
               )}
             </div>
@@ -1898,6 +2061,7 @@ export default function CandidateRankingsPage() {
               className="text-[12px] font-semibold text-slate-800 bg-transparent focus:outline-none cursor-pointer pr-1 w-[90px]"
             >
               <option value="all">All</option>
+              <option value="completed">Completed</option>
               <option value="pass">Pass</option>
               <option value="fail">Fail</option>
               <option value="in_progress">In Progress</option>
