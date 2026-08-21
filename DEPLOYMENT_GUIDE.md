@@ -14,7 +14,7 @@ The deployment system automatically detects which environment to deploy to based
 
 | Git Branch | Environment | Domain | Description |
 |------------|-------------|--------|-------------|
-| `main` / `master` | **PRODUCTION** | `curate.hoonr.ai` | Live production environment |
+| `main` / `master` | **PRODUCTION** | `pair.pyramidci.com` | Live production environment |
 | `develop` / `development` | **QA** | `pairqa.pyramidci.com` | Testing environment |
 | Other branches | **QA** | `pairqa.pyramidci.com` | Default for feature branches |
 
@@ -32,10 +32,10 @@ The deployment system automatically detects which environment to deploy to based
 ### Manual Domain Override
 ```bash
 # Deploy to specific domain (overrides auto-detection)
-./deploy-azure.sh curate.hoonr.ai
+./deploy-azure.sh pair.pyramidci.com
 
 # Or set environment variable
-export DOMAIN_NAME=curate.hoonr.ai
+export DOMAIN_NAME=pair.pyramidci.com
 ./deploy-azure.sh
 ```
 
@@ -45,7 +45,7 @@ export DOMAIN_NAME=curate.hoonr.ai
 ./setup-ssl.sh
 
 # Setup SSL for specific domain
-./setup-ssl.sh curate.hoonr.ai
+./setup-ssl.sh pair.pyramidci.com
 ```
 
 ## 📋 Deployment Scripts
@@ -68,7 +68,7 @@ export DOMAIN_NAME=curate.hoonr.ai
 ./deploy-azure.sh pairqa.pyramidci.com
 
 # With environment variable
-DOMAIN_NAME=curate.hoonr.ai ./deploy-azure.sh
+DOMAIN_NAME=pair.pyramidci.com ./deploy-azure.sh
 ```
 
 **SSL Handling:**
@@ -90,7 +90,7 @@ DOMAIN_NAME=curate.hoonr.ai ./deploy-azure.sh
 ./setup-ssl.sh
 
 # Specific domain
-./setup-ssl.sh curate.hoonr.ai
+./setup-ssl.sh pair.pyramidci.com
 ```
 
 **Process:**
@@ -140,7 +140,7 @@ detect_domain() {
     current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
     case "$current_branch" in
         "main"|"master")
-            echo "curate.hoonr.ai"  # PRODUCTION
+            echo "pair.pyramidci.com"  # PRODUCTION
             ;;
         "develop"|"development")
             echo "pairqa.pyramidci.com"  # QA
@@ -182,7 +182,7 @@ git checkout main
 
 # Verify deployment
 ./manage.sh env
-curl -I https://curate.hoonr.ai
+curl -I https://pair.pyramidci.com
 ```
 
 ### First-time Deployment (No SSL)
@@ -205,10 +205,10 @@ curl -I https://curate.hoonr.ai
 ./deploy-azure.sh pairqa.pyramidci.com
 
 # Deploy to PROD manually
-./deploy-azure.sh curate.hoonr.ai
+./deploy-azure.sh pair.pyramidci.com
 
 # Or use environment variable
-export DOMAIN_NAME=curate.hoonr.ai
+export DOMAIN_NAME=pair.pyramidci.com
 ./deploy-azure.sh
 ```
 
@@ -226,7 +226,7 @@ curl -I http://localhost:8000/api/docs  # API
 curl -I http://localhost:3000           # Web
 
 # External access
-curl -I https://curate.hoonr.ai        # PROD
+curl -I https://pair.pyramidci.com      # PROD
 curl -I https://pairqa.pyramidci.com    # QA
 ```
 
@@ -236,7 +236,7 @@ curl -I https://pairqa.pyramidci.com    # QA
 sudo certbot certificates
 
 # Test SSL
-openssl s_client -connect curate.hoonr.ai:443 -servername curate.hoonr.ai
+openssl s_client -connect pair.pyramidci.com:443 -servername pair.pyramidci.com
 ```
 
 ### First Deploy on a New Domain (certificate bootstrap)
@@ -268,15 +268,22 @@ sudo certbot renew --dry-run
 
 ### Legacy Domain Redirect (transition window)
 
-QA moved from `qacurate.hoonr.ai` to `pairqa.pyramidci.com`. The rename is a hard
-switch — the old `server_name` stops answering the moment nginx reloads — so the
-deploy also installs a redirect-only site that 301s the old host to the new one.
+Both environments were renamed off `hoonr.ai`:
+
+| Environment | Old hostname | New hostname | 301 until |
+|---|---|---|---|
+| PROD | `curate.hoonr.ai` | `pair.pyramidci.com` | 2026-08-28 |
+| QA | `qacurate.hoonr.ai` | `pairqa.pyramidci.com` | 2026-08-28 |
+
+The rename is a hard switch — the old `server_name` stops answering the moment
+nginx reloads — so the deploy also installs a redirect-only site that 301s the
+old host to the new one.
 
 ```bash
-LEGACY_DOMAIN=qacurate.hoonr.ai LEGACY_REDIRECT_UNTIL=2026-08-28 ./deploy-azure.sh
+LEGACY_DOMAIN=curate.hoonr.ai LEGACY_REDIRECT_UNTIL=2026-08-28 ./deploy-azure.sh
 ```
 
-- Set in CI at [.github/workflows/deploy.yml](.github/workflows/deploy.yml) for the `deploy-qa` job.
+- Set in CI at [.github/workflows/deploy.yml](.github/workflows/deploy.yml) for both the `deploy-prod` and `deploy-qa` jobs.
 - Template: [nginx-legacy-redirect.conf](nginx-legacy-redirect.conf), installed as `/etc/nginx/sites-enabled/airecruiter-legacy`.
 - Skipped automatically if no Let's Encrypt cert exists for the legacy name (an
   HTTPS block with a missing cert would fail `nginx -t` and take the site down).
@@ -287,8 +294,14 @@ LEGACY_DOMAIN=qacurate.hoonr.ai LEGACY_REDIRECT_UNTIL=2026-08-28 ./deploy-azure.
 Verify:
 
 ```bash
+curl -I https://curate.hoonr.ai     # expect 301 -> https://pair.pyramidci.com
 curl -I https://qacurate.hoonr.ai   # expect 301 -> https://pairqa.pyramidci.com
 ```
+
+> **Emailed links.** Candidate report and engagement emails embed
+> `APP_BASE_URL` ([apps/api/core/email.py:60](apps/api/core/email.py:60)), so
+> messages already sent carry `curate.hoonr.ai`. Those links stop working when
+> the window closes — extend `LEGACY_REDIRECT_UNTIL` if that matters.
 
 ## 🚨 Troubleshooting
 
@@ -346,7 +359,7 @@ git checkout develop
 ./deploy-azure.sh  # Automatically deploys to pairqa.pyramidci.com
 
 git checkout main  
-./deploy-azure.sh  # Automatically deploys to curate.hoonr.ai
+./deploy-azure.sh  # Automatically deploys to pair.pyramidci.com
 ```
 
 This system makes it easy to have different deployment targets based on git branches while maintaining configuration in a single repository.

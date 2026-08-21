@@ -5,7 +5,7 @@
 #
 # 🔄 USAGE:
 # Auto-detect (based on git branch):   ./deploy-azure.sh
-# Explicit domain:                     ./deploy-azure.sh curate.hoonr.ai
+# Explicit domain:                     ./deploy-azure.sh pair.pyramidci.com
 # CI/CD (environment variable):        DOMAIN_NAME=domain.com ./deploy-azure.sh
 # Force env update:                    FORCE_ENV_UPDATE=true ./deploy-azure.sh
 # Legacy 301 redirect (transition):    LEGACY_DOMAIN=old.example.com LEGACY_REDIRECT_UNTIL=YYYY-MM-DD ./deploy-azure.sh
@@ -55,7 +55,7 @@ detect_domain() {
     current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
     case "$current_branch" in
         "main"|"master")
-            echo "curate.hoonr.ai"
+            echo "pair.pyramidci.com"
             ;;
         "develop"|"development")
             echo "pairqa.pyramidci.com"
