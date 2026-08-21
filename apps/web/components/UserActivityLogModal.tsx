@@ -24,6 +24,7 @@ import {
   Info
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { shouldShowQuestionsCompleted } from "@/lib/activityTimeline";
 
 const formatActivityDate = (dateString: string) => {
   try {
@@ -55,25 +56,6 @@ interface UserActivityLogModalProps {
   onClose: () => void;
   interviewId: string;
   candidateName: string;
-}
-
-/** Progress belongs on completion / partial / questionnaire events, not on
- * call parking or SIP start (PAI-157). */
-const HIDE_QUESTIONS_COMPLETED_ON = new Set([
-  "interview_started_web",
-  "interview_started_call",
-  "call_dispatch_requested",
-  "call_initiated",
-]);
-
-export function shouldShowQuestionsCompleted(activityType: string): boolean {
-  if (HIDE_QUESTIONS_COMPLETED_ON.has(activityType)) {
-    return false;
-  }
-  if (activityType.startsWith("call_")) {
-    return false;
-  }
-  return true;
 }
 
 export function UserActivityLogModal({
