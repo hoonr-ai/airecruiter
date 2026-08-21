@@ -24,6 +24,7 @@ import {
   Info
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { shouldShowQuestionsCompleted } from "@/lib/activityTimeline";
 
 const formatActivityDate = (dateString: string) => {
   try {
@@ -336,7 +337,7 @@ export function UserActivityLogModal({
                                 Candidate completed the interview successfully.
                               </p>
                             )}
-                            {!['interview_started_web', 'interview_started_call'].includes(log.activity_type) &&
+                            {shouldShowQuestionsCompleted(log.activity_type) &&
                              questionsCompletedValue !== null && (
                               <p className="text-slate-700">
                                 Questions completed: {questionsCompletedValue}
