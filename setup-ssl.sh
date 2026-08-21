@@ -49,10 +49,10 @@ detect_domain() {
             echo "curate.hoonr.ai"
             ;;
         "develop"|"development")
-            echo "qacurate.hoonr.ai"
+            echo "pairqa.pyramidci.com"
             ;;
         *)
-            echo "qacurate.hoonr.ai"
+            echo "pairqa.pyramidci.com"
             ;;
     esac
 }
@@ -66,6 +66,29 @@ if [ -z "$DOMAIN_NAME" ]; then
 fi
 
 echo -e "${BLUE}🔒 Setting up SSL certificate for domain: ${YELLOW}$DOMAIN_NAME${NC}"
+
+# --- DNS preflight -----------------------------------------------------------
+# Let's Encrypt validates over HTTP against whatever $DOMAIN_NAME resolves to.
+# If DNS has not been cut over to this VM yet, certbot cannot issue a cert,
+# nginx.conf (which references /etc/letsencrypt/live/$DOMAIN_NAME/...) fails
+# `nginx -t`, and nginx is never reloaded. Catch that here with an actionable
+# message instead of leaving the box on a stale config.
+echo -e "${BLUE}🌐 Checking DNS for $DOMAIN_NAME...${NC}"
+RESOLVED_IP=$(getent ahostsv4 "$DOMAIN_NAME" 2>/dev/null | awk 'NR==1 {print $1}')
+PUBLIC_IP=$(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null || echo "")
+
+if [ -z "$RESOLVED_IP" ]; then
+    print_error "$DOMAIN_NAME does not resolve. Point an A record at this VM ($PUBLIC_IP) before deploying."
+    exit 1
+fi
+
+if [ -n "$PUBLIC_IP" ] && [ "$RESOLVED_IP" != "$PUBLIC_IP" ]; then
+    print_error "$DOMAIN_NAME resolves to $RESOLVED_IP but this VM is $PUBLIC_IP."
+    print_error "Update DNS (and any load balancer / firewall rule) for the new hostname, then re-run the deploy."
+    exit 1
+fi
+
+print_status "DNS OK: $DOMAIN_NAME -> $RESOLVED_IP"
 
 # Install Certbot if not already installed
 echo -e "${BLUE}📦 Installing Certbot for SSL certificates...${NC}"
@@ -103,6 +126,8 @@ if sudo nginx -t; then
     print_status "Nginx configuration reloaded with SSL"
 else
     print_error "Nginx configuration test failed after SSL setup"
+    print_error "Nginx was NOT reloaded and is still serving the previous configuration."
+    exit 1
 fi
 
 echo -e "${GREEN}🎉 SSL setup completed for $DOMAIN_NAME!${NC}"

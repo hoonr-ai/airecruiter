@@ -8,6 +8,7 @@
 # Explicit domain:                     ./deploy-azure.sh curate.hoonr.ai
 # CI/CD (environment variable):        DOMAIN_NAME=domain.com ./deploy-azure.sh
 # Force env update:                    FORCE_ENV_UPDATE=true ./deploy-azure.sh
+# Legacy 301 redirect (transition):    LEGACY_DOMAIN=old.example.com LEGACY_REDIRECT_UNTIL=YYYY-MM-DD ./deploy-azure.sh
 #
 # 🌍 DOMAIN DETECTION PRIORITY:
 # 1. Command line argument (highest)
@@ -57,11 +58,11 @@ detect_domain() {
             echo "curate.hoonr.ai"
             ;;
         "develop"|"development")
-            echo "qacurate.hoonr.ai"
+            echo "pairqa.pyramidci.com"
             ;;
         *)
             # Default to QA for feature branches or unknown
-            echo "qacurate.hoonr.ai"
+            echo "pairqa.pyramidci.com"
             ;;
     esac
 }
@@ -220,6 +221,42 @@ print_status "Nginx configuration updated"
 sudo ln -sf /etc/nginx/sites-available/airecruiter /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 print_status "Nginx airecruiter site enabled"
+
+# ---------------------------------------------------------------------------
+# Legacy domain 301 redirect (transition window)
+#
+# The rename is a hard switch: once nginx reloads with the new server_name, the
+# old hostname stops answering. While LEGACY_DOMAIN is still in DNS and pointed
+# at this VM, serve it from a redirect-only site so old links 301 to the new
+# canonical host instead of erroring. Self-expiring: after
+# LEGACY_REDIRECT_UNTIL the site is removed and the old name goes dark.
+# ---------------------------------------------------------------------------
+LEGACY_DOMAIN="${LEGACY_DOMAIN:-}"
+LEGACY_REDIRECT_UNTIL="${LEGACY_REDIRECT_UNTIL:-}"
+LEGACY_SITE="/etc/nginx/sites-available/airecruiter-legacy"
+
+install_legacy_redirect=false
+if [ -n "$LEGACY_DOMAIN" ] && [ "$LEGACY_DOMAIN" != "$DOMAIN_NAME" ]; then
+    if [ -n "$LEGACY_REDIRECT_UNTIL" ] && [ "$(date -u +%Y-%m-%d)" \> "$LEGACY_REDIRECT_UNTIL" ]; then
+        print_warning "Legacy redirect window for $LEGACY_DOMAIN ended $LEGACY_REDIRECT_UNTIL - removing redirect"
+    elif [ ! -f "/etc/letsencrypt/live/$LEGACY_DOMAIN/fullchain.pem" ]; then
+        # No cert for the old name means the HTTPS redirect block would fail
+        # `nginx -t` and take the whole site down. Skip rather than break.
+        print_warning "No SSL certificate for $LEGACY_DOMAIN - skipping legacy redirect"
+    else
+        install_legacy_redirect=true
+    fi
+fi
+
+if [ "$install_legacy_redirect" = true ]; then
+    sed -e "s/{{LEGACY_DOMAIN}}/$LEGACY_DOMAIN/g" \
+        -e "s/{{DOMAIN_NAME}}/$DOMAIN_NAME/g" \
+        "$PROJECT_DIR/nginx-legacy-redirect.conf" | sudo tee "$LEGACY_SITE" > /dev/null
+    sudo ln -sf "$LEGACY_SITE" /etc/nginx/sites-enabled/
+    print_status "Legacy 301 redirect enabled: $LEGACY_DOMAIN -> $DOMAIN_NAME (until ${LEGACY_REDIRECT_UNTIL:-removed manually})"
+else
+    sudo rm -f /etc/nginx/sites-enabled/airecruiter-legacy "$LEGACY_SITE"
+fi
 
 # Test and reload nginx configuration
 if sudo nginx -t; then

@@ -15,7 +15,7 @@ Environment variables (set in .env / Azure App Settings):
 
     PAIR_TEAM_EMAIL    – fixed team inbox; default pair-recruiting@pyramidci.com
     APP_BASE_URL       – public front-end URL used to build deep-links
-                         (e.g. https://qacurate.hoonr.ai)
+                         (e.g. https://pairqa.pyramidci.com)
     JOBDIVA_URL        – JobDiva instance root (default https://www1.jobdiva.com)
 """
 

@@ -95,7 +95,7 @@ import { trackEvent } from "@/lib/analytics";
 import { logger } from "@/lib/logger";
 
 const IS_QA_CURATE =
-  typeof window !== "undefined" && window.location.hostname === "qacurate.hoonr.ai";
+  typeof window !== "undefined" && window.location.hostname === "pairqa.pyramidci.com";
 const LAUNCH_EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const PLACEHOLDER_LAUNCH_EMAILS = new Set([
   "your-email@example.com",
