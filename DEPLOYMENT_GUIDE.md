@@ -239,6 +239,33 @@ sudo certbot certificates
 openssl s_client -connect curate.hoonr.ai:443 -servername curate.hoonr.ai
 ```
 
+### First Deploy on a New Domain (certificate bootstrap)
+
+`nginx.conf` references `/etc/letsencrypt/live/$DOMAIN_NAME/*.pem`, so on the
+first deploy after a rename there is no cert yet and the config cannot load.
+The deploy handles this in two stages:
+
+1. [deploy-azure.sh](deploy-azure.sh) installs [nginx-bootstrap.conf](nginx-bootstrap.conf)
+   (HTTP only, plus the ACME webroot) when no cert exists for the domain.
+2. [setup-ssl.sh](setup-ssl.sh) issues the cert with `certbot certonly --webroot`
+   against that live HTTP site, then installs [nginx.conf](nginx.conf) and reloads.
+
+Both configs `include /etc/nginx/snippets/airecruiter-app.conf` — the shared
+locations, headers, and body limits from [nginx-app-locations.conf](nginx-app-locations.conf)
+— so HTTP and HTTPS behaviour cannot drift apart.
+
+Do **not** use `certbot --nginx` here: the plugin runs `nginx -t` internally,
+which fails on exactly the missing-cert config you are trying to fix. Likewise
+avoid `--standalone` for issuance, because certbot records the authenticator for
+renewals and standalone cannot bind port 80 while nginx is running — the cert
+then expires silently. If a cert was ever issued with `--standalone`, convert it:
+
+```bash
+sudo certbot certonly --webroot -w /var/www/html -d <domain> --cert-name <domain> \
+  --non-interactive --agree-tos --email Pragati.Raj@celsiortech.com
+sudo certbot renew --dry-run
+```
+
 ### Legacy Domain Redirect (transition window)
 
 QA moved from `qacurate.hoonr.ai` to `pairqa.pyramidci.com`. The rename is a hard
