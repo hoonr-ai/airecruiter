@@ -186,18 +186,28 @@ curl -I https://pair.pyramidci.com
 ```
 
 ### First-time Deployment (No SSL)
+
+No manual bootstrap pass is needed — `deploy-azure.sh` detects the missing
+certificate and brings the site up over HTTP, then `setup-ssl.sh` issues the
+cert and switches to HTTPS. See
+[First Deploy on a New Domain](#first-deploy-on-a-new-domain-certificate-bootstrap)
+for how the two stages fit together.
+
 ```bash
-# Deploy application (will use HTTP-only configuration)
+# Deploy application (installs the HTTP-only bootstrap config automatically)
 ./deploy-azure.sh
 
 # Application is now available at http://domain.com
 # API available at http://domain.com/api/docs
 
-# Setup SSL when ready
+# Issue the certificate and switch to HTTPS
 ./setup-ssl.sh
 
 # Application now available at https://domain.com
 ```
+
+Both run unattended in CI, in that order — the only prerequisite is that DNS for
+the domain already points at the VM.
 
 ### Manual Run with Specific Domain
 ```bash

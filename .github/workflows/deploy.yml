@@ -10,6 +10,11 @@ on:
       - develop
       - main
 
+# Single source of truth for the legacy-domain 301 window. Both deploy jobs read
+# this; deploy-azure.sh removes the redirect once the date has passed.
+env:
+  LEGACY_REDIRECT_UNTIL: "2026-08-28"
+
 jobs:
 
   test-api:
@@ -71,7 +76,6 @@ jobs:
           # to the new one. Removed automatically by deploy-azure.sh after the
           # date below - delete these two vars once it lapses.
           LEGACY_DOMAIN: qacurate.hoonr.ai
-          LEGACY_REDIRECT_UNTIL: "2026-08-28"
         run: |
           ssh -i ~/.ssh/id_ed25519 ubuntu@${{ secrets.AZURE_JOB_DIVA_HOST_QA }} << EOF
             set -e
@@ -126,7 +130,6 @@ jobs:
           # to the new one. Removed automatically by deploy-azure.sh after the
           # date below - delete these two vars once it lapses.
           LEGACY_DOMAIN: curate.hoonr.ai
-          LEGACY_REDIRECT_UNTIL: "2026-08-28"
         run: |
           ssh -i ~/.ssh/id_ed25519 ubuntu@${{ secrets.AZURE_JOB_DIVA_HOST_PROD }} << EOF
             set -e
