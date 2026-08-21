@@ -15,8 +15,8 @@ The deployment system automatically detects which environment to deploy to based
 | Git Branch | Environment | Domain | Description |
 |------------|-------------|--------|-------------|
 | `main` / `master` | **PRODUCTION** | `curate.hoonr.ai` | Live production environment |
-| `develop` / `development` | **QA** | `qacurate.hoonr.ai` | Testing environment |
-| Other branches | **QA** | `qacurate.hoonr.ai` | Default for feature branches |
+| `develop` / `development` | **QA** | `pairqa.pyramidci.com` | Testing environment |
+| Other branches | **QA** | `pairqa.pyramidci.com` | Default for feature branches |
 
 ## 🚀 Quick Start
 
@@ -65,7 +65,7 @@ export DOMAIN_NAME=curate.hoonr.ai
 ./deploy-azure.sh
 
 # Specify domain
-./deploy-azure.sh qacurate.hoonr.ai
+./deploy-azure.sh pairqa.pyramidci.com
 
 # With environment variable
 DOMAIN_NAME=curate.hoonr.ai ./deploy-azure.sh
@@ -143,10 +143,10 @@ detect_domain() {
             echo "curate.hoonr.ai"  # PRODUCTION
             ;;
         "develop"|"development")
-            echo "qacurate.hoonr.ai"  # QA
+            echo "pairqa.pyramidci.com"  # QA
             ;;
         *)
-            echo "qacurate.hoonr.ai"  # Default to QA
+            echo "pairqa.pyramidci.com"  # Default to QA
             ;;
     esac
 }
@@ -202,7 +202,7 @@ curl -I https://curate.hoonr.ai
 ### Manual Run with Specific Domain
 ```bash
 # Deploy to QA manually
-./deploy-azure.sh qacurate.hoonr.ai
+./deploy-azure.sh pairqa.pyramidci.com
 
 # Deploy to PROD manually
 ./deploy-azure.sh curate.hoonr.ai
@@ -227,7 +227,7 @@ curl -I http://localhost:3000           # Web
 
 # External access
 curl -I https://curate.hoonr.ai        # PROD
-curl -I https://qacurate.hoonr.ai      # QA
+curl -I https://pairqa.pyramidci.com      # QA
 ```
 
 ### SSL Certificate Status
@@ -292,7 +292,7 @@ For automated deployments:
 ```bash
 # In CI/CD pipeline
 git checkout develop
-./deploy-azure.sh  # Automatically deploys to qacurate.hoonr.ai
+./deploy-azure.sh  # Automatically deploys to pairqa.pyramidci.com
 
 git checkout main  
 ./deploy-azure.sh  # Automatically deploys to curate.hoonr.ai

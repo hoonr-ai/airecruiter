@@ -57,11 +57,11 @@ detect_domain() {
             echo "curate.hoonr.ai"
             ;;
         "develop"|"development")
-            echo "qacurate.hoonr.ai"
+            echo "pairqa.pyramidci.com"
             ;;
         *)
             # Default to QA for feature branches or unknown
-            echo "qacurate.hoonr.ai"
+            echo "pairqa.pyramidci.com"
             ;;
     esac
 }
