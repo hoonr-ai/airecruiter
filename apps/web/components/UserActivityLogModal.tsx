@@ -57,6 +57,25 @@ interface UserActivityLogModalProps {
   candidateName: string;
 }
 
+/** Progress belongs on completion / partial / questionnaire events, not on
+ * call parking or SIP start (PAI-157). */
+const HIDE_QUESTIONS_COMPLETED_ON = new Set([
+  "interview_started_web",
+  "interview_started_call",
+  "call_dispatch_requested",
+  "call_initiated",
+]);
+
+export function shouldShowQuestionsCompleted(activityType: string): boolean {
+  if (HIDE_QUESTIONS_COMPLETED_ON.has(activityType)) {
+    return false;
+  }
+  if (activityType.startsWith("call_")) {
+    return false;
+  }
+  return true;
+}
+
 export function UserActivityLogModal({
   isOpen,
   onClose,
@@ -336,7 +355,7 @@ export function UserActivityLogModal({
                                 Candidate completed the interview successfully.
                               </p>
                             )}
-                            {!['interview_started_web', 'interview_started_call'].includes(log.activity_type) &&
+                            {shouldShowQuestionsCompleted(log.activity_type) &&
                              questionsCompletedValue !== null && (
                               <p className="text-slate-700">
                                 Questions completed: {questionsCompletedValue}
