@@ -213,9 +213,26 @@ echo -e "${BLUE}🌐 Configuring Nginx reverse proxy...${NC}"
 # Update nginx config with the correct domain (replace template placeholder)
 sed -i "s/{{DOMAIN_NAME}}/$DOMAIN_NAME/g" "$PROJECT_DIR/nginx.conf"
 
-# Always copy and update nginx config
-sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
-print_status "Nginx configuration updated"
+# Shared location/header config, included by both the HTTPS and bootstrap
+# server blocks so the two can never drift apart.
+sudo mkdir -p /etc/nginx/snippets
+sudo cp "$PROJECT_DIR/nginx-app-locations.conf" /etc/nginx/snippets/airecruiter-app.conf
+print_status "Nginx shared application snippet installed"
+
+# nginx.conf hard-references /etc/letsencrypt/live/$DOMAIN_NAME/*.pem. On the
+# first deploy after a domain rename that cert does not exist yet, so installing
+# it fails `nginx -t` -> nginx never reloads -> certbot's nginx plugin also
+# fails (it runs `nginx -t` too) -> the cert can never be issued. Break the
+# deadlock by serving HTTP-only until setup-ssl.sh has obtained a certificate.
+if sudo test -f "/etc/letsencrypt/live/$DOMAIN_NAME/fullchain.pem"; then
+    sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
+    print_status "Nginx configuration updated (HTTPS)"
+else
+    print_warning "No certificate for $DOMAIN_NAME yet - installing HTTP-only bootstrap config"
+    sed "s/{{DOMAIN_NAME}}/$DOMAIN_NAME/g" "$PROJECT_DIR/nginx-bootstrap.conf" \
+        | sudo tee /etc/nginx/sites-available/airecruiter > /dev/null
+    print_status "Nginx bootstrap configuration installed (setup-ssl.sh will switch to HTTPS)"
+fi
 
 # Enable airecruiter site and disable default
 sudo ln -sf /etc/nginx/sites-available/airecruiter /etc/nginx/sites-enabled/
@@ -239,7 +256,7 @@ install_legacy_redirect=false
 if [ -n "$LEGACY_DOMAIN" ] && [ "$LEGACY_DOMAIN" != "$DOMAIN_NAME" ]; then
     if [ -n "$LEGACY_REDIRECT_UNTIL" ] && [ "$(date -u +%Y-%m-%d)" \> "$LEGACY_REDIRECT_UNTIL" ]; then
         print_warning "Legacy redirect window for $LEGACY_DOMAIN ended $LEGACY_REDIRECT_UNTIL - removing redirect"
-    elif [ ! -f "/etc/letsencrypt/live/$LEGACY_DOMAIN/fullchain.pem" ]; then
+    elif ! sudo test -f "/etc/letsencrypt/live/$LEGACY_DOMAIN/fullchain.pem"; then
         # No cert for the old name means the HTTPS redirect block would fail
         # `nginx -t` and take the whole site down. Skip rather than break.
         print_warning "No SSL certificate for $LEGACY_DOMAIN - skipping legacy redirect"

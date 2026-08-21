@@ -104,21 +104,32 @@ print_status "Webroot directory prepared"
 if sudo certbot certificates | grep -q "$DOMAIN_NAME"; then
     echo -e "${BLUE}🔐 SSL certificate already exists for $DOMAIN_NAME${NC}"
     print_status "Using existing SSL certificate"
-    # Update domain in nginx config  
-    sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
-    print_status "Nginx SSL configuration updated"
 else
-    # Obtain SSL certificate from Let's Encrypt
+    # Obtain SSL certificate from Let's Encrypt.
+    #
+    # webroot, not --nginx: the nginx plugin shells out to `nginx -t`, which
+    # fails whenever the installed config references a cert that does not exist
+    # yet - exactly the situation we are in here. webroot only needs a live HTTP
+    # server, which deploy-azure.sh guarantees via nginx-bootstrap.conf.
+    # It also records webroot as the renewal authenticator, so unattended
+    # `certbot renew` works with nginx running (--standalone would fail to bind
+    # port 80 and let the certificate silently expire).
     echo -e "${BLUE}🔐 Obtaining SSL certificate for $DOMAIN_NAME...${NC}"
-    if sudo certbot --nginx -d $DOMAIN_NAME --non-interactive --agree-tos --email Pragati.Raj@celsiortech.com; then
-        print_status "SSL certificate obtained and configured successfully"
+    if sudo certbot certonly --webroot -w /var/www/html -d "$DOMAIN_NAME" \
+        --cert-name "$DOMAIN_NAME" --non-interactive --agree-tos \
+        --email Pragati.Raj@celsiortech.com; then
+        print_status "SSL certificate obtained"
     else
-        print_warning "Certbot failed to configure SSL automatically, applying manual configuration..."
-        # Force update nginx config with SSL settings
-        sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
-        print_status "Nginx SSL configuration updated manually"
+        print_error "Failed to obtain SSL certificate for $DOMAIN_NAME"
+        print_error "Site remains on the HTTP-only bootstrap config; check DNS and port 80 reachability."
+        exit 1
     fi
 fi
+
+# Certificate is in place - install the HTTPS config (replaces the bootstrap
+# config if this was a first deploy).
+sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
+print_status "Nginx HTTPS configuration installed"
 
 # Test and reload nginx configuration after SSL setup
 if sudo nginx -t; then
