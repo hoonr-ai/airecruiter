@@ -227,7 +227,7 @@ curl -I http://localhost:3000           # Web
 
 # External access
 curl -I https://curate.hoonr.ai        # PROD
-curl -I https://pairqa.pyramidci.com      # QA
+curl -I https://pairqa.pyramidci.com    # QA
 ```
 
 ### SSL Certificate Status
@@ -237,6 +237,30 @@ sudo certbot certificates
 
 # Test SSL
 openssl s_client -connect curate.hoonr.ai:443 -servername curate.hoonr.ai
+```
+
+### Legacy Domain Redirect (transition window)
+
+QA moved from `qacurate.hoonr.ai` to `pairqa.pyramidci.com`. The rename is a hard
+switch — the old `server_name` stops answering the moment nginx reloads — so the
+deploy also installs a redirect-only site that 301s the old host to the new one.
+
+```bash
+LEGACY_DOMAIN=qacurate.hoonr.ai LEGACY_REDIRECT_UNTIL=2026-08-28 ./deploy-azure.sh
+```
+
+- Set in CI at [.github/workflows/deploy.yml](.github/workflows/deploy.yml) for the `deploy-qa` job.
+- Template: [nginx-legacy-redirect.conf](nginx-legacy-redirect.conf), installed as `/etc/nginx/sites-enabled/airecruiter-legacy`.
+- Skipped automatically if no Let's Encrypt cert exists for the legacy name (an
+  HTTPS block with a missing cert would fail `nginx -t` and take the site down).
+- **Self-expiring**: after `LEGACY_REDIRECT_UNTIL` the next deploy removes the
+  site and the old hostname goes dark. Drop the two env vars from the workflow
+  once the window lapses, and remove the legacy A record from DNS.
+
+Verify:
+
+```bash
+curl -I https://qacurate.hoonr.ai   # expect 301 -> https://pairqa.pyramidci.com
 ```
 
 ## 🚨 Troubleshooting

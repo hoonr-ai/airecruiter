@@ -67,6 +67,11 @@ jobs:
       - name: Deploy to QA VM
         env:
           DOMAIN_NAME: pairqa.pyramidci.com
+          # Transition window: keep the retired hostname answering with a 301
+          # to the new one. Removed automatically by deploy-azure.sh after the
+          # date below - delete these two vars once it lapses.
+          LEGACY_DOMAIN: qacurate.hoonr.ai
+          LEGACY_REDIRECT_UNTIL: "2026-08-28"
         run: |
           ssh -i ~/.ssh/id_ed25519 ubuntu@${{ secrets.AZURE_JOB_DIVA_HOST_QA }} << EOF
             set -e
@@ -74,6 +79,8 @@ jobs:
             git fetch --all
             git reset --hard origin/${{ github.ref_name }}
             export DOMAIN_NAME="$DOMAIN_NAME"
+            export LEGACY_DOMAIN="$LEGACY_DOMAIN"
+            export LEGACY_REDIRECT_UNTIL="$LEGACY_REDIRECT_UNTIL"
             bash deploy-azure.sh && export DOMAIN_NAME="$DOMAIN_NAME" && bash setup-ssl.sh
           EOF
 
