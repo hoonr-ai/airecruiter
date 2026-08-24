@@ -57,7 +57,7 @@ MS_GRAPH_SENDER_EMAIL = _cfg("MS_GRAPH_SENDER_EMAIL") or SMTP_FROM
 # PAIR-specific (not SMTP credentials)
 PAIR_TEAM_EMAIL    = _cfg("PAIR_TEAM_EMAIL",    "pair-recruiting@pyramidci.com")
 JOB_POSTING_EMAIL  = _cfg("JOB_POSTING_EMAIL",  "Jobposting@pyramidci.com")
-APP_BASE_URL       = _cfg("APP_BASE_URL",        "https://curate.hoonr.ai")
+APP_BASE_URL       = _cfg("APP_BASE_URL",        "https://pair.pyramidci.com")
 JOBDIVA_URL        = _cfg("JOBDIVA_URL",         "https://www1.jobdiva.com")
 
 
@@ -86,7 +86,7 @@ def resolve_app_base_url(override: Optional[str] = None) -> str:
     candidate = (override or "").strip().rstrip("/")
     if candidate.startswith("http://") or candidate.startswith("https://"):
         return candidate
-    return (APP_BASE_URL or "https://curate.hoonr.ai").rstrip("/")
+    return (APP_BASE_URL or "https://pair.pyramidci.com").rstrip("/")
 
 def _smtp_configured() -> bool:
     """Return True only when enough SMTP settings are present to attempt a send."""

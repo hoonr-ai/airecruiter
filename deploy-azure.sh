@@ -5,7 +5,7 @@
 #
 # 🔄 USAGE:
 # Auto-detect (based on git branch):   ./deploy-azure.sh
-# Explicit domain:                     ./deploy-azure.sh curate.hoonr.ai
+# Explicit domain:                     ./deploy-azure.sh pair.pyramidci.com
 # CI/CD (environment variable):        DOMAIN_NAME=domain.com ./deploy-azure.sh
 # Force env update:                    FORCE_ENV_UPDATE=true ./deploy-azure.sh
 # Legacy 301 redirect (transition):    LEGACY_DOMAIN=old.example.com LEGACY_REDIRECT_UNTIL=YYYY-MM-DD ./deploy-azure.sh
@@ -55,7 +55,7 @@ detect_domain() {
     current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
     case "$current_branch" in
         "main"|"master")
-            echo "curate.hoonr.ai"
+            echo "pair.pyramidci.com"
             ;;
         "develop"|"development")
             echo "pairqa.pyramidci.com"
@@ -181,6 +181,26 @@ print_status "Python dependencies installed"
 # Check if .env exists
 if [ -f "$API_DIR/.env" ]; then
     print_status "API environment file already exists and will be used"
+
+    # APP_BASE_URL is embedded into candidate report / engagement emails at send
+    # time (see core/email.py resolve_app_base_url). The code default only
+    # applies when the var is unset, so on a domain rename a stale value in .env
+    # keeps mailing links to the retired hostname long after cutover - and those
+    # links outlive the legacy 301 window. The deployed domain is the authority
+    # here, so reconcile rather than warn.
+    EXPECTED_APP_BASE_URL="https://$DOMAIN_NAME"
+    CURRENT_APP_BASE_URL=$(grep -E '^APP_BASE_URL=' "$API_DIR/.env" | tail -n1 | cut -d= -f2- | tr -d '"'"'"'" ')
+
+    if [ -z "$CURRENT_APP_BASE_URL" ]; then
+        echo "APP_BASE_URL=$EXPECTED_APP_BASE_URL" >> "$API_DIR/.env"
+        print_status "APP_BASE_URL added to .env: $EXPECTED_APP_BASE_URL"
+    elif [ "$CURRENT_APP_BASE_URL" != "$EXPECTED_APP_BASE_URL" ]; then
+        cp "$API_DIR/.env" "$API_DIR/.env.bak"
+        sed -i "s#^APP_BASE_URL=.*#APP_BASE_URL=$EXPECTED_APP_BASE_URL#" "$API_DIR/.env"
+        print_warning "APP_BASE_URL was $CURRENT_APP_BASE_URL - updated to $EXPECTED_APP_BASE_URL (backup: .env.bak)"
+    else
+        print_status "APP_BASE_URL matches deployed domain"
+    fi
 else
     print_warning "API environment file not found. Please ensure .env is present in $API_DIR"
 fi
