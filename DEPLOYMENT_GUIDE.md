@@ -14,9 +14,9 @@ The deployment system automatically detects which environment to deploy to based
 
 | Git Branch | Environment | Domain | Description |
 |------------|-------------|--------|-------------|
-| `main` / `master` | **PRODUCTION** | `curate.hoonr.ai` | Live production environment |
-| `develop` / `development` | **QA** | `qacurate.hoonr.ai` | Testing environment |
-| Other branches | **QA** | `qacurate.hoonr.ai` | Default for feature branches |
+| `main` / `master` | **PRODUCTION** | `pair.pyramidci.com` | Live production environment |
+| `develop` / `development` | **QA** | `pairqa.pyramidci.com` | Testing environment |
+| Other branches | **QA** | `pairqa.pyramidci.com` | Default for feature branches |
 
 ## 🚀 Quick Start
 
@@ -32,10 +32,10 @@ The deployment system automatically detects which environment to deploy to based
 ### Manual Domain Override
 ```bash
 # Deploy to specific domain (overrides auto-detection)
-./deploy-azure.sh curate.hoonr.ai
+./deploy-azure.sh pair.pyramidci.com
 
 # Or set environment variable
-export DOMAIN_NAME=curate.hoonr.ai
+export DOMAIN_NAME=pair.pyramidci.com
 ./deploy-azure.sh
 ```
 
@@ -45,7 +45,7 @@ export DOMAIN_NAME=curate.hoonr.ai
 ./setup-ssl.sh
 
 # Setup SSL for specific domain
-./setup-ssl.sh curate.hoonr.ai
+./setup-ssl.sh pair.pyramidci.com
 ```
 
 ## 📋 Deployment Scripts
@@ -65,10 +65,10 @@ export DOMAIN_NAME=curate.hoonr.ai
 ./deploy-azure.sh
 
 # Specify domain
-./deploy-azure.sh qacurate.hoonr.ai
+./deploy-azure.sh pairqa.pyramidci.com
 
 # With environment variable
-DOMAIN_NAME=curate.hoonr.ai ./deploy-azure.sh
+DOMAIN_NAME=pair.pyramidci.com ./deploy-azure.sh
 ```
 
 **SSL Handling:**
@@ -90,7 +90,7 @@ DOMAIN_NAME=curate.hoonr.ai ./deploy-azure.sh
 ./setup-ssl.sh
 
 # Specific domain
-./setup-ssl.sh curate.hoonr.ai
+./setup-ssl.sh pair.pyramidci.com
 ```
 
 **Process:**
@@ -140,13 +140,13 @@ detect_domain() {
     current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
     case "$current_branch" in
         "main"|"master")
-            echo "curate.hoonr.ai"  # PRODUCTION
+            echo "pair.pyramidci.com"  # PRODUCTION
             ;;
         "develop"|"development")
-            echo "qacurate.hoonr.ai"  # QA
+            echo "pairqa.pyramidci.com"  # QA
             ;;
         *)
-            echo "qacurate.hoonr.ai"  # Default to QA
+            echo "pairqa.pyramidci.com"  # Default to QA
             ;;
     esac
 }
@@ -182,33 +182,43 @@ git checkout main
 
 # Verify deployment
 ./manage.sh env
-curl -I https://curate.hoonr.ai
+curl -I https://pair.pyramidci.com
 ```
 
 ### First-time Deployment (No SSL)
+
+No manual bootstrap pass is needed — `deploy-azure.sh` detects the missing
+certificate and brings the site up over HTTP, then `setup-ssl.sh` issues the
+cert and switches to HTTPS. See
+[First Deploy on a New Domain](#first-deploy-on-a-new-domain-certificate-bootstrap)
+for how the two stages fit together.
+
 ```bash
-# Deploy application (will use HTTP-only configuration)
+# Deploy application (installs the HTTP-only bootstrap config automatically)
 ./deploy-azure.sh
 
 # Application is now available at http://domain.com
 # API available at http://domain.com/api/docs
 
-# Setup SSL when ready
+# Issue the certificate and switch to HTTPS
 ./setup-ssl.sh
 
 # Application now available at https://domain.com
 ```
 
+Both run unattended in CI, in that order — the only prerequisite is that DNS for
+the domain already points at the VM.
+
 ### Manual Run with Specific Domain
 ```bash
 # Deploy to QA manually
-./deploy-azure.sh qacurate.hoonr.ai
+./deploy-azure.sh pairqa.pyramidci.com
 
 # Deploy to PROD manually
-./deploy-azure.sh curate.hoonr.ai
+./deploy-azure.sh pair.pyramidci.com
 
 # Or use environment variable
-export DOMAIN_NAME=curate.hoonr.ai
+export DOMAIN_NAME=pair.pyramidci.com
 ./deploy-azure.sh
 ```
 
@@ -226,8 +236,8 @@ curl -I http://localhost:8000/api/docs  # API
 curl -I http://localhost:3000           # Web
 
 # External access
-curl -I https://curate.hoonr.ai        # PROD
-curl -I https://qacurate.hoonr.ai      # QA
+curl -I https://pair.pyramidci.com      # PROD
+curl -I https://pairqa.pyramidci.com    # QA
 ```
 
 ### SSL Certificate Status
@@ -236,8 +246,72 @@ curl -I https://qacurate.hoonr.ai      # QA
 sudo certbot certificates
 
 # Test SSL
-openssl s_client -connect curate.hoonr.ai:443 -servername curate.hoonr.ai
+openssl s_client -connect pair.pyramidci.com:443 -servername pair.pyramidci.com
 ```
+
+### First Deploy on a New Domain (certificate bootstrap)
+
+`nginx.conf` references `/etc/letsencrypt/live/$DOMAIN_NAME/*.pem`, so on the
+first deploy after a rename there is no cert yet and the config cannot load.
+The deploy handles this in two stages:
+
+1. [deploy-azure.sh](deploy-azure.sh) installs [nginx-bootstrap.conf](nginx-bootstrap.conf)
+   (HTTP only, plus the ACME webroot) when no cert exists for the domain.
+2. [setup-ssl.sh](setup-ssl.sh) issues the cert with `certbot certonly --webroot`
+   against that live HTTP site, then installs [nginx.conf](nginx.conf) and reloads.
+
+Both configs `include /etc/nginx/snippets/airecruiter-app.conf` — the shared
+locations, headers, and body limits from [nginx-app-locations.conf](nginx-app-locations.conf)
+— so HTTP and HTTPS behaviour cannot drift apart.
+
+Do **not** use `certbot --nginx` here: the plugin runs `nginx -t` internally,
+which fails on exactly the missing-cert config you are trying to fix. Likewise
+avoid `--standalone` for issuance, because certbot records the authenticator for
+renewals and standalone cannot bind port 80 while nginx is running — the cert
+then expires silently. If a cert was ever issued with `--standalone`, convert it:
+
+```bash
+sudo certbot certonly --webroot -w /var/www/html -d <domain> --cert-name <domain> \
+  --non-interactive --agree-tos --email Pragati.Raj@celsiortech.com
+sudo certbot renew --dry-run
+```
+
+### Legacy Domain Redirect (transition window)
+
+Both environments were renamed off `hoonr.ai`:
+
+| Environment | Old hostname | New hostname | 301 until |
+|---|---|---|---|
+| PROD | `curate.hoonr.ai` | `pair.pyramidci.com` | 2026-08-28 |
+| QA | `qacurate.hoonr.ai` | `pairqa.pyramidci.com` | 2026-08-28 |
+
+The rename is a hard switch — the old `server_name` stops answering the moment
+nginx reloads — so the deploy also installs a redirect-only site that 301s the
+old host to the new one.
+
+```bash
+LEGACY_DOMAIN=curate.hoonr.ai LEGACY_REDIRECT_UNTIL=2026-08-28 ./deploy-azure.sh
+```
+
+- Set in CI at [.github/workflows/deploy.yml](.github/workflows/deploy.yml) for both the `deploy-prod` and `deploy-qa` jobs.
+- Template: [nginx-legacy-redirect.conf](nginx-legacy-redirect.conf), installed as `/etc/nginx/sites-enabled/airecruiter-legacy`.
+- Skipped automatically if no Let's Encrypt cert exists for the legacy name (an
+  HTTPS block with a missing cert would fail `nginx -t` and take the site down).
+- **Self-expiring**: after `LEGACY_REDIRECT_UNTIL` the next deploy removes the
+  site and the old hostname goes dark. Drop the two env vars from the workflow
+  once the window lapses, and remove the legacy A record from DNS.
+
+Verify:
+
+```bash
+curl -I https://curate.hoonr.ai     # expect 301 -> https://pair.pyramidci.com
+curl -I https://qacurate.hoonr.ai   # expect 301 -> https://pairqa.pyramidci.com
+```
+
+> **Emailed links.** Candidate report and engagement emails embed
+> `APP_BASE_URL` ([apps/api/core/email.py:60](apps/api/core/email.py:60)), so
+> messages already sent carry `curate.hoonr.ai`. Those links stop working when
+> the window closes — extend `LEGACY_REDIRECT_UNTIL` if that matters.
 
 ## 🚨 Troubleshooting
 
@@ -292,10 +366,10 @@ For automated deployments:
 ```bash
 # In CI/CD pipeline
 git checkout develop
-./deploy-azure.sh  # Automatically deploys to qacurate.hoonr.ai
+./deploy-azure.sh  # Automatically deploys to pairqa.pyramidci.com
 
 git checkout main  
-./deploy-azure.sh  # Automatically deploys to curate.hoonr.ai
+./deploy-azure.sh  # Automatically deploys to pair.pyramidci.com
 ```
 
 This system makes it easy to have different deployment targets based on git branches while maintaining configuration in a single repository.

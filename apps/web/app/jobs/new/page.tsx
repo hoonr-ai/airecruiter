@@ -94,8 +94,8 @@ import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion 
 import { trackEvent } from "@/lib/analytics";
 import { logger } from "@/lib/logger";
 
-const IS_QA_CURATE =
-  typeof window !== "undefined" && window.location.hostname === "qacurate.hoonr.ai";
+const IS_QA_ENV =
+  typeof window !== "undefined" && window.location.hostname === "pairqa.pyramidci.com";
 const LAUNCH_EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const PLACEHOLDER_LAUNCH_EMAILS = new Set([
   "your-email@example.com",
@@ -1068,7 +1068,7 @@ function NewJobPageContent() {
   // QA-only safety toggle. When ON (default), Launch PAIR opens the manual
   // mobile/email override modal for every candidate (current QA behavior).
   // When OFF, Launch PAIR behaves exactly like production (auto-enrich +
-  // launch for everyone). Has no effect outside QA (gated by IS_QA_CURATE).
+  // launch for everyone). Has no effect outside QA (gated by IS_QA_ENV).
   const [qaOverrideEnabled, setQaOverrideEnabled] = useState(true);
   const [readyLaunchedPendingRedirect, setReadyLaunchedPendingRedirect] = useState(false);
 
@@ -7888,7 +7888,7 @@ function NewJobPageContent() {
 
     setIsEnrichingContacts(true);
     try {
-      if (IS_QA_CURATE && qaOverrideEnabled) {
+      if (IS_QA_ENV && qaOverrideEnabled) {
         // QA mode with Override toggle ON: skip ZoomInfo auto-enrichment and
         // the immediate launch path. Open the contact modal for EVERY selected
         // candidate so QA can review and override mobile / email before
@@ -9895,7 +9895,7 @@ function NewJobPageContent() {
                 {hasSearched && !isSearching ? `${selectedCandidates.size} candidates selected` : ''}
               </span>
               <div className="flex flex-col items-end gap-2">
-                {IS_QA_CURATE && (
+                {IS_QA_ENV && (
                   <button
                     type="button"
                     onClick={() => setQaOverrideEnabled(v => !v)}

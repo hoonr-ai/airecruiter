@@ -5,9 +5,10 @@
 #
 # 🔄 USAGE:
 # Auto-detect (based on git branch):   ./deploy-azure.sh
-# Explicit domain:                     ./deploy-azure.sh curate.hoonr.ai
+# Explicit domain:                     ./deploy-azure.sh pair.pyramidci.com
 # CI/CD (environment variable):        DOMAIN_NAME=domain.com ./deploy-azure.sh
 # Force env update:                    FORCE_ENV_UPDATE=true ./deploy-azure.sh
+# Legacy 301 redirect (transition):    LEGACY_DOMAIN=old.example.com LEGACY_REDIRECT_UNTIL=YYYY-MM-DD ./deploy-azure.sh
 #
 # 🌍 DOMAIN DETECTION PRIORITY:
 # 1. Command line argument (highest)
@@ -54,14 +55,14 @@ detect_domain() {
     current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
     case "$current_branch" in
         "main"|"master")
-            echo "curate.hoonr.ai"
+            echo "pair.pyramidci.com"
             ;;
         "develop"|"development")
-            echo "qacurate.hoonr.ai"
+            echo "pairqa.pyramidci.com"
             ;;
         *)
             # Default to QA for feature branches or unknown
-            echo "qacurate.hoonr.ai"
+            echo "pairqa.pyramidci.com"
             ;;
     esac
 }
@@ -180,6 +181,26 @@ print_status "Python dependencies installed"
 # Check if .env exists
 if [ -f "$API_DIR/.env" ]; then
     print_status "API environment file already exists and will be used"
+
+    # APP_BASE_URL is embedded into candidate report / engagement emails at send
+    # time (see core/email.py resolve_app_base_url). The code default only
+    # applies when the var is unset, so on a domain rename a stale value in .env
+    # keeps mailing links to the retired hostname long after cutover - and those
+    # links outlive the legacy 301 window. The deployed domain is the authority
+    # here, so reconcile rather than warn.
+    EXPECTED_APP_BASE_URL="https://$DOMAIN_NAME"
+    CURRENT_APP_BASE_URL=$(grep -E '^APP_BASE_URL=' "$API_DIR/.env" | tail -n1 | cut -d= -f2- | tr -d '"'"'"'" ')
+
+    if [ -z "$CURRENT_APP_BASE_URL" ]; then
+        echo "APP_BASE_URL=$EXPECTED_APP_BASE_URL" >> "$API_DIR/.env"
+        print_status "APP_BASE_URL added to .env: $EXPECTED_APP_BASE_URL"
+    elif [ "$CURRENT_APP_BASE_URL" != "$EXPECTED_APP_BASE_URL" ]; then
+        cp "$API_DIR/.env" "$API_DIR/.env.bak"
+        sed -i "s#^APP_BASE_URL=.*#APP_BASE_URL=$EXPECTED_APP_BASE_URL#" "$API_DIR/.env"
+        print_warning "APP_BASE_URL was $CURRENT_APP_BASE_URL - updated to $EXPECTED_APP_BASE_URL (backup: .env.bak)"
+    else
+        print_status "APP_BASE_URL matches deployed domain"
+    fi
 else
     print_warning "API environment file not found. Please ensure .env is present in $API_DIR"
 fi
@@ -212,21 +233,82 @@ echo -e "${BLUE}🌐 Configuring Nginx reverse proxy...${NC}"
 # Update nginx config with the correct domain (replace template placeholder)
 sed -i "s/{{DOMAIN_NAME}}/$DOMAIN_NAME/g" "$PROJECT_DIR/nginx.conf"
 
-# Always copy and update nginx config
-sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
-print_status "Nginx configuration updated"
+# Shared location/header config, included by both the HTTPS and bootstrap
+# server blocks so the two can never drift apart.
+sudo mkdir -p /etc/nginx/snippets
+sudo cp "$PROJECT_DIR/nginx-app-locations.conf" /etc/nginx/snippets/airecruiter-app.conf
+print_status "Nginx shared application snippet installed"
+
+# Shared upstream/limit_req_zone directives, included at the top level by both
+# nginx.conf and nginx-bootstrap.conf. Must be installed before either config
+# is tested/loaded, since the locations above proxy_pass/limit_req against
+# these.
+sudo cp "$PROJECT_DIR/nginx-upstreams.conf" /etc/nginx/snippets/airecruiter-upstreams.conf
+print_status "Nginx shared upstreams snippet installed"
+
+# nginx.conf hard-references /etc/letsencrypt/live/$DOMAIN_NAME/*.pem. On the
+# first deploy after a domain rename that cert does not exist yet, so installing
+# it fails `nginx -t` -> nginx never reloads -> certbot's nginx plugin also
+# fails (it runs `nginx -t` too) -> the cert can never be issued. Break the
+# deadlock by serving HTTP-only until setup-ssl.sh has obtained a certificate.
+if sudo test -f "/etc/letsencrypt/live/$DOMAIN_NAME/fullchain.pem"; then
+    sudo cp "$PROJECT_DIR/nginx.conf" /etc/nginx/sites-available/airecruiter
+    print_status "Nginx configuration updated (HTTPS)"
+else
+    print_warning "No certificate for $DOMAIN_NAME yet - installing HTTP-only bootstrap config"
+    sed "s/{{DOMAIN_NAME}}/$DOMAIN_NAME/g" "$PROJECT_DIR/nginx-bootstrap.conf" \
+        | sudo tee /etc/nginx/sites-available/airecruiter > /dev/null
+    print_status "Nginx bootstrap configuration installed (setup-ssl.sh will switch to HTTPS)"
+fi
 
 # Enable airecruiter site and disable default
 sudo ln -sf /etc/nginx/sites-available/airecruiter /etc/nginx/sites-enabled/
 sudo rm -f /etc/nginx/sites-enabled/default
 print_status "Nginx airecruiter site enabled"
 
+# ---------------------------------------------------------------------------
+# Legacy domain 301 redirect (transition window)
+#
+# The rename is a hard switch: once nginx reloads with the new server_name, the
+# old hostname stops answering. While LEGACY_DOMAIN is still in DNS and pointed
+# at this VM, serve it from a redirect-only site so old links 301 to the new
+# canonical host instead of erroring. Self-expiring: after
+# LEGACY_REDIRECT_UNTIL the site is removed and the old name goes dark.
+# ---------------------------------------------------------------------------
+LEGACY_DOMAIN="${LEGACY_DOMAIN:-}"
+LEGACY_REDIRECT_UNTIL="${LEGACY_REDIRECT_UNTIL:-}"
+LEGACY_SITE="/etc/nginx/sites-available/airecruiter-legacy"
+
+install_legacy_redirect=false
+if [ -n "$LEGACY_DOMAIN" ] && [ "$LEGACY_DOMAIN" != "$DOMAIN_NAME" ]; then
+    if [ -n "$LEGACY_REDIRECT_UNTIL" ] && [ "$(date -u +%Y-%m-%d)" \> "$LEGACY_REDIRECT_UNTIL" ]; then
+        print_warning "Legacy redirect window for $LEGACY_DOMAIN ended $LEGACY_REDIRECT_UNTIL - removing redirect"
+    elif ! sudo test -f "/etc/letsencrypt/live/$LEGACY_DOMAIN/fullchain.pem"; then
+        # No cert for the old name means the HTTPS redirect block would fail
+        # `nginx -t` and take the whole site down. Skip rather than break.
+        print_warning "No SSL certificate for $LEGACY_DOMAIN - skipping legacy redirect"
+    else
+        install_legacy_redirect=true
+    fi
+fi
+
+if [ "$install_legacy_redirect" = true ]; then
+    sed -e "s/{{LEGACY_DOMAIN}}/$LEGACY_DOMAIN/g" \
+        -e "s/{{DOMAIN_NAME}}/$DOMAIN_NAME/g" \
+        "$PROJECT_DIR/nginx-legacy-redirect.conf" | sudo tee "$LEGACY_SITE" > /dev/null
+    sudo ln -sf "$LEGACY_SITE" /etc/nginx/sites-enabled/
+    print_status "Legacy 301 redirect enabled: $LEGACY_DOMAIN -> $DOMAIN_NAME (until ${LEGACY_REDIRECT_UNTIL:-removed manually})"
+else
+    sudo rm -f /etc/nginx/sites-enabled/airecruiter-legacy "$LEGACY_SITE"
+fi
+
 # Test and reload nginx configuration
 if sudo nginx -t; then
     sudo systemctl reload nginx
     print_status "Nginx configuration reloaded"
 else
-    print_error "Nginx configuration test failed"
+    print_error "Nginx configuration test failed - aborting before reload"
+    exit 1
 fi
 
 # Copy systemd service files

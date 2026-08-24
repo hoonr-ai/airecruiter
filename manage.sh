@@ -22,13 +22,13 @@ detect_domain() {
     current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
     case "$current_branch" in
         "main"|"master")
-            echo "curate.hoonr.ai"
+            echo "pair.pyramidci.com"
             ;;
         "develop"|"development")
-            echo "qacurate.hoonr.ai"
+            echo "pairqa.pyramidci.com"
             ;;
         *)
-            echo "qacurate.hoonr.ai"
+            echo "pairqa.pyramidci.com"
             ;;
     esac
 }
