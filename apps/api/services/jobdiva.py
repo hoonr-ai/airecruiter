@@ -4564,6 +4564,12 @@ class JobDivaService:
         if not token:
             return False, None
 
+        # Remember whether the caller explicitly linked a profile id. If the create
+        # later fails, the linked id may be stale (profile merged/deleted, or captured
+        # before an earlier duplicate-creation bug), so we retry via an email-based
+        # lookup rather than trusting the linked id unconditionally.
+        linked_id_provided = bool(candidate_id)
+
         # Check if candidate already exists to avoid duplicate/Unknown-Unknown profile
         if email and not candidate_id:
             candidate_id = await self.search_candidate_profile(email, first_name, last_name)
@@ -4597,77 +4603,100 @@ class JobDivaService:
             header_text = "\n".join(header_lines)
             resume_text = f"{header_text}\n\n================================\n\n{resume_text}"
 
-        json_payload = {
-            "filename": filename,
-            "textfile": resume_text,
-            "filecontent": "",
-            "jobid": int(resolved_job_id or 0),
-            "recruiterid": int(JOBDIVA_PAIR_RECRUITER_ID or 0),
-            "resumeDate": resume_date,
-            "resumesource": 0
-        }
-        if candidate_id:
-            json_payload["candidateid"] = int(candidate_id)
+        async def _attempt(cid: Any) -> tuple:
+            """Post one CreateJobApplicationWithResume call for the given candidate id."""
+            nonlocal token
+            json_payload = {
+                "filename": filename,
+                "textfile": resume_text,
+                "filecontent": "",
+                "jobid": int(resolved_job_id or 0),
+                "recruiterid": int(JOBDIVA_PAIR_RECRUITER_ID or 0),
+                "resumeDate": resume_date,
+                "resumesource": 0
+            }
+            if cid:
+                json_payload["candidateid"] = int(cid)
 
-        try:
-            for attempt in range(2):
-                async with httpx.AsyncClient(timeout=30.0) as client:
-                    response = await client.post(
-                        url,
-                        json=json_payload,
-                        headers={
-                            "Authorization": f"Bearer {token}",
-                            "Accept": "application/json",
-                        }
-                    )
-                status, res_body = response.status_code, response.text
-                
-                if status == 401 and attempt == 0:
-                    logger.warning(f"⚠️ CreateJobApplicationWithResume got 401. Refreshing token...")
-                    token = await self.authenticate(force_refresh=True)
-                    if not token:
-                        return False, None
-                    continue
+            try:
+                status, res_body = None, ""
+                for attempt in range(2):
+                    async with httpx.AsyncClient(timeout=30.0) as client:
+                        response = await client.post(
+                            url,
+                            json=json_payload,
+                            headers={
+                                "Authorization": f"Bearer {token}",
+                                "Accept": "application/json",
+                            }
+                        )
+                    status, res_body = response.status_code, response.text
 
-                logger.info(f"🔎 CreateJobApplicationWithResume: {status} — {res_body[:200]}")
-                break
+                    if status == 401 and attempt == 0:
+                        logger.warning(f"⚠️ CreateJobApplicationWithResume got 401. Refreshing token...")
+                        token = await self.authenticate(force_refresh=True)
+                        if not token:
+                            return False, None
+                        continue
 
-            if status in [200, 201]:
-                try:
-                    new_cid = int(res_body.strip())
-                except (ValueError, TypeError):
-                    # JobDiva may return JSON instead of a bare integer
+                    logger.info(f"🔎 CreateJobApplicationWithResume: {status} — {res_body[:200]}")
+                    break
+
+                if status in [200, 201]:
                     try:
-                        import json as _json
-                        parsed = _json.loads(res_body)
-                        if isinstance(parsed, dict):
-                            new_cid = parsed.get("candidateId") or parsed.get("id") or parsed.get("CANDIDATEID")
-                        else:
+                        new_cid = int(res_body.strip())
+                    except (ValueError, TypeError):
+                        # JobDiva may return JSON instead of a bare integer
+                        try:
+                            import json as _json
+                            parsed = _json.loads(res_body)
+                            if isinstance(parsed, dict):
+                                new_cid = parsed.get("candidateId") or parsed.get("id") or parsed.get("CANDIDATEID")
+                            else:
+                                new_cid = None
+                        except Exception:
                             new_cid = None
-                    except Exception:
-                        new_cid = None
 
-                # When linking an existing candidate, JobDiva often returns 0 or empty
-                # body (no new profile created). Fall back to the pre-found candidate_id
-                # so the ID is correctly persisted and updateCandidateProfile still runs.
-                if not new_cid and candidate_id:
-                    new_cid = candidate_id
-                    logger.info(f"ℹ️ JobDiva returned no ID — using pre-found candidateId={new_cid}")
+                    # When linking an existing candidate, JobDiva often returns 0 or empty
+                    # body (no new profile created). Fall back to the pre-found candidate_id
+                    # so the ID is correctly persisted and updateCandidateProfile still runs.
+                    if not new_cid and cid:
+                        new_cid = cid
+                        logger.info(f"ℹ️ JobDiva returned no ID — using pre-found candidateId={new_cid}")
 
-                logger.info(f"✅ JobDiva application linked/created → candidateId={new_cid}, job={job_id}")
+                    logger.info(f"✅ JobDiva application linked/created → candidateId={new_cid}, job={job_id}")
 
-                # We injected the name into the resume header, so JobDiva's parser should 
-                # extract it perfectly. We still call _update_candidate_name instantly 
-                # just to guarantee the exact spelling and apply any missing fields.
-                if new_cid and (first_name or last_name or email or phone):
-                    await self._update_candidate_name(token, new_cid, first_name, last_name, email, phone)
+                    # We injected the name into the resume header, so JobDiva's parser should 
+                    # extract it perfectly. We still call _update_candidate_name instantly 
+                    # just to guarantee the exact spelling and apply any missing fields.
+                    if new_cid and (first_name or last_name or email or phone):
+                        await self._update_candidate_name(token, new_cid, first_name, last_name, email, phone)
 
-                return True, new_cid
-            else:
-                logger.error(f"❌ CreateJobApplicationWithResume failed: {status} - {res_body}")
-        except Exception as e:
-            logger.error(f"❌ CreateJobApplicationWithResume exception: {e}")
-        return False, None
+                    return True, new_cid
+                else:
+                    logger.error(f"❌ CreateJobApplicationWithResume failed: {status} - {res_body}")
+            except Exception as e:
+                logger.error(f"❌ CreateJobApplicationWithResume exception: {e}")
+            return False, None
+
+        success, new_cid = await _attempt(candidate_id)
+
+        # If an explicitly linked id failed, the stored id may be stale. Retry once
+        # using an email-based candidate lookup before creating a brand-new profile.
+        if not success and linked_id_provided and email:
+            fallback_id = await self.search_candidate_profile(email, first_name, last_name)
+            if fallback_id and str(fallback_id) != str(candidate_id):
+                logger.warning(
+                    f"⚠️ Linked candidateId={candidate_id} failed — retrying with email-matched id={fallback_id}"
+                )
+                success, new_cid = await _attempt(fallback_id)
+            elif not fallback_id:
+                logger.warning(
+                    f"⚠️ Linked candidateId={candidate_id} failed and no email match — retrying as new profile"
+                )
+                success, new_cid = await _attempt(None)
+
+        return success, new_cid
 
     async def _update_candidate_name(self, token: str, candidate_id: int, first_name: str, last_name: str, email: str = "", phone: str = "") -> bool:
         """
