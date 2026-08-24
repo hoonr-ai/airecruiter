@@ -3033,7 +3033,6 @@ async def _check_and_fire_candidate_passed_notification(
         # 6. Prepare attachment (resume text as Word-compatible .doc fallback)
         resume_bytes = None
         resume_filename = None
-        resume_text = ""
 
         # Reuse the same quality gate as the View Resume endpoint:
         # attach only real JobDiva resume text, skip placeholder/generated text.

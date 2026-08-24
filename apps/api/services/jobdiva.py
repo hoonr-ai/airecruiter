@@ -4615,10 +4615,9 @@ class JobDivaService:
                 "resumeDate": resume_date,
                 "resumesource": 0
             }
-            if cid:
-                json_payload["candidateid"] = int(cid)
-
             try:
+                if cid:
+                    json_payload["candidateid"] = int(cid)
                 status, res_body = None, ""
                 for attempt in range(2):
                     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -4681,8 +4680,7 @@ class JobDivaService:
 
         success, new_cid = await _attempt(candidate_id)
 
-        # If an explicitly linked id failed, the stored id may be stale. Retry once
-        # using an email-based candidate lookup before creating a brand-new profile.
+        # On linked-id failure, retry once via email lookup before creating a new profile.
         if not success and linked_id_provided and email:
             fallback_id = await self.search_candidate_profile(email, first_name, last_name)
             if fallback_id and str(fallback_id) != str(candidate_id):
