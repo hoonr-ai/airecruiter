@@ -1148,6 +1148,49 @@ def _persist_jobdiva_candidate_id(candidate_id_internal: str, cand_data: Dict[st
         conn.close()
 
 
+def _resolve_link_candidate_id(
+    source: Optional[str],
+    cand_data: Optional[Dict[str, Any]],
+    existing_jd_id: Optional[str],
+) -> Optional[str]:
+    """Return the JobDiva candidate id to link a new application to, or None.
+
+    Only returns an id we trust to be a real JobDiva candidate id: one explicitly
+    stored as ``jobdiva_candidate_id`` or belonging to a JobDiva-sourced candidate
+    (whose internal id IS the JobDiva id). This prevents linking a non-JobDiva
+    candidate's numeric internal id to an unrelated JobDiva profile.
+    """
+    source_lower = str(source or "").lower()
+    is_trusted_jd_id = bool(
+        (cand_data or {}).get("jobdiva_candidate_id") or source_lower.startswith("jobdiva")
+    )
+    if existing_jd_id and str(existing_jd_id).isdigit() and is_trusted_jd_id:
+        return str(existing_jd_id)
+    return None
+
+
+def _select_pass_email_resume(
+    jobdiva_resume: Optional[str],
+    local_resume: Optional[str],
+    blocked_markers: Tuple[str, ...],
+) -> Tuple[str, bool]:
+    """Choose the resume text for the Candidate Passed email.
+
+    Prefers the full JobDiva resume; falls back to the locally stored resume when
+    the JobDiva text is empty or a known placeholder. Returns
+    ``(resume_text, used_local_fallback)``.
+    """
+    text = (jobdiva_resume or "").strip()
+    if text and any(marker in text for marker in blocked_markers):
+        text = ""
+    if text:
+        return text, False
+    local = (local_resume or "").strip()
+    if local and not any(marker in local for marker in blocked_markers):
+        return local, True
+    return "", False
+
+
 async def _resolve_provisioning_job_ids(job_id_internal: str):
     """Resolve (numeric_job_id, ref_job_id) from either form of the job identifier.
     Returns (None, None) if the job is not found.
@@ -1312,9 +1355,18 @@ async def _provision_batch_to_jobdiva(
                     + (actual_resume or "(Profile sourced via PAIR)")
                 )
 
+                # Link to the candidate's existing JobDiva profile when we already
+                # know its id, so JobDiva attaches this job to the real profile
+                # instead of spawning a duplicate "Unknown Unknown" applicant.
+                # If the linked id is stale/invalid, create_job_application_with_resume
+                # falls back to an email-based candidate lookup before creating anew.
+                link_candidate_id = _resolve_link_candidate_id(
+                    row.get("source"), cand_data, existing_jd_id
+                )
+
                 try:
                     success, new_jd_id = await jobdiva_service.create_job_application_with_resume(
-                        candidate_id=None,
+                        candidate_id=link_candidate_id,
                         job_id=jd_job_id,
                         resume_text=resume_text,
                         filename=f"{safe_name}_Resume.txt",
@@ -2981,7 +3033,6 @@ async def _check_and_fire_candidate_passed_notification(
         # 6. Prepare attachment (resume text as Word-compatible .doc fallback)
         resume_bytes = None
         resume_filename = None
-        resume_text = ""
 
         # Reuse the same quality gate as the View Resume endpoint:
         # attach only real JobDiva resume text, skip placeholder/generated text.
@@ -2992,14 +3043,15 @@ async def _check_and_fire_candidate_passed_notification(
             "Resume content unavailable",
         )
 
-        # Only use JobDiva full resume text for attachment; no local fallback.
+        # Prefer the full JobDiva resume text for the attachment; if JobDiva
+        # returns nothing/placeholder text, we fall back to the locally stored
+        # resume below so the pass email still carries an attachment.
+        fetched_jobdiva_resume = ""
         if str(jd_candidate_id).isdigit():
             try:
                 jd_resume = await jobdiva_service.get_candidate_resume(candidate_id=str(jd_candidate_id))
                 if isinstance(jd_resume, dict):
-                    fetched = jd_resume.get("resume_text") or ""
-                    if fetched and not any(marker in fetched for marker in blocked_resume_markers):
-                        resume_text = fetched
+                    fetched_jobdiva_resume = jd_resume.get("resume_text") or ""
             except Exception as resume_err:
                 logger.warning(
                     "Failed to fetch JobDiva resume for candidate %s: %s",
@@ -3007,8 +3059,15 @@ async def _check_and_fire_candidate_passed_notification(
                     resume_err,
                 )
 
-        if any(marker in (resume_text or "") for marker in blocked_resume_markers):
-            resume_text = ""
+        resume_text, used_local_resume_fallback = _select_pass_email_resume(
+            fetched_jobdiva_resume, cand_row.get("resume_text"), blocked_resume_markers
+        )
+        if used_local_resume_fallback:
+            logger.info(
+                "📎 Using locally stored resume fallback for pass email (candidate %s / job %s)",
+                candidate_id,
+                job_id,
+            )
 
         if (resume_text or "").strip():
             resume_bytes = _build_word_resume_document(cand_row["name"] or "Candidate", resume_text)
