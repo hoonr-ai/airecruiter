@@ -1312,9 +1312,25 @@ async def _provision_batch_to_jobdiva(
                     + (actual_resume or "(Profile sourced via PAIR)")
                 )
 
+                # Link to the candidate's existing JobDiva profile when we already
+                # know its id, so JobDiva attaches this job to the real profile
+                # instead of spawning a duplicate "Unknown Unknown" applicant.
+                # Only link when the id is a trusted JobDiva candidate id: either
+                # explicitly stored as jobdiva_candidate_id, or the candidate was
+                # sourced from JobDiva (where the internal id IS the JobDiva id).
+                source_lower = str(row.get("source") or "").lower()
+                is_trusted_jd_id = bool(
+                    cand_data.get("jobdiva_candidate_id") or source_lower.startswith("jobdiva")
+                )
+                link_candidate_id = (
+                    existing_jd_id
+                    if (existing_jd_id and existing_jd_id.isdigit() and is_trusted_jd_id)
+                    else None
+                )
+
                 try:
                     success, new_jd_id = await jobdiva_service.create_job_application_with_resume(
-                        candidate_id=None,
+                        candidate_id=link_candidate_id,
                         job_id=jd_job_id,
                         resume_text=resume_text,
                         filename=f"{safe_name}_Resume.txt",
@@ -2992,7 +3008,7 @@ async def _check_and_fire_candidate_passed_notification(
             "Resume content unavailable",
         )
 
-        # Only use JobDiva full resume text for attachment; no local fallback.
+        # Prefer the full JobDiva resume text for the attachment.
         if str(jd_candidate_id).isdigit():
             try:
                 jd_resume = await jobdiva_service.get_candidate_resume(candidate_id=str(jd_candidate_id))
@@ -3009,6 +3025,14 @@ async def _check_and_fire_candidate_passed_notification(
 
         if any(marker in (resume_text or "") for marker in blocked_resume_markers):
             resume_text = ""
+
+        # Fallback: use the resume text stored on the sourced candidate row when
+        # JobDiva returns nothing (e.g. profile just linked and not yet indexed),
+        # so the Candidate Passed email still includes the resume attachment.
+        if not (resume_text or "").strip():
+            local_resume = (cand_row.get("resume_text") or "").strip()
+            if local_resume and not any(marker in local_resume for marker in blocked_resume_markers):
+                resume_text = local_resume
 
         if (resume_text or "").strip():
             resume_bytes = _build_word_resume_document(cand_row["name"] or "Candidate", resume_text)
