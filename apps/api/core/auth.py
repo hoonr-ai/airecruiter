@@ -135,6 +135,10 @@ class UserIdentity:
     def is_team_lead(self) -> bool:
         return self.role == "team_lead"
 
+    @property
+    def is_recruiter(self) -> bool:
+        return self.role == "recruiter"
+
 
 def get_user_role(email: str) -> str:
     """

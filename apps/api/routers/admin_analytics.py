@@ -116,6 +116,29 @@ def _load_team_scope(conn, team_id: str) -> Dict[str, Any]:
     }
 
 
+def _load_recruiter_scope(conn, recruiter_email: str) -> Dict[str, Any]:
+    """Resolve a single recruiter email into their scoped job key sets."""
+    email_clean = recruiter_email.strip().lower()
+    job_ids: List[str] = []
+    jobdiva_ids: List[str] = []
+    with conn.cursor() as cur:
+        cur.execute("SELECT job_id, jobdiva_id, recruiter_emails FROM monitored_jobs")
+        for job_id, jobdiva_id, raw_emails in cur.fetchall():
+            assigned = _parse_recruiter_emails(raw_emails)
+            if email_clean in assigned:
+                if job_id is not None and str(job_id):
+                    job_ids.append(str(job_id))
+                if jobdiva_id is not None and str(jobdiva_id).strip():
+                    jobdiva_ids.append(str(jobdiva_id).strip())
+
+    return {
+        "recruiter_email": email_clean,
+        "emails": [email_clean],
+        "job_ids": sorted(set(job_ids)),
+        "sc_keys": sorted(set(job_ids) | set(jobdiva_ids)),
+    }
+
+
 def _mj_filter(scope: Optional[Dict[str, Any]], alias: str = "") -> Tuple[str, List[Any]]:
     """(SQL condition, params) restricting monitored_jobs rows to the scope.
 
@@ -455,48 +478,29 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
         with conn.cursor() as cur:
             # 1. Overview: Monitored vs Archived Jobs
             cur.execute(f"""
-                SELECT COALESCE(is_archived, FALSE), COUNT(DISTINCT COALESCE(jobdiva_id, job_id::text))
+                SELECT
+                    COUNT(*) FILTER (WHERE COALESCE(is_archived, FALSE) = FALSE) AS active_jobs,
+                    COUNT(*) FILTER (WHERE COALESCE(is_archived, FALSE) = TRUE) AS archived_jobs
                 FROM monitored_jobs
                 WHERE {mj_cond}
-                GROUP BY COALESCE(is_archived, FALSE)
             """, mj_params)
-            job_rows = cur.fetchall()
-            active_jobs = 0
-            archived_jobs = 0
-            for is_archived, count in job_rows:
-                if is_archived:
-                    archived_jobs = count
-                else:
-                    active_jobs = count
+            row = cur.fetchone()
+            active_jobs = int(row[0] or 0) if row else 0
+            archived_jobs = int(row[1] or 0) if row else 0
 
-            # 2. Sourced candidates by effective funnel status
+            # 2. Candidates by Status
             cur.execute(f"""
-                SELECT
-                    CASE
-                        WHEN LOWER(COALESCE(sc.data->>'engage_status', '')) IN ('pass', 'passed', 'qualified', 'shortlisted', 'hired', 'selected') THEN 'passed'
-                        WHEN LOWER(COALESCE(sc.data->>'engage_status', '')) IN ('fail', 'failed', 'rejected', 'disqualified', 'declined') THEN 'failed'
-                        WHEN LOWER(COALESCE(sc.data->>'engage_status', '')) IN ('in_progress', 'in progress', 'screening', 'interview_completed', 'interview completed', 'contacted') THEN 'in_progress'
-                        WHEN COALESCE(NULLIF(sc.data->>'engage_interview_id', ''), '') <> ''
-                             OR EXISTS (
-                                 SELECT 1 FROM engage_interview_audit ea
-                                 WHERE ea.candidate_id = sc.candidate_id
-                                   AND COALESCE(NULLIF(ea.interview_id, ''), '') <> ''
-                             ) THEN 'launched'
-                        WHEN LOWER(COALESCE(sc.status, '')) IN ('launched', 'submitted') THEN 'launched'
-                        WHEN LOWER(COALESCE(sc.status, '')) IN ('pass', 'passed', 'qualified', 'shortlisted') THEN 'passed'
-                        WHEN LOWER(COALESCE(sc.status, '')) IN ('fail', 'failed', 'rejected') THEN 'failed'
-                        ELSE COALESCE(NULLIF(TRIM(sc.status), ''), 'pending')
-                    END AS effective_status,
-                    COUNT(*)
+                SELECT sc.status, COUNT(*)
                 FROM sourced_candidates sc
                 WHERE {sc_cond}
-                GROUP BY effective_status
+                GROUP BY sc.status
             """, sc_params)
             status_rows = cur.fetchall()
             candidates_by_status = {}
             total_candidates = 0
             for status, count in status_rows:
-                candidates_by_status[status] = count
+                st = status or "Unknown"
+                candidates_by_status[st] = count
                 total_candidates += count
 
             # 3. Jobs by Customer
@@ -534,7 +538,7 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
             # Team scope: the leaderboard only ranks the team's own emails —
             # a shared job also assigned to an outside recruiter must not
             # leak that recruiter into the team's view.
-            scope_emails = set(scope["emails"]) if scope else None
+            scope_emails = set(scope["emails"]) if scope and "emails" in scope else None
             recruiter_stats = {}
             for jobdiva_id, job_id, raw_emails in cur.fetchall():
                 clean_emails = set(_parse_recruiter_emails(raw_emails))
@@ -629,6 +633,7 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
             "submission_metrics": submission_metrics,
             "linkedin_accounts": linkedin_accounts,
             "team_scope": team_scope_out,
+            "recruiter_scope": recruiter_scope_out,
         }
     except LookupError:
         raise
@@ -653,6 +658,7 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
             "submission_metrics": {},
             "linkedin_accounts": [],
             "team_scope": team_scope_out,
+            "recruiter_scope": recruiter_scope_out,
             "warning": f"Analytics partially unavailable: {e}"
         }
     finally:
@@ -714,24 +720,29 @@ async def get_admin_analytics(
     user: UserIdentity = Depends(get_current_user),
 ):
     """
-    Analytics for administrators and team leads.
+    Analytics for administrators, team leads, and recruiters.
 
     - Admins: system-wide by default; pass ?team_id=... to scope to one team.
     - Team leads: always scoped to their own team (team_id is ignored).
-    - Recruiters: 403.
+    - Recruiters: always scoped to their own email data (user.email).
     """
+    scope_team_id = None
+    scope_recruiter_email = None
+
     if user.is_admin:
         scope_team_id = (team_id or "").strip() or None
     elif user.is_team_lead and user.team_id:
         scope_team_id = user.team_id
+    elif user.is_recruiter or user.email:
+        scope_recruiter_email = user.email
     else:
         raise HTTPException(
             status_code=403,
-            detail="Access denied. Admin or team lead access required to view analytics."
+            detail="Access denied. Admin, team lead, or recruiter access required to view analytics."
         )
 
     try:
-        data = await asyncio.to_thread(_compute_analytics_sync, scope_team_id)
+        data = await asyncio.to_thread(_compute_analytics_sync, scope_team_id, scope_recruiter_email)
         return {
             "status": "success",
             "data": data

@@ -137,6 +137,10 @@ interface LinkedInAccount {
   status?: string;
 }
 
+interface RecruiterScope {
+  recruiter_email: string;
+}
+
 interface AnalyticsData {
   overview: AnalyticsOverview;
   candidates_by_status: Record<string, number>;
@@ -150,6 +154,7 @@ interface AnalyticsData {
   submission_metrics?: SubmissionMetrics;
   linkedin_accounts?: LinkedInAccount[];
   team_scope?: TeamScope | null;
+  recruiter_scope?: RecruiterScope | null;
   warning?: string;
 }
 
@@ -235,7 +240,7 @@ const renderPairStatusBadge = (status: JobTimelineEntry["pair_status"]) => {
 };
 
 export default function AdminAnalyticsPage() {
-  const { isAdmin, isTeamLead, teamName, isLoading: isRoleLoading, email, role } = useUserRole();
+  const { isAdmin, isTeamLead, isRecruiter, teamName, isLoading: isRoleLoading, email, role } = useUserRole();
   const [data, setData] = useState<AnalyticsData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -261,7 +266,7 @@ export default function AdminAnalyticsPage() {
     }
   });
 
-  const canView = isAdmin || isTeamLead;
+  const canView = isAdmin || isTeamLead || isRecruiter;
 
   const fetchAnalytics = useCallback(async (refresh = false) => {
     if (refresh) setIsRefreshing(true);
@@ -457,7 +462,7 @@ export default function AdminAnalyticsPage() {
     const lines = [
       "PAIR - Executive Analytics Report",
       `Generated: ${new Date().toLocaleDateString()}`,
-      `Scope: ${data.team_scope ? `Team - ${data.team_scope.team_name}` : "All Teams (System-wide)"}`,
+      `Scope: ${data.team_scope ? `Team - ${data.team_scope.team_name}` : data.recruiter_scope ? `Recruiter - ${data.recruiter_scope.recruiter_email}` : "All Teams (System-wide)"}`,
       "",
       "--- SYSTEM KPI OVERVIEW ---",
       `Active Monitored Jobs,${data.overview.total_monitored_jobs}`,
@@ -574,14 +579,14 @@ export default function AdminAnalyticsPage() {
       <div className="flex items-center justify-between mt-2">
         <div className="flex items-center gap-3">
           <h1 className="text-[28px] font-bold text-slate-900 tracking-tight">
-            {isAdmin ? "Admin Analytics" : "Team Lead Dashboard"}
+            {isAdmin ? "Admin Analytics" : isTeamLead ? "Team Lead Dashboard" : "My Analytics"}
           </h1>
           {isAdmin && !teamScope && (
             <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-[12px] font-semibold text-slate-500 ring-1 ring-inset ring-slate-200">
               System Overview
             </span>
           )}
-          {(teamScope || (!isAdmin && teamName)) && (
+          {(teamScope || (!isAdmin && isTeamLead && teamName)) && (
             <span className="inline-flex items-center gap-1.5 rounded-full bg-indigo-50 px-2.5 py-0.5 text-[12px] font-semibold text-indigo-700 ring-1 ring-inset ring-indigo-200">
               <UsersRound className="w-3.5 h-3.5" />
               {teamScope?.team_name || teamName}
@@ -590,9 +595,14 @@ export default function AdminAnalyticsPage() {
               )}
             </span>
           )}
-          {!isAdmin && (
+          {isTeamLead && (
             <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-[12px] font-semibold text-slate-500 ring-1 ring-inset ring-slate-200 uppercase tracking-wide">
               Team Lead
+            </span>
+          )}
+          {isRecruiter && (
+            <span className="inline-flex items-center rounded-full bg-slate-100 px-2.5 py-0.5 text-[12px] font-semibold text-slate-500 ring-1 ring-inset ring-slate-200 uppercase tracking-wide">
+              Recruiter
             </span>
           )}
           {data?.warning && (
@@ -1576,7 +1586,7 @@ export default function AdminAnalyticsPage() {
 
       {/* LinkedIn Sourcing Accounts — global infrastructure, only meaningful
           on the unscoped all-teams admin view. */}
-      {!teamScope && (
+      {isAdmin && !teamScope && (
       <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
         <div className="px-6 py-4 border-b border-slate-200 bg-[#fcfdfd] flex flex-wrap items-center justify-between gap-3">
           <div>
