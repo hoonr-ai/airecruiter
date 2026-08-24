@@ -239,6 +239,13 @@ sudo mkdir -p /etc/nginx/snippets
 sudo cp "$PROJECT_DIR/nginx-app-locations.conf" /etc/nginx/snippets/airecruiter-app.conf
 print_status "Nginx shared application snippet installed"
 
+# Shared upstream/limit_req_zone directives, included at the top level by both
+# nginx.conf and nginx-bootstrap.conf. Must be installed before either config
+# is tested/loaded, since the locations above proxy_pass/limit_req against
+# these.
+sudo cp "$PROJECT_DIR/nginx-upstreams.conf" /etc/nginx/snippets/airecruiter-upstreams.conf
+print_status "Nginx shared upstreams snippet installed"
+
 # nginx.conf hard-references /etc/letsencrypt/live/$DOMAIN_NAME/*.pem. On the
 # first deploy after a domain rename that cert does not exist yet, so installing
 # it fails `nginx -t` -> nginx never reloads -> certbot's nginx plugin also
@@ -300,7 +307,8 @@ if sudo nginx -t; then
     sudo systemctl reload nginx
     print_status "Nginx configuration reloaded"
 else
-    print_error "Nginx configuration test failed"
+    print_error "Nginx configuration test failed - aborting before reload"
+    exit 1
 fi
 
 # Copy systemd service files
