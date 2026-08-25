@@ -1160,11 +1160,18 @@ def _resolve_link_candidate_id(
     (whose internal id IS the JobDiva id). This prevents linking a non-JobDiva
     candidate's numeric internal id to an unrelated JobDiva profile.
     """
-    source_lower = str(source or "").lower()
-    is_trusted_jd_id = bool(
-        (cand_data or {}).get("jobdiva_candidate_id") or source_lower.startswith("jobdiva")
-    )
-    if existing_jd_id and str(existing_jd_id).isdigit() and is_trusted_jd_id:
+    # Only link to an id that was explicitly stored as jobdiva_candidate_id.
+    # We must NOT use the source prefix alone as a trust signal: for JobAgent
+    # candidates the PAIR internal cand_id gets passed as existing_jd_id via
+    # the old fallback path, and that id is not a real JobDiva profile id.
+    # Requiring the id to actually live in jobdiva_candidate_id ensures we only
+    # link when we already confirmed the real JD profile id on a previous launch.
+    explicitly_stored_jd_id = str((cand_data or {}).get("jobdiva_candidate_id") or "")
+    if (
+        existing_jd_id
+        and str(existing_jd_id).isdigit()
+        and existing_jd_id == explicitly_stored_jd_id
+    ):
         return str(existing_jd_id)
     return None
 
@@ -1306,9 +1313,11 @@ async def _provision_batch_to_jobdiva(
 
                 email = (row.get("email") or "").strip()
                 phone = (row.get("phone") or "").strip()
+                # Only trust an id that was explicitly stored as jobdiva_candidate_id.
+                # The PAIR internal cand_id for JobAgent candidates is NOT a real JobDiva
+                # profile id — using it as link_candidate_id causes JD to create a
+                # duplicate 'Unknown Unknown' profile instead of linking the real one.
                 existing_jd_id = str(cand_data.get("jobdiva_candidate_id") or "")
-                if not existing_jd_id and str(cand_id).isdigit():
-                    existing_jd_id = str(cand_id)
 
                 phone_norm = "".join(ch for ch in phone if ch.isdigit())
                 
