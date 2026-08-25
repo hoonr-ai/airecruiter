@@ -4468,7 +4468,7 @@ class JobDivaService:
         unique_companies = list(dict.fromkeys(companies))[:10]
         return unique_companies
 
-    async def search_candidate_profile(self, email: str, first_name: str = None, last_name: str = None) -> Optional[int]:
+    async def search_candidate_profile(self, email: str, first_name: str = None, last_name: str = None, phone: str = None) -> Optional[int]:
         """
         Search for an existing candidate using POST (more fields).
         """
@@ -4481,10 +4481,18 @@ class JobDivaService:
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json"
         }
-        
-        payload = {"email": email}
+        payload = {}
+        # Skip synthetic emails from the search payload since JD uses AND logic
+        # and a fake email will guarantee zero results even if phone matches.
+        if email and not email.lower().startswith("auto_") and "@no-email." not in email.lower():
+            payload["email"] = email
         if first_name: payload["firstName"] = first_name
         if last_name: payload["lastName"] = last_name
+        if phone: payload["phone"] = phone
+        
+        # If no valid search criteria exist, don't even call the API
+        if not payload:
+            return None
 
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
@@ -4492,16 +4500,16 @@ class JobDivaService:
                 if response.status_code == 200:
                     data = response.json()
                     if data and isinstance(data, list) and len(data) > 0:
-                        # Return the first match's ID
-                        return data[0].get("candidateId") or data[0].get("CANDIDATEID")
+                        # JobDiva v2 searchCandidateProfile returns 'id', not 'candidateId'
+                        return data[0].get("id") or data[0].get("candidateId") or data[0].get("CANDIDATEID")
                 else:
                     # Fallback to GET if POST is not available or fails with 405
                     if response.status_code == 405:
-                        res_get = await client.get(url, params={"email": email}, headers=headers)
+                        res_get = await client.get(url, params=payload, headers=headers)
                         if res_get.status_code == 200:
                             data_get = res_get.json()
                             if data_get and isinstance(data_get, list) and len(data_get) > 0:
-                                return data_get[0].get("candidateId")
+                                return data_get[0].get("id") or data_get[0].get("candidateId")
         except Exception as e:
             logger.error(f"❌ searchCandidateProfile failed: {e}")
         return None
@@ -4571,8 +4579,8 @@ class JobDivaService:
         linked_id_provided = bool(candidate_id)
 
         # Check if candidate already exists to avoid duplicate/Unknown-Unknown profile
-        if email and not candidate_id:
-            candidate_id = await self.search_candidate_profile(email, first_name, last_name)
+        if (email or phone) and not candidate_id:
+            candidate_id = await self.search_candidate_profile(email, first_name, last_name, phone)
 
         from datetime import datetime
         resume_date = datetime.now().strftime("%m/%d/%Y 12:00:00")
@@ -4682,7 +4690,7 @@ class JobDivaService:
 
         # On linked-id failure, retry once via email lookup before creating a new profile.
         if not success and linked_id_provided and email:
-            fallback_id = await self.search_candidate_profile(email, first_name, last_name)
+            fallback_id = await self.search_candidate_profile(email, first_name, last_name, phone)
             if fallback_id and str(fallback_id) != str(candidate_id):
                 logger.warning(
                     f"⚠️ Linked candidateId={candidate_id} failed — retrying with email-matched id={fallback_id}"
