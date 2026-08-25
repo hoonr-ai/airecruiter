@@ -29,10 +29,25 @@ BLOCKED_MARKERS = (
 # _resolve_link_candidate_id
 # ---------------------------------------------------------------------------
 
-def test_jobdiva_source_numeric_id_links():
-    """JobDiva-sourced candidate, numeric id, no stored jobdiva_candidate_id."""
+def test_jobdiva_source_numeric_id_does_not_link_without_stored_id():
+    """JobDiva-sourced numeric id must NOT link unless it matches the stored
+    jobdiva_candidate_id. For JobAgent candidates the PAIR internal id is passed
+    as existing_jd_id and is not a real JobDiva profile id, so linking on the
+    source prefix alone would create/attach to the wrong profile."""
     assert (
         _resolve_link_candidate_id("JobDiva-JobAgent", {}, "462058065251")
+        is None
+    )
+
+
+def test_jobdiva_source_links_when_id_matches_stored():
+    """JobDiva-sourced candidate links when existing id matches the stored id."""
+    assert (
+        _resolve_link_candidate_id(
+            "JobDiva-JobAgent",
+            {"jobdiva_candidate_id": "462058065251"},
+            "462058065251",
+        )
         == "462058065251"
     )
 

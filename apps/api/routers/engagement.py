@@ -1816,8 +1816,10 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
             if not isinstance(data_list, list):
                 data_list = [response_data] if response_data else []
 
-            # Prefer source_candidate_id (PAI-155 Pairbot echoes it). Fall back
-            # to email for older Pairbot responses / phone-only rows.
+            # Index Pairbot's creation_completed data[] by source_candidate_id
+            # (PAI-155: Pairbot always echoes it). candidate_email is never
+            # present in Pairbot response items, so the email index is only
+            # populated when Pairbot happens to include it (legacy/fallback).
             interview_by_source_id: Dict[str, Dict[str, Any]] = {}
             interview_by_email: Dict[str, Dict[str, Any]] = {}
             for item in data_list:
@@ -1830,19 +1832,29 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 if item_email and item_email not in interview_by_email:
                     interview_by_email[item_email] = item
 
-            # Position N in real_candidate_ids corresponds to position N in
-            # payload_obj.resumes (both built from the same selection in
-            # generate-payload), so we can recover the submitted identifiers
-            # per candidate without another DB lookup.
+            # Log any interviews Pairbot explicitly failed on its side.
+            failed_interviews_from_pairbot = response_data.get("failed_interviews") or []
+            if failed_interviews_from_pairbot:
+                logger.warning(
+                    "pairbot_failed_interviews bulk_id=%s count=%d sample=%s",
+                    response_data.get("bulk_id", "?"),
+                    len(failed_interviews_from_pairbot),
+                    failed_interviews_from_pairbot[:5],
+                )
+
+            # Build email lookup from the sent payload resumes (keyed by
+            # source_candidate_id == candidate_id).  Used as email fallback
+            # when Pairbot response items don't carry source_candidate_id.
+            # IMPORTANT: source_candidate_id in generate-payload is always set
+            # to the candidate's own candidate_id, so we look up by candidate_id
+            # directly — this is position-independent and alignment-safe after
+            # idempotency/exclusion filtering.
             payload_resumes = payload_obj.get("resumes") or []
-            submitted_source_id_by_idx: List[str] = [
-                str((r or {}).get("source_candidate_id") or "").strip()
+            candidate_id_to_email: Dict[str, str] = {
+                str(r.get("source_candidate_id") or "").strip(): str(r.get("email") or "").lower().strip()
                 for r in payload_resumes
-            ]
-            submitted_email_by_idx: List[str] = [
-                str((r or {}).get("email") or "").lower().strip()
-                for r in payload_resumes
-            ]
+                if isinstance(r, dict) and r.get("source_candidate_id")
+            }
 
             # ── TRIGGER PROVISIONING (JobDiva Application) ─────────────
             # Background-fire batch provisioning so it doesn't block the
@@ -1860,30 +1872,19 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                 asyncio.create_task(_run_batch_provisioning())
 
             for idx, candidate_id in enumerate(request.real_candidate_ids):
-                submitted_source_id = (
-                    submitted_source_id_by_idx[idx]
-                    if idx < len(submitted_source_id_by_idx)
-                    else ""
-                )
-                submitted_email = (
-                    submitted_email_by_idx[idx]
-                    if idx < len(submitted_email_by_idx)
-                    else ""
-                )
+                # Direct lookup by candidate_id == source_candidate_id (always
+                # identical — see generate-payload).  Falls back to email index
+                # for legacy Pairbot responses that include candidate_email.
+                # NOTE: positional fallback (data_list[idx]) is intentionally
+                # absent — Pairbot may omit skipped candidates from data[], so a
+                # position-based grab would assign the wrong interview_id.
+                submitted_source_id = str(candidate_id)
+                submitted_email = candidate_id_to_email.get(str(candidate_id), "")
                 interview_info: Dict[str, Any] = {}
-                if submitted_source_id and submitted_source_id in interview_by_source_id:
+                if submitted_source_id in interview_by_source_id:
                     interview_info = interview_by_source_id.pop(submitted_source_id, {}) or {}
                 elif submitted_email:
                     interview_info = interview_by_email.pop(submitted_email, {}) or {}
-                # NOTE: The legacy positional fallback (data_list[idx]) has been
-                # intentionally removed. When the Bot API skips a candidate (e.g.
-                # missing email and phone) its response data[] is shorter than the
-                # submitted candidate list. Grabbing data_list[idx] in that case
-                # assigns a *different* candidate's interview_id to the skipped
-                # candidate, causing Curate to mark them as "sent" even though no
-                # interview was ever created for them. If the email lookup misses,
-                # interview_info stays {}, interview_id stays empty, and
-                # engage_status is correctly set to "failed".
 
                 interview_id = str(interview_info.get("interview_id") or "")
                 candidate_name = interview_info.get("candidate_name", "")
@@ -1939,6 +1940,17 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
                     "session_token": interview_info.get("session_token", ""),
                     "created_at": interview_info.get("created_at", "")
                 })
+
+            # Any items left in interview_by_source_id were created by Pairbot
+            # but couldn't be matched back to a submitted candidate_id.  This
+            # can happen if source_candidate_id was not echoed or was mutated.
+            if interview_by_source_id:
+                logger.warning(
+                    "pairbot_unmatched_created_interviews bulk_id=%s count=%d orphaned_ids=%s",
+                    response_data.get("bulk_id", "?"),
+                    len(interview_by_source_id),
+                    list(interview_by_source_id.keys())[:10],
+                )
         else:
             # Still log the failed attempt
             for candidate_id in request.real_candidate_ids:
