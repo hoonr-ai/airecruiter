@@ -657,7 +657,7 @@ export default function AdminAnalyticsPage() {
     const sm = data.submission_metrics || {};
     const lines = [
       "PAIR - Executive Analytics Report",
-      `Generated: ${new Date().toLocaleDateString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric" })} EST`,
+      `Generated: ${new Date().toLocaleString("en-US", { timeZone: "America/New_York", month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" })}`,
       `Scope: ${data.team_scope ? `Team - ${data.team_scope.team_name}` : "All Teams (System-wide)"}`,
       "",
       "--- SYSTEM KPI OVERVIEW ---",
@@ -794,11 +794,18 @@ export default function AdminAnalyticsPage() {
           escapeCsvField(job.title),
           escapeCsvField(job.jobdiva_id),
           escapeCsvField(job.customer_name),
-          formatDate(job.jobdiva_posted_on), // Jobdiva posts are often just dates
-          formatDateTime(job.added_to_pair_at),
-          formatDateTime(job.launched_at),
-          job.launch_lag_days ?? "—",
-          job.pair_status,
+          escapeCsvField(job.jobdiva_posted_on || job.posted_date_raw),
+          escapeCsvField(formatDateTime(job.added_to_curate_at)),
+          escapeCsvField(formatDateTime(job.curate_launched_at)),
+          escapeCsvField(
+            job.posted_to_launch_days === null ||
+              job.posted_to_launch_days === undefined
+              ? ""
+              : job.posted_to_launch_days < 0
+                ? "n/a"
+                : String(job.posted_to_launch_days),
+          ),
+          escapeCsvField(job.pair_status),
           job.candidates_sourced,
           job.candidates_launched,
           job.jobdiva_submittals ?? 0,
