@@ -241,6 +241,16 @@ EXTERNAL_MIN_SCORE_EXEMPT_SOURCES = ("JobDiva-JobAgent", "JobDiva-Applicants")
 # trusted; the recruiter narrows via the UI chips).
 EXTERNAL_LOCATION_CONFIRMED_MISMATCH_DROP = True
 
+# Scoring-time location veto for JobDiva-JobAgent rows. JobAgent results
+# follow the criteria/boolean the recruiter authored inside JobDiva — which
+# may deliberately reach beyond the job's radius (relocators, nearby metros)
+# — so a confirmed out-of-radius / state-mismatch must NOT zero their
+# match_score the way it does for machine-queried sources. False (default):
+# JobAgent rows keep their rubric score plus the out-of-radius badge and
+# distance, and the recruiter filters via the UI chips. True restores the
+# old hard-zero. Every other source keeps the location hard gate either way.
+JOBAGENT_LOCATION_HARD_VETO = False
+
 # High-level scoring for JobDiva-JobAgent results. The JobAgent criteria
 # are authored by recruiters inside JobDiva and its matcher pre-ranks the
 # results, so the expensive per-candidate LLM skills-match adds little —
