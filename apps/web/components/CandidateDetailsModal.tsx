@@ -11,7 +11,8 @@ import {
   TrendingUp,
   AlertCircle,
   Clock,
-  ExternalLink
+  ExternalLink,
+  Zap
 } from "lucide-react";
 import { 
   Dialog, 
@@ -178,9 +179,18 @@ function CandidateDetailsModalBase({
     (matchedSkills?.length ?? 0) > 0 ||
     (missingSkills?.length ?? 0) > 0 ||
     Object.values(matchScoreDetails || {}).some((d: any) => d?.weight > 0);
-  const isAgentHighLevel =
-    scoringMode === "high_level" ||
-    (source === "JobDiva-JobAgent" && !hasDetailedAnalysis);
+  // JobDiva-JobAgent rows are never presented as a % — the score ring is
+  // replaced by an "Agent match" emblem, the %-based score breakdown stays
+  // hidden, and the provenance banner explains the ranking. Keyed on source
+  // so rows persisted with an old numeric score render the same way.
+  const isAgentRow = source === "JobDiva-JobAgent";
+  const isAgentHighLevel = isAgentRow || scoringMode === "high_level";
+  // The skill audit is only suppressed for high-level rows (keyword-level
+  // matched/gaps lists imply a depth of analysis the high-level pass doesn't
+  // have). A real detailed analysis (JOBAGENT_HIGH_LEVEL_SCORING turned off)
+  // keeps its audit visible — see the one-line-revert note above.
+  const hideSkillAudit =
+    scoringMode === "high_level" || (isAgentRow && !hasDetailedAnalysis);
 
   const formattedTitle = toTitleCase(jobTitle || "");
   const formattedLocation = formatLocation(location || "");
@@ -196,9 +206,15 @@ function CandidateDetailsModalBase({
   const topMatches = (matchedSkills || []).slice(0, 8);
   const topMissing = (missingSkills || []).slice(0, 8);
   // The banner already states the high-level provenance — surface the next
-  // useful explainability line instead of repeating it.
+  // useful explainability line instead of repeating it. (Both prefixes are
+  // matched: "High-level score …" is the pre-2026-08-25 wording still on
+  // persisted rows.)
   const summary = isAgentHighLevel
-    ? (explainability || []).find((l) => !l.startsWith("High-level score"))
+    ? (explainability || []).find(
+        (l) =>
+          !l.startsWith("High-level score") &&
+          !l.startsWith("Matched by JobDiva agent search")
+      )
     : explainability?.[0];
   const initials = candidateName
     .split(" ")
@@ -275,9 +291,19 @@ function CandidateDetailsModalBase({
             </div>
           </div>
 
-          {/* Score ring */}
+          {/* Score ring — agent rows get a provenance emblem instead of a % */}
           <div className="shrink-0 ml-1">
-            <ScoreRing score={matchScore} />
+            {isAgentRow ? (
+              <div className="flex flex-col items-center gap-1.5">
+                <div className="w-[72px] h-[72px] rounded-full bg-[#fff7ed] border-2 border-[#fed7aa] flex flex-col items-center justify-center">
+                  <Zap className="w-5 h-5 text-[#c2410c]" />
+                  <span className="text-[9px] font-extrabold uppercase tracking-wider text-[#c2410c] mt-1">Agent</span>
+                </div>
+                <span className="text-[10px] font-bold uppercase tracking-widest text-[#c2410c]">JobDiva match</span>
+              </div>
+            ) : (
+              <ScoreRing score={matchScore} />
+            )}
           </div>
         </div>
 
@@ -293,9 +319,9 @@ function CandidateDetailsModalBase({
                   Matched by JobDiva Agent Search
                 </p>
                 <p className="text-[12px] text-slate-600 leading-relaxed font-medium">
-                  This candidate was found by the recruiter-configured search agent in
-                  JobDiva. The score shown is a high-level estimate — the detailed AI
-                  skills analysis is skipped for agent-search results.
+                  This candidate was found and ranked by the recruiter-configured
+                  search agent in JobDiva. Agent-search results aren&apos;t %-scored —
+                  the details below come from the candidate&apos;s profile and résumé.
                 </p>
               </div>
             </div>
@@ -322,10 +348,10 @@ function CandidateDetailsModalBase({
             </div>
           )}
 
-          {/* Skill audit — two columns (hidden for agent-search rows: the
+          {/* Skill audit — two columns (hidden for high-level rows: the
               keyword-level matched/gaps lists imply a depth of analysis the
-              high-level score doesn't have) */}
-          {!isAgentHighLevel && (topMatches.length > 0 || topMissing.length > 0) && (
+              high-level pass doesn't have) */}
+          {!hideSkillAudit && (topMatches.length > 0 || topMissing.length > 0) && (
             <div className="grid grid-cols-2 gap-3">
               {/* Matched */}
               <div className="bg-white rounded-xl border border-slate-100 shadow-sm p-4">

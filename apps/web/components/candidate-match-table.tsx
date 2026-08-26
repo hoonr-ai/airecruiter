@@ -160,6 +160,14 @@ function awaitingScore(c: any): boolean {
   return stage === "agent_result" || stage === "details_loaded";
 }
 
+// JobDiva-JobAgent rows are never shown as a % (they follow the recruiter's
+// own criteria inside JobDiva and JobDiva's ranking); the score cell renders
+// an "Agent" pill instead. Keyed on source so rows persisted with an old
+// numeric score render the same way.
+function isJobAgentRow(c: any): boolean {
+  return String(c?.source || "") === "JobDiva-JobAgent";
+}
+
 function getSourceBadge(source: string | undefined, sources?: string[]) {
   const src = String(source || "");
   // A candidate may have been surfaced by both the keyword-driven Exa pass
@@ -485,7 +493,7 @@ export function CandidateMatchTable({
                       else scoreRefs.current.delete(id);
                     }}
                     onMouseEnter={(e) => {
-                      if (matchScore != null && tone) {
+                      if ((matchScore != null && tone) || (isJobAgentRow(candidate) && !isNoContact)) {
                         setHoveredId(id);
                         computePosition(e.currentTarget);
                       }
@@ -503,6 +511,19 @@ export function CandidateMatchTable({
                       >
                         —
                       </span>
+                    ) : isJobAgentRow(candidate) ? (
+                      // JobDiva-JobAgent rows are never shown as a % — the
+                      // agent's results follow the recruiter's own criteria in
+                      // JobDiva and JobDiva's ranking. The pill still opens the
+                      // details popup (matched-by-agent provenance + reasons).
+                      <button
+                        type="button"
+                        onClick={() => onOpenDetails(candidate)}
+                        className="inline-flex items-center justify-center w-12 h-12 rounded-full font-extrabold text-[9.5px] uppercase tracking-wider hover:scale-105 transition-transform shadow-sm bg-[#fff7ed] text-[#c2410c] border-2 border-[#fed7aa]"
+                        title="Matched & ranked by the JobDiva agent search — agent results aren't %-scored. Click for details."
+                      >
+                        Agent
+                      </button>
                     ) : matchScore != null && tone ? (
                       <button
                         type="button"
@@ -866,7 +887,7 @@ function HoverDetailsCard({
                   </span>
                 </>
               )}
-              {matchScore != null && matchTone && (
+              {matchScore != null && matchTone && !isJobAgentRow(candidate) && (
                 <>
                   <span className="text-slate-300">·</span>
                   <span

@@ -587,10 +587,25 @@ class UnifiedCandidateSearch:
             cand["match_score_details"] = score_result.get("score_details", {})
 
             if cand.get("scoring_mode") == "high_level":
+                # No % is shown for agent rows (see the match_score=None stamp
+                # below), so drop the rubric tier-judgment line — it reads as
+                # a verdict on a score the recruiter never sees. Concrete
+                # lines (matched dimensions, location note, hard exclusions)
+                # stay: those are the legitimate reasons the popup surfaces.
+                _tier_lines = {
+                    "Excellent rubric and sourcing alignment",
+                    "Strong overall fit across active filters",
+                    "Partial fit; review missing rubric requirements",
+                    "Limited fit against active rubric and sourcing filters",
+                }
+                _expl = [
+                    line for line in (cand["explainability"] or [])
+                    if line not in _tier_lines
+                ]
                 cand["explainability"] = [
-                    "High-level score — matched by JobDiva agent search; "
-                    "detailed AI skills analysis skipped"
-                ] + list(cand["explainability"] or [])[:5]
+                    "Matched by JobDiva agent search — detailed AI skills "
+                    "analysis skipped"
+                ] + _expl[:5]
 
             # JobAgent-rank floor: JobDiva's JobAgent endpoint pre-ranks
             # candidates by their own relevance matcher. After refactor
@@ -678,6 +693,17 @@ class UnifiedCandidateSearch:
                 hard_veto = (cand.get("match_score_details") or {}).get("hard_veto") or {}
                 if not hard_veto.get("triggered"):
                     cand["match_score"] = None
+
+            # JobDiva-JobAgent rows are never presented as a percentage
+            # (2026-08-25 policy): they follow the criteria the recruiter
+            # authored inside JobDiva and JobDiva's own ranking, so a rubric %
+            # misleads. The scoring pass above still runs — matched/missing
+            # skills, explainability, and the location badge feed the row and
+            # its popup — only the number is withheld. NULL match_score is
+            # already the storage/UI "unscored" sentinel (kept by every
+            # min-score gate, NULLS LAST in rank-list sorting).
+            if str(cand.get("source") or "") == "JobDiva-JobAgent":
+                cand["match_score"] = None
 
             return cand
 
@@ -4527,6 +4553,18 @@ class UnifiedCandidateSearch:
         ):
             candidate["location_out_of_radius"] = True
             candidate.setdefault("location_match_reason", reason)
+        # JobDiva-JobAgent exemption: these rows follow the criteria the
+        # recruiter authored inside JobDiva (which may deliberately reach
+        # beyond the job's radius), so a confirmed mismatch never zeroes
+        # their score — the badge fields stamped above still render the
+        # distance and the recruiter filters via the UI chips. Every other
+        # source falls through to the hard veto below.
+        from core import sourcing_config as _sc_gate
+        if (
+            str(candidate.get("source") or "") == "JobDiva-JobAgent"
+            and not getattr(_sc_gate, "JOBAGENT_LOCATION_HARD_VETO", False)
+        ):
+            return None
         if reason in ("state_mismatch", "relocation_excluded_by_filter"):
             # Machine-readable veto marker for the emit-time drop gates and
             # telemetry (the human string below feeds explainability only).
@@ -4784,6 +4822,27 @@ class UnifiedCandidateSearch:
             explainability.insert(0, "Partial fit; review missing rubric requirements")
         else:
             explainability.insert(0, "Limited fit against active rubric and sourcing filters")
+
+        # Out-of-radius JobDiva-JobAgent rows are kept and scored (see the
+        # _location_hard_gate exemption) — say so in the score popup, so the
+        # distance badge and a non-zero score don't read as a contradiction.
+        if (
+            not hard_veto_hits
+            and not location_veto
+            and candidate.get("location_out_of_radius")
+            and str(candidate.get("source") or "") == "JobDiva-JobAgent"
+        ):
+            _dist = candidate.get("distance_miles")
+            _note = (
+                f"~{round(float(_dist))} mi from the job location"
+                if isinstance(_dist, (int, float))
+                else "Outside the job's location radius"
+            )
+            explainability.insert(
+                1,
+                f"{_note} — kept: JobDiva agent results follow the "
+                "recruiter's own criteria, so location isn't hard-enforced",
+            )
 
         if not explainability:
             explainability = ["No active resume-match filters were available for scoring"]

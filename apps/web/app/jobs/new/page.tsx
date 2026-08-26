@@ -1568,7 +1568,10 @@ function NewJobPageContent() {
       const awaitingDetails = stage === "agent_result";
       // Candidates we couldn't score (detail_failed → N/A) are exempt from the
       // min-score filter — a failed detail lookup must not hide a JobDiva row.
-      if (minScore > 0 && !awaitingScore && !c?.detail_failed) {
+      // JobDiva-JobAgent rows are unscored BY DESIGN (no % is shown for agent
+      // results), so a % filter can never hide them either.
+      const isAgentRow = String(c?.source || "") === "JobDiva-JobAgent";
+      if (minScore > 0 && !awaitingScore && !c?.detail_failed && !isAgentRow) {
         const score = getCandidateMatchScore(c);
         if (score < minScore) return false;
       }
@@ -1608,8 +1611,14 @@ function NewJobPageContent() {
             return rankA - rankB;
           }
 
-          const scoreA = getCandidateMatchScore(a);
-          const scoreB = getCandidateMatchScore(b);
+          // JobDiva-JobAgent rows carry no % (unscored by design, ranked by
+          // JobDiva) — treat them as the top band so hiding their score
+          // doesn't sink JobDiva's trusted results below every scored row.
+          // Agent-vs-agent pairs were already ordered by api_rank above.
+          const agentA = String(a?.source || "") === "JobDiva-JobAgent";
+          const agentB = String(b?.source || "") === "JobDiva-JobAgent";
+          const scoreA = agentA ? Number.POSITIVE_INFINITY : getCandidateMatchScore(a);
+          const scoreB = agentB ? Number.POSITIVE_INFINITY : getCandidateMatchScore(b);
           if (scoreA !== scoreB) return (scoreA - scoreB) * dirMul;
 
           const prioA = sourcePriority(a);
@@ -7729,7 +7738,14 @@ function NewJobPageContent() {
   // in-radius candidates ahead of out-of-radius ones and a mild distance
   // tiebreak. Mirrors "best by skill and location and other matches".
   const searchAndLaunchRank = (c: any): number => {
-    let score = getCandidateMatchScore(c);
+    // JobDiva-JobAgent rows carry no % (unscored by design) — rank them by
+    // JobDiva's own order (api_rank 0 = best → base 100) so the JobDiva
+    // quota keeps the agent's ordering instead of degrading to distance-only.
+    const isAgentRow = String(c?.source || "") === "JobDiva-JobAgent";
+    const apiRank = Number(c?.api_rank);
+    let score = isAgentRow
+      ? 100 - Math.min(99, Number.isFinite(apiRank) ? apiRank : 50)
+      : getCandidateMatchScore(c);
     if (c?.location_out_of_radius) score -= 40;
     const dist = Number(c?.distance_miles);
     if (Number.isFinite(dist) && dist > 0) score -= Math.min(10, dist / 25);
