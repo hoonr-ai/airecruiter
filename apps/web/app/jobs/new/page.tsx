@@ -89,6 +89,7 @@ import {
 } from "@/components/launch-pair-progress-modal";
 import { normalizePhone } from "@/lib/phone";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
+import { candidateHiddenReason, hiddenBreakdown as computeHiddenBreakdown } from "@/lib/candidateVisibility";
 import { API_BASE, authFetch, isNetworkFetchError } from "@/lib/api";
 import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion } from "@/hooks/use-question-moderation";
 import { trackEvent } from "@/lib/analytics";
@@ -1573,51 +1574,18 @@ function NewJobPageContent() {
 
   // One classification shared by the visible-table filter and the
   // all-hidden empty state, so the two can never drift on what hides a row.
-  const getCandidateHiddenReason = (c: any): null | "launched" | "excluded" | "filtered" => {
-    const candId = c.candidate_id || c.jobdiva_candidate_id || c.id;
-    const key = `${c.source ?? ''}:${candId}`;
-    // Hide anyone already launched (now in sourced_candidates / the rank
-    // list). Match on the composite source:id key, falling back to the bare
-    // candidate_id so source-string drift between sourcing runs can't let a
-    // launched candidate re-surface.
-    if (launchedCandidateKeys.has(key) || launchedCandidateIds.has(String(candId))) return "launched";
-    if (getCandidateExclusionReason(c)) return "excluded";
-    // Progressive rows (agent_result / details_loaded) bypass score &
-    // location filters so they stay visible while shimmering. Once the
-    // scored patch lands they fall back into the normal filter pipeline.
-    const stage = String(c?._stage || "");
-    const awaitingScore = stage === "agent_result" || stage === "details_loaded";
-    const awaitingDetails = stage === "agent_result";
-    // Candidates we couldn't score (detail_failed → N/A) are exempt from the
-    // min-score filter — a failed detail lookup must not hide a JobDiva row.
-    // JobDiva-JobAgent rows are unscored BY DESIGN (no % is shown for agent
-    // results), so a % filter can never hide them either.
-    const isAgentRow = String(c?.source || "") === "JobDiva-JobAgent";
-    if (minScore > 0 && !awaitingScore && !c?.detail_failed && !isAgentRow) {
-      const score = getCandidateMatchScore(c);
-      if (score < minScore) return "filtered";
-    }
-    if (locationFilter.size > 0 && !awaitingDetails) {
-      const loc = getCandidateLocationStr(c);
-      if (!loc || !locationFilter.has(loc)) return "filtered";
-    }
-    const trimmedQuery = candidateSearchQuery.trim().toLowerCase();
-    if (trimmedQuery) {
-      const haystack = [
-        c.name,
-        c.firstName,
-        c.lastName,
-        c.email,
-        c.phone,
-        c.title,
-        c.headline,
-      ]
-        .map((v) => String(v || "").toLowerCase())
-        .join(" ");
-      if (!haystack.includes(trimmedQuery)) return "filtered";
-    }
-    return null;
+  // Logic lives in lib/candidateVisibility.ts where it is unit-tested.
+  const visibilityCtx = {
+    launchedKeys: launchedCandidateKeys,
+    launchedIds: launchedCandidateIds,
+    isExcluded: (c: any) => Boolean(getCandidateExclusionReason(c)),
+    minScore,
+    getScore: getCandidateMatchScore,
+    locationFilter,
+    getLocation: getCandidateLocationStr,
+    searchQuery: candidateSearchQuery,
   };
+  const getCandidateHiddenReason = (c: any) => candidateHiddenReason(c, visibilityCtx);
 
   const sortedCandidates = useMemo(() => {
     const sourcePriority = (c: any) => {
@@ -1693,19 +1661,10 @@ function NewJobPageContent() {
   // Feeds the all-hidden empty state; memoized because it runs the
   // string-heavy exclusion classifier over every loaded row and would
   // otherwise recompute per keystroke while that state is showing.
-  const hiddenBreakdown = useMemo(() => {
-    const bucket = candidates.filter((c: any) => matchesSourceFilter(c));
-    let launched = 0;
-    let excluded = 0;
-    let filtered = 0;
-    for (const c of bucket) {
-      const reason = getCandidateHiddenReason(c);
-      if (reason === "launched") launched++;
-      else if (reason === "excluded") excluded++;
-      else if (reason === "filtered") filtered++;
-    }
-    return { bucket: bucket.length, launched, excluded, filtered };
-  }, [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, launchedCandidateKeys, launchedCandidateIds]);
+  const hiddenBreakdown = useMemo(
+    () => computeHiddenBreakdown(candidates.filter((c: any) => matchesSourceFilter(c)), visibilityCtx),
+    [candidates, sourceFilter, minScore, locationFilter, candidateSearchQuery, launchedCandidateKeys, launchedCandidateIds]
+  );
 
   const totalPages = Math.max(1, Math.ceil(sortedCandidates.length / candidatesPerPage));
   const paginatedCandidates = sortedCandidates.slice(
@@ -6331,8 +6290,10 @@ function NewJobPageContent() {
                 }
               }
             } else if (event.type === "error") {
+              // event.message is a raw backend exception string — log it for
+              // debugging but never render it (it can carry internal URLs).
               console.error("Stream error:", event.message);
-              showToast(`Search ended with an error: ${event.message}`, "error");
+              showToast("Search ended with a server error. Please retry — details are in the API logs.", "error");
             }
           } catch (e) {
             console.error("Failed to parse stream line:", line, e);

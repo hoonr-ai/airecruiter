@@ -1477,7 +1477,6 @@ class UnifiedCandidateSearch:
                     try:
                         talent_res = await self._search_jobdiva_talent_search(criteria)
                         raw_count = len(talent_res.get("candidates", []))
-                        summary["talent_search_count"] = raw_count
                         _min_score = getattr(_sc_pool, "JOBDIVA_TALENTSEARCH_MIN_SCORE", None)
                         emitted_count = await _process_talent_pool(
                             talent_res,
@@ -1488,6 +1487,10 @@ class UnifiedCandidateSearch:
                             # matches; the sub-threshold tail is noise.
                             min_score=int(_min_score) if _min_score else None,
                         )
+                        # Committed only after the pool fully processed: a
+                        # mid-processing failure must not leave a healthy-looking
+                        # count in the summary next to a "failed" source_status.
+                        summary["talent_search_count"] = raw_count
                     except Exception as e:
                         # Contain the failure so it can't abandon the JobAgent
                         # pool sharing the outer gather.

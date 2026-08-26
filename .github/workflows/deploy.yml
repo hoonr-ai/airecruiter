@@ -63,7 +63,7 @@ jobs:
 
       - name: Run web unit tests
         working-directory: apps/web
-        run: node --experimental-strip-types --test lib/activityTimeline.test.ts
+        run: node --experimental-strip-types --test lib/activityTimeline.test.ts lib/candidateVisibility.test.ts
 
   # ----------------------
   # QA DEPLOYMENT
