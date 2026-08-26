@@ -555,6 +555,7 @@ export function AssessModal({
                                   timeZone: "America/New_York",
                                   hour: "2-digit",
                                   minute: "2-digit",
+                                  timeZoneName: "short"
                                 }
                               )}
                             </p>

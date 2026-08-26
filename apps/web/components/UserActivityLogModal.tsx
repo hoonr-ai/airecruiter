@@ -36,6 +36,7 @@ const formatActivityDate = (dateString: string) => {
       hour: "numeric",
       minute: "numeric",
       hour12: true,
+      timeZoneName: "short",
     }).format(date);
   } catch (e) {
     return dateString;
