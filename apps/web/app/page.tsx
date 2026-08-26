@@ -460,12 +460,23 @@ export default function DashboardPage() {
 
       {/* Avg Time to First Pass stat — jobs launched since most recent Monday */}
       {activeTab === "active" && !isLoading && (() => {
-        // Dynamically compute start-of-most-recent-Monday (UTC midnight)
+        // Dynamically compute start-of-most-recent-Monday exactly in America/New_York time
         const now = new Date();
-        const dayOfWeek = now.getUTCDay(); // 0=Sun, 1=Mon ... 6=Sat
-        const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-        const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysToMonday));
-        const mondayLabel = monday.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
+        let dt = new Date(now.getTime());
+        
+        // 1. Walk back by 24h steps until the Eastern time is a Monday
+        while (new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short' }).format(dt) !== 'Mon') {
+          dt = new Date(dt.getTime() - 24 * 60 * 60 * 1000);
+        }
+        
+        // 2. Walk back by 1h steps until it flips to Sunday
+        while (new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short' }).format(dt) === 'Mon') {
+          dt = new Date(dt.getTime() - 60 * 60 * 1000);
+        }
+        
+        // 3. Step forward 1 hour to reach exactly 00:00 on Monday in EST/EDT
+        const monday = new Date(dt.getTime() + 60 * 60 * 1000);
+        const mondayLabel = monday.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "America/New_York" });
 
         const sinceMondayJobs = allJobs.filter(j =>
           j.pairLaunchedAt &&
