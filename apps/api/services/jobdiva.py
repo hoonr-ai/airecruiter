@@ -4468,7 +4468,7 @@ class JobDivaService:
         unique_companies = list(dict.fromkeys(companies))[:10]
         return unique_companies
 
-    async def search_candidate_profile(self, email: str, first_name: str = None, last_name: str = None, phone: str = None) -> Optional[int]:
+    async def search_candidate_profile(self, email: str, first_name: Optional[str] = None, last_name: Optional[str] = None, phone: Optional[str] = None) -> Optional[int]:
         """
         Search for an existing candidate using POST (more fields).
         """
@@ -4688,12 +4688,12 @@ class JobDivaService:
 
         success, new_cid = await _attempt(candidate_id)
 
-        # On linked-id failure, retry once via email lookup before creating a new profile.
-        if not success and linked_id_provided and email:
+        # On linked-id failure, retry once via email/phone lookup before creating a new profile.
+        if not success and linked_id_provided and (email or phone):
             fallback_id = await self.search_candidate_profile(email, first_name, last_name, phone)
             if fallback_id and str(fallback_id) != str(candidate_id):
                 logger.warning(
-                    f"⚠️ Linked candidateId={candidate_id} failed — retrying with email-matched id={fallback_id}"
+                    f"⚠️ Linked candidateId={candidate_id} failed — retrying with email/phone-matched id={fallback_id}"
                 )
                 success, new_cid = await _attempt(fallback_id)
             elif not fallback_id:
@@ -4724,7 +4724,7 @@ class JobDivaService:
         if phone:
             payload["phone"] = phone
             
-        async def _send_update(data_payload: dict, auth_token: str) -> httpx.Response:
+        async def _send_update(data_payload: dict, auth_token: str) -> tuple[httpx.Response, str]:
             for attempt in range(2):
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     res = await client.post(
@@ -4742,22 +4742,21 @@ class JobDivaService:
                         break
                     continue
                 break
-            return res
+            return res, auth_token
 
         try:
-            response = await _send_update(payload, token)
+            response, token = await _send_update(payload, token)
             logger.info(f"🔎 updateCandidateProfile response: {response.status_code} — {response.text[:300]}")
             
             # If update failed (e.g. 500 unique constraint error on email/phone),
             # retry updating ONLY the name fields so the profile at least gets its name corrected
             if response.status_code not in [200, 201] and (email or phone):
                 logger.warning(f"⚠️ updateCandidateProfile failed. Retrying name-only update to prevent 'Unknown Unknown' profile...")
-                fallback_payload = {
-                    "candidateid": candidate_id,
-                    "firstName": first_name,
-                    "lastName": last_name,
-                }
-                response = await _send_update(fallback_payload, token)
+                fallback_payload = payload.copy()
+                fallback_payload.pop("email", None)
+                fallback_payload.pop("phone", None)
+                
+                response, token = await _send_update(fallback_payload, token)
                 logger.info(f"🔎 updateCandidateProfile name-only response: {response.status_code} — {response.text[:300]}")
                 
             if response.status_code in [200, 201]:

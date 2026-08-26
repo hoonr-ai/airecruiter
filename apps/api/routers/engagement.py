@@ -1160,19 +1160,22 @@ def _resolve_link_candidate_id(
     (whose internal id IS the JobDiva id). This prevents linking a non-JobDiva
     candidate's numeric internal id to an unrelated JobDiva profile.
     """
-    # Only link to an id that was explicitly stored as jobdiva_candidate_id.
-    # We must NOT use the source prefix alone as a trust signal: for JobAgent
-    # candidates the PAIR internal cand_id gets passed as existing_jd_id via
-    # the old fallback path, and that id is not a real JobDiva profile id.
-    # Requiring the id to actually live in jobdiva_candidate_id ensures we only
-    # link when we already confirmed the real JD profile id on a previous launch.
+    # The id is trusted if it was explicitly persisted from a previous JobDiva interaction.
+    # Note: `existing_jd_id` and `explicitly_stored_jd_id` may currently be derived from the
+    # same source upstream, making this check defensively redundant for current callers.
     explicitly_stored_jd_id = str((cand_data or {}).get("jobdiva_candidate_id") or "")
-    if (
-        existing_jd_id
-        and str(existing_jd_id).isdigit()
-        and existing_jd_id == explicitly_stored_jd_id
-    ):
-        return str(existing_jd_id)
+    if existing_jd_id and str(existing_jd_id).isdigit():
+        if existing_jd_id == explicitly_stored_jd_id:
+            return str(existing_jd_id)
+            
+        # Fallback: if not explicitly stored, we can trust the internal numeric ID
+        # ONLY IF the candidate was sourced directly from JobDiva (i.e. 'JobDiva' or 'JobDiva-Applicants').
+        # We MUST reject 'JobDiva-JobAgent' candidates here, because PAIR generates its own
+        # internal numeric IDs for them which are NOT valid JobDiva profile IDs.
+        source_lower = str(source or "").lower()
+        if source_lower.startswith("jobdiva") and "jobagent" not in source_lower:
+            return str(existing_jd_id)
+            
     return None
 
 
