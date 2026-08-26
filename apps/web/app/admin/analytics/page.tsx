@@ -110,6 +110,7 @@ interface SubmissionMetrics {
   complete_submissions?: number;
   pass_submissions?: number;
   pair_external_subs?: number;
+  pair_submits?: number;
   top_jobs_by_submittals?: SubmissionTopJob[];
 }
 
@@ -469,6 +470,7 @@ export default function AdminAnalyticsPage() {
       `JobDiva Submittals (all time),${sm.jobdiva_total_submittals ?? 0}`,
       `JobDiva Submittals (last 30 days),${sm.jobdiva_submittals_last_30_days ?? 0}`,
       `Distinct Candidates Submitted (JobDiva),${sm.jobdiva_distinct_candidates ?? 0}`,
+      `PAIR Submits,${sm.pair_submits ?? 0}`,
       `PAIR External Submittals,${sm.pair_external_subs ?? 0}`,
       `Complete Submissions (PAIR),${sm.complete_submissions ?? 0}`,
       `Pass Submissions (PAIR),${sm.pass_submissions ?? 0}`,
@@ -907,6 +909,27 @@ export default function AdminAnalyticsPage() {
               </div>
             </div>
 
+            {/* Two views of the same funnel step, deliberately side by side:
+                what PAIR recorded, and what JobDiva confirms. */}
+            <div className="rounded-xl border border-slate-200 p-4 flex flex-col justify-between">
+              <div className="flex items-center justify-between">
+                <span className="text-[13px] font-semibold text-slate-500">PAIR Submits</span>
+                <div className="w-8 h-8 rounded-lg bg-emerald-50 border border-emerald-100 flex items-center justify-center text-emerald-600">
+                  <BadgeCheck className="w-4 h-4" />
+                </div>
+              </div>
+              <div className="mt-3">
+                {isLoading ? (
+                  <div className="h-8 w-16 bg-slate-100 animate-pulse rounded" />
+                ) : (
+                  <div className="text-[26px] font-bold text-slate-900 leading-none">
+                    {(submissionMetrics.pair_submits ?? 0).toLocaleString()}
+                  </div>
+                )}
+                <div className="text-[12px] text-slate-400 mt-1.5 font-medium">recruiter pressed Submit in PAIR</div>
+              </div>
+            </div>
+
             <div className="rounded-xl border border-slate-200 p-4 flex flex-col justify-between">
               <div className="flex items-center justify-between">
                 <span className="text-[13px] font-semibold text-slate-500">PAIR External Subs</span>
@@ -922,7 +945,7 @@ export default function AdminAnalyticsPage() {
                     {(submissionMetrics.pair_external_subs ?? 0).toLocaleString()}
                   </div>
                 )}
-                <div className="text-[12px] text-slate-400 mt-1.5 font-medium">submittals matching PAIR criteria</div>
+                <div className="text-[12px] text-slate-400 mt-1.5 font-medium">JobDiva submittals matching PAIR criteria</div>
               </div>
             </div>
 

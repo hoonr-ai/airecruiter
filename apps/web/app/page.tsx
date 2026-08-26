@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Search, Plus, FileText, ArrowUpDown, ArrowUp, ArrowDown, MoreVertical, Link as LinkIcon, AlertTriangle, Archive, Edit3 } from "lucide-react";
@@ -42,6 +42,7 @@ interface Job {
   candidatesLaunched: number;
   completeSubmissions: number;
   passSubmissions: number;
+  pairSubmits: number;
   pairExternalSubs: number;
   feedbackCompleted: number;
   timeToFirstPass: number;
@@ -56,6 +57,44 @@ const SCREENING_LEVEL_STYLES: Record<string, string> = {
   "L1.5": "bg-teal-50 text-teal-700 border-teal-200",
   "L2":   "bg-purple-50 text-purple-700 border-purple-200",
 };
+
+// How often the dashboard silently re-pulls /jobs/monitored. Metrics like
+// FEEDBACK COMPLETED and PAIR EXTERNAL SUBS change from background work
+// (a teammate's feedback, the JobDiva sync) — without this the page only
+// ever showed the numbers as of the moment it was opened. The backend
+// serves this from a 30s cache warmed every 25s, so polling at 30s adds
+// essentially no DB load.
+const DASHBOARD_REFRESH_MS = 30_000;
+
+const sortJobsBy = (list: Job[], field: SortField, direction: SortDirection): Job[] =>
+  [...list].sort((a, b) => {
+    const aVal = a[field as keyof Job];
+    const bVal = b[field as keyof Job];
+
+    // Handle null values and "—" placeholders — always sort to the bottom regardless of direction
+    if (aVal === null && bVal === null) return 0;
+    if (aVal === null || aVal === "—") return 1;
+    if (bVal === null || bVal === "—") return -1;
+
+    // Arrays (recruiterEmails) — sort by first element alphabetically
+    const aStr = Array.isArray(aVal) ? (aVal[0] || "") : aVal;
+    const bStr = Array.isArray(bVal) ? (bVal[0] || "") : bVal;
+
+    if (typeof aStr === "string" && typeof bStr === "string") {
+      return direction === "asc" ? aStr.localeCompare(bStr) : bStr.localeCompare(aStr);
+    }
+
+    if (typeof aVal === "number" && typeof bVal === "number") {
+      return direction === "asc" ? aVal - bVal : bVal - aVal;
+    }
+
+    return 0;
+  });
+
+const matchesSearch = (job: Job, query: string): boolean =>
+  Object.values(job).some((value) =>
+    (value?.toString() || "").toLowerCase().includes(query.toLowerCase())
+  );
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -101,8 +140,34 @@ export default function DashboardPage() {
   // Tab state
   const [activeTab, setActiveTab] = useState<"active" | "archived">("active");
 
+  // The poll below runs outside React's render cycle, so it can't read
+  // state directly without capturing a stale closure. Mirror the view
+  // state into refs so a background refresh re-applies the search and sort
+  // the user currently has, instead of resetting the table under them.
+  const viewStateRef = useRef({ searchQuery, sortField, sortDirection });
+  viewStateRef.current = { searchQuery, sortField, sortDirection };
+
   useEffect(() => {
     fetchJobs();
+  }, [activeTab]);
+
+  // Keep the metrics live. FEEDBACK COMPLETED and PAIR EXTERNAL SUBS move
+  // from work that happens off this page — another recruiter submitting
+  // feedback, the JobDiva submittal sync — so an open dashboard would
+  // otherwise sit on the numbers it loaded with until someone reloaded.
+  // Silent (no spinner), paused while the tab is hidden, and refreshed
+  // immediately on returning to the tab so a backgrounded dashboard is
+  // never showing minutes-old data.
+  useEffect(() => {
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") fetchJobs({ background: true });
+    };
+    const interval = setInterval(refreshIfVisible, DASHBOARD_REFRESH_MS);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
   }, [activeTab]);
 
   useEffect(() => {
@@ -112,8 +177,10 @@ export default function DashboardPage() {
     }
   }, [toast]);
 
-  const fetchJobs = async () => {
-    setIsLoading(true);
+  const fetchJobs = async ({ background = false }: { background?: boolean } = {}) => {
+    // A background refresh must not swap the table for a skeleton — the
+    // user is reading it.
+    if (!background) setIsLoading(true);
     // Bound the fetch at 15s. Backend statement_timeout is 5s, so the live
     // query either succeeds, fails-fast, or falls through to the 200-empty
     // path well inside this window. The previous 8s budget raced the
@@ -169,6 +236,7 @@ export default function DashboardPage() {
           candidatesLaunched: details.candidates_launched || 0,
           completeSubmissions: details.complete_submissions || 0,
           passSubmissions: details.pass_submissions || 0,
+          pairSubmits: details.pair_submits || 0,
           pairExternalSubs: details.pair_external_subs || 0,
           feedbackCompleted: details.feedback_completed || 0,
           timeToFirstPass: parseFloat(details.time_to_first_pass) || 0,
@@ -176,7 +244,17 @@ export default function DashboardPage() {
       }).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 
       setAllJobs(jobs);
-      setFilteredJobs(jobs);
+      // Re-apply whatever the user has on screen. A foreground load starts
+      // clean (newest-first, no query); a background refresh must land the
+      // new numbers without clearing their search box or re-sorting the
+      // column they picked.
+      if (background) {
+        const { searchQuery: q, sortField: f, sortDirection: d } = viewStateRef.current;
+        const visible = q ? jobs.filter(job => matchesSearch(job, q)) : jobs;
+        setFilteredJobs(f === "createdAt" && d === "desc" ? visible : sortJobsBy(visible, f, d));
+      } else {
+        setFilteredJobs(jobs);
+      }
       setIsStale(false);
       // Backend's 200-empty fallback signals via `source: "error"`. Treat
       // the same as a fetch failure UX-wise — empty list + retry banner —
@@ -193,7 +271,7 @@ export default function DashboardPage() {
       }
     } finally {
       clearTimeout(timeoutId);
-      setIsLoading(false);
+      if (!background) setIsLoading(false);
     }
   };
 
@@ -203,51 +281,19 @@ export default function DashboardPage() {
       setSortField("createdAt");
       setSortDirection("desc");
       const base = [...allJobs].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-      setFilteredJobs(searchQuery
-        ? base.filter(job => Object.values(job).some(v => (v?.toString() || "").toLowerCase().includes(searchQuery.toLowerCase())))
-        : base
-      );
+      setFilteredJobs(searchQuery ? base.filter(job => matchesSearch(job, searchQuery)) : base);
       return;
     }
     const newDirection = sortField === field && sortDirection === "asc" ? "desc" : "asc";
     setSortField(field);
     setSortDirection(newDirection);
 
-    const sorted = [...filteredJobs].sort((a, b) => {
-      const aVal = a[field as keyof Job];
-      const bVal = b[field as keyof Job];
-
-      // Handle null values and "—" placeholders — always sort to the bottom regardless of direction
-      if (aVal === null && bVal === null) return 0;
-      if (aVal === null || aVal === "—") return 1;
-      if (bVal === null || bVal === "—") return -1;
-
-      // Arrays (recruiterEmails) — sort by first element alphabetically
-      const aStr = Array.isArray(aVal) ? (aVal[0] || "") : aVal;
-      const bStr = Array.isArray(bVal) ? (bVal[0] || "") : bVal;
-
-      if (typeof aStr === "string" && typeof bStr === "string") {
-        return newDirection === "asc" ? aStr.localeCompare(bStr) : bStr.localeCompare(aStr);
-      }
-
-      if (typeof aVal === "number" && typeof bVal === "number") {
-        return newDirection === "asc" ? aVal - bVal : bVal - aVal;
-      }
-
-      return 0;
-    });
-
-    setFilteredJobs(sorted);
+    setFilteredJobs(sortJobsBy(filteredJobs, field, newDirection));
   };
 
   const handleSearch = (query: string) => {
     setSearchQuery(query);
-    const filtered = allJobs.filter(job =>
-      Object.values(job).some(value =>
-        (value?.toString() || "").toLowerCase().includes(query.toLowerCase())
-      )
-    );
-    setFilteredJobs(filtered);
+    setFilteredJobs(allJobs.filter(job => matchesSearch(job, query)));
   };
 
   const handleExport = () => {
@@ -267,6 +313,7 @@ export default function DashboardPage() {
       "Candidates Launched",
       "Complete Submissions",
       "Pass Submissions",
+      "PAIR Submits",
       "PAIR External Subs",
       "Feedback Completed",
       "Time to First Pass",
@@ -293,6 +340,7 @@ export default function DashboardPage() {
       escapeCSV(job.candidatesLaunched),
       escapeCSV(job.completeSubmissions),
       escapeCSV(job.passSubmissions),
+      escapeCSV(job.pairSubmits),
       escapeCSV(job.pairExternalSubs),
       escapeCSV(job.feedbackCompleted),
       escapeCSV(job.timeToFirstPass ? `${job.timeToFirstPass} mins` : "—"),
@@ -399,7 +447,7 @@ export default function DashboardPage() {
             <button
               type="button"
               className="font-semibold underline decoration-amber-400 underline-offset-2 hover:text-amber-900"
-              onClick={fetchJobs}
+              onClick={() => fetchJobs()}
             >
               Retry
             </button>
@@ -415,7 +463,7 @@ export default function DashboardPage() {
             <button
               type="button"
               className="font-semibold underline decoration-red-400 underline-offset-2 hover:text-red-900"
-              onClick={fetchJobs}
+              onClick={() => fetchJobs()}
             >
               Retry
             </button>
@@ -521,6 +569,7 @@ export default function DashboardPage() {
                 <SortableHeader field="candidatesLaunched">CANDIDATES LAUNCHED</SortableHeader>
                 <SortableHeader field="completeSubmissions">COMPLETE SUBMISSIONS</SortableHeader>
                 <SortableHeader field="passSubmissions">PASS SUBMISSIONS</SortableHeader>
+                <SortableHeader field="pairSubmits">PAIR SUBMITS</SortableHeader>
                 <SortableHeader field="pairExternalSubs">PAIR EXTERNAL SUBS</SortableHeader>
                 <SortableHeader field="feedbackCompleted">FEEDBACK COMPLETED</SortableHeader>
                 <SortableHeader field="timeToFirstPass">TIME TO FIRST PASS</SortableHeader>
@@ -611,6 +660,16 @@ export default function DashboardPage() {
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700 text-center">
                     {job.passSubmissions}
+                  </td>
+                  {/* PAIR SUBMITS = what PAIR recorded (recruiter pressed
+                      Submit; mirrored to JobDiva as a "PAIR Submit -
+                      Externally Submitted" note). PAIR EXTERNAL SUBS = what
+                      JobDiva confirms (a submittal to the job's contact for
+                      a candidate carrying PAIR Candidates=Pass). They are
+                      deliberately separate — a gap between them is a real
+                      signal, not a rounding difference. */}
+                  <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700 text-center">
+                    {job.pairSubmits}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-[13.5px] font-medium text-slate-700 text-center">
                     {job.pairExternalSubs}

@@ -17,6 +17,7 @@ from services.dnc_storage import load_dnc_phone_set
 from services.unified_candidate_search import SearchCriteria, unified_search_service
 from services.gender_logic import normalize_gender_prediction, to_gender_fields, infer_gender_from_name_ai
 from services.location import sanitize_candidate_location
+from services.feedback_metrics import refresh_feedback_metrics_sync
 from services import contact_enrichment
 from utils.phone import normalize_phone
 from models import (
@@ -25,7 +26,7 @@ from models import (
 )
 from routers._helpers import get_db_connection
 from core.auth import get_current_user, UserIdentity
-from routers.jobs import _verify_job_access_by_id
+from routers.jobs import _verify_job_access_by_id, invalidate_monitored_jobs_cache
 
 def _merge_transcriptions(webhook_list: list, live_list: list) -> list:
     """Helper to merge webhook transcriptions (with hard_filter_status) into live transcriptions."""
@@ -3595,10 +3596,37 @@ async def save_candidate_feedback(
     except Exception as e:
         logger.error(f"❌ Failed to persist feedback locally: {e}")
 
+    # 5. Write through to the dashboard's FEEDBACK COMPLETED and PAIR
+    #    SUBMITS columns now. Both are denormalized on monitored_jobs (the
+    #    dashboard is a single indexed SELECT and deliberately does no
+    #    aggregation), and their only writer used to be the 15-min
+    #    auto-sync cycle — so a recruiter's click took up to 15 minutes to
+    #    appear, and never appeared at all for jobs the sync skips
+    #    (closed/filled status, or a processing_status the cron doesn't
+    #    select). Recomputing here makes the recruiter's own action land on
+    #    the next dashboard load.
+    feedback_metrics = await asyncio.to_thread(
+        refresh_feedback_metrics_sync, str(app_job_ref or job_id_or_ref)
+    )
+    if feedback_metrics is not None:
+        # Drop this worker's cached /jobs/monitored payload so the fresh
+        # counts aren't hidden behind the 30s cache TTL.
+        try:
+            invalidate_monitored_jobs_cache()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.info(
+            f"📊 Job {app_job_ref}: feedback_completed="
+            f"{feedback_metrics['feedback_completed']} "
+            f"pair_submits={feedback_metrics['pair_submits']}"
+        )
+
     return {
         "status": "success",
         "jobdiva_sync": jobdiva_result.get("status"),
         "action_string": action_string,
         "jobdiva_candidate_id": jd_candidate_id,
         "jobdiva_job_ref": jd_job_ref,
+        "feedback_completed": (feedback_metrics or {}).get("feedback_completed"),
+        "pair_submits": (feedback_metrics or {}).get("pair_submits"),
     }
