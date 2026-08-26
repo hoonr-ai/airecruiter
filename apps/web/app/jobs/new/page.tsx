@@ -90,6 +90,7 @@ import {
 import { normalizePhone } from "@/lib/phone";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { candidateHiddenReason, hiddenBreakdown as computeHiddenBreakdown } from "@/lib/candidateVisibility";
+import { compareCandidatesByMatch } from "@/lib/candidateSorting";
 import { API_BASE, authFetch, isNetworkFetchError } from "@/lib/api";
 import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion } from "@/hooks/use-question-moderation";
 import { trackEvent } from "@/lib/analytics";
@@ -1604,31 +1605,7 @@ function NewJobPageContent() {
     const cmp = (a: any, b: any) => {
       switch (sortKey) {
         case "match": {
-          // JobDiva rows carry api_rank (recency for Applicants, JobAgent
-          // rank for Talent Search). When both sides have it, JobDiva's
-          // own ranking wins — match_score is a lenient/rough signal for
-          // those rows, not the sort key. Falls through to score sort for
-          // non-JobDiva pairs (no api_rank) and ties.
-          const rankA = typeof a.api_rank === "number" ? a.api_rank : null;
-          const rankB = typeof b.api_rank === "number" ? b.api_rank : null;
-          if (rankA !== null && rankB !== null && rankA !== rankB) {
-            return rankA - rankB;
-          }
-
-          // JobDiva-JobAgent rows carry no % (unscored by design, ranked by
-          // JobDiva) — treat them as the top band so hiding their score
-          // doesn't sink JobDiva's trusted results below every scored row.
-          // Agent-vs-agent pairs were already ordered by api_rank above.
-          const agentA = String(a?.source || "") === "JobDiva-JobAgent";
-          const agentB = String(b?.source || "") === "JobDiva-JobAgent";
-          const scoreA = agentA ? Number.POSITIVE_INFINITY : getCandidateMatchScore(a);
-          const scoreB = agentB ? Number.POSITIVE_INFINITY : getCandidateMatchScore(b);
-          if (scoreA !== scoreB) return (scoreA - scoreB) * dirMul;
-
-          const prioA = sourcePriority(a);
-          const prioB = sourcePriority(b);
-          if (prioA !== prioB) return prioA - prioB;
-          return 0;
+          return compareCandidatesByMatch(a, b, sortDir);
         }
         case "name": {
           const nameA = String(a.name || `${a.firstName || ""} ${a.lastName || ""}`).trim().toLowerCase();
