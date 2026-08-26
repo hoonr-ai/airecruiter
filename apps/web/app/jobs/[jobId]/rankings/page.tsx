@@ -60,15 +60,15 @@ const formatDate = (dateStr: string) => {
   try {
     const date = new Date(dateStr);
     if (isNaN(date.getTime())) return dateStr;
-    return date.toLocaleString('en-GB', {
+    return date.toLocaleString('en-US', {
       timeZone: 'America/New_York',
-      day: '2-digit',
-      month: '2-digit',
+      month: 'short',
+      day: 'numeric',
       year: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
       hour12: true
-    }).toUpperCase();
+    });
   } catch {
     return dateStr;
   }
