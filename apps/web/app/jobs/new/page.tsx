@@ -90,6 +90,7 @@ import {
 import { normalizePhone } from "@/lib/phone";
 import { useEngagementFlow } from "@/hooks/use-engagement-flow";
 import { candidateHiddenReason, hiddenBreakdown as computeHiddenBreakdown } from "@/lib/candidateVisibility";
+import { compareCandidatesByMatch } from "@/lib/candidateSorting";
 import { API_BASE, authFetch, isNetworkFetchError } from "@/lib/api";
 import { useQuestionModeration, QuestionPolicyWarning, isRecruiterAddedQuestion } from "@/hooks/use-question-moderation";
 import { trackEvent } from "@/lib/analytics";
@@ -1604,47 +1605,7 @@ function NewJobPageContent() {
     const cmp = (a: any, b: any) => {
       switch (sortKey) {
         case "match": {
-          const scoreA = getCandidateMatchScore(a);
-          const scoreB = getCandidateMatchScore(b);
-          const hasScoreA = scoreA > 0;
-          const hasScoreB = scoreB > 0;
-
-          // 1. Primary Rule: Scored candidates always float to the top
-          if (hasScoreA !== hasScoreB) {
-            return hasScoreA ? -1 : 1;
-          }
-
-          // 2. Secondary Rule: If both have scores, sort by score based on direction multiplier
-          if (hasScoreA && hasScoreB && scoreA !== scoreB) {
-            return scoreA > scoreB ? dirMul : -dirMul;
-          }
-
-          // 3. Fallback Rules (Applies to ties in scored group OR the entire unscored group)
-          
-          // Tie-breaker A: api_rank (stable, lower rank always comes first)
-          const rankA = typeof a?.api_rank === "number" ? a.api_rank : null;
-          const rankB = typeof b?.api_rank === "number" ? b.api_rank : null;
-          if (rankA !== null && rankB !== null && rankA !== rankB) {
-            return rankA - rankB;
-          }
-
-          // Tie-breaker B: JobDiva Preference (Only matters for unscored candidates based on original logic)
-          if (!hasScoreA) {
-            const agentA = a?.source === "JobDiva-JobAgent";
-            const agentB = b?.source === "JobDiva-JobAgent";
-            if (agentA !== agentB) {
-              return agentA ? -1 : 1;
-            }
-          }
-
-          // Tie-breaker C: Source Priority (stable, higher priority source always comes first)
-          const prioA = sourcePriority(a);
-          const prioB = sourcePriority(b);
-          if (prioA !== prioB) {
-            return prioA - prioB;
-          }
-
-          return 0;
+          return compareCandidatesByMatch(a, b, sortDir);
         }
         case "name": {
           const nameA = String(a.name || `${a.firstName || ""} ${a.lastName || ""}`).trim().toLowerCase();
