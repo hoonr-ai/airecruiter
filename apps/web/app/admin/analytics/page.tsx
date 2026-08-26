@@ -176,6 +176,22 @@ const formatDate = (iso: string | null | undefined): string => {
   });
 };
 
+/** ISO date/datetime → "Feb 24, 2026, 10:30 AM EST"; null/invalid → "—". */
+const formatDateTime = (iso: string | null | undefined): string => {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-US", {
+    timeZone: "America/New_York",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short"
+  });
+};
+
 /** ISO Monday date → "Jun 1". */
 const formatWeekLabel = (iso: string): string => {
   const d = new Date(`${iso}T00:00:00`);
@@ -207,7 +223,7 @@ const formatLagValue = (lag: number): string =>
   Number.isInteger(lag) ? `${lag}` : lag.toFixed(1);
 
 const renderDateCell = (iso: string | null) => {
-  const formatted = formatDate(iso);
+  const formatted = formatDateTime(iso);
   return formatted === "—" ? (
     <span className="text-slate-300">—</span>
   ) : (
@@ -778,9 +794,9 @@ export default function AdminAnalyticsPage() {
           escapeCsvField(job.title),
           escapeCsvField(job.jobdiva_id),
           escapeCsvField(job.customer_name),
-          formatDate(job.jobdiva_posted_on),
-          formatDate(job.added_to_pair_at),
-          formatDate(job.launched_at),
+          formatDate(job.jobdiva_posted_on), // Jobdiva posts are often just dates
+          formatDateTime(job.added_to_pair_at),
+          formatDateTime(job.launched_at),
           job.launch_lag_days ?? "—",
           job.pair_status,
           job.candidates_sourced,
