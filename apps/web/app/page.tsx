@@ -465,7 +465,7 @@ export default function DashboardPage() {
         const dayOfWeek = now.getUTCDay(); // 0=Sun, 1=Mon ... 6=Sat
         const daysToMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
         const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysToMonday));
-        const mondayLabel = monday.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "America/New_York" });
+        const mondayLabel = monday.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric", timeZone: "UTC" });
 
         const sinceMondayJobs = allJobs.filter(j =>
           j.pairLaunchedAt &&
