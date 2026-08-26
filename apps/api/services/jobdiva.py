@@ -4724,29 +4724,44 @@ class JobDivaService:
         if phone:
             payload["phone"] = phone
             
-        try:
+        async def _send_update(data_payload: dict, auth_token: str) -> httpx.Response:
             for attempt in range(2):
                 async with httpx.AsyncClient(timeout=10.0) as client:
-                    response = await client.post(
+                    res = await client.post(
                         url,
-                        json=payload,
+                        json=data_payload,
                         headers={
-                            "Authorization": f"Bearer {token}",
+                            "Authorization": f"Bearer {auth_token}",
                             "Accept": "application/json"
                         }
                     )
-                
-                if response.status_code == 401 and attempt == 0:
+                if res.status_code == 401 and attempt == 0:
                     logger.warning(f"⚠️ updateCandidateProfile got 401. Refreshing token...")
-                    token = await self.authenticate(force_refresh=True)
-                    if not token:
-                        return False
+                    auth_token = await self.authenticate(force_refresh=True)
+                    if not auth_token:
+                        break
                     continue
-
-                logger.info(f"🔎 updateCandidateProfile response: {response.status_code} — {response.text[:300]}")
                 break
+            return res
+
+        try:
+            response = await _send_update(payload, token)
+            logger.info(f"🔎 updateCandidateProfile response: {response.status_code} — {response.text[:300]}")
+            
+            # If update failed (e.g. 500 unique constraint error on email/phone),
+            # retry updating ONLY the name fields so the profile at least gets its name corrected
+            if response.status_code not in [200, 201] and (email or phone):
+                logger.warning(f"⚠️ updateCandidateProfile failed. Retrying name-only update to prevent 'Unknown Unknown' profile...")
+                fallback_payload = {
+                    "candidateid": candidate_id,
+                    "firstName": first_name,
+                    "lastName": last_name,
+                }
+                response = await _send_update(fallback_payload, token)
+                logger.info(f"🔎 updateCandidateProfile name-only response: {response.status_code} — {response.text[:300]}")
+                
             if response.status_code in [200, 201]:
-                logger.info(f"✅ Profile updated for candidateId={candidate_id}: {first_name} {last_name}, email={bool(email)}, phone={bool(phone)}")
+                logger.info(f"✅ Profile updated for candidateId={candidate_id}: {first_name} {last_name}")
                 return True
             else:
                 logger.warning(f"⚠️ updateCandidateProfile failed: {response.status_code} - {response.text[:300]}")
