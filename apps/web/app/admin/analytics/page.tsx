@@ -1976,11 +1976,11 @@ export default function AdminAnalyticsPage() {
           </div>
         </div>
 
-        <div className="overflow-x-auto">
+        <div className="overflow-auto max-h-[700px] relative">
           <table className="w-full text-left border-collapse">
-            <thead>
-              <tr className="border-b border-slate-200 bg-slate-50 font-bold text-slate-500 text-[12.5px]">
-                <th className="py-3 px-6">Job</th>
+            <thead className="sticky top-0 z-20 bg-slate-50 shadow-[0_1px_0_0_#e2e8f0]">
+              <tr className="font-bold text-slate-500 text-[12.5px]">
+                <th className="py-3 px-6 sticky left-0 z-30 shadow-[1px_0_0_0_#e2e8f0]">Job</th>
                 <th className="py-3 px-6">Client</th>
                 <th className="py-3 px-6">Posted (JobDiva)</th>
                 <th className="py-3 px-6">Added (PAIR)</th>
@@ -1996,7 +1996,7 @@ export default function AdminAnalyticsPage() {
               {isLoading ? (
                 [1, 2, 3, 4].map((i) => (
                   <tr key={i}>
-                    <td className="py-4 px-6">
+                    <td className="py-4 px-6 sticky left-0 z-10 bg-white shadow-[1px_0_0_0_#e2e8f0]">
                       <div className="h-4 w-44 bg-slate-100 animate-pulse rounded" />
                       <div className="h-3 w-20 bg-slate-100 animate-pulse rounded mt-1.5" />
                     </td>
@@ -2044,9 +2044,9 @@ export default function AdminAnalyticsPage() {
                 visibleTimeline.map((job) => (
                   <tr
                     key={job.job_id || job.jobdiva_id}
-                    className="hover:bg-[#f6f8fb] transition-colors"
+                    className="hover:bg-[#f6f8fb] transition-colors group"
                   >
-                    <td className="py-3.5 px-6">
+                    <td className="py-3.5 px-6 sticky left-0 z-10 bg-white group-hover:bg-[#f6f8fb] transition-colors shadow-[1px_0_0_0_#e2e8f0]">
                       <div
                         className="font-semibold text-slate-800 max-w-[260px] truncate"
                         title={job.title}
