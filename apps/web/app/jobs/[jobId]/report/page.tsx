@@ -307,7 +307,7 @@ export default function CandidateEvaluationReportPage() {
       const days = parseInt(daysMatch[1]);
       const date = new Date(interviewDate);
       date.setDate(date.getDate() + days);
-      return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      return date.toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'short', day: 'numeric', year: 'numeric' });
     }
     
     return availability;

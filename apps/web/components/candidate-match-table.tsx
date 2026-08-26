@@ -122,7 +122,7 @@ function getLastActiveDate(c: any): Date | null {
 
 function formatLastActiveShort(d: Date | null): string {
   if (!d) return "";
-  return d.toLocaleDateString(undefined, { month: "2-digit", day: "2-digit", year: "numeric" });
+  return d.toLocaleDateString("en-US", { timeZone: "America/New_York", month: "2-digit", day: "2-digit", year: "numeric" });
 }
 
 function getMatchTone(score: number | null) {
