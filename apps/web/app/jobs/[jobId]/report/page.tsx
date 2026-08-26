@@ -45,6 +45,7 @@ interface TranscriptionItem {
   message_text?: string;
   text?: string;
   content?: string;
+  timestamp?: string;
 }
 
 interface EvaluationReport {
@@ -117,6 +118,18 @@ const hasFinalEngageOutcome = (hardFilterStatus?: string, engageStatus?: string,
   return statuses.some((status) => {
     const raw = normalizeStatusValue(status);
     return raw ? FINAL_ENGAGE_STATUSES.has(raw) || raw.includes("complete") : false;
+  });
+};
+
+const formatMessageTime = (timestamp?: string): string | null => {
+  if (!timestamp) return null;
+  const date = new Date(timestamp);
+  if (isNaN(date.getTime())) return null;
+  return date.toLocaleTimeString("en-US", {
+    timeZone: "America/New_York",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short",
   });
 };
 
@@ -704,8 +717,9 @@ export default function CandidateEvaluationReportPage() {
                           <div key={i} className="space-y-4">
                             {q_text && (
                               <div className={`flex flex-col gap-2.5 relative items-start pr-12 ${msg.is_closing ? 'opacity-70' : ''}`}>
-                                <span className="text-[11px] font-black uppercase tracking-widest text-[#4f46e5]">
-                                  ASSISTANT (ALEX)
+                                <span className="text-[11px] font-black uppercase tracking-widest text-[#4f46e5] flex items-center gap-2">
+                                  <span>ASSISTANT (ALEX)</span>
+                                  {formatMessageTime(msg.timestamp) && <span className="opacity-60 font-medium normal-case tracking-normal">{formatMessageTime(msg.timestamp)}</span>}
                                 </span>
                                 <div className={`p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border rounded-tl-none ${
                                   msg.is_closing
@@ -719,8 +733,9 @@ export default function CandidateEvaluationReportPage() {
                             {/* Candidate answer — show placeholder when question was sent but not answered */}
                             {a_text ? (
                               <div className="flex flex-col gap-2.5 relative items-end pl-12">
-                                <span className="text-[11px] font-black uppercase tracking-widest text-[#94a3b8]">
-                                  CANDIDATE
+                                <span className="text-[11px] font-black uppercase tracking-widest text-[#94a3b8] flex items-center gap-2 flex-row-reverse">
+                                  <span>CANDIDATE</span>
+                                  {formatMessageTime(msg.timestamp) && <span className="opacity-60 font-medium normal-case tracking-normal">{formatMessageTime(msg.timestamp)}</span>}
                                 </span>
                                 <div className="p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border bg-white border-[#e2e8f0] text-[#1e293b] rounded-tr-none">
                                   {a_text}
@@ -729,8 +744,9 @@ export default function CandidateEvaluationReportPage() {
                             ) : msg.is_unanswered ? (
                               /* PAI-107: candidate dropped off — show explicit placeholder */
                               <div className="flex flex-col gap-2.5 relative items-end pl-12">
-                                <span className="text-[11px] font-black uppercase tracking-widest text-[#94a3b8]">
-                                  CANDIDATE
+                                <span className="text-[11px] font-black uppercase tracking-widest text-[#94a3b8] flex items-center gap-2 flex-row-reverse">
+                                  <span>CANDIDATE</span>
+                                  {formatMessageTime(msg.timestamp) && <span className="opacity-60 font-medium normal-case tracking-normal">{formatMessageTime(msg.timestamp)}</span>}
                                 </span>
                                 <div className="p-6 rounded-[20px] text-[13px] leading-relaxed shadow-sm border bg-[#fef9f0] border-[#fed7aa] text-[#92400e] rounded-tr-none italic">
                                   No response recorded
@@ -747,8 +763,9 @@ export default function CandidateEvaluationReportPage() {
                           <div key={i} className="space-y-4">
                             {isBot ? (
                               <div className="flex flex-col gap-2.5 relative items-start pr-12">
-                                <span className="text-[11px] font-black uppercase tracking-widest text-[#4f46e5]">
-                                  ASSISTANT (ALEX)
+                                <span className="text-[11px] font-black uppercase tracking-widest text-[#4f46e5] flex items-center gap-2">
+                                  <span>ASSISTANT (ALEX)</span>
+                                  {formatMessageTime(msg.timestamp) && <span className="opacity-60 font-medium normal-case tracking-normal">{formatMessageTime(msg.timestamp)}</span>}
                                 </span>
                                 <div className="p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border bg-[#eef2ff] border-[#e0e7ff] text-[#312e81] rounded-tl-none">
                                   {single_text}
@@ -756,8 +773,9 @@ export default function CandidateEvaluationReportPage() {
                               </div>
                             ) : (
                               <div className="flex flex-col gap-2.5 relative items-end pl-12">
-                                <span className="text-[11px] font-black uppercase tracking-widest text-[#94a3b8]">
-                                  CANDIDATE
+                                <span className="text-[11px] font-black uppercase tracking-widest text-[#94a3b8] flex items-center gap-2 flex-row-reverse">
+                                  <span>CANDIDATE</span>
+                                  {formatMessageTime(msg.timestamp) && <span className="opacity-60 font-medium normal-case tracking-normal">{formatMessageTime(msg.timestamp)}</span>}
                                 </span>
                                 <div className="p-6 rounded-[20px] text-[14px] leading-relaxed font-medium shadow-sm border bg-white border-[#e2e8f0] text-[#1e293b] rounded-tr-none">
                                   {single_text}
