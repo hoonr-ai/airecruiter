@@ -132,7 +132,7 @@ import asyncio
 def test_search_candidate_profile_payload(jobdiva_service):
     """Test phone is included in search payload and synthetic emails are excluded."""
     async def run_test():
-        with patch("httpx.AsyncClient") as mock_client_class:
+        with patch("services.jobdiva.httpx.AsyncClient") as mock_client_class:
             mock_client = mock_client_class.return_value.__aenter__.return_value
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -158,7 +158,7 @@ def test_search_candidate_profile_payload(jobdiva_service):
 def test_search_candidate_profile_id_priority(jobdiva_service):
     """Test that 'id' is prioritized over 'candidateId'."""
     async def run_test():
-        with patch("httpx.AsyncClient") as mock_client_class:
+        with patch("services.jobdiva.httpx.AsyncClient") as mock_client_class:
             mock_client = mock_client_class.return_value.__aenter__.return_value
             mock_response = MagicMock()
             mock_response.status_code = 200
@@ -176,7 +176,7 @@ def test_search_candidate_profile_id_priority(jobdiva_service):
 def test_update_candidate_name_fallback(jobdiva_service):
     """Test that the name-only fallback strips email and phone when 500 occurs."""
     async def run_test():
-        with patch("httpx.AsyncClient") as mock_client_class:
+        with patch("services.jobdiva.httpx.AsyncClient") as mock_client_class:
             mock_client = mock_client_class.return_value.__aenter__.return_value
             
             # First call fails with 500 (unique constraint error)
