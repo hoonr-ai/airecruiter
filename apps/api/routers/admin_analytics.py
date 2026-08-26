@@ -459,10 +459,14 @@ def _compute_linkedin_accounts(conn) -> List[Dict[str, Any]]:
     ]
 
 
-def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, Any]:
+def _compute_analytics_sync(
+    scope_team_id: Optional[str] = None,
+    scope_recruiter_email: Optional[str] = None,
+) -> Dict[str, Any]:
     conn = get_db_connection()
     scope: Optional[Dict[str, Any]] = None
     team_scope_out: Optional[Dict[str, Any]] = None
+    recruiter_scope_out: Optional[Dict[str, Any]] = None
     try:
         if scope_team_id:
             # LookupError (unknown team) is re-raised below → endpoint 404s
@@ -472,6 +476,11 @@ def _compute_analytics_sync(scope_team_id: Optional[str] = None) -> Dict[str, An
                 "team_id": scope["team_id"],
                 "team_name": scope["team_name"],
                 "member_count": len(scope["emails"]),
+            }
+        elif scope_recruiter_email:
+            scope = _load_recruiter_scope(conn, scope_recruiter_email)
+            recruiter_scope_out = {
+                "recruiter_email": scope["recruiter_email"],
             }
         mj_cond, mj_params = _mj_filter(scope)
         sc_cond, sc_params = _sc_filter(scope, "sc.jobdiva_id")
@@ -733,7 +742,7 @@ async def get_admin_analytics(
         scope_team_id = (team_id or "").strip() or None
     elif user.is_team_lead and user.team_id:
         scope_team_id = user.team_id
-    elif user.is_recruiter or user.email:
+    elif user.is_recruiter and user.email:
         scope_recruiter_email = user.email
     else:
         raise HTTPException(
