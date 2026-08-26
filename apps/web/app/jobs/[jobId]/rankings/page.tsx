@@ -1372,9 +1372,8 @@ export default function CandidateRankingsPage() {
       if (sEmail && sEmail !== dEmail && (!dEmail || (isPlaceholderEmail(dEmail) && !isPlaceholderEmail(sEmail)))) {
         dst.email = sEmail;
       }
-      
       // Merge candidate data dictionary so nested fields like engage_status are preserved
-      if (src.data && typeof src.data === "object") {
+      if (src.data && typeof src.data === "object" && !Array.isArray(src.data)) {
         dst.data = {
           ...src.data,
           ...(dst.data || {})

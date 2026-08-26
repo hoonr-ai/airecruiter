@@ -1835,11 +1835,12 @@ async def _send_bulk_interview_core(request: SendBulkInterviewRequest):
             # Log any interviews Pairbot explicitly failed on its side.
             failed_interviews_from_pairbot = response_data.get("failed_interviews") or []
             if failed_interviews_from_pairbot:
+                failed_ids = [item.get("candidate_id") or item.get("source_candidate_id") or "?" for item in failed_interviews_from_pairbot]
                 logger.warning(
                     "pairbot_failed_interviews bulk_id=%s count=%d sample=%s",
                     response_data.get("bulk_id", "?"),
                     len(failed_interviews_from_pairbot),
-                    failed_interviews_from_pairbot[:5],
+                    failed_ids[:5],
                 )
 
             # Build email lookup from the sent payload resumes (keyed by
