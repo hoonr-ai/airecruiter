@@ -1604,30 +1604,46 @@ function NewJobPageContent() {
     const cmp = (a: any, b: any) => {
       switch (sortKey) {
         case "match": {
-          // JobDiva rows carry api_rank (recency for Applicants, JobAgent
-          // rank for Talent Search). When both sides have it, JobDiva's
-          // own ranking wins — match_score is a lenient/rough signal for
-          // those rows, not the sort key. Falls through to score sort for
-          // non-JobDiva pairs (no api_rank) and ties.
-          const rankA = typeof a.api_rank === "number" ? a.api_rank : null;
-          const rankB = typeof b.api_rank === "number" ? b.api_rank : null;
+          const scoreA = getCandidateMatchScore(a);
+          const scoreB = getCandidateMatchScore(b);
+          const hasScoreA = scoreA > 0;
+          const hasScoreB = scoreB > 0;
+
+          // 1. Primary Rule: Scored candidates always float to the top
+          if (hasScoreA !== hasScoreB) {
+            return hasScoreA ? -1 : 1;
+          }
+
+          // 2. Secondary Rule: If both have scores, sort by score based on direction multiplier
+          if (hasScoreA && hasScoreB && scoreA !== scoreB) {
+            return scoreA > scoreB ? dirMul : -dirMul;
+          }
+
+          // 3. Fallback Rules (Applies to ties in scored group OR the entire unscored group)
+          
+          // Tie-breaker A: api_rank (stable, lower rank always comes first)
+          const rankA = typeof a?.api_rank === "number" ? a.api_rank : null;
+          const rankB = typeof b?.api_rank === "number" ? b.api_rank : null;
           if (rankA !== null && rankB !== null && rankA !== rankB) {
             return rankA - rankB;
           }
 
-          // JobDiva-JobAgent rows carry no % (unscored by design, ranked by
-          // JobDiva) — treat them as the top band so hiding their score
-          // doesn't sink JobDiva's trusted results below every scored row.
-          // Agent-vs-agent pairs were already ordered by api_rank above.
-          const agentA = String(a?.source || "") === "JobDiva-JobAgent";
-          const agentB = String(b?.source || "") === "JobDiva-JobAgent";
-          const scoreA = agentA ? Number.POSITIVE_INFINITY : getCandidateMatchScore(a);
-          const scoreB = agentB ? Number.POSITIVE_INFINITY : getCandidateMatchScore(b);
-          if (scoreA !== scoreB) return (scoreA - scoreB) * dirMul;
+          // Tie-breaker B: JobDiva Preference (Only matters for unscored candidates based on original logic)
+          if (!hasScoreA) {
+            const agentA = a?.source === "JobDiva-JobAgent";
+            const agentB = b?.source === "JobDiva-JobAgent";
+            if (agentA !== agentB) {
+              return agentA ? -1 : 1;
+            }
+          }
 
+          // Tie-breaker C: Source Priority (stable, higher priority source always comes first)
           const prioA = sourcePriority(a);
           const prioB = sourcePriority(b);
-          if (prioA !== prioB) return prioA - prioB;
+          if (prioA !== prioB) {
+            return prioA - prioB;
+          }
+
           return 0;
         }
         case "name": {
