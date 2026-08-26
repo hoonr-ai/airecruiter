@@ -11,6 +11,7 @@ export interface UserRoleInfo {
   role: UserRole;
   isAdmin: boolean;
   isTeamLead: boolean;
+  isRecruiter: boolean;
   teamId: string | null;
   teamName: string | null;
   isLoading: boolean;
@@ -121,6 +122,7 @@ export function useUserRole(): UserRoleInfo {
     role: roleInfo.role,
     isAdmin: roleInfo.isAdmin,
     isTeamLead: roleInfo.isTeamLead,
+    isRecruiter: roleInfo.role === "recruiter" || (!roleInfo.isAdmin && !roleInfo.isTeamLead),
     teamId: roleInfo.teamId,
     teamName: roleInfo.teamName,
     isLoading,

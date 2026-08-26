@@ -9,14 +9,14 @@ import { useUserRole } from "@/hooks/use-user-role";
 
 export function Sidebar() {
     const pathname = usePathname();
-    const { isAdmin, isTeamLead, teamName, isLoading } = useUserRole();
+    const { isAdmin, isTeamLead, isRecruiter, teamName, isLoading } = useUserRole();
 
     const navItems = [
         { label: "Jobs", href: "/", icon: Briefcase, disabled: false },
         { label: "Campaigns", href: "/campaigns", icon: Megaphone, disabled: false },
         { label: "Candidates", href: "/candidates", icon: Users, disabled: true },
-        // Admins get the full analytics + team management; team leads get the
-        // same analytics page auto-scoped to their team by the backend.
+        // Admins get the full analytics + team management; team leads get team analytics;
+        // recruiters get personal analytics (My Analytics).
         ...(isAdmin
             ? [
                   { label: "Admin Analytics", href: "/admin/analytics", icon: LayoutDashboard, disabled: false },
@@ -26,6 +26,9 @@ export function Sidebar() {
             : []),
         ...(!isAdmin && isTeamLead
             ? [{ label: "Team Analytics", href: "/admin/analytics", icon: LayoutDashboard, disabled: false }]
+            : []),
+        ...(!isAdmin && !isTeamLead
+            ? [{ label: "My Analytics", href: "/admin/analytics", icon: LayoutDashboard, disabled: false }]
             : []),
         { label: "Settings", href: "/settings", icon: Settings, disabled: false },
     ];
